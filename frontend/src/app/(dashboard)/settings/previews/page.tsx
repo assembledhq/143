@@ -46,6 +46,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api, ApiError } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
+import { pollMs } from "@/lib/poll-intervals";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   ListResponse,
@@ -61,8 +62,10 @@ import type {
 const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
 
 const SECRET_FILE_KEY = "SECRET_FILE_CONTENT";
-const JSON_FILE_VALIDATION_DEBOUNCE_MS = 400;
+const JSON_FILE_VALIDATION_DEBOUNCE_MS = pollMs(400);
 const SECRET_FILE_JSON_ERROR = "Secret file contents must be valid JSON.";
+const MASKED_SECRET_PLACEHOLDER = "********";
+const MASKED_SECRET_FILE_PLACEHOLDER = `${MASKED_SECRET_PLACEHOLDER}\n${MASKED_SECRET_PLACEHOLDER}\n${MASKED_SECRET_PLACEHOLDER}`;
 
 type SecretValueRow = {
   /** Stable identity used as a React key — never sent to the server. */
@@ -718,6 +721,13 @@ function SecretFileFields({
   onReveal: () => void;
   onFormChange: (form: BundleFormState) => void;
 }) {
+  const [isReplacingFileContent, setIsReplacingFileContent] = useState(false);
+  const isMaskedFileContent = canReveal && !form.fileContent && !isReplacingFileContent;
+  const contentValue = isMaskedFileContent ? MASKED_SECRET_FILE_PLACEHOLDER : form.fileContent;
+  const contentPlaceholder = form.fileFormat === "json"
+    ? '{\n  "token": "paste-secret-value-here"\n}'
+    : "Paste the file contents here";
+
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
@@ -769,11 +779,20 @@ function SecretFileFields({
         </div>
         <Textarea
           id="secret-file-content"
-          value={form.fileContent}
-          onChange={(event) => onFormChange({ ...form, fileContent: event.target.value })}
-          placeholder={form.fileFormat === "json" ? '{\n  "token": "paste-secret-value-here"\n}' : "Paste the file contents here"}
+          value={contentValue}
+          onFocus={(event) => {
+            if (isMaskedFileContent) {
+              setIsReplacingFileContent(true);
+              event.currentTarget.select();
+            }
+          }}
+          onChange={(event) => onFormChange({
+            ...form,
+            fileContent: event.target.value,
+          })}
+          placeholder={contentPlaceholder}
           aria-label="Secret file contents"
-          className="min-h-40 font-mono text-xs"
+          className={`min-h-40 font-mono text-xs${isMaskedFileContent ? " [-webkit-text-security:disc]" : ""}`}
           spellCheck={false}
         />
       </div>
@@ -804,6 +823,8 @@ function StoredSecretsFields({
   onRowRemove: (index: number) => void;
   onReveal: (target: RevealTarget) => void;
 }) {
+  const [replacingRowIds, setReplacingRowIds] = useState<Set<string>>(() => new Set());
+
   return (
     <div className="space-y-2">
       <div className="space-y-1">
@@ -821,6 +842,8 @@ function StoredSecretsFields({
           const key = row.key.trim();
           const canRevealRow = canReveal && Boolean(revealBundle) && Boolean(key);
           const isRevealed = revealedEnvRowIds.get(row.rowId) === key;
+          const isMaskedValue = canRevealRow && !isRevealed && !row.value && !replacingRowIds.has(row.rowId);
+          const value = isMaskedValue ? MASKED_SECRET_PLACEHOLDER : row.value;
 
           return (
             <div key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
@@ -832,8 +855,16 @@ function StoredSecretsFields({
                 autoComplete="off"
               />
               <Input
-                value={row.value}
-                onChange={(event) => onRowChange(index, { value: event.target.value })}
+                value={value}
+                onFocus={(event) => {
+                  if (isMaskedValue) {
+                    setReplacingRowIds((current) => new Set(current).add(row.rowId));
+                    event.currentTarget.select();
+                  }
+                }}
+                onChange={(event) => onRowChange(index, {
+                  value: event.target.value,
+                })}
                 placeholder="Secret value"
                 type={isRevealed ? "text" : "password"}
                 aria-label={index === 0 ? "Secret value" : `Secret value ${index + 1}`}

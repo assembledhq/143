@@ -1,14 +1,17 @@
 package deploy_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -239,11 +242,20 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	fleetText := string(fleetScript)
 	require.Contains(t, fleetText, `REQUESTED_ROLES="${3:-app,worker}"`, "fleet deploy should default to the user-facing runtime roles so routine app deploys do not restart db, redis, or logging")
 	require.Contains(t, fleetText, `./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] all`, "fleet deploy should document an explicit all-roles maintenance argument")
+	require.Contains(t, fleetText, `FLEET_HOSTS format:  app:10.0.0.2,worker:10.0.0.4,db:10.0.0.3,logging:10.0.0.6,redis:10.0.0.5,egress:10.0.0.7`, "fleet deploy should document egress as an inventory role")
 	require.Contains(t, fleetText, `validate_requested_roles`, "fleet deploy should reject misspelled roles instead of silently skipping every host")
 	require.Contains(t, fleetText, `cannot be combined with other roles`, "fleet deploy should reject confusing mixed selections like all,redis")
 	require.Contains(t, fleetText, `No fleet hosts matched requested roles`, "fleet deploy should fail loudly when a valid role selection matches no hosts")
 	require.Contains(t, fleetText, `should_deploy_role()`, "fleet deploy should centralize role filtering so every FLEET_HOSTS entry is handled consistently")
 	require.Contains(t, fleetText, `Skipping $ROLE@$IP`, "fleet deploy should log skipped maintenance roles so operators can tell they were intentionally left alone")
+	require.Contains(t, fleetText, `if [ "$ROLE" = "egress" ]; then`, "fleet deploy should skip egress inventory entries even when ROLES=all is requested")
+	require.Contains(t, fleetText, "make provision-egress", "fleet deploy should point operators at the dedicated egress gateway provisioning flow")
+	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should default to a bounded four-node deploy fan-out")
+	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should deploy matching nodes concurrently instead of serializing the whole fleet")
+	require.Contains(t, fleetText, `LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"`, "parallel fleet deploy should keep per-host logs inspectable after failures")
+	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
+	require.Contains(t, fleetText, `FAILED: one or more deploys failed`, "fleet deploy should finish pending parallel deploys and then fail loudly when any host fails")
+	require.Contains(t, fleetText, `DEPLOY_JOBS=1`, "fleet deploy should document how to recover the old one-host-at-a-time rollout behavior")
 
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
@@ -254,6 +266,8 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(makefile), "ROLES ?= app,worker", "Makefile should make the default fleet role set visible to operators")
 	require.Contains(t, string(makefile), "force ?=", "Makefile should expose active-session force deploys as a make argument")
 	require.Contains(t, string(makefile), "TAG ?= latest", "Makefile should expose the image tag as the same kind of make argument as roles")
+	require.Contains(t, string(makefile), "DEPLOY_JOBS ?= 4", "Makefile should make the default fleet deploy parallelism visible to operators")
+	require.Contains(t, string(makefile), "make deploy-fleet DEPLOY_JOBS=1", "Makefile should document how to serialize fleet deploys when needed")
 	require.Contains(t, string(makefile), "WORKER_BLUE_GREEN_PORT_START ?= 8080", "Makefile should default manual worker deploys to the CI blue/green port range start")
 	require.Contains(t, string(makefile), "WORKER_BLUE_GREEN_PORT_END ?= 8087", "Makefile should default manual worker deploys to the CI blue/green port range end")
 	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)", "single-role deploy targets should honor force and the default blue/green range")
@@ -261,11 +275,132 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=app,worker", "Makefile should document the manual non-disruptive worker deploy command")
 	require.Contains(t, string(makefile), "make deploy-fleet force=true", "Makefile should document how to override the active-session guardrail with a make argument")
-	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)", "Makefile should pass role, tag, force, and the default blue/green range through to deploy-fleet.sh")
+	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) DEPLOY_JOBS=$(DEPLOY_JOBS) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)", "Makefile should pass role, tag, force, parallelism, and the default blue/green range through to deploy-fleet.sh")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	require.Contains(t, string(deployScript), `-e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}"`, "worker deploy guardrail container should receive the force override from the deploy environment")
+}
+
+func TestDeployFleetRunsMatchingHostsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	stateDir := filepath.Join(tempDir, "state")
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+role="$1"
+ip="$2"
+state="${FAKE_DEPLOY_STATE:?}"
+mkdir -p "$state"
+while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done
+touch "$state/$role-$ip.started"
+rmdir "$state/lock"
+deadline=$((SECONDS + 5))
+while [ "$(find "$state" -name '*.started' | wc -l | tr -d ' ')" -lt 2 ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "timed out waiting for concurrent deploy peer" >&2
+    exit 42
+  fi
+  sleep 0.05
+done
+echo "$role@$ip deployed by fake script"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
+	cmd.Env = append(os.Environ(),
+		"DEPLOY_JOBS=2",
+		"FAKE_DEPLOY_STATE="+stateDir,
+		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.2,db:10.0.0.3,egress:10.0.0.4",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "deploy-fleet should complete when two matching hosts can run concurrently: %s", string(output))
+	require.Contains(t, string(output), "Deploying 2 node(s), 2 at a time", "deploy-fleet should report bounded parallel fan-out")
+	require.FileExists(t, filepath.Join(stateDir, "app-10.0.0.1.started"), "fake app deploy should have started")
+	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.2.started"), "fake worker deploy should have started")
+	require.NoFileExists(t, filepath.Join(stateDir, "db-10.0.0.3.started"), "unrequested db deploy should not have started")
+}
+
+func TestDeployFleetSerializesDeploysToTheSameHost(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	stateDir := filepath.Join(tempDir, "state")
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+role="$1"
+ip="$2"
+state="${FAKE_DEPLOY_STATE:?}"
+mkdir -p "$state"
+host_safe="${ip//[^A-Za-z0-9_.-]/_}"
+lock="$state/host-$host_safe.lock"
+if [ "$role" = "app" ]; then
+  sleep 0.2
+fi
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "same host deployed concurrently: $ip" >&2
+  exit 43
+fi
+trap 'rmdir "$lock"' EXIT
+touch "$state/$role-$ip.started"
+printf '%s@%s\n' "$role" "$ip" >> "$state/order.log"
+sleep 0.4
+echo "$role@$ip deployed by fake script"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "all")
+	cmd.Env = append(os.Environ(),
+		"DEPLOY_JOBS=3",
+		"FAKE_DEPLOY_STATE="+stateDir,
+		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.1,redis:10.0.0.2",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "deploy-fleet should serialize role deploys that target the same host: %s", string(output))
+	require.FileExists(t, filepath.Join(stateDir, "app-10.0.0.1.started"), "same-host app deploy should have started")
+	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.1.started"), "same-host worker deploy should have started after the app deploy released the host")
+	require.FileExists(t, filepath.Join(stateDir, "redis-10.0.0.2.started"), "different-host deploy should still be eligible for parallel execution")
+
+	orderBytes, err := os.ReadFile(filepath.Join(stateDir, "order.log"))
+	require.NoError(t, err, "test should read the fake deploy order log")
+	order := strings.Split(strings.TrimSpace(string(orderBytes)), "\n")
+	appIndex := indexOfString(order, "app@10.0.0.1")
+	workerIndex := indexOfString(order, "worker@10.0.0.1")
+	require.NotEqual(t, -1, appIndex, "order log should include the same-host app deploy")
+	require.NotEqual(t, -1, workerIndex, "order log should include the same-host worker deploy")
+	require.Less(t, appIndex, workerIndex, "same-host deploys should preserve FLEET_HOSTS order")
+}
+
+func indexOfString(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestWorkerDeployPreflightTargetValidatesBlueGreenReadiness(t *testing.T) {
@@ -409,17 +544,194 @@ func TestWorkerDeployFingerprintsAreSeparatedByBlastRadius(t *testing.T) {
 	require.Contains(t, workerProcess, "worker", "worker process fingerprint should target the worker service")
 
 	require.NotContains(t, supportServices, "fingerprint_files \\\n        /opt/143/docker-compose.worker.yml", "support-service fingerprint should not hash the entire worker compose file")
-	require.Contains(t, supportServices, "chrome", "support-service fingerprint should include the chrome service block")
-	require.Contains(t, supportServices, "gvisor-check", "support-service fingerprint should include the gVisor check service block")
-	require.Contains(t, supportServices, "sandbox-dns", "support-service fingerprint should include the sandbox DNS service block")
-	require.Contains(t, supportServices, "docker-compose.dns-probe.yml", "support-service fingerprint should include the DNS probe compose file")
+	require.Contains(t, supportServices, "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES", "support-service fingerprint should hash the shared support compose service list")
+	require.Contains(t, supportServices, "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES", "support-service fingerprint should hash the shared support file list")
 
-	require.Contains(t, hostRuntime, "reconcile-worker-host.sh", "host-runtime fingerprint should include worker host reconciliation")
-	require.Contains(t, hostRuntime, "sandbox-firewall.sh", "host-runtime fingerprint should include sandbox firewall rules")
-	require.Contains(t, hostRuntime, "sandbox-resolv-conf.sh", "host-runtime fingerprint should include sandbox resolv.conf generation")
+	supportComposeServices := extractFingerprintListVar(t, deploy, "WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")
+	require.Contains(t, supportComposeServices, "chrome", "support-service fingerprint should include the chrome service block")
+	require.Contains(t, supportComposeServices, "gvisor-check", "support-service fingerprint should include the gVisor check service block")
+	require.Contains(t, supportComposeServices, "sandbox-dns", "support-service fingerprint should include the sandbox DNS service block")
+	supportFiles := extractFingerprintListVar(t, deploy, "WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")
+	require.Contains(t, supportFiles, "Dockerfile.dnsmasq", "support-service fingerprint should include the dnsmasq Dockerfile")
+	require.Contains(t, supportFiles, "docker-compose.dns-probe.yml", "support-service fingerprint should include the DNS probe compose file")
 
-	require.Contains(t, dockerDaemon, "install-docker-dns.sh", "docker-daemon fingerprint should include Docker DNS installation")
-	require.Contains(t, dockerDaemon, "install-log-rotation.sh", "docker-daemon fingerprint should include Docker log rotation installation")
+	require.Contains(t, hostRuntime, "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES", "host-runtime fingerprint should hash the shared host-runtime file list")
+	hostRuntimeFiles := extractFingerprintListVar(t, deploy, "WORKER_HOST_RUNTIME_FINGERPRINT_FILES")
+	require.Contains(t, hostRuntimeFiles, "reconcile-worker-host.sh", "host-runtime fingerprint should include worker host reconciliation")
+	require.Contains(t, hostRuntimeFiles, "sandbox-firewall.sh", "host-runtime fingerprint should include sandbox firewall rules")
+	require.Contains(t, hostRuntimeFiles, "sandbox-resolv-conf.sh", "host-runtime fingerprint should include sandbox resolv.conf generation")
+	require.Contains(t, hostRuntimeFiles, "install-static-egress-worker.sh", "host-runtime fingerprint should include static egress WireGuard installation")
+
+	require.Contains(t, dockerDaemon, "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES", "docker-daemon fingerprint should hash the shared docker-daemon file list")
+	dockerDaemonFiles := extractFingerprintListVar(t, deploy, "WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")
+	require.Contains(t, dockerDaemonFiles, "install-docker-dns.sh", "docker-daemon fingerprint should include Docker DNS installation")
+	require.Contains(t, dockerDaemonFiles, "install-log-rotation.sh", "docker-daemon fingerprint should include Docker log rotation installation")
+}
+
+// extractFingerprintListVar returns the canonical (single, top-level)
+// definition of one of the shared worker fingerprint input lists. The
+// negative character class skips the detached-rollover heredoc line that
+// re-binds the variable to itself ('$WORKER_...').
+func extractFingerprintListVar(t *testing.T, deployText, name string) string {
+	t.Helper()
+
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `='([^'$][^']*)'$`)
+	matches := re.FindAllStringSubmatch(deployText, -1)
+	require.Len(t, matches, 1, "deploy.sh should define %s exactly once as the canonical fingerprint input list", name)
+	return matches[0][1]
+}
+
+// Regression test for the routine-deploy failure loop: the staged fingerprint
+// gate and the blue/green rollover each used to carry their own hardcoded
+// fingerprint input lists. When the lists diverged (install-static-egress-
+// worker.sh was added to the gate's host-runtime list but not the rollover's),
+// every routine deploy failed with "host-runtime config changed": the gate
+// repaired the on-host baseline to a hash the rollover never computed, and a
+// maintenance deploy wrote the rollover's hash back, re-arming the failure.
+func TestWorkerFingerprintInputListsAreSharedBetweenGateAndRollover(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	gate := extractTopLevelShellBlock(t, deploy, "fingerprint_candidate_files", "\nREMOTE\n}")
+	rollover := extractShellFunction(t, deploy, "worker_support_service_fingerprint", "ensure_routine_worker_fingerprints_compatible")
+
+	listVars := []string{
+		"WORKER_HOST_RUNTIME_FINGERPRINT_FILES",
+		"WORKER_DOCKER_DAEMON_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES",
+	}
+	for _, name := range listVars {
+		extractFingerprintListVar(t, deploy, name)
+		require.Contains(t, gate, "$"+name, "staged fingerprint gate should consume the shared %s list", name)
+		require.Contains(t, rollover, "$"+name, "blue/green rollover fingerprints should consume the shared %s list", name)
+		require.Equal(t, 2, strings.Count(deploy, "remote_env_assignment "+name+" "), "both the gate and the main remote payload should receive %s over SSH", name)
+		require.Contains(t, deploy, name+"='$"+name+"'", "detached rollover script should bake the shared %s list because it runs in a fresh process", name)
+	}
+}
+
+// The staged gate repairs the persisted fingerprint baseline using
+// fingerprint_candidate_files while the rollover recomputes it with
+// fingerprint_files. The repaired baseline only satisfies the rollover if the
+// two implementations hash identical files to identical digests — pin that
+// here so a format change in either copy fails at PR time, not on the fleet.
+func TestGateAndRolloverFingerprintImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	gateFn := extractTopLevelShellFunction(t, deploy, "fingerprint_candidate_files", "fingerprint_active_files")
+	rolloverFn := extractShellFunction(t, deploy, "fingerprint_files", "compose_service_fingerprint")
+
+	tmpDir := t.TempDir()
+	first := filepath.Join(tmpDir, "reconcile-worker-host.sh")
+	second := filepath.Join(tmpDir, "sandbox-firewall.sh")
+	require.NoError(t, os.WriteFile(first, []byte("echo reconcile\n"), 0o755), "test should seed first fingerprinted file")
+	require.NoError(t, os.WriteFile(second, []byte("echo firewall\n"), 0o755), "test should seed second fingerprinted file")
+
+	script := gateFn + rolloverFn + `
+set -euo pipefail
+gate="$(fingerprint_candidate_files "$FILE_ONE" "$FILE_TWO")"
+rollover="$(fingerprint_files "$FILE_ONE" "$FILE_TWO")"
+printf '%s\n%s\n' "$gate" "$rollover"
+`
+
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(), "FILE_ONE="+first, "FILE_TWO="+second)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "fingerprint implementations should execute successfully: %s", output)
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	require.Len(t, lines, 2, "comparison script should print both fingerprints")
+	require.Len(t, lines[0], 64, "gate fingerprint should be a sha256 hex digest")
+	require.Equal(t, lines[0], lines[1], "gate and rollover must compute identical fingerprints for identical files or routine deploys fail on a repaired baseline")
+}
+
+func TestStagedFingerprintIgnoresCandidateFilename(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	functionBody := extractTopLevelShellFunction(t, string(deployScript), "fingerprint_candidate_files", "compose_service_fingerprint")
+
+	tmpDir := t.TempDir()
+	supportFile := filepath.Join(tmpDir, "support.conf")
+	script := functionBody + `
+set -euo pipefail
+printf 'same support-service config\n' > "$SUPPORT_FILE"
+active="$(fingerprint_candidate_files "$SUPPORT_FILE")"
+cp "$SUPPORT_FILE" "$SUPPORT_FILE.new"
+candidate="$(fingerprint_candidate_files "$SUPPORT_FILE")"
+printf '%s\n%s\n' "$active" "$candidate"
+`
+
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(), "SUPPORT_FILE="+supportFile)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "staged fingerprint helper should execute successfully: %s", output)
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	require.Equal(t, []string{lines[0], lines[0]}, lines, "staging an identical .new file should not change the candidate fingerprint")
+}
+
+func TestStagedFingerprintGateRepairsStaleBaselineWhenCandidateMatchesActive(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	gateScript := extractTopLevelShellBlock(t, string(deployScript), "fingerprint_candidate_files", "\nREMOTE\n}")
+
+	tmpDir := t.TempDir()
+	gateScript = strings.ReplaceAll(gateScript, "/opt/143", tmpDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "deploy", "scripts"), 0o755), "test should create deploy script directory")
+
+	compose := `services:
+  chrome:
+    image: chromedp/headless-shell:latest
+  gvisor-check:
+    image: docker:27-cli
+  sandbox-dns:
+    image: 143-sandbox-dns:local
+  worker:
+    image: ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.worker.yml"), []byte(compose), 0o644), "test should seed active worker compose")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.worker.yml.new"), []byte(compose), 0o644), "test should seed identical staged worker compose")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "Dockerfile.dnsmasq"), []byte("FROM alpine:3.20\n"), 0o644), "test should seed active dnsmasq Dockerfile")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "Dockerfile.dnsmasq.new"), []byte("FROM alpine:3.20\n"), 0o644), "test should seed identical staged dnsmasq Dockerfile")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.dns-probe.yml"), []byte("services:\n  dns-probe:\n    image: alpine:3.20\n"), 0o644), "test should seed active DNS probe compose")
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "docker-compose.dns-probe.yml.new"), []byte("services:\n  dns-probe:\n    image: alpine:3.20\n"), 0o644), "test should seed identical staged DNS probe compose")
+
+	fingerprintFile := filepath.Join(tmpDir, ".worker-support-services.v2.fingerprint")
+	require.NoError(t, os.WriteFile(fingerprintFile, []byte("stale-baseline\n"), 0o644), "test should seed a stale persisted support fingerprint")
+
+	cmd := exec.Command("bash", "-c", gateScript)
+	cmd.Env = append(os.Environ(), "DEPLOY_MODE=routine")
+	// The gate reads the shared fingerprint input lists from its environment
+	// (deploy.sh passes them over SSH); feed it the real lists, retargeted at
+	// the temp directory.
+	for _, name := range []string{
+		"WORKER_HOST_RUNTIME_FINGERPRINT_FILES",
+		"WORKER_DOCKER_DAEMON_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES",
+	} {
+		value := extractFingerprintListVar(t, string(deployScript), name)
+		cmd.Env = append(cmd.Env, name+"="+strings.ReplaceAll(value, "/opt/143", tmpDir))
+	}
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "staged fingerprint gate should allow stale baseline repair when candidate matches active files: %s", output)
+	require.Contains(t, string(output), "stored worker support-service fingerprint is stale", "gate should explain stale support fingerprint repair")
+
+	repaired, err := os.ReadFile(fingerprintFile)
+	require.NoError(t, err, "test should read repaired support fingerprint")
+	require.NotEqual(t, "stale-baseline\n", string(repaired), "gate should update stale support fingerprint metadata")
+	require.Len(t, strings.TrimSpace(string(repaired)), 64, "repaired support fingerprint should be a sha256 hex digest")
 }
 
 func TestRoutineWorkerDeployBlocksOnlyRuntimeFingerprints(t *testing.T) {
@@ -448,17 +760,29 @@ func TestWorkerDeployGatesStagedRuntimeFilesBeforeApplying(t *testing.T) {
 	require.NoError(t, err, "test should read deploy.sh")
 	deploy := string(deployScript)
 
-	gateIndex := strings.Index(deploy, "run_worker_staged_fingerprint_gate\n  ssh \"${SSH_OPTS[@]}\" deploy@\"$HOST\" \\\n    \"mv /opt/143/deploy/scripts/sandbox-firewall.sh.new")
+	gateIndex := strings.Index(deploy, "run_worker_staged_fingerprint_gate\n  ssh \"${SSH_OPTS[@]}\" deploy@\"$HOST\" \\\n    \"mv /opt/143/$COMPOSE_FILE.new")
+	stageWorkerComposeIndex := strings.Index(deploy, `"$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new`)
+	stageDNSProbeIndex := strings.Index(deploy, `"$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/docker-compose.dns-probe.yml.new`)
+	promoteWorkerComposeIndex := strings.Index(deploy, `mv /opt/143/$COMPOSE_FILE.new /opt/143/$COMPOSE_FILE`)
+	promoteDNSProbeIndex := strings.Index(deploy, `mv /opt/143/docker-compose.dns-probe.yml.new /opt/143/docker-compose.dns-probe.yml`)
 	promoteFirewallIndex := strings.Index(deploy, "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new")
 	promoteResolvIndex := strings.Index(deploy, "mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new")
 	promoteReconcileIndex := strings.Index(deploy, "mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new")
 	reconcileIndex := strings.Index(deploy, "Reconciling worker host invariants")
 
+	require.NotEqual(t, -1, stageWorkerComposeIndex, "worker deploy should stage worker compose before the routine fingerprint gate")
+	require.NotEqual(t, -1, stageDNSProbeIndex, "worker deploy should stage dns-probe compose before the routine fingerprint gate")
 	require.NotEqual(t, -1, gateIndex, "worker deploy should gate staged host/runtime files before applying them")
+	require.NotEqual(t, -1, promoteWorkerComposeIndex, "worker deploy should promote worker compose after the staged gate")
+	require.NotEqual(t, -1, promoteDNSProbeIndex, "worker deploy should promote dns-probe compose after the staged gate")
 	require.NotEqual(t, -1, promoteFirewallIndex, "worker deploy should promote sandbox-firewall after the staged gate")
 	require.NotEqual(t, -1, promoteResolvIndex, "worker deploy should promote sandbox-resolv-conf after the staged gate")
 	require.NotEqual(t, -1, promoteReconcileIndex, "worker deploy should promote reconcile-worker-host after the staged gate")
 	require.NotEqual(t, -1, reconcileIndex, "worker deploy should reconcile host invariants after the staged gate")
+	require.Less(t, stageWorkerComposeIndex, gateIndex, "worker compose should be staged before the staged fingerprint gate")
+	require.Less(t, stageDNSProbeIndex, gateIndex, "dns-probe compose should be staged before the staged fingerprint gate")
+	require.Less(t, gateIndex, promoteWorkerComposeIndex, "staged fingerprint gate should run before promoting worker compose")
+	require.Less(t, gateIndex, promoteDNSProbeIndex, "staged fingerprint gate should run before promoting dns-probe compose")
 	require.Less(t, gateIndex, promoteFirewallIndex, "staged fingerprint gate should run before promoting sandbox-firewall")
 	require.Less(t, gateIndex, promoteResolvIndex, "staged fingerprint gate should run before promoting sandbox-resolv-conf")
 	require.Less(t, gateIndex, promoteReconcileIndex, "staged fingerprint gate should run before promoting reconcile-worker-host")
@@ -629,6 +953,22 @@ func extractShellFunction(t *testing.T, script, startFunc, nextFunc string) stri
 	return script[start : start+end]
 }
 
+func extractTopLevelShellFunction(t *testing.T, script, startFunc, nextFunc string) string {
+	t.Helper()
+
+	return extractTopLevelShellBlock(t, script, startFunc, nextFunc+"() {")
+}
+
+func extractTopLevelShellBlock(t *testing.T, script, startFunc, endMarker string) string {
+	t.Helper()
+
+	start := strings.Index(script, startFunc+"() {")
+	require.NotEqual(t, -1, start, "deploy.sh should define %s", startFunc)
+	end := strings.Index(script[start:], endMarker)
+	require.NotEqual(t, -1, end, "deploy.sh should contain marker %q after %s", endMarker, startFunc)
+	return script[start : start+end]
+}
+
 func TestCIDeployConfiguresWorkerBlueGreenPortRange(t *testing.T) {
 	t.Parallel()
 
@@ -715,6 +1055,7 @@ func TestWorkerProvisioningHandlesAddressingEdgeCases(t *testing.T) {
 	require.Contains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP//./-}`, "provision.sh's NODE_ID default should use the full dotted-to-dash IP so workers across multiple /24s don't collide on \"worker-<last-octet>\"")
 	require.NotContains(t, string(provisionScript), `worker-${WORKER_PRIVATE_IP##*.}`, "provision.sh should not fall back to the last-octet-only default — it collides across /24s")
 	require.Contains(t, string(provisionScript), "private IPv4 addresses on real interfaces", "provision.sh should detect multi-homed hosts and require the operator to set WORKER_PRIVATE_IP explicitly rather than silently picking a NIC")
+	require.Contains(t, string(provisionScript), `docker|br-|veth|virbr|lo|wg`, "provision.sh should ignore static-egress WireGuard interfaces when auto-detecting the app-reachable worker IP")
 }
 
 func TestTailscaleReadyPrivateServiceBinding(t *testing.T) {
@@ -796,6 +1137,198 @@ func TestProvisioningCanInstallAndUseTailscaleAddresses(t *testing.T) {
 	cloudInitText := string(cloudInit)
 	require.NotContains(t, cloudInitText, "TS_AUTH_KEY", "worker Tailscale enrollment should stay in provision.sh so it can use the production host map")
 	require.NotContains(t, cloudInitText, "tailscale up", "worker cloud-init should not duplicate the Tailscale enrollment path")
+}
+
+func TestStaticEgressDeployWiring(t *testing.T) {
+	t.Parallel()
+
+	firewallScript, err := os.ReadFile("../deploy/scripts/sandbox-firewall.sh")
+	require.NoError(t, err, "test should read sandbox-firewall.sh")
+	firewallText := string(firewallScript)
+	require.Contains(t, firewallText, `COMMENT_TAG="143-sandbox-egress-${NETWORK_TAG}"`, "firewall rules should use network-specific comment tags so reconciling one bridge does not delete the other bridge's rules")
+	require.Contains(t, firewallText, "169.254.0.0/16", "firewall should block metadata destinations")
+	require.Contains(t, firewallText, "10.0.0.0/8", "firewall should block private ranges")
+	require.Contains(t, firewallText, "100.64.0.0/10", "firewall should block Tailscale CGNAT destinations from sandbox traffic")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read reconcile-worker-host.sh")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, "STATIC_EGRESS_NETWORK", "worker reconciliation should know about the static egress bridge")
+	require.Contains(t, reconcileText, "143-sandbox-static-egress", "worker reconciliation should create the static egress sandbox network")
+	require.Contains(t, reconcileText, "172.31.0.0/24", "static egress bridge should use a pinned subnet distinct from the default sandbox bridge")
+	require.Contains(t, reconcileText, "sandbox-static-egress-resolv.conf", "static egress sandboxes should get a dedicated resolver file")
+	require.Contains(t, reconcileText, "install-static-egress-worker.sh", "worker reconciliation should install policy routing and WireGuard for the static egress bridge")
+	require.NotContains(t, reconcileText, "STATIC_EGRESS_ENABLED", "worker reconciliation should not require a separate static egress enabled flag")
+	require.Contains(t, reconcileText, "/opt/143/.env", "worker reconciliation should load static egress config from the host env file during fresh provisioning")
+	require.Contains(t, reconcileText, "/opt/143/static-egress-worker.env", "worker reconciliation should load host-only static egress secrets outside the compose env file")
+	require.Contains(t, reconcileText, "load_static_egress_env_key", "worker reconciliation should parse env values without eval/source")
+	require.Contains(t, reconcileText, "static egress is configured but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing", "configured static egress must not silently skip a missing install helper")
+	require.Contains(t, reconcileText, "ensure_static_egress_dns", "worker reconciliation should ensure sandbox DNS exists before static egress verification")
+	require.Contains(t, reconcileText, "docker compose -f \"$compose_file\" up -d --build --no-deps sandbox-dns", "fresh worker provisioning should start sandbox-dns before probing the static egress bridge")
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	require.Contains(t, deployText, "install-static-egress-worker.sh.new", "worker deploys should sync the static egress install helper to existing workers")
+	require.Contains(t, deployText, "STATIC_EGRESS_PROBE_IMAGE:=ghcr.io/assembledhq/143-sandbox:$TAG", "worker deploys should default the static egress verifier to the release sandbox image")
+	require.Contains(t, deployText, "STATIC_EGRESS_PROBE_IMAGE=%s", "worker deploys should write the verifier image into the remote worker env")
+	require.NotContains(t, deployText, "STATIC_EGRESS_ENABLED", "deploy should not require a separate static egress enabled flag")
+	require.Contains(t, deployText, "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\\nSTATIC_EGRESS_PUBLIC_IP=%s\\n", "app deploys should write static egress public IP for network status and preview routing")
+	require.Contains(t, deployText, `if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then`, "worker deploys should pre-pull the static egress verifier when a static egress public IP is configured")
+	require.Contains(t, deployText, "apply_static_egress_worker_host_map", "deploy should resolve per-worker static egress tunnel config from the centralized production host map")
+	require.Contains(t, deployText, "STATIC_EGRESS_WORKER_HOSTS", "deploy should support centralized per-worker static egress config from production secrets")
+	require.NotContains(t, deployText, "<node-id>:<host>@<wg-address>@<private-key>", "static egress worker host maps should use the simpler host@wg-address@private-key format")
+	probePullIndex := strings.Index(deployText, `docker pull \"$static_egress_probe_image\"`)
+	reconcileIndex := strings.Index(deployText, "if ! run_worker_host_reconcile")
+	require.NotEqual(t, -1, probePullIndex, "worker deploys should pre-pull the configured static egress verifier image")
+	require.NotEqual(t, -1, reconcileIndex, "worker deploys should reconcile worker host invariants")
+	require.Less(t, probePullIndex, reconcileIndex, "worker deploys should pull the configured static egress verifier image before root-side static egress verification")
+	require.NotContains(t, deployText, "STATIC_EGRESS_WORKER_PRIVATE_KEY=%q", "deploy should not place the WireGuard private key in ssh/sudo argv")
+	require.NotContains(t, deployText, "sudo -n env $reconcile_env", "deploy should let root-side reconciliation read static egress config from /opt/143/.env")
+	require.Contains(t, deployText, "/opt/143/static-egress-worker.env", "deploy should write WireGuard secrets into a host-only static egress env file")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "/opt/143/static-egress-worker.env", "provision should initialize the host-only static egress env file for new workers")
+	require.NotContains(t, provisionText, "STATIC_EGRESS_ENABLED", "provisioning should not require a separate static egress enabled flag")
+	require.Contains(t, provisionText, "NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\\nSTATIC_EGRESS_PUBLIC_IP=%s\\n", "app provisioning should write static egress public IP for network status and preview routing")
+	require.Contains(t, provisionText, "apply_static_egress_worker_host_map", "provisioning should resolve per-worker static egress tunnel config from the centralized production host map")
+	require.Contains(t, provisionText, "STATIC_EGRESS_WORKER_HOSTS", "provisioning should support centralized per-worker static egress config from production secrets")
+	require.NotContains(t, provisionText, "<node-id>:<host>@<wg-address>@<private-key>", "static egress worker host maps should use the simpler host@wg-address@private-key format")
+
+	workerInstallScript, err := os.ReadFile("../deploy/scripts/install-static-egress-worker.sh")
+	require.NoError(t, err, "test should read static egress worker installer")
+	workerInstallText := string(workerInstallScript)
+	workerInterfaceDefault := regexp.MustCompile(`STATIC_EGRESS_WG_INTERFACE:-([^}]+)`).FindStringSubmatch(workerInstallText)
+	require.Len(t, workerInterfaceDefault, 2, "static egress worker installer should define a default WireGuard interface")
+	require.Equal(t, "wg-egress", workerInterfaceDefault[1], "worker WireGuard interface default should stay short and readable")
+	require.LessOrEqual(t, len(workerInterfaceDefault[1]), 15, "worker WireGuard interface name must fit Linux IFNAMSIZ so wg-quick can create it")
+	require.Contains(t, workerInstallText, "docker run", "static egress verification should probe from a sandbox-network container")
+	require.Contains(t, workerInstallText, "--network \"$STATIC_EGRESS_NETWORK\"", "static egress verification should exercise the static egress bridge")
+	require.Contains(t, workerInstallText, "--dns \"$STATIC_EGRESS_DNS_IP\"", "static egress verification should use the sandbox DNS resolver")
+	require.Contains(t, workerInstallText, "getent hosts \"$host\"", "static egress verification should prove DNS works before advertising capability")
+	require.NotContains(t, workerInstallText, "curl --interface", "static egress verification should not use a host-originated WireGuard interface probe")
+	require.NotContains(t, workerInstallText, "ip rule replace", "worker WireGuard policy routing should avoid unsupported ip rule replace syntax")
+	require.Contains(t, workerInstallText, "ip rule add fwmark", "worker WireGuard service should restore static egress policy routing after reboot")
+	require.Contains(t, workerInstallText, "PostDown = ip rule del", "worker WireGuard service should clean up static egress policy routing on stop")
+	require.Contains(t, workerInstallText, "systemctl stop \"wg-quick@${WG_INTERFACE}\"", "worker install should stop the existing WireGuard unit before recreating the interface")
+	require.Contains(t, workerInstallText, "ip link delete dev \"$WG_INTERFACE\"", "worker install should remove stale WireGuard links before wg-quick up")
+	require.Contains(t, workerInstallText, "systemctl start \"wg-quick@${WG_INTERFACE}\"", "worker install should start from a known-clean WireGuard interface state")
+	require.NotContains(t, workerInstallText, "systemctl restart \"wg-quick@${WG_INTERFACE}\"", "worker install should avoid restart because stale links can survive a failed wg-quick down")
+	require.Contains(t, workerInstallText, "rm -f \"$CAPABILITY_FILE\"", "worker install should clear stale capability before re-verifying the gateway path")
+	require.Contains(t, workerInstallText, "iptables-persistent", "worker install should install persistent iptables support before advertising capability")
+	require.Contains(t, workerInstallText, "command -v netfilter-persistent", "worker install should verify iptables persistence is available")
+	require.Contains(t, workerInstallText, "netfilter-persistent save", "worker install should persist static egress mark and NAT rules")
+	require.Contains(t, workerInstallText, "docker pull \"$PROBE_IMAGE\"", "static egress verification should ensure its probe image exists before running with --pull never")
+
+	workerCompose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read worker compose")
+	workerComposeText := string(workerCompose)
+	require.NotContains(t, workerComposeText, "SANDBOX_STATIC_EGRESS_RESOLV_CONF", "static egress resolver path should be fixed internally instead of exposed as compose config")
+	require.NotContains(t, workerComposeText, "SANDBOX_STATIC_EGRESS_NETWORK", "static egress bridge name should be fixed internally instead of exposed as compose config")
+	require.Contains(t, workerComposeText, "STATIC_EGRESS_PUBLIC_IP", "worker should advertise the configured public static egress IP")
+	require.NotContains(t, workerComposeText, "STATIC_EGRESS_WORKER_PRIVATE_KEY", "worker app containers should not receive WireGuard private keys")
+	require.NotContains(t, workerComposeText, "STATIC_EGRESS_CAPABILITY_FILE", "static egress capability marker path should be fixed internally instead of exposed as compose config")
+	require.Contains(t, workerComposeText, "/etc/143:/etc/143:ro", "worker container should see the host verifier marker and resolver files read-only")
+	require.Contains(t, workerComposeText, "static-egress-sandbox", "worker service should join the static egress sandbox bridge")
+	require.NotContains(t, workerComposeText, "sandbox-static-egress-dns", "one sandbox-dns service should attach to both sandbox bridges")
+	require.Contains(t, workerComposeText, "ipv4_address: 172.31.0.2", "the shared sandbox-dns service should have a fixed IP on the static egress bridge")
+	require.Contains(t, workerComposeText, "name: 143-sandbox-static-egress", "worker compose should declare the static egress bridge as an external network")
+
+	makefile, err := os.ReadFile("../Makefile")
+	require.NoError(t, err, "test should read Makefile")
+	makefileText := string(makefile)
+	require.Contains(t, makefileText, "provision-egress", "Makefile should expose an egress gateway provisioning entrypoint")
+	require.Contains(t, makefileText, "deploy/scripts/sync-static-egress-secrets.sh --apply", "provision-worker should sync generated static egress secrets from FLEET_HOSTS before provisioning")
+	require.Contains(t, makefileText, "PROVISION_WORKER_HOST=$(HOST)", "provision-worker should verify the requested worker is present in FLEET_HOSTS during static egress sync")
+	require.Contains(t, makefileText, "deploy/scripts/provision-egress.sh", "provision-worker should reload the egress gateway after provisioning a static-egress worker")
+	require.Contains(t, makefileText, "EGRESS_SSH_KEY ?= $(or $(wildcard ~/.ssh/143-egress),$(wildcard ~/.ssh/143-egress.pem),$(SSH_KEY))", "static egress provisioning should auto-detect a role-specific SSH key before falling back to the fleet deploy key")
+	require.Contains(t, makefileText, "provision-egress:\n\t@test -n \"$(EGRESS_SSH_KEY)\"", "provision-egress should validate the gateway SSH key before provisioning")
+	require.Contains(t, makefileText, "@deploy/scripts/sync-static-egress-secrets.sh --apply", "provision-egress should sync generated gateway and worker peer secrets before provisioning the gateway")
+	require.Contains(t, makefileText, "EGRESS_SSH_KEY", "provision-worker should support a separate SSH key for reloading an AWS-hosted egress gateway")
+	require.Contains(t, makefileText, "EGRESS_SSH_USER", "provision-egress should support a role-specific SSH user override without changing worker provisioning")
+	require.Contains(t, makefileText, "TS_AUTH_KEY_EGRESS", "provision-egress should support enrolling the egress gateway in Tailscale")
+	require.NotContains(t, makefileText, "static-egress-worker-keys", "static egress should not expose a second worker inventory via a standalone key-generation target")
+	require.NotContains(t, makefileText, "generate-static-egress-keys.sh", "static egress key generation should happen from FLEET_HOSTS during provisioning")
+	syncIndex := strings.Index(makefileText, "deploy/scripts/sync-static-egress-secrets.sh --apply")
+	gatewayIndex := strings.Index(makefileText, `deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"`)
+	workerProvisionIndex := strings.Index(makefileText, "./deploy/scripts/provision.sh worker")
+	require.NotEqual(t, -1, syncIndex, "provision-worker should sync static egress secrets")
+	require.NotEqual(t, -1, gatewayIndex, "provision-worker should reload the egress gateway")
+	require.NotEqual(t, -1, workerProvisionIndex, "provision-worker should provision the worker")
+	require.Less(t, syncIndex, gatewayIndex, "provision-worker should sync gateway peer config before reloading the gateway")
+	require.Less(t, gatewayIndex, workerProvisionIndex, "provision-worker should reload the gateway before the worker runs static egress probes")
+
+	syncScript, err := os.ReadFile("../deploy/scripts/sync-static-egress-secrets.sh")
+	require.NoError(t, err, "test should read static egress sync helper")
+	syncText := string(syncScript)
+	require.Contains(t, syncText, "FLEET_HOSTS", "static egress sync should derive workers from the fleet host inventory")
+	require.Contains(t, syncText, "role=\"${entry%%:*}\"", "static egress sync should identify worker entries by role")
+	require.Contains(t, syncText, "egress_host_count", "static egress sync should count egress inventory entries before mutating production secrets")
+	require.Contains(t, syncText, "exactly one egress:<host>", "static egress sync should require exactly one gateway host in FLEET_HOSTS")
+	require.Contains(t, syncText, "duplicate worker:<host>", "static egress sync should reject duplicate worker inventory entries before generating WireGuard peers")
+	require.Contains(t, syncText, "brew install wireguard-tools", "static egress sync should explain how to install the local WireGuard CLI prerequisite")
+	require.Contains(t, syncText, "STATIC_EGRESS_GATEWAY_PRIVATE_KEY", "static egress sync should generate or preserve the gateway private key")
+	require.Contains(t, syncText, "STATIC_EGRESS_GATEWAY_PUBLIC_KEY", "static egress sync should derive the gateway public key")
+	require.Contains(t, syncText, "STATIC_EGRESS_WORKER_HOSTS", "static egress sync should update the generated worker private-key map")
+	require.Contains(t, syncText, "STATIC_EGRESS_WORKER_PEERS", "static egress sync should update the derived gateway peer list")
+	require.Contains(t, syncText, "PROVISION_WORKER_HOST", "static egress sync should validate provision-worker is backed by FLEET_HOSTS")
+	require.Contains(t, syncText, "sops set", "static egress sync should edit generated keys in place in apply mode")
+	require.Contains(t, syncText, "--idempotent", "static egress sync should skip keys whose value is unchanged so no-op re-runs produce no diff")
+	require.NotContains(t, syncText, "sops --encrypt", "static egress sync should not full re-encrypt the file, which rotates the data key and rewrites every value into an unreviewable whole-file diff")
+	require.Contains(t, syncText, "cp \"$ENC_FILE\" \"$staged_enc\"", "static egress sync should stage edits on a copy so a partial failure cannot leave the live secrets file half-updated")
+	require.Contains(t, syncText, "mv \"$staged_enc\" \"$ENC_FILE\"", "static egress sync should swap the fully-edited staged copy in with an atomic rename")
+	require.Contains(t, syncText, "Commit $ENC_FILE after provisioning succeeds", "static egress sync should remind operators to commit generated encrypted secrets after provisioning succeeds")
+
+	provisionEgressScript, err := os.ReadFile("../deploy/scripts/provision-egress.sh")
+	require.NoError(t, err, "test should read egress provisioning wrapper")
+	provisionEgressText := string(provisionEgressScript)
+	require.Contains(t, provisionEgressText, ".env.production.enc", "egress provisioning wrapper should load gateway config from encrypted production secrets")
+	require.Contains(t, provisionEgressText, "FLEET_HOSTS", "egress provisioning wrapper should resolve the gateway host from the fleet host inventory")
+	require.Contains(t, provisionEgressText, `role="${entry%%:*}"`, "egress provisioning wrapper should identify egress entries by role")
+	require.Contains(t, provisionEgressText, `role" = "egress"`, "egress provisioning wrapper should support an egress:<host> fleet role")
+	require.Contains(t, provisionEgressText, "trap 'rm -f \"$tmp_env\"' RETURN", "egress provisioning wrapper should clean up decrypted production env temp files on every function exit path")
+	require.NotContains(t, provisionEgressText, "STATIC_EGRESS_GATEWAY_HOST", "egress provisioning wrapper should avoid a second gateway host inventory field")
+	require.Contains(t, provisionEgressText, "STATIC_EGRESS_GATEWAY_PRIVATE_KEY", "egress provisioning wrapper should require and forward the gateway private key")
+	require.Contains(t, provisionEgressText, "STATIC_EGRESS_WORKER_PEERS", "egress provisioning wrapper should require and forward worker peer config")
+	require.Contains(t, provisionEgressText, "/opt/143/static-egress-gateway.env", "egress provisioning wrapper should stage remote gateway config instead of assuming remote shell env")
+	require.Contains(t, provisionEgressText, "provision-egress-gateway.sh", "egress provisioning wrapper should run the gateway provisioning helper")
+	require.Contains(t, provisionEgressText, `EGRESS_SSH_USER="${EGRESS_SSH_USER:-${SSH_USER:-}}"`, "egress provisioning should allow a role-specific user while preserving the legacy SSH_USER override")
+	require.Contains(t, provisionEgressText, "resolve_remote_user", "egress provisioning should auto-detect root versus ubuntu before running scp")
+	require.Contains(t, provisionEgressText, "root ubuntu", "egress provisioning should probe both common cloud bootstrap users")
+	require.Contains(t, provisionEgressText, "remote_sudo_prefix", "egress provisioning should use sudo for privileged remote commands when SSH_USER is not root")
+	require.NotContains(t, provisionEgressText, `root@"$HOST"`, "egress provisioning should not hard-code root SSH because AWS Ubuntu AMIs require ubuntu@")
+	require.Contains(t, provisionEgressText, "install-tailscale.sh", "egress provisioning should optionally enroll the gateway in Tailscale")
+	require.Contains(t, provisionEgressText, "TS_AUTH_KEY_EGRESS", "egress provisioning should support a role-specific Tailscale auth key")
+
+	gatewayScript, err := os.ReadFile("../deploy/scripts/provision-egress-gateway.sh")
+	require.NoError(t, err, "test should read egress gateway provisioning helper")
+	gatewayText := string(gatewayScript)
+	require.Contains(t, gatewayText, "wg0", "egress gateway provisioning should configure WireGuard")
+	require.Contains(t, gatewayText, "publicKey@allowedIP", "egress gateway peer format should use a delimiter that cannot appear in base64 WireGuard keys")
+	require.NotContains(t, gatewayText, "%%=*", "egress gateway should not split WireGuard peer keys on '=' because base64 public keys may be padded")
+	require.NotContains(t, gatewayText, "#*=", "egress gateway should not split WireGuard peer keys on '=' because base64 public keys may be padded")
+	require.Contains(t, gatewayText, "MASQUERADE", "egress gateway should SNAT tunnel traffic to its public IPv4")
+	require.Contains(t, gatewayText, "iptables-persistent", "egress gateway should install persistent iptables support")
+	require.Contains(t, gatewayText, "netfilter-persistent save", "egress gateway should persist NAT and guard rules")
+	require.Contains(t, gatewayText, "systemctl restart \"wg-quick@${WG_INTERFACE}\"", "egress gateway provisioning should reload rewritten WireGuard peer config")
+	require.Contains(t, gatewayText, "169.254.0.0/16", "egress gateway should independently block metadata ranges")
+	require.Contains(t, gatewayText, "10.0.0.0/8", "egress gateway should independently block private ranges")
+	require.Contains(t, gatewayText, "100.64.0.0/10", "egress gateway should block Tailscale CGNAT ranges")
+}
+
+func TestWorkerReprovisionDrainsBlueGreenGenerations(t *testing.T) {
+	t.Parallel()
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read provision.sh")
+	provisionText := string(provisionScript)
+
+	require.Contains(t, provisionText, "list_worker_reprovision_containers", "worker reprovision should inspect all compose worker generations, not only the base compose project")
+	require.Contains(t, provisionText, `label=com.docker.compose.service=worker`, "worker reprovision should detect blue/green worker containers by compose service label")
+	require.Contains(t, provisionText, "spin-down-worker.sh", "worker reprovision should drain blue/green generations through the canonical spin-down path")
+	require.Contains(t, provisionText, "WORKER_REPROVISION_DRAIN_TIMEOUT_SECONDS", "worker reprovision should expose an operator-controlled drain timeout")
 }
 
 func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testing.T) {
@@ -1493,8 +2026,8 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	require.NoError(t, err, "test should read the worker host reconciliation script")
 	reconcileText := string(reconcileScript)
 	require.Contains(t, reconcileText, `SANDBOX_SUBNET="`+sandboxSubnet+`"`, "reconcile-worker-host.sh should define the pinned sandbox subnet so sandbox-dns gets a predictable static IP")
-	require.Contains(t, reconcileText, `--subnet "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should create 143-sandbox with the pinned subnet variable")
-	require.Contains(t, reconcileText, `"$EXISTING_SANDBOX_SUBNET" != "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
+	require.Contains(t, reconcileText, `ensure_bridge "$SANDBOX_NETWORK" "$SANDBOX_SUBNET"`, "reconcile-worker-host.sh should create 143-sandbox with the pinned subnet variable")
+	require.Contains(t, reconcileText, `"$existing_subnet" != "$subnet"`, "reconcile-worker-host.sh should fail loudly when an existing 143-sandbox network has a different subnet — silent reuse breaks the static-IP mapping")
 
 	// The sandbox resolv.conf writer is the single source of truth for the
 	// nameserver line. provision.sh and deploy.sh both call it so a content
@@ -1502,12 +2035,12 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	// reprovision maintenance window.
 	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
 	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
-	require.Contains(t, string(resolvScript), "nameserver "+sandboxDNSIP, "sandbox-resolv-conf.sh should write sandbox-dns's IP into /etc/143/sandbox-resolv.conf")
+	require.Contains(t, string(resolvScript), `NAMESERVER="${2:-`+sandboxDNSIP+`}"`, "sandbox-resolv-conf.sh should default to sandbox-dns's IP for /etc/143/sandbox-resolv.conf")
 	require.Contains(t, reconcileText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read the deploy script")
 	deployText := string(deployScript)
-	require.Contains(t, deployText, "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "deploy.sh should refresh worker host invariants through the canonical reconciliation script")
+	require.Contains(t, deployText, "/opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox", "deploy.sh should refresh worker host invariants through the canonical reconciliation script")
 	require.NotContains(t, deployText, "enable_icc=false", "deploy.sh must not create 143-sandbox with bridge ICC disabled because Docker blocks sandbox DNS before DOCKER-USER can carve it out")
 
 	compose, err := os.ReadFile("../docker-compose.worker.yml")

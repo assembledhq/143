@@ -74,7 +74,6 @@ var previewStartupCacheTestCols = []string{
 	"size_bytes", "worker_node_id", "last_used_at", "created_at",
 }
 
-
 var prPreviewStateTestCols = []string{
 	"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 	"last_preview_instance_id", "last_screenshot_blob_path", "last_visual_diff_blob_path",

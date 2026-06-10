@@ -726,6 +726,9 @@ function IntegrationDetailSheet({
   isSyncingRepos,
   onReplaceNotionToken,
   onReplaceCircleCIToken,
+  onReplaceMezmoCredentials,
+  mezmoDataset,
+  mezmoBaseURL,
 }: {
   provider: IntegrationKey | null;
   open: boolean;
@@ -742,6 +745,9 @@ function IntegrationDetailSheet({
   isSyncingRepos: boolean;
   onReplaceNotionToken: () => void;
   onReplaceCircleCIToken: () => void;
+  onReplaceMezmoCredentials: () => void;
+  mezmoDataset?: string;
+  mezmoBaseURL?: string;
 }) {
   if (!provider) return null;
   const meta = getIntegrationByKey(provider);
@@ -804,6 +810,21 @@ function IntegrationDetailSheet({
               <Button size="sm" variant="outline" onClick={onReplaceCircleCIToken}>Replace credentials</Button>
             </div>
           ) : null}
+          {provider === "mezmo" ? (
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium">Connection settings</h3>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+                <dt className="text-muted-foreground">Base URL</dt>
+                <dd className="truncate">{mezmoBaseURL || "https://api.mezmo.com (default)"}</dd>
+                <dt className="text-muted-foreground">Dataset</dt>
+                <dd className="truncate">{mezmoDataset || "All datasets"}</dd>
+              </dl>
+              <p className="text-sm text-muted-foreground">
+                Replace the Mezmo service key, base URL, or dataset used for production log queries.
+              </p>
+              <Button size="sm" variant="outline" onClick={onReplaceMezmoCredentials}>Replace credentials</Button>
+            </div>
+          ) : null}
 
           {isConnected ? (
             <>
@@ -827,6 +848,10 @@ type TokenDialogField = {
   label: string;
   placeholder?: string;
   type?: "text" | "password";
+  // When true, the field may be left blank and does not gate the submit
+  // button. Used for provider settings like Mezmo's base URL and dataset that
+  // fall back to sensible defaults server-side.
+  optional?: boolean;
   help?: ReactNode;
   tooltip?: {
     ariaLabel: string;
@@ -856,7 +881,7 @@ function TokenDialog({ open, onOpenChange, title, description, fields, submittin
     onOpenChange(next);
   };
   const trimmedValues = Object.fromEntries(fields.map((f) => [f.id, (values[f.id] ?? "").trim()]));
-  const ready = fields.every((f) => trimmedValues[f.id] !== "");
+  const ready = fields.every((f) => f.optional || trimmedValues[f.id] !== "");
 
   return (
     <AlertDialog open={open} onOpenChange={handleOpenChange}>
@@ -979,6 +1004,21 @@ export default function IntegrationsPage() {
     },
   });
 
+  const [mezmoDialogOpen, setMezmoDialogOpen] = useState(false);
+  const [mezmoError, setMezmoError] = useState<string | null>(null);
+  const mezmoConnectMutation = useMutation({
+    mutationFn: ({ apiKey, baseUrl, dataset }: { apiKey: string; baseUrl: string; dataset: string }) =>
+      api.integrations.connectMezmo(apiKey, baseUrl, dataset),
+    onSuccess: () => {
+      setMezmoDialogOpen(false);
+      setMezmoError(null);
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    },
+    onError: (err: Error) => {
+      setMezmoError(err.message || "Failed to connect Mezmo. Check your service key.");
+    },
+  });
+
   const githubIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "github" && integration.status === "active"
   );
@@ -1006,6 +1046,9 @@ export default function IntegrationsPage() {
   const circleciIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "circleci" && integration.status === "active"
   );
+  const mezmoIntegration = integrationsResp?.data?.find(
+    (integration) => integration.provider === "mezmo" && integration.status === "active"
+  );
   const repositories = repositoriesResp?.data ?? [];
   const activeRepositories = repositories.filter((repo) => repo.status === "active");
   const connected = {
@@ -1015,6 +1058,7 @@ export default function IntegrationsPage() {
     slack: Boolean(slackIntegration),
     notion: Boolean(notionIntegration),
     circleci: Boolean(circleciIntegration),
+    mezmo: Boolean(mezmoIntegration),
   } satisfies Partial<Record<IntegrationKey, boolean>>;
 
   return (
@@ -1042,6 +1086,8 @@ export default function IntegrationsPage() {
         notionLoading={notionConnectMutation.isPending}
         circleciConnected={Boolean(circleciIntegration)}
         circleciLoading={circleciConnectMutation.isPending}
+        mezmoConnected={Boolean(mezmoIntegration)}
+        mezmoLoading={mezmoConnectMutation.isPending}
         onConnectGitHub={() => api.integrations.loginGitHub()}
         onConnectSentry={() => api.auth.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
@@ -1053,6 +1099,10 @@ export default function IntegrationsPage() {
         onConnectCircleCI={() => {
           setCircleciError(null);
           setCircleciDialogOpen(true);
+        }}
+        onConnectMezmo={() => {
+          setMezmoError(null);
+          setMezmoDialogOpen(true);
         }}
         onManageGitHub={isAdmin ? () => setSelectedIntegration("github") : undefined}
         onManageIntegration={isAdmin ? (provider) => setSelectedIntegration(provider) : undefined}
@@ -1067,6 +1117,11 @@ export default function IntegrationsPage() {
           circleci: circleciIntegration ? (
             <p className="mt-1.5 text-xs text-muted-foreground">
               {circleciIntegration.circleci_project_slug ? `Project: ${circleciIntegration.circleci_project_slug}` : "Flaky-test context is enabled"}
+            </p>
+          ) : undefined,
+          mezmo: mezmoIntegration ? (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              {mezmoIntegration.mezmo_dataset ? `Dataset: ${mezmoIntegration.mezmo_dataset}` : "Production log queries are enabled"}
             </p>
           ) : undefined,
         }}
@@ -1102,6 +1157,12 @@ export default function IntegrationsPage() {
           setCircleciError(null);
           setCircleciDialogOpen(true);
         }}
+        onReplaceMezmoCredentials={() => {
+          setMezmoError(null);
+          setMezmoDialogOpen(true);
+        }}
+        mezmoDataset={mezmoIntegration?.mezmo_dataset}
+        mezmoBaseURL={mezmoIntegration?.mezmo_base_url}
       />
 
       <TokenDialog
@@ -1177,6 +1238,58 @@ export default function IntegrationsPage() {
         error={circleciError}
         onSubmit={(values) =>
           circleciConnectMutation.mutate({ token: values.token, projectSlug: values.projectSlug })
+        }
+      />
+
+      <TokenDialog
+        open={mezmoDialogOpen}
+        onOpenChange={setMezmoDialogOpen}
+        title="Connect Mezmo"
+        description={
+          <>
+            Open Mezmo, select the right organization, then go to Settings &gt;
+            Organization &gt; API Keys. Create a service key there so agents can query production logs.{" "}
+            <a
+              href="https://app.mezmo.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline"
+            >
+              Open Mezmo
+            </a>
+            . Base URL and dataset are optional; leave them blank to use the
+            default Mezmo search scope.
+          </>
+        }
+        fields={[
+          { id: "apiKey", label: "Service Key", placeholder: "Mezmo service key" },
+          {
+            id: "baseUrl",
+            label: "Base URL (optional)",
+            placeholder: "https://api.mezmo.com",
+            type: "text",
+            optional: true,
+            tooltip: {
+              ariaLabel: "When to set a custom Mezmo base URL",
+              content: "Only needed for self-hosted or regional Mezmo deployments. Leave blank to use https://api.mezmo.com.",
+            },
+          },
+          {
+            id: "dataset",
+            label: "Dataset (optional)",
+            placeholder: "e.g. production",
+            type: "text",
+            optional: true,
+            tooltip: {
+              ariaLabel: "Where to find the Mezmo dataset",
+              content: "In Mezmo Log Analysis, open Search, then use the dataset selector near the top of the log viewer. Copy that selected dataset name exactly. Leave blank to query across the default Mezmo scope.",
+            },
+          },
+        ]}
+        submitting={mezmoConnectMutation.isPending}
+        error={mezmoError}
+        onSubmit={(values) =>
+          mezmoConnectMutation.mutate({ apiKey: values.apiKey, baseUrl: values.baseUrl, dataset: values.dataset })
         }
       />
     </PageContainer>

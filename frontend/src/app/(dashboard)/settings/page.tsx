@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { CopyButton } from "@/components/copy-button";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
 import { useAutosave } from "@/hooks/useAutosave";
@@ -184,6 +185,72 @@ function PRAuthorshipSettings() {
   );
 }
 
+function NetworkAccessSettings() {
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+  const { data: networkStatusResponse } = useQuery({
+    queryKey: queryKeys.settings.network,
+    queryFn: () => api.settings.getNetworkStatus(),
+  });
+  const { save, status } = useOrgSettingsAutosave();
+
+  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const sandboxNetwork = settings.sandbox_network ?? {};
+  const networkStatus = networkStatusResponse?.data;
+  const available = networkStatus?.static_egress_available ?? false;
+  const publicIP = networkStatus?.static_egress_public_ip;
+  const unavailableReason = networkStatus?.static_egress_unavailable_reason;
+  const enabled = sandboxNetwork.static_egress_enabled ?? networkStatus?.static_egress_enabled ?? false;
+
+  const saveStaticEgress = (checked: boolean) => {
+    save({
+      settings: {
+        sandbox_network: {
+          ...sandboxNetwork,
+          static_egress_enabled: checked,
+        },
+      },
+    });
+  };
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-medium text-foreground">Network access</h2>
+        <AutosaveIndicator status={status} />
+      </div>
+      <Card>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
+              <Label htmlFor="static-egress-enabled">Use static egress IP for sessions and previews</Label>
+              <p className="text-xs text-muted-foreground">
+                Uses a stable public IP for new and hydrated sandboxes.
+              </p>
+              {!available && unavailableReason && (
+                <p className="text-xs text-muted-foreground">{unavailableReason}</p>
+              )}
+            </div>
+            <Switch
+              id="static-egress-enabled"
+              checked={enabled}
+              onCheckedChange={saveStaticEgress}
+              aria-label="Use static egress IP for sessions and previews"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+            <span className="text-xs text-muted-foreground">Public IP</span>
+            <code className="font-mono text-xs text-foreground">{publicIP ?? "Not configured"}</code>
+            <CopyButton value={publicIP} label="Copy static egress public IP" />
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
 function PreviewCapacitySettings() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -280,6 +347,7 @@ export default function SettingsPage() {
           </Card>
         </section>
 
+        {user?.role === "admin" && <NetworkAccessSettings />}
         {user?.role === "admin" && <PreviewCapacitySettings />}
         {user?.role === "admin" && <PRAuthorshipSettings />}
       </div>

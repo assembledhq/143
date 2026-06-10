@@ -1346,6 +1346,7 @@ type testDeps struct {
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
 	sandboxCapacity  *agent.SandboxCapacityGate
+	staticEgress     agent.StaticEgressRuntimeConfig
 	users            agent.UserLookup
 	logger           *zerolog.Logger
 }
@@ -1508,6 +1509,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		IdentityResolver:   d.identityResolver,
 		SandboxAuth:        d.sandboxAuth,
 		SandboxCapacity:    d.sandboxCapacity,
+		StaticEgress:       d.staticEgress,
 		Users:              d.users,
 		NodeID:             d.nodeID,
 		Logger:             logger,
@@ -5014,6 +5016,67 @@ func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrSandboxOnDifferentNode,
 		"cross-node continue_session claim must return ErrSandboxOnDifferentNode so the worker re-enqueues for the correct node")
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "container_id must be untouched on cross-node bail-out")
+}
+
+func TestContinueSession_ReusePathRejectsWrongStaticEgressNetwork(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	containerID := "direct-egress-container"
+	session.ContainerID = &containerID
+	thisNode := "worker-static"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = models.SandboxStateRunning
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.issues.issue = issue
+	d.orgs = &mockOrgStore{org: models.Organization{
+		ID:       orgID,
+		Settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}}
+	d.staticEgress = agent.StaticEgressRuntimeConfig{
+		Enabled:     true,
+		Capable:     true,
+		NetworkName: agent.DefaultStaticEgressNetwork,
+		PublicIP:    "203.0.113.10",
+	}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sb.ID, "IsAlive should verify the recorded container before network inspection")
+		return true, nil
+	}
+	d.provider.ConnInfoFn = func(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+		require.Equal(t, containerID, sb.ID, "network inspection should check the recorded container")
+		return &agent.SandboxConnectionInfo{Environment: map[string]string{"DOCKER_HOST": "143-sandbox"}}, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run for a live container whose network no longer matches org settings")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run when the live container is on the wrong egress network")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err, "ContinueSession should fail closed when a reused container has the wrong egress network")
+	require.Contains(t, err.Error(), "restart environment to apply network setting", "ContinueSession should return an actionable restart message")
 }
 
 func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *testing.T) {

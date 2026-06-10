@@ -25,6 +25,34 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
+type repairJobPayloadArg struct {
+	wantThreadID      uuid.UUID
+	wantPullRequestID uuid.UUID
+	wantAction        models.PullRequestRepairActionType
+	wantHealthVersion int64
+}
+
+func (a repairJobPayloadArg) Match(value interface{}) bool {
+	var payloadBytes []byte
+	switch v := value.(type) {
+	case []byte:
+		payloadBytes = v
+	case string:
+		payloadBytes = []byte(v)
+	default:
+		return false
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return false
+	}
+	return payload["thread_id"] == a.wantThreadID.String() &&
+		payload["pull_request_id"] == a.wantPullRequestID.String() &&
+		payload["command_type"] == string(a.wantAction) &&
+		payload["health_version"] == float64(a.wantHealthVersion)
+}
+
 func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActions(t *testing.T) {
 	t.Parallel()
 
@@ -1436,10 +1464,15 @@ func TestPRServiceResumeRepairSession(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgx.NamedArgs{
-						"org_id":     pr.OrgID,
-						"queue":      "agent",
-						"job_type":   "continue_session",
-						"payload":    pgxmock.AnyArg(),
+						"org_id":   pr.OrgID,
+						"queue":    "agent",
+						"job_type": "continue_session",
+						"payload": repairJobPayloadArg{
+							wantThreadID:      threadID,
+							wantPullRequestID: pr.ID,
+							wantAction:        models.PullRequestRepairActionTypeResolveConflicts,
+							wantHealthVersion: 9,
+						},
 						"priority":   5,
 						"dedupe_key": pgxmock.AnyArg(),
 					}).

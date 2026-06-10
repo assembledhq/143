@@ -557,8 +557,9 @@ type Orchestrator struct {
 	mentionIndexes      *workspace.MentionIndexCache
 	usageTracker        UsageRecorder        // can be nil — billing tracking disabled if nil
 	sandboxCapacity     *SandboxCapacityGate // can be nil — live local sandbox admission disabled
-	threadRuntimes      ThreadRuntimeStore   // can be nil — disables live thread-runtime routing
-	threadInbox         ThreadInboxStore     // can be nil — disables live inbox delivery
+	staticEgress        StaticEgressRuntimeConfig
+	threadRuntimes      ThreadRuntimeStore // can be nil — disables live thread-runtime routing
+	threadInbox         ThreadInboxStore   // can be nil — disables live inbox delivery
 	sandboxHolders      SessionSandboxHolderStore
 	threadDeliveryLocks sync.Map
 	env                 *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
@@ -659,6 +660,9 @@ func (o *Orchestrator) RevertThread(ctx context.Context, session *models.Session
 		return fmt.Errorf("revert thread: resolve workdir: %w", err)
 	} else if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
+	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
+		return fmt.Errorf("revert thread: resolve sandbox network: %w", err)
 	}
 
 	sandbox, err := HydrateSandboxFromSnapshot(ctx, o.provider, o.snapshots, *session.SnapshotKey, sandboxCfg)
@@ -795,8 +799,9 @@ type OrchestratorConfig struct {
 	MentionIndexes     *workspace.MentionIndexCache
 	UsageTracker       UsageRecorder        // optional — enables billing observability
 	SandboxCapacity    *SandboxCapacityGate // optional — gates new local sandbox creation
-	ThreadRuntimes     ThreadRuntimeStore   // optional — records per-thread live runtime ownership
-	ThreadInbox        ThreadInboxStore     // optional — durable per-thread input delivery log
+	StaticEgress       StaticEgressRuntimeConfig
+	ThreadRuntimes     ThreadRuntimeStore // optional — records per-thread live runtime ownership
+	ThreadInbox        ThreadInboxStore   // optional — durable per-thread input delivery log
 	SandboxHolders     SessionSandboxHolderStore
 	Cancels            *CancelRegistry       // optional — enables session cancellation from API
 	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
@@ -885,6 +890,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		mentionIndexes:     cfg.MentionIndexes,
 		usageTracker:       cfg.UsageTracker,
 		sandboxCapacity:    cfg.SandboxCapacity,
+		staticEgress:       cfg.StaticEgress,
 		threadRuntimes:     cfg.ThreadRuntimes,
 		threadInbox:        cfg.ThreadInbox,
 		sandboxHolders:     cfg.SandboxHolders,
@@ -2233,6 +2239,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
+	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, run.OrgID, o.staticEgress, &sandboxCfg); err != nil {
+		o.failRun(ctx, run, err.Error())
+		return err
+	}
 	authState, authErr := o.prepareSandboxGitHubAuth(ctx, run, authRepo, token, &sandboxCfg, log)
 	if authErr != nil {
 		o.failRun(ctx, run, authErr.Error())
@@ -3101,6 +3111,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		internalAPIThreadID = &threadIDCopy
 	}
 	o.injectInternalAPIEnv(ctx, session, resolvedRepoID, internalAPIThreadID, &sandboxCfg, log)
+	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
+		if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
+			log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network failure")
+		}
+		return err
+	}
 	if authErr := o.env.CheckAuth(session.AgentType, sandboxCfg.Env); authErr != nil {
 		authLog := log.Error().Err(authErr).
 			Str("session_id", session.ID.String()).
@@ -3283,6 +3299,32 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 					Str("stale_container_id", *session.ContainerID).
 					Msg("cleared stale orphan container_id during continue_session reuse liveness check; signaling retry to re-enter against the clean row")
 				return o.abandonReuseForRetry(ctx, session, log, "stale container_id cleared")
+			}
+			networkCtx, networkCancel := context.WithTimeout(ctx, sandboxRaceProbeTimeout)
+			networkMatches, networkErr := SandboxNetworkMatches(networkCtx, o.provider, &Sandbox{ID: *session.ContainerID, Provider: "docker"}, sandboxCfg.NetworkName, o.staticEgress.NetworkName)
+			networkCancel()
+			if networkErr != nil {
+				log.Warn().Err(networkErr).
+					Str("container_id", *session.ContainerID).
+					Msg("network probe on recorded container_id failed during continue_session reuse; abandoning attempt so the worker retries instead of attaching to an indeterminate container")
+				return o.abandonReuseForRetry(ctx, session, log, "network probe error")
+			}
+			if !networkMatches {
+				log.Warn().
+					Str("container_id", *session.ContainerID).
+					Str("expected_network", sandboxCfg.NetworkName).
+					Str("static_egress_network", o.staticEgress.NetworkName).
+					Msg("recorded container_id uses a different sandbox network than the current org setting")
+				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, models.SessionStatusIdle); revertErr != nil {
+					log.Error().Err(revertErr).Msg("failed to revert session to idle after sandbox network mismatch")
+				}
+				o.registerSandboxFailureMessage(
+					ctx,
+					session,
+					"Restart environment to apply network setting.",
+					"sandbox network",
+				)
+				return fmt.Errorf("restart environment to apply network setting")
 			}
 		}
 	}

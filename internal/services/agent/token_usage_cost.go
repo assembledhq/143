@@ -38,6 +38,7 @@ var codexCreditRates = map[string]tokenRate{
 }
 
 var anthropicRates = map[string]tokenRate{
+	models.ClaudeCodeModelFable5:   {inputPerMTok: 10.00, cachedInputPerMTok: 1.00, cacheCreationPerMTok: 12.50, outputPerMTok: 50.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus48:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus47:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},
 	models.ClaudeCodeModelOpus46:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 25.00, unit: TokenCostUnitUSD, detail: "anthropic_api_pricing"},

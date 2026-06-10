@@ -113,6 +113,18 @@ func TestComposeTimeline_CodexApplyPatchVerificationDiagnosticKeepsErrorAsLog(t 
 	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "recoverable Codex apply_patch diagnostics should not be returned as user-visible errors")
 }
 
+func TestComposeTimeline_CodexApplyPatchVerificationDiagnosticWithTopLevelContextKeepsErrorAsLog(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, nil, "2026-01-01T00:00:01Z", "error", "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/db/autopilot_queue.go:\nfunc ptrTime(t time.Time) *time.Time {\n\treturn &t\n}"),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 1, "recoverable Codex apply_patch diagnostics with top-level context should remain available in the timeline")
+	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "recoverable Codex apply_patch diagnostics with top-level context should not be returned as user-visible errors")
+}
+
 func TestComposeTimeline_DedupesLegacyRowsWithoutMetadata(t *testing.T) {
 	t.Parallel()
 

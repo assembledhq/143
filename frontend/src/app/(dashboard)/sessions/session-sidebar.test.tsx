@@ -20,6 +20,7 @@ vi.mock('next/link', () => ({
 let mockPathname = '/sessions';
 let mockSelectedSegment: string | null = null;
 const mockRouterPush = vi.fn();
+const mockRouterPrefetch = vi.fn();
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -33,7 +34,7 @@ const mockAuthState: {
 };
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: mockRouterPush, replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, prefetch: mockRouterPrefetch, replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
   useSelectedLayoutSegment: () => mockSelectedSegment,
@@ -131,6 +132,7 @@ describe('SessionSidebar', () => {
     mockPathname = '/sessions';
     mockSelectedSegment = null;
     mockRouterPush.mockReset();
+    mockRouterPrefetch.mockReset();
     mockOptimisticSessions.length = 0;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
@@ -240,7 +242,153 @@ describe('SessionSidebar', () => {
     resolveArchiveRefetch?.();
   });
 
-  it('keeps a committed mobile archive row displaced until the backend removes it', async () => {
+  it('optimistically removes an archived session before the archive request settles', async () => {
+    let resolveArchive: (() => void) | undefined;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Immediate archive' })],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        return new Promise((resolve) => {
+          resolveArchive = () => resolve(HttpResponse.json({ status: 'archived' }));
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Immediate archive');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive session' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Immediate archive')).not.toBeInTheDocument();
+    });
+
+    resolveArchive?.();
+  });
+
+  it('rolls back an optimistic archive when the archive request fails', async () => {
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Archive rollback' })],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        return HttpResponse.json(
+          { error: { code: 'ARCHIVE_FAILED', message: 'Archive failed' } },
+          { status: 500 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Archive rollback');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive session' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Archive rollback')).toBeInTheDocument();
+    });
+  });
+
+  it('optimistically removes an archived session from loaded extra pages', async () => {
+    server.use(
+      http.get('/api/v1/sessions', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        if (cursor === 'page-2') {
+          return HttpResponse.json({
+            data: [makeSession({ id: 's2', result_summary: 'Second page archive' })],
+            meta: {},
+          });
+        }
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'First page session' })],
+          meta: { next_cursor: 'page-2' },
+        });
+      }),
+      http.post('/api/v1/sessions/s2/archive', () => {
+        return HttpResponse.json({ status: 'archived' });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('First page session');
+    await userEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    await screen.findByText('Second page archive');
+
+    const archiveButtons = screen.getAllByRole('button', { name: 'Archive session' });
+    await userEvent.click(archiveButtons[archiveButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Second page archive')).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps capped session counts capped during optimistic archive updates', async () => {
+    let resolveArchive: (() => void) | undefined;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Capped count archive', status: 'running' })],
+          meta: {},
+        });
+      }),
+      http.get('/api/v1/sessions/counts', () => {
+        return HttpResponse.json({ data: { all: 100, active: 100, archived: 100, cap: 100 } });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        return new Promise((resolve) => {
+          resolveArchive = () => resolve(HttpResponse.json({ status: 'archived' }));
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Capped count archive');
+    await screen.findAllByText('99+');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive session' }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('99+')).toHaveLength(3);
+    });
+    expect(screen.queryByText('99')).not.toBeInTheDocument();
+
+    resolveArchive?.();
+  });
+
+  it('prefetches session detail when a session row is hovered or focused', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Prefetch me' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    const link = (await screen.findByText('Prefetch me')).closest('a');
+    expect(link).not.toBeNull();
+
+    fireEvent.mouseEnter(link!);
+    fireEvent.focus(link!);
+
+    expect(mockRouterPrefetch).toHaveBeenCalledWith('/sessions/s1');
+  });
+
+  it('prefetches the new-session route when the new-session affordance is hovered', async () => {
+    serveSessions([]);
+
+    renderWithProviders(<SessionSidebar />);
+    const link = await screen.findByRole('link', { name: 'New session' });
+
+    fireEvent.mouseEnter(link);
+
+    expect(mockRouterPrefetch).toHaveBeenCalledWith('/sessions/new');
+  });
+
+  it('removes a committed mobile archive row immediately while the backend request is pending', async () => {
     let archiveCalls = 0;
     let archiveSettled = false;
     let resolveArchive: (() => void) | undefined;
@@ -280,18 +428,16 @@ describe('SessionSidebar', () => {
     fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
     fireEvent.touchEnd(surface!);
 
-    await waitFor(() => {
-      expect(archiveCalls).toBe(1);
-    });
-    expect(screen.getByText('Swipe pending')).toBeInTheDocument();
+    // Committed visual state is set synchronously before onMutate's async cache removal
     expect(container).toHaveAttribute('data-swipe-state', 'committed');
     expect(surface!.style.transform).toBe('translateX(-390px)');
 
-    resolveArchive?.();
-
     await waitFor(() => {
-      expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
+      expect(archiveCalls).toBe(1);
     });
+    expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
+
+    resolveArchive?.();
   });
 
   it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
@@ -485,6 +631,26 @@ describe('SessionSidebar', () => {
       expect(input).toHaveValue('');
       expect(screen.getByText('Alpha fix')).toBeInTheDocument();
     });
+  });
+
+  it('opens a clicked session with client navigation', async () => {
+    const session = makeSession({
+      id: 's1',
+      result_summary: 'Instant open session',
+      status: 'running',
+      diff_stats: { added: 12, removed: 4, files_changed: 3 },
+    });
+    serveSessions([session]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Instant open session')).closest('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
+
+    await userEvent.click(link!);
+
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
   // -----------------------------------------------------------------------

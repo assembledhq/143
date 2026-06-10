@@ -10,9 +10,13 @@ import {
   invalidateSessionHumanInputRequests,
   applyThreadInboxEventToThreads,
   applyThreadRuntimeEventToThreads,
+  mergeSessionLogListResponse,
+  mergeSessionDetailStatusUpdate,
+  mergeVisibleThreadLogs,
   trackInFlightAgentUpdate,
+  buildChromeThreads,
 } from "./session-detail-content";
-import type { SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
+import type { SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
@@ -143,6 +147,55 @@ describe("thread SSE event reducers", () => {
   });
 });
 
+describe("mergeSessionDetailStatusUpdate", () => {
+  const baseThread: SessionThread = {
+    id: "thread-1",
+    session_id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    label: "Main",
+    status: "running",
+    current_turn: 1,
+    created_at: "2026-01-01T00:00:00.000Z",
+    cost_cents: 0,
+    pending_message_count: 0,
+  };
+
+  const baseDetail: SessionDetail = {
+    id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    status: "running",
+    autonomy_level: "semi",
+    token_mode: "standard",
+    current_turn: 1,
+    last_activity_at: "2026-01-01T00:00:00.000Z",
+    sandbox_state: "running",
+    created_at: "2026-01-01T00:00:00.000Z",
+    threads: [baseThread],
+  };
+
+  it("preserves threads from an initial SSE status payload when the detail cache is empty", () => {
+    const next = mergeSessionDetailStatusUpdate(undefined, baseDetail);
+
+    expect(next.data.threads).toEqual([baseThread]);
+  });
+
+  it("settles existing running threads when an old status payload omits thread detail", () => {
+    const next = mergeSessionDetailStatusUpdate(
+      { data: baseDetail },
+      {
+        ...baseDetail,
+        status: "idle",
+        threads: [],
+      },
+    );
+
+    expect(next.data.status).toBe("idle");
+    expect(next.data.threads).toEqual([{ ...baseThread, status: "idle" }]);
+  });
+});
+
 describe("getInitialComposerSelectedModel", () => {
   const baseThread: SessionThread = {
     id: "thread-1",
@@ -163,6 +216,66 @@ describe("getInitialComposerSelectedModel", () => {
 
   it("uses the default composer selection when the created thread has no override", () => {
     expect(getInitialComposerSelectedModel(baseThread)).toBe("");
+  });
+});
+
+describe("buildChromeThreads", () => {
+  const baseThread: SessionThread = {
+    id: "thread-1",
+    session_id: "session-1",
+    org_id: "org-1",
+    agent_type: "codex",
+    label: "Main",
+    status: "idle",
+    current_turn: 0,
+    created_at: "2026-01-01T00:00:00.000Z",
+    cost_cents: 0,
+    pending_message_count: 0,
+  };
+
+  it("appends a pending preview while the matching real thread is not present", () => {
+    const pending = {
+      ...baseThread,
+      id: "__pending-thread__",
+      label: "Codex 2",
+      status: "pending" as const,
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+
+    expect(buildChromeThreads([baseThread], pending)).toEqual([baseThread, pending]);
+  });
+
+  it("drops the pending preview once the real created thread is in the session detail cache", () => {
+    const pending = {
+      ...baseThread,
+      id: "__pending-thread__",
+      label: "Codex 2",
+      status: "pending" as const,
+      model_override: "gpt-5.4",
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+    const created = {
+      ...baseThread,
+      id: "thread-2",
+      label: "Codex 2",
+      model_override: "gpt-5.4",
+      created_at: "2026-01-01T00:00:02.000Z",
+    };
+
+    expect(buildChromeThreads([baseThread, created], pending)).toEqual([baseThread, created]);
+  });
+
+  it("drops the pending preview when its id directly matches a thread (review-loop case)", () => {
+    const reviewThread = {
+      ...baseThread,
+      id: "thread-review-1",
+      label: "Review",
+      status: "pending" as const,
+      created_at: "2026-01-01T00:00:01.000Z",
+    };
+    const realThread = { ...baseThread, id: "thread-review-1", label: "Review" };
+
+    expect(buildChromeThreads([baseThread, realThread], reviewThread)).toEqual([baseThread, realThread]);
   });
 });
 
@@ -275,6 +388,47 @@ describe("thread message windows", () => {
       [log(10, 1), log(20, 1)],
       [],
     ).map((item) => item.id)).toEqual([10, 20]);
+  });
+
+  it("merges streamed logs into cached log responses without duplicating ids", () => {
+    const result = mergeSessionLogListResponse(
+      {
+        data: [log(10, 1), log(30, 3)],
+        meta: { next_cursor: "older" },
+      },
+      [log(20, 2), { ...log(30, 3), message: "canonical update" }],
+    );
+
+    expect(result.meta).toEqual({ next_cursor: "older" });
+    expect(result.data.map((item) => item.id)).toEqual([10, 20, 30]);
+    expect(result.data[2].message).toBe("canonical update");
+  });
+
+  it("caps live streamed log buffers while keeping the newest entries", () => {
+    const result = mergeSessionLogListResponse(
+      {
+        data: [log(10, 1), log(20, 1)],
+        meta: {},
+      },
+      [log(30, 2), log(40, 2)],
+      3,
+    );
+
+    expect(result.data.map((item) => item.id)).toEqual([20, 30, 40]);
+  });
+
+  it("keeps live thread logs before their turn is represented in loaded message windows", () => {
+    const result = mergeVisibleThreadLogs(
+      {
+        data: [log(10, 0), log(20, 2)],
+        meta: {},
+      },
+      [log(30, 1)],
+      [message(1, 0)],
+      [],
+    );
+
+    expect(result.map((item) => item.id)).toEqual([10, 30]);
   });
 
   it("includes the execution turn for completed threads without assistant messages", () => {

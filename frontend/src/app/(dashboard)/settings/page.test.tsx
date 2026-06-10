@@ -5,6 +5,7 @@ import SettingsPage from './page';
 const {
   settingsGetMock,
   settingsUpdateMock,
+  settingsNetworkStatusMock,
   auditLogsListMock,
   teamListMembersMock,
   useAuthMock,
@@ -27,6 +28,13 @@ const {
       updated_at: '2026-05-06T15:30:00Z',
     },
   }),
+  settingsNetworkStatusMock: vi.fn().mockResolvedValue({
+    data: {
+      static_egress_available: true,
+      static_egress_enabled: false,
+      static_egress_public_ip: '203.0.113.10',
+    },
+  }),
   auditLogsListMock: vi.fn().mockResolvedValue({ data: [] }),
   teamListMembersMock: vi.fn().mockResolvedValue({ data: [] }),
   useAuthMock: vi.fn(() => ({
@@ -39,6 +47,7 @@ vi.mock('@/lib/api', () => ({
     settings: {
       get: settingsGetMock,
       update: settingsUpdateMock,
+      getNetworkStatus: settingsNetworkStatusMock,
     },
     auditLogs: {
       list: auditLogsListMock,
@@ -57,6 +66,7 @@ describe('SettingsPage', () => {
   beforeEach(() => {
     settingsGetMock.mockClear();
     settingsUpdateMock.mockClear();
+    settingsNetworkStatusMock.mockClear();
     useAuthMock.mockReset();
     useAuthMock.mockReturnValue({
       user: { role: 'admin' },
@@ -68,6 +78,13 @@ describe('SettingsPage', () => {
         settings: {},
         created_at: '2026-05-01T12:00:00Z',
         updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: true,
+        static_egress_enabled: true,
+        static_egress_public_ip: '203.0.113.10',
       },
     });
     auditLogsListMock.mockClear();
@@ -159,6 +176,62 @@ describe('SettingsPage', () => {
     });
   });
 
+  it('uses the canonical organization returned by the server after saving settings', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { builder_permissions: { require_review_before_pr: true, extra_flag: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsUpdateMock.mockResolvedValueOnce({
+      data: {
+        id: 'org-1',
+        name: 'Trimmed Org',
+        settings: { builder_permissions: { require_review_before_pr: true, extra_flag: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-06T15:30:00Z',
+      },
+    });
+    settingsUpdateMock.mockResolvedValueOnce({
+      data: {
+        id: 'org-1',
+        name: 'Trimmed Org',
+        settings: { builder_permissions: { require_review_before_pr: false, extra_flag: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-06T15:30:00Z',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const input = await screen.findByLabelText('Organization name');
+    const user = userEvent.setup();
+    await user.click(input);
+    await user.keyboard('{Control>}a{/Control}  Trimmed Org  ');
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({ name: '  Trimmed Org  ' });
+    });
+    await waitFor(() => {
+      expect(input).toHaveValue('Trimmed Org');
+    });
+
+    await user.click(screen.getByLabelText('Require builder review before PR'));
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { builder_permissions: { require_review_before_pr: false } },
+      });
+    });
+    expect(settingsUpdateMock).toHaveBeenLastCalledWith({
+      settings: { builder_permissions: { require_review_before_pr: false } },
+    });
+  });
+
   it('shows and saves the active previews per user setting', async () => {
     settingsGetMock.mockResolvedValue({
       data: {
@@ -220,6 +293,145 @@ describe('SettingsPage', () => {
 
     await waitFor(() => {
       expect(screen.getByLabelText('Organization name')).toBeDisabled();
+    });
+  });
+
+  it('shows static egress network access with copyable public IP', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: {},
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsUpdateMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: false } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-06T15:30:00Z',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText('Network access')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText('Use static egress IP for sessions and previews')).toBeChecked();
+    });
+    expect(screen.getByText('Uses a stable public IP for new and hydrated sandboxes.')).toBeInTheDocument();
+    expect(screen.queryByText('New and hydrated sandboxes use the allowlistable public IP when enabled.')).not.toBeInTheDocument();
+    const publicIP = screen.getByText('203.0.113.10');
+    expect(publicIP).toBeInTheDocument();
+    expect(publicIP).toHaveClass('text-xs');
+
+    const copyButton = screen.getByRole('button', { name: 'Copy static egress public IP' });
+    await userEvent.click(copyButton);
+    expect(writeText).toHaveBeenCalledWith('203.0.113.10');
+    expect(screen.getByRole('button', { name: 'Copied static egress public IP' })).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText('Use static egress IP for sessions and previews'));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Use static egress IP for sessions and previews')).not.toBeChecked();
+    });
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_network: { static_egress_enabled: false } },
+      });
+    });
+  });
+
+  it('allows admins to disable static egress when the gateway is unavailable', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: false,
+        static_egress_enabled: true,
+        static_egress_public_ip: '203.0.113.10',
+        static_egress_unavailable_reason: 'no active static-egress-capable workers are available',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const toggle = await screen.findByLabelText('Use static egress IP for sessions and previews');
+    await waitFor(() => {
+      expect(toggle).toBeChecked();
+      expect(toggle).not.toBeDisabled();
+    });
+
+    const user = userEvent.setup();
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_network: { static_egress_enabled: false } },
+      });
+    });
+  });
+
+  it('allows admins to enable static egress when workers are unavailable', async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: false } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: false,
+        static_egress_enabled: false,
+        static_egress_public_ip: '203.0.113.10',
+        static_egress_unavailable_reason: 'not all active session workers are static-egress-capable for the configured public IP',
+      },
+    });
+    settingsUpdateMock.mockResolvedValue({
+      data: {
+        id: 'org-1',
+        name: 'Test Org',
+        settings: { sandbox_network: { static_egress_enabled: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-06T15:30:00Z',
+      },
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const toggle = await screen.findByLabelText('Use static egress IP for sessions and previews');
+    await waitFor(() => {
+      expect(toggle).not.toBeChecked();
+      expect(toggle).not.toBeDisabled();
+    });
+
+    const user = userEvent.setup();
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_network: { static_egress_enabled: true } },
+      });
     });
   });
 });

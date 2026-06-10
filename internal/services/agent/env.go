@@ -459,12 +459,14 @@ func (e *AgentEnv) ShedAuthRejectedWithContext(ctx context.Context, orgID uuid.U
 	shedder.MarkAuthRejected(rec.credID)
 }
 
-// integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
+// integrationCredentials holds the resolved Sentry, Linear, Notion, CircleCI,
+// and Mezmo configs for an org.
 type integrationCredentials struct {
 	Sentry   *models.SentryConfig
 	Linear   *models.LinearConfig
 	Notion   *models.NotionConfig
 	CircleCI *models.CircleCIConfig
+	Mezmo    *models.MezmoConfig
 }
 
 type integrationCredentialProvider interface {
@@ -476,6 +478,7 @@ var integrationProviderNames = []models.ProviderName{
 	models.ProviderLinear,
 	models.ProviderNotion,
 	models.ProviderCircleCI,
+	models.ProviderMezmo,
 }
 
 // fetchIntegrationCredentials retrieves integration configs for an org from
@@ -531,6 +534,11 @@ func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.De
 	if cred := creds[models.ProviderCircleCI]; cred != nil {
 		if cfg, ok := cred.Config.(models.CircleCIConfig); ok {
 			ic.CircleCI = &cfg
+		}
+	}
+	if cred := creds[models.ProviderMezmo]; cred != nil {
+		if cfg, ok := cred.Config.(models.MezmoConfig); ok {
+			ic.Mezmo = &cfg
 		}
 	}
 }
@@ -666,6 +674,17 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 		}
 		if ic.CircleCI.ProjectSlug != "" {
 			merged["CIRCLECI_PROJECT_SLUG"] = ic.CircleCI.ProjectSlug
+		}
+	}
+	if ic.Mezmo != nil {
+		if ic.Mezmo.APIKey != "" {
+			merged["MEZMO_API_KEY"] = ic.Mezmo.APIKey
+		}
+		if ic.Mezmo.BaseURL != "" {
+			merged["MEZMO_BASE_URL"] = ic.Mezmo.BaseURL
+		}
+		if ic.Mezmo.Dataset != "" {
+			merged["MEZMO_DATASET"] = ic.Mezmo.Dataset
 		}
 	}
 

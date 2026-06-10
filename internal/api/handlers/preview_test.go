@@ -1144,6 +1144,14 @@ func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer
 
 func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
 
+type previewStaticEgressOrgStore struct {
+	settings json.RawMessage
+}
+
+func (s previewStaticEgressOrgStore) GetByID(_ context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{ID: orgID, Settings: s.settings}, nil
+}
+
 // TestPreviewHandler_StartPreview_NoWorkspaceConfig covers the common path where
 // the user clicks Start Preview on a repo that has no .143/config.json
 // committed and supplies no explicit config. The handler must abort the
@@ -1607,6 +1615,68 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode as a preview instance")
 	require.Equal(t, previewID, resp.Data.ID, "response should return the reserved preview")
 	require.Equal(t, models.PreviewStatusStarting, resp.Data.Status, "response should show startup in progress")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewHandler_StartPreview_WorkerRoutedStaticEgressNoCapableWorkers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	sessionStore := db.NewSessionStore(mock)
+	previewStore := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+
+	mgr := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "api-node",
+	})
+	h := NewPreviewHandler(mgr, previewStore, sessionStore, nil, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
+	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
+	h.SetStaticEgressRuntime(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}, agent.StaticEgressRuntimeConfig{PublicIP: "203.0.113.10"})
+
+	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://worker-a.internal",
+	})
+	require.NoError(t, err, "should marshal worker metadata")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, nil, "none")...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "worker-routed start should fail when static egress has no eligible workers")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode as an error response")
+	require.Equal(t, "PREVIEW_NO_WORKERS", resp.Error.Code, "static-egress worker selection should keep the stable no-workers code")
+	require.Equal(t, "Static egress is enabled, but no preview workers are verified for 203.0.113.10. Disable static egress or provision workers.", resp.Error.Message, "static-egress worker selection should explain the real eligibility blocker")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -2535,6 +2605,90 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure surfaces as 422 PREVIEW_START_FAILED")
 	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetwork(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "direct-container"
+	h := newPreviewTestHandler()
+	h.SetStaticEgressRuntime(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}, agent.StaticEgressRuntimeConfig{
+		Enabled:     true,
+		Capable:     true,
+		NetworkName: "143-sandbox-static-egress",
+		PublicIP:    "203.0.113.10",
+	})
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sb.ID, "liveness check should inspect the recorded container")
+		return true, nil
+	}
+	sp.ConnInfoFn = func(_ context.Context, _ *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+		return &agent.SandboxConnectionInfo{
+			Environment: map[string]string{"DOCKER_HOST": "143-sandbox"},
+		}, nil
+	}
+	h.sandboxProvider = sp
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		SandboxState: models.SandboxStateRunning,
+	}, &models.PreviewConfig{})
+
+	require.Nil(t, result.Sandbox, "live container on the direct bridge should not be reused for static egress")
+	require.Equal(t, "NETWORK_SETTING_RESTART_REQUIRED", result.ErrCode, "network mismatch should return a restart-required error code")
+	require.Error(t, result.Err, "network mismatch should surface an actionable error")
+}
+
+func TestClassifyAcquireSandboxErrorPreservesNetworkErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		result         acquireSandboxResult
+		expectedStatus int
+		expectedCode   string
+		expectedMsg    string
+	}{
+		{
+			name: "restart required",
+			result: acquireSandboxResult{
+				ErrCode: "NETWORK_SETTING_RESTART_REQUIRED",
+				Err:     errors.New("restart environment to apply network setting"),
+			},
+			expectedStatus: http.StatusConflict,
+			expectedCode:   "NETWORK_SETTING_RESTART_REQUIRED",
+			expectedMsg:    "restart environment to apply network setting",
+		},
+		{
+			name: "static egress unavailable",
+			result: acquireSandboxResult{
+				ErrCode: "STATIC_EGRESS_UNAVAILABLE",
+				Err:     errors.New("static egress is enabled for this org, but this worker is not static-egress capable"),
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedCode:   "STATIC_EGRESS_UNAVAILABLE",
+			expectedMsg:    "static egress is enabled for this org, but this worker is not static-egress capable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := classifyAcquireSandboxError(tt.result)
+
+			require.Equal(t, tt.expectedStatus, actual.status, "network acquisition errors should use actionable HTTP statuses")
+			require.Equal(t, tt.expectedCode, actual.code, "network acquisition errors should preserve their specific codes")
+			require.Equal(t, tt.expectedMsg, actual.message, "network acquisition errors should preserve the actionable message")
+		})
+	}
 }
 
 // TestClassifyLaunchError verifies the error-code mapping that turns

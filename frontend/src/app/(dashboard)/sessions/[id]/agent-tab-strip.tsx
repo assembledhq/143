@@ -289,6 +289,7 @@ export function AgentTabStrip({
               aria-label="Add agent tab"
               title="Add agent tab (t)"
               onClick={onAddTab}
+              disabled={addTabPending}
             >
               <Plus className="h-3.5 w-3.5" />
             </Button>

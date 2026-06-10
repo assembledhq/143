@@ -121,6 +121,25 @@ describe("DiffToolbar", () => {
     expect(screen.queryByText("Split")).not.toBeInTheDocument();
   });
 
+  it("renders the full screen toggle when onToggleFullScreen is provided", async () => {
+    const user = userEvent.setup();
+    const onToggleFullScreen = vi.fn();
+    renderToolbar({ onToggleFullScreen });
+    const button = screen.getByRole("button", { name: "Enter full screen" });
+    await user.click(button);
+    expect(onToggleFullScreen).toHaveBeenCalled();
+  });
+
+  it("labels the full screen toggle as an exit while in full screen", () => {
+    renderToolbar({ onToggleFullScreen: vi.fn(), isFullScreen: true });
+    expect(screen.getByRole("button", { name: "Exit full screen" })).toBeInTheDocument();
+  });
+
+  it("does not render the full screen toggle without onToggleFullScreen", () => {
+    renderToolbar();
+    expect(screen.queryByRole("button", { name: "Enter full screen" })).not.toBeInTheDocument();
+  });
+
   it("does not render a dead mobile search control when search is unavailable", () => {
     renderToolbar({
       isMobile: true,

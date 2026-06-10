@@ -600,6 +600,7 @@ export const api = {
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
+    getNetworkStatus: () => get<import('./types').SingleResponse<import('./types').NetworkSettingsStatus>>('/api/v1/settings/network'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
   },
@@ -721,6 +722,12 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {
         auth_token: authToken,
         project_slug: projectSlug,
+      }),
+    connectMezmo: (apiKey: string, baseUrl?: string, dataset?: string) =>
+      post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/mezmo/connect', {
+        api_key: apiKey,
+        base_url: baseUrl ?? '',
+        dataset: dataset ?? '',
       }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; repos_seen?: number; errors: number } }>('/api/v1/integrations/github/sync'),

@@ -198,6 +198,8 @@ type Config struct {
 	// and typically contains "nameserver 1.1.1.1\nnameserver 8.8.8.8". Leaving
 	// this empty falls back to whatever resolv.conf Docker injects.
 	SandboxResolvConf string `env:"SANDBOX_RESOLV_CONF"`
+	// StaticEgressPublicIP is the public IPv4 customers should allowlist.
+	StaticEgressPublicIP string `env:"STATIC_EGRESS_PUBLIC_IP"`
 	// SandboxAuthSocketDir is the on-host directory under which per-session
 	// GitHub credential sockets are created (one Unix-domain socket per
 	// session, bind-mounted into the container). The orchestrator must be
