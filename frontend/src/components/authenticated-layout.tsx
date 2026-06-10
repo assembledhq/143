@@ -469,17 +469,26 @@ type MobileTopBarProps = {
   menuOpen: boolean;
 };
 
-function isSessionDetailRoute(pathname: string): boolean {
+// Returns the second path segment of a /sessions/<segment> route, or null
+// for anything else (including /sessions/new). Shared by the loose UI check
+// below and the strict prefetch guard so the route shape is parsed once.
+function sessionDetailRouteSegment(pathname: string): string | null {
   const segments = pathname.split("/").filter(Boolean);
-  return segments.length === 2 && segments[0] === "sessions" && segments[1] !== "new";
+  if (segments.length !== 2 || segments[0] !== "sessions" || segments[1] === "new") return null;
+  return segments[1];
+}
+
+function isSessionDetailRoute(pathname: string): boolean {
+  return sessionDetailRouteSegment(pathname) !== null;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Strict variant for the auth-gate prefetch: only a UUID segment is worth a
+// speculative request, so non-id paths never hit the API.
 export function sessionDetailRouteId(pathname: string): string | null {
-  const segments = pathname.split("/").filter(Boolean);
-  if (segments.length !== 2 || segments[0] !== "sessions") return null;
-  return UUID_RE.test(segments[1]) ? segments[1] : null;
+  const segment = sessionDetailRouteSegment(pathname);
+  return segment !== null && UUID_RE.test(segment) ? segment : null;
 }
 
 function MobileTopBar({
