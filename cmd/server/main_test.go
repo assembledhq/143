@@ -338,6 +338,18 @@ func TestSessionExecutorGroupAdd(t *testing.T) {
 	}
 }
 
+func TestSessionExecutorBindsIncludeStaticEgressCapabilityMount(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
+	}
+
+	require.Equal(t, expected, sessionExecutorBinds(), "session executors should mount every host resource needed for sandbox creation")
+}
+
 func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	t.Parallel()
 
