@@ -3346,6 +3346,11 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 			name:   "disabled",
 			status: "disabled",
 		},
+		{
+			name:     "skipped marker missing",
+			status:   "skipped_marker_missing",
+			cacheKey: strings.Repeat("b", 64),
+		},
 	}
 
 	for _, tt := range tests {

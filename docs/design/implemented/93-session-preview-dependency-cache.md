@@ -55,22 +55,23 @@ The new flow:
    - Caching is enabled by default when `preview.install` has at least one `lockfiles` entry and at least one effective cache path.
    - Effective cache paths are `preview.install.clean_paths`, optional `preview.install.cache.paths`, and conservative paths inferred from known dependency files.
    - `preview.install.cache.enabled: false` disables restore and save.
-4. If caching is enabled:
+4. Compute the preview install marker key and check whether the marker exists.
+5. If caching is enabled and the install marker exists:
    - Compute a dependency cache key from install config, declared lockfiles, sandbox runtime/image, and effective cache paths.
    - Look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The DB metadata is authoritative for effective paths and checksum.
    - If metadata is found, check worker-local L1 by `cache_key` and use it when the checksum matches; otherwise stream the L2 blob from object storage into a bounded worker temp file.
    - Preflight the recorded compressed size, verify checksum, validate tar members against the stored effective paths on the worker, stage downloaded compressed blobs under the worker-local dependency cache staging directory instead of `/tmp`, stream extraction into the sandbox over stdin, populate worker-local L1 when configured, and upsert the worker's L1 location hint.
    - If both L1 and L2 miss, continue to the normal install path.
-5. Run the existing `preview.install` flow:
-   - Compute the existing install marker key.
+   - If the install marker is absent, skip restore entirely and go straight to the normal install path; commands such as `npm ci` clean/reinstall the same paths, so restoring first only adds latency on first-ever cold starts.
+6. Run the existing `preview.install` flow:
    - If the dependency-cache restore did not fail and the marker and `verify_paths` are present, skip install.
    - Otherwise clean `clean_paths`, run `command`, then write the marker.
-6. If install succeeds and caching is enabled, archive the effective cache paths once, write the archive to worker-local L1 when configured, upload it to shared L2 object storage, upsert the durable L2 metadata row, and upsert the worker's L1 location hint.
-7. Start preview services and readiness as today.
+7. If install succeeds and caching is enabled, archive the effective cache paths once, write the archive to worker-local L1 when configured, upload it to shared L2 object storage, upsert the durable L2 metadata row, and upsert the worker's L1 location hint.
+8. Start preview services and readiness as today.
 
 This means cache restore is an accelerator, not the source of truth. The hydrated session snapshot remains authoritative for source files.
 
-**Restore and marker interaction:** The restore step runs before the install marker check. When the session snapshot already contains the install marker and the restored artifacts satisfy `verify_paths`, the marker check passes and install is skipped entirely — this is the primary fast path. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists. When the marker is absent (e.g. a new session that has never completed install), effective cache paths that overlap with `clean_paths` will be wiped before install runs, making the prior restore wasteful for install commands such as `npm ci` that unconditionally reinstall. A future optimization may check for marker-file existence before deciding to restore and skip the restore when the marker is absent; the implementation restores unconditionally and accepts the I/O cost on first-ever cold starts, since the common case is returning to a session that has already run install.
+**Restore and marker interaction:** The marker-existence check runs before dependency-cache lookup/restore. When the marker is absent (e.g. a new session that has never completed install), restore is skipped with `skipped_marker_missing` and the normal install command runs. When the session snapshot already contains the install marker, restore may run before full `verify_paths` validation so restored artifacts can satisfy `verify_paths` and skip install entirely — this is the primary returning-session fast path. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists.
 
 ### Cache-Key-Aware Scheduling
 
@@ -86,7 +87,7 @@ Use two keys:
 Worker selection order:
 
 1. Existing live session sandbox worker, when the session container is still running.
-2. Healthy workers with a recent local L1 cache location for the same `(org_id, repo_id, placement_key)`, subject to capacity and region constraints.
+2. Healthy workers with a recent local L1 cache location for the same `(org_id, repo_id, placement_key)`, subject to capacity and region constraints. If multiple holders are eligible, choose the least-loaded holder and use hint recency only as a tie-breaker.
 3. The top N workers from rendezvous hashing over `(org_id, repo_id, placement_key)` among healthy workers in the preferred region, subject to capacity. Start with N between 4 and 8 so load can spill while preserving locality.
 4. Least-loaded healthy worker in the preferred region.
 5. Cross-region fallback only when no preferred-region worker can accept the preview.
@@ -738,7 +739,7 @@ Add OpenTelemetry metrics:
 - `preview.session.dependency_cache.restores` counter with `result=disabled|restored|miss|restore_failed`
 - `preview.session.dependency_cache.saves` counter with `result=saved|skipped|save_failed`
 - `preview.session.dependency_cache.scheduler_decisions` counter with `decision=live_session|local_cache_holder|rendezvous|least_loaded|cross_region|fallback_error`
-- `preview.session.phase_duration` histogram with `phase=hydrate|config|dependency_cache_restore|install_build|start_services|readiness`
+- `preview.session.phase_duration` histogram with `phase=hydrate|config|install_marker_check|dependency_cache_key|dependency_cache_lookup|dependency_cache_restore|install_build|install_command|start_services|readiness`
 
 **Metrics cardinality:** Do not use `repo_id` as a metric dimension. In a multi-tenant system with many repos, per-repo cardinality will exceed most metric backend limits. Use `org_id` as the finest-grained dimension for counters and histograms, and rely on preview logs (which include `repo_id` as a structured field) for per-repo debugging. Existing branch preview phase metrics should remain branch-specific and follow the same cardinality constraint.
 
@@ -830,7 +831,7 @@ Verification:
 8. Add `DependencyCache` implementation backed by shared S3-compatible object storage. Restore finds durable DB metadata first, then checks optional worker-local L1 before streaming from S3 to a bounded worker temp file on L1 miss, derives effective paths from `DependencyCacheMetadata.EffectivePaths`, and upserts local L1 location rows after successful L1 population. Save uploads to S3, writes checksum sidecars, upserts the DB record, and registers local L1 location when configured. Background cleanup deletes expired DB metadata, objects, and stale location hints; worker-local L1 eviction enforces the local byte budget.
 9. Add exact cache key computation using version string `preview-dependency-cache-v1`.
 10. Add placement key computation and scheduler tests.
-11. Update worker selection to prefer live session worker, matching local-cache holders, rendezvous candidates for placement key, least-loaded same-region fallback, then cross-region fallback.
+11. Update worker selection to prefer live session worker, matching local-cache holders, rendezvous candidates for placement key, least-loaded same-region fallback, then cross-region fallback. Cache-holder selection remains load-aware: among matching holders, pick the least-loaded worker before falling back to hint recency.
 12. Add cache metrics using `org_id` dimension only (not `repo_id`); align result labels with observer statuses and add scheduler-decision metrics.
 13. Change `PreviewCapableProvider.StartPreview` to accept `StartPreviewOptions`; update all provider implementations and tests.
 14. Thread org/repo/session metadata through `Manager.LaunchPreview` into provider options.
