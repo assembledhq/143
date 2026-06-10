@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -21,7 +23,7 @@ import (
 
 type pullRequestHealthService interface {
 	GetPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID) (*models.PullRequestHealthResponse, error)
-	StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error)
+	StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, opts ghservice.StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error)
 	MergePullRequest(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeResponse, error)
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	CancelMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
@@ -198,8 +200,34 @@ func (h *PullRequestHandler) startRepair(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	resp, err := h.service.StartPullRequestRepair(r.Context(), orgID, pullRequestID, user.ID, action)
+	var body struct {
+		ThreadID string `json:"thread_id"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid repair request body")
+			return
+		}
+	}
+	var threadID *uuid.UUID
+	if strings.TrimSpace(body.ThreadID) != "" {
+		parsedThreadID, err := uuid.Parse(body.ThreadID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_THREAD_ID", "invalid thread ID")
+			return
+		}
+		threadID = &parsedThreadID
+	}
+
+	resp, err := h.service.StartPullRequestRepair(r.Context(), orgID, pullRequestID, user.ID, ghservice.StartPullRequestRepairOptions{
+		Action:   action,
+		ThreadID: threadID,
+	})
 	if err != nil {
+		if errors.Is(err, ghservice.ErrRepairThreadNotFound) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_THREAD_ID", "requested thread does not belong to this pull request's session")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "PULL_REQUEST_REPAIR_FAILED", "failed to start pull request repair", err)
 		return
 	}

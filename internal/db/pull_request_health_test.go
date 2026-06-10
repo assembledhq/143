@@ -25,7 +25,7 @@ var prHealthSnapshotColumns = []string{
 }
 
 var prRepairRunColumns = []string{
-	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version",
+	"id", "org_id", "pull_request_id", "session_id", "thread_id", "action_type", "health_version",
 	"workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at",
 }
 
@@ -219,6 +219,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 	orgID := uuid.New()
 	prID := uuid.New()
 	sessionID := uuid.New()
+	threadID := uuid.New()
 	runID := uuid.New()
 	now := time.Now().UTC()
 
@@ -257,18 +258,20 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 			"health_version":  int64(5),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).AddRow(
-			runID, orgID, prID, sessionID, models.PullRequestRepairActionTypeFixTests, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
+			runID, orgID, prID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
 		))
 
 	run, err := store.GetActiveRepairRun(context.Background(), orgID, prID, models.PullRequestRepairActionTypeFixTests, 5)
 	require.NoError(t, err, "GetActiveRepairRun should return the active repair run")
 	require.Equal(t, runID, run.ID, "GetActiveRepairRun should decode the repair run row")
+	require.Equal(t, &threadID, run.ThreadID, "GetActiveRepairRun should decode the repair thread row")
 
 	mock.ExpectQuery("INSERT INTO pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{
 			"org_id":               orgID,
 			"pull_request_id":      prID,
 			"session_id":           sessionID,
+			"thread_id":            &threadID,
 			"action_type":          models.PullRequestRepairActionTypeResolveConflicts,
 			"health_version":       int64(6),
 			"workspace_mode":       models.PullRequestRepairWorkspaceModePRHeadReconstruction,
@@ -281,6 +284,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 		OrgID:         orgID,
 		PullRequestID: prID,
 		SessionID:     sessionID,
+		ThreadID:      &threadID,
 		ActionType:    models.PullRequestRepairActionTypeResolveConflicts,
 		HealthVersion: 6,
 		WorkspaceMode: models.PullRequestRepairWorkspaceModePRHeadReconstruction,
@@ -311,6 +315,8 @@ func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
 	prID := uuid.New()
 	sessionA := uuid.New()
 	sessionB := uuid.New()
+	threadA := uuid.New()
+	threadB := uuid.New()
 	now := time.Now().UTC()
 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
@@ -320,14 +326,16 @@ func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
 			"health_version":  int64(9),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).
-			AddRow(uuid.New(), orgID, prID, sessionA, models.PullRequestRepairActionTypeFixTests, int64(9), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
-			AddRow(uuid.New(), orgID, prID, sessionB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
+			AddRow(uuid.New(), orgID, prID, sessionA, &threadA, models.PullRequestRepairActionTypeFixTests, int64(9), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
+			AddRow(uuid.New(), orgID, prID, sessionB, &threadB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
 
 	runs, err := store.ListActiveRepairRuns(context.Background(), orgID, prID, 9)
 	require.NoError(t, err, "ListActiveRepairRuns should return active repair runs for the current health version")
 	require.Len(t, runs, 2, "ListActiveRepairRuns should return every active repair run for the pull request health version")
 	require.Equal(t, sessionA, runs[0].SessionID, "ListActiveRepairRuns should decode the first repair session")
+	require.Equal(t, &threadA, runs[0].ThreadID, "ListActiveRepairRuns should decode the first repair thread")
 	require.Equal(t, sessionB, runs[1].SessionID, "ListActiveRepairRuns should decode the second repair session")
+	require.Equal(t, &threadB, runs[1].ThreadID, "ListActiveRepairRuns should decode the second repair thread")
 	require.NoError(t, mock.ExpectationsWereMet(), "all active repair run expectations should be met")
 }
 

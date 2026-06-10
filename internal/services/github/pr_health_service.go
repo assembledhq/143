@@ -262,6 +262,7 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 		activeRepairs = append(activeRepairs, models.PullRequestActiveRepair{
 			ActionType:    run.ActionType,
 			SessionID:     run.SessionID,
+			ThreadID:      run.ThreadID,
 			SessionStatus: session.Status,
 			HealthVersion: run.HealthVersion,
 		})
@@ -539,7 +540,13 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	return s.pullRequests.UpdateHealthEnrichment(ctx, orgID, pullRequestID, version, conflictPayload, failingTestsPayload, models.PullRequestHealthEnrichmentStatusReady)
 }
 
-func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
+type StartPullRequestRepairOptions struct {
+	Action   models.PullRequestRepairActionType
+	ThreadID *uuid.UUID
+}
+
+func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, opts StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+	action := opts.Action
 	if err := action.Validate(); err != nil {
 		return nil, err
 	}
@@ -587,6 +594,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 		if sessionErr == nil && !isSessionTerminalStatus(session.Status) {
 			return &models.PullRequestRepairResponse{
 				SessionID:        existing.SessionID,
+				ThreadID:         existing.ThreadID,
 				Mode:             "existing",
 				ReusedInFlight:   true,
 				HeadSHA:          current.HeadSHA,
@@ -623,7 +631,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	if workspaceMode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason != "" {
 		return nil, fmt.Errorf("canonical pull request session is not ready for repair: %s", reason)
 	}
-	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode)
+	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID)
 }
 
 func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current models.PullRequestHealthCurrent, summary models.PullRequestHealthSummary, snapshot models.PullRequestHealthSnapshot, action models.PullRequestRepairActionType) ([]byte, error) {
@@ -697,7 +705,7 @@ func (s *PRService) repairWorkspaceMode(session models.Session) (models.PullRequ
 	}
 }
 
-func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode) (*models.PullRequestRepairResponse, error) {
+func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode, requestedThreadID *uuid.UUID) (*models.PullRequestRepairResponse, error) {
 	if s.sessionMessages == nil {
 		return nil, fmt.Errorf("session message store not configured")
 	}
@@ -729,22 +737,13 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := txSessions.UpdateRevisionContext(ctx, pr.OrgID, claimed.ID, revisionContext); err != nil {
 		return nil, err
 	}
-	// The session's primary thread is the "Main" tab seeded at session
-	// creation. Without attributing the repair message to that thread, the
-	// session-detail UI's per-thread timeline query (ListByThread) skips it
-	// and the user sees the click do nothing in the conversation view —
-	// SessionStore.ClaimIdle/ClaimForResume don't hydrate PrimaryThreadID
-	// from the row, so we look it up here. ListBySession orders by
-	// created_at ASC, matching the convention that the first-created thread
-	// is "Main".
 	threads, err := txThreads.ListBySession(ctx, pr.OrgID, claimed.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list session threads for repair message: %w", err)
 	}
-	var threadID *uuid.UUID
-	if len(threads) > 0 {
-		id := threads[0].ID
-		threadID = &id
+	threadID, err := selectRepairThreadID(threads, requestedThreadID)
+	if err != nil {
+		return nil, err
 	}
 	msg := &models.SessionMessage{
 		SessionID:  claimed.ID,
@@ -762,6 +761,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		OrgID:         pr.OrgID,
 		PullRequestID: pr.ID,
 		SessionID:     claimed.ID,
+		ThreadID:      threadID,
 		ActionType:    action,
 		HealthVersion: healthVersion,
 		WorkspaceMode: workspaceMode,
@@ -773,6 +773,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 			if lookupErr == nil {
 				return &models.PullRequestRepairResponse{
 					SessionID:        existing.SessionID,
+					ThreadID:         existing.ThreadID,
 					Mode:             "existing",
 					ReusedInFlight:   true,
 					HeadSHA:          headSHA,
@@ -814,6 +815,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	}
 	return &models.PullRequestRepairResponse{
 		SessionID:        claimed.ID,
+		ThreadID:         threadID,
 		Mode:             repairResponseMode(workspaceMode),
 		ReusedInFlight:   false,
 		HeadSHA:          headSHA,
@@ -821,6 +823,26 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		HealthVersion:    healthVersion,
 		RepairActionType: action,
 	}, nil
+}
+
+// ErrRepairThreadNotFound is returned when the requested thread_id is not found in the canonical PR session.
+var ErrRepairThreadNotFound = errors.New("requested repair thread does not belong to the canonical pull request session")
+
+func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*uuid.UUID, error) {
+	if requestedThreadID != nil {
+		for _, thread := range threads {
+			if thread.ID == *requestedThreadID {
+				id := thread.ID
+				return &id, nil
+			}
+		}
+		return nil, ErrRepairThreadNotFound
+	}
+	if len(threads) == 0 {
+		return nil, nil
+	}
+	id := threads[0].ID
+	return &id, nil
 }
 
 func repairResponseMode(workspaceMode models.PullRequestRepairWorkspaceMode) string {
