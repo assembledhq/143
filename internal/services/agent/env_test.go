@@ -418,6 +418,7 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 					models.ProviderSentry: {Config: models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "assembled"}},
 					models.ProviderLinear: {Config: models.LinearConfig{AccessToken: "linear-token"}},
 					models.ProviderNotion: {Config: models.NotionConfig{AccessToken: "notion-token"}},
+					models.ProviderMezmo:  {Config: models.MezmoConfig{APIKey: "mezmo-key", BaseURL: "https://logs.example.com", Dataset: "prod"}},
 				},
 			},
 			expected: map[string]string{
@@ -427,6 +428,9 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 				"SENTRY_ORG_SLUG":     "assembled",
 				"LINEAR_ACCESS_TOKEN": "linear-token",
 				"NOTION_ACCESS_TOKEN": "notion-token",
+				"MEZMO_API_KEY":       "mezmo-key",
+				"MEZMO_BASE_URL":      "https://logs.example.com",
+				"MEZMO_DATASET":       "prod",
 			},
 		},
 		{
@@ -489,6 +493,7 @@ func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
 			models.ProviderLinear:   {Config: models.LinearConfig{AccessToken: "linear-token"}},
 			models.ProviderNotion:   {Config: models.NotionConfig{AccessToken: "notion-token"}},
 			models.ProviderCircleCI: {Config: models.CircleCIConfig{AuthToken: "circle-token", ProjectSlug: "gh/acme/repo"}},
+			models.ProviderMezmo:    {Config: models.MezmoConfig{APIKey: "mezmo-key"}},
 		},
 	}
 	env := NewAgentEnv(AgentEnvDeps{
@@ -503,12 +508,14 @@ func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
 		models.ProviderLinear,
 		models.ProviderNotion,
 		models.ProviderCircleCI,
+		models.ProviderMezmo,
 	}, orgCreds.batch, "fetchIntegrationCredentials should request all integrations in one batch")
 	require.Empty(t, orgCreds.getCalls, "fetchIntegrationCredentials should not issue per-provider Get calls")
 	require.NotNil(t, creds.Sentry, "fetchIntegrationCredentials should decode Sentry from batch results")
 	require.NotNil(t, creds.Linear, "fetchIntegrationCredentials should decode Linear from batch results")
 	require.NotNil(t, creds.Notion, "fetchIntegrationCredentials should decode Notion from batch results")
 	require.NotNil(t, creds.CircleCI, "fetchIntegrationCredentials should decode CircleCI from batch results")
+	require.NotNil(t, creds.Mezmo, "fetchIntegrationCredentials should decode Mezmo from batch results")
 }
 
 // fakeLinearTokens implements LinearTokenResolver for env tests. The
