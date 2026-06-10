@@ -160,7 +160,11 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-// UpdateSettings updates the authenticated user's personal settings document.
+// UpdateSettings applies an RFC 7386 JSON merge patch to the authenticated
+// user's personal settings document: omitted fields keep their stored value,
+// null clears a field, and nested objects merge per key. Callers send only
+// the fields they are changing — never a full document rebuilt from a client
+// cache, which would let concurrent edits from another tab clobber each other.
 func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
@@ -173,18 +177,24 @@ func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body models.UserSettings
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil {
+	patch, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
-	if err := body.Validate(); err != nil {
+	var patchObject map[string]json.RawMessage
+	if err := json.Unmarshal(patch, &patchObject); err != nil || patchObject == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	// Applying the patch to an empty document exercises the same key and
+	// value validation as the real merge, so bad patches fail with a 400
+	// before we open the merge transaction.
+	if _, err := models.ApplyUserSettingsMergePatch(nil, patch); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_USER_SETTINGS", err.Error())
 		return
 	}
-	if err := h.userStore.UpdateSettings(r.Context(), user.ID, body); err != nil {
+	if _, err := h.userStore.MergeSettings(r.Context(), user.ID, patch); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_SETTINGS_UPDATE_FAILED", "failed to update user settings", err)
 		return
 	}

@@ -206,6 +206,11 @@ function CredentialList({
 // (Codex + Claude Code today).
 type PersonalAuthType = "subscription" | "api_key";
 
+// Local display map of reasoning defaults (no nulls) vs the wire patch sent
+// to the merge-patch settings endpoint (null clears an agent's entry).
+type ReasoningDefaults = ReturnType<typeof getCodingAgentReasoningDefaultsFromSettings>;
+type ReasoningDefaultsPatch = NonNullable<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]>;
+
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -220,9 +225,9 @@ export default function AccountPage() {
   const [showCodexModal, setShowCodexModal] = useState(false);
   const [showClaudeModal, setShowClaudeModal] = useState(false);
   const [pendingDefaultModel, setPendingDefaultModel] = useState<string | null>(null);
-  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<ReasoningDefaults | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
-  const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const queuedReasoningDefaultsRef = useRef<ReasoningDefaultsPatch | null>(null);
 
   // Personal stack — the user's own credentials, ordered by priority.
   const { data: personalResp } = useQuery<ListResponse<CodingCredentialSummary>>({
@@ -241,10 +246,6 @@ export default function AccountPage() {
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
   const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
-  const hasEffectiveReasoningDefaults = Object.keys(effectiveReasoningDefaults).length > 0;
-  // Not editable on this page (toggled from the diff viewer toolbar), but it
-  // must ride along with every settings PATCH or it would be wiped.
-  const storedDiffFullScreen = user?.settings?.diff_viewer_full_screen ?? false;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -293,17 +294,13 @@ export default function AccountPage() {
   });
 
   const updateReasoningDefaultsMutation = useMutation({
-    // PATCH replaces the whole settings document, so every settings mutation
-    // on this page must carry the fields it isn't editing.
-    mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
-      api.auth.updateSettings({
-        ...(effectiveDefaultModel ? { coding_agent_model_default: effectiveDefaultModel } : {}),
-        ...(defaults && Object.keys(defaults).length > 0 ? { coding_agent_reasoning_defaults: defaults } : {}),
-        ...(storedDiffFullScreen ? { diff_viewer_full_screen: true } : {}),
-      }),
-    onMutate: (defaults) => {
+    // The settings endpoint is a JSON merge patch, so each save carries only
+    // the per-agent entries that changed (null clears an entry back to the
+    // built-in default).
+    mutationFn: (patch: ReasoningDefaultsPatch) =>
+      api.auth.updateSettings({ coding_agent_reasoning_defaults: patch }),
+    onMutate: () => {
       reasoningSaveInFlightRef.current = true;
-      setPendingReasoningDefaults(defaults);
     },
     onSuccess: (response) => {
       queryClient.setQueryData(["auth", "me"], { data: response.data });
@@ -331,22 +328,28 @@ export default function AccountPage() {
     },
   });
 
-  function saveReasoningDefaults(defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) {
-    setPendingReasoningDefaults(defaults);
+  function saveReasoningDefault(agentType: keyof ReasoningDefaultsPatch, effort: ReasoningDefaults[keyof ReasoningDefaults] | null) {
+    const nextDefaults = { ...effectiveReasoningDefaults };
+    if (effort) {
+      nextDefaults[agentType] = effort;
+    } else {
+      delete nextDefaults[agentType];
+    }
+    setPendingReasoningDefaults(nextDefaults);
     if (reasoningSaveInFlightRef.current) {
-      queuedReasoningDefaultsRef.current = defaults;
+      // Merge queued entries per agent so rapid edits to different agents
+      // all land instead of the last patch replacing the queue.
+      queuedReasoningDefaultsRef.current = { ...queuedReasoningDefaultsRef.current, [agentType]: effort };
       return;
     }
-    updateReasoningDefaultsMutation.mutate(defaults);
+    updateReasoningDefaultsMutation.mutate({ [agentType]: effort });
   }
 
   const updateDefaultModelMutation = useMutation({
+    // Merge-patch endpoint: send just the model, with null clearing the
+    // stored default when the user picks "Default".
     mutationFn: (model: string) =>
-      api.auth.updateSettings({
-        ...(model ? { coding_agent_model_default: model } : {}),
-        ...(hasEffectiveReasoningDefaults ? { coding_agent_reasoning_defaults: effectiveReasoningDefaults } : {}),
-        ...(storedDiffFullScreen ? { diff_viewer_full_screen: true } : {}),
-      }),
+      api.auth.updateSettings({ coding_agent_model_default: model || null }),
     onMutate: (model) => {
       setPendingDefaultModel(model);
     },
@@ -520,13 +523,7 @@ export default function AccountPage() {
                       value={defaultReasoning || "__default__"}
                       onValueChange={(value) => {
                         const nextValue = value === "__default__" ? "" : toCodingAgentReasoningEffort(value);
-                        const nextDefaults = { ...effectiveReasoningDefaults };
-                        if (nextValue) {
-                          nextDefaults[agentType as "codex" | "claude_code"] = nextValue;
-                        } else {
-                          delete nextDefaults[agentType as "codex" | "claude_code"];
-                        }
-                        saveReasoningDefaults(nextDefaults);
+                        saveReasoningDefault(agentType as "codex" | "claude_code", nextValue || null);
                       }}
                     >
                       <SelectTrigger
