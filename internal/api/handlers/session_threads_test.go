@@ -1861,6 +1861,8 @@ func TestSessionThreadHandler_GetThreadMessagesWindow_InvalidCursorCombinations(
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?"+tc.query, "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
 			w := httptest.NewRecorder()
 			handler.GetThreadMessages(w, req)
@@ -1870,7 +1872,7 @@ func TestSessionThreadHandler_GetThreadMessagesWindow_InvalidCursorCombinations(
 					Code string `json:"code"`
 				} `json:"error"`
 			}
-			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "error response should be valid JSON")
 			require.Equal(t, tc.expectedError, body.Error.Code, "error code should match")
 		})
 	}

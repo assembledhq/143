@@ -2711,8 +2711,6 @@ function ChatPanel({
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
     initialAnchorCancelledRef.current = false;
-    setNewerThreadMessagePages([]);
-    setIsFetchingNewerThreadMessages(false);
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
