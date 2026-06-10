@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   flexRender,
   getCoreRowModel,
@@ -36,7 +36,8 @@ import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import type { Session, SessionListItem, SessionStatus, User } from "@/lib/types";
+import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
+import type { Session, SessionDetail, SessionListItem, SessionStatus, SingleResponse, User } from "@/lib/types";
 import {
   workingSet,
   filterToStatusParam as baseFilterToStatusParam,
@@ -189,6 +190,21 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
+  const queryClient = useQueryClient();
+
+  // Seeding the detail cache with the list item lets the session detail view
+  // render its header/skeleton instantly instead of waiting on the API fetch.
+  const seedSessionDetailCache = useCallback((session: Session) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(
+      queryKeys.sessions.detail(session.id),
+      (current) => current ?? provisionalSessionDetailFromListItem(session),
+    );
+  }, [queryClient]);
+
+  const navigateToSession = useCallback((session: Session) => {
+    seedSessionDetailCache(session);
+    router.push(`/sessions/${session.id}`);
+  }, [router, seedSessionDetailCache]);
   const {
     mode,
     selectedUserIDs,
@@ -227,6 +243,11 @@ export function SessionsPageContent() {
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
   const isPaginated = extraPages.length > 0;
 
+  // Pause list polling while the pointer is over the table. A poll response can
+  // reorder rows mid-click, which either swallows the click or swaps a
+  // different session under the cursor right before navigation.
+  const [isTableHovered, setIsTableHovered] = useState(false);
+
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders.
   const scopeKey = `${repo ?? ""}|${serializedPeopleParam ?? "mine"}|${currentFilter}`;
@@ -250,7 +271,7 @@ export function SessionsPageContent() {
   const { data: listData, isLoading, error } = useQuery({
     queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam],
     queryFn: () => api.sessions.list(listParams),
-    refetchInterval: isPaginated || showDecisions ? false : 10000,
+    refetchInterval: isPaginated || showDecisions || isTableHovered ? false : 10000,
     enabled: !showDecisions && isResolved,
   });
 
@@ -416,7 +437,11 @@ export function SessionsPageContent() {
 
       {/* ── Data table ─────────────────────────────────────────────── */}
       {!isPendingScope && !showDecisions && !error && counts?.all !== 0 && (
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div
+          className="rounded-lg border border-border bg-card overflow-hidden"
+          onPointerEnter={() => setIsTableHovered(true)}
+          onPointerLeave={() => setIsTableHovered(false)}
+        >
           {filteredSessions.length === 0 ? (
             <div className="py-12 text-center text-xs text-muted-foreground">
               No sessions match this filter.
@@ -445,7 +470,12 @@ export function SessionsPageContent() {
                     <TableRow
                       key={row.id}
                       className="cursor-pointer"
-                      onClick={() => router.push(`/sessions/${row.original.id}`)}
+                      // Prefetch the route on hover and seed the detail cache on
+                      // mousedown so the click navigates instantly to a seeded
+                      // skeleton instead of silently waiting on a server fetch.
+                      onMouseEnter={() => router.prefetch(`/sessions/${row.original.id}`)}
+                      onMouseDown={() => seedSessionDetailCache(row.original)}
+                      onClick={() => navigateToSession(row.original)}
                     >
                       {row.getVisibleCells().map((cell) => (
                         <TableCell key={cell.id}>
