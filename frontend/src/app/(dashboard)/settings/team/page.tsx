@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { roleLabel } from "@/lib/roles";
@@ -512,6 +513,9 @@ export default function TeamSettingsPage() {
           </Card>
         </section>
       )}
+
+      {/* CLI install links (admin-only: creating one hands out membership) */}
+      {canManageTeam && <CLIJoinTokensCard />}
 
       {/* Invite Member Dialog */}
       {canManageTeam && (

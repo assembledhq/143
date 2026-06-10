@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -69,6 +70,19 @@ func (rw *responseWriter) captureErrorDetails(responseBody []byte) {
 	rw.errorResponse = &response
 }
 
+// RedactLogPath strips secrets that ride in URL path segments before the
+// path is logged. Today that is only the /install/{join_token} installer
+// route: the join token is a credential-shaped value that deliberately lives
+// in the URL (so `curl <url> | sh` needs no arguments), and the trade-off
+// documented in the design is that the server's own request log must not
+// retain it.
+func RedactLogPath(path string) string {
+	if strings.HasPrefix(path, "/install/") && len(path) > len("/install/") {
+		return "/install/:token"
+	}
+	return path
+}
+
 func Logging(logger zerolog.Logger, reporter observability.Reporter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +100,7 @@ func Logging(logger zerolog.Logger, reporter observability.Reporter) func(http.H
 
 			logEvent.
 				Str("method", r.Method).
-				Str("path", r.URL.Path).
+				Str("path", RedactLogPath(r.URL.Path)).
 				Str("request_id", chiMiddleware.GetReqID(r.Context())).
 				Int("status", rw.status).
 				Str("status_class", strconv.Itoa(rw.status/100)+"xx").
@@ -115,7 +129,7 @@ func Logging(logger zerolog.Logger, reporter observability.Reporter) func(http.H
 func buildRequestErrorEvent(r *http.Request, rw *responseWriter) observability.RequestErrorEvent {
 	event := observability.RequestErrorEvent{
 		Method:    r.Method,
-		Path:      r.URL.Path,
+		Path:      RedactLogPath(r.URL.Path),
 		Route:     routePattern(r),
 		RequestID: chiMiddleware.GetReqID(r.Context()),
 		Status:    rw.status,
