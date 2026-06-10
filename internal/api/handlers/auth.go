@@ -708,6 +708,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.emitJoinTokenUsed(r, createdUser.ID, usedToken, string(createdUser.Role))
+		h.markGitHubEmailVerified(r, createdUser.ID, ghEmails, email)
 		h.storeGitHubToken(r, createdUser, tokenResp)
 		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
 		if cliIntent != nil {
@@ -742,6 +743,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		if sessionToken, joined := h.tryDomainAutoJoin(r, user, true, upsertGitHub); joined {
 			h.storeGitHubToken(r, user, tokenResp)
 			h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
+			// CLI-initiated logins must finish the loopback handshake, not
+			// redirect the browser to the web app — a teammate at a
+			// captured-domain org running `143-tools login` as their very
+			// first sign-in lands on this path.
+			if cliIntent != nil {
+				h.finishCLILoginWithSession(w, r, user, sessionToken, cliIntent)
+				return
+			}
 			h.redirectWithSession(w, r, sessionToken)
 			return
 		}
