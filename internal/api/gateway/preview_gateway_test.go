@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -701,9 +702,90 @@ func TestGateway_ServeHTTP_Proxy_NoCookieStoppedTarget(t *testing.T) {
 	gw.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "stopped direct preview visits should render the lightweight control overlay")
+	require.Contains(t, w.Body.String(), "Preview stopped", "stopped target overlay should state the terminal status in the title")
 	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
-	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped target overlay should show the terminal status")
-	require.Contains(t, w.Body.String(), "May 26, 2026 20:05 UTC", "stopped target overlay should show when the preview stopped")
+	require.Contains(t, w.Body.String(), "Stopped · May 26, 2026 20:05 UTC", "stopped target overlay should show when the preview stopped")
+	require.Contains(t, w.Body.String(), `"restartable":true`, "stopped target overlay should enable the in-place restart script")
+	require.NotContains(t, w.Body.String(), "%!", "overlay template verbs should match the formatted arguments")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_ControlStatus_StoppedTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Date(2026, 5, 26, 20, 15, 0, 0, time.UTC)
+	stoppedAt := now.Add(-10 * time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/__143_control/status", nil)
+	req.Host = targetID.String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "control status should be readable without a preview session")
+	require.Contains(t, w.Header().Get("Content-Type"), "application/json", "control status should be JSON")
+
+	var body struct {
+		Status    string  `json:"status"`
+		Label     string  `json:"label"`
+		Active    bool    `json:"active"`
+		StoppedAt *string `json:"stopped_at"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "control status body should decode")
+	require.Equal(t, "stopped", body.Status, "control status should report the raw status")
+	require.Equal(t, "Stopped", body.Label, "control status should report the human label")
+	require.False(t, body.Active, "stopped previews should not report active")
+	require.NotNil(t, body.StoppedAt, "control status should include the stop time")
+	require.Equal(t, stoppedAt.Format(time.RFC3339), *body.StoppedAt, "control status stop time should be RFC3339")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_ControlStatus_UnknownTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/__143_control/status", nil)
+	req.Host = uuid.New().String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "unknown previews should return not found")
+	require.Contains(t, w.Body.String(), "PREVIEW_NOT_FOUND", "unknown previews should return a typed error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -802,7 +884,7 @@ func TestGateway_ServeHTTP_Proxy_StaleStoppedTargetCookieShowsRestart(t *testing
 	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "stale preview cookie should be cleared")
 	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
 	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
-	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped target overlay should show terminal status")
+	require.Contains(t, w.Body.String(), "Preview stopped", "stopped target overlay should show terminal status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
