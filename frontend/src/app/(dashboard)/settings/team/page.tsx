@@ -339,7 +339,7 @@ export default function TeamSettingsPage() {
               </div>
             ) : (
               <div className="divide-y divide-border/50">
-                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
                   <div>Name</div>
                   <div>Email</div>
                   <div>Role</div>

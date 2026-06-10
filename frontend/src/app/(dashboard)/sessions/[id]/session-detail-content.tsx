@@ -251,10 +251,10 @@ const statusConfig: Record<DisplayStatusKey, { color: string; label: string }> =
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
   idle: { color: "bg-primary/10 text-primary", label: "Idle" },
-  awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
-  needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
-  completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
-  pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  awaiting_input: { color: "bg-warning/10 text-warning", label: "Awaiting input" },
+  needs_human_guidance: { color: "bg-attention/10 text-attention", label: "Needs guidance" },
+  completed: { color: "bg-success/10 text-success", label: "Completed" },
+  pr_created: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR created" },
   pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
   pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
@@ -630,7 +630,7 @@ function isRuntimeRecoveryActive(session: Session): boolean {
 
 function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
   return (
-    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300`}>
+    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-info/10 border-info/30 text-info`}>
       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
       <span>
         <span className="font-medium">Restoring runtime from checkpoint</span>
@@ -683,10 +683,10 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     <div className="space-y-4">
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
-        <Card className="border-l-2 border-l-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/10">
+        <Card className="border-l-2 border-l-success bg-success/5">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs flex items-center gap-2">
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <CheckCircle2 className="h-3.5 w-3.5 text-success" />
               Result
             </CardTitle>
           </CardHeader>
@@ -697,10 +697,10 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
       )}
 
       {isDeployRecovery && (
-        <Card className="border-l-2 border-l-amber-500 bg-amber-50/30 dark:bg-amber-950/10">
+        <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs flex items-center gap-2">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+              <AlertTriangle className="h-3.5 w-3.5 text-warning" />
               Resumed after deploy
             </CardTitle>
           </CardHeader>
@@ -790,7 +790,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
               </Button>
             )}
             {isCodexAuthFailure && isCodexAuthenticated && (
-              <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+              <p className="text-xs text-success flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 {checkpointRetryUnavailable
                   ? "ChatGPT connected — open the retry menu and choose Start over from beginning."
@@ -836,8 +836,8 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${status.color}`}>
             {isActive && (
               <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
               </span>
             )}
             {status.label}
@@ -1603,7 +1603,7 @@ function SessionComposer({
                     variant="secondary"
                     className={cn(
                       "gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1",
-                      isInvalid && "border-amber-500/60 bg-amber-100/40 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100",
+                      isInvalid && "border-warning/60 bg-warning/10 text-warning",
                     )}
                     data-invalid={isInvalid || undefined}
                     title={isInvalid ? `${command.token} is a ${command.agent_type} command. Switch agent or remove it.` : undefined}
@@ -1625,7 +1625,7 @@ function SessionComposer({
             </div>
           )}
           {hasInvalidCommands && (
-            <p className="px-3 pb-2 text-xs text-amber-600 dark:text-amber-300" role="alert">
+            <p className="px-3 pb-2 text-xs text-warning" role="alert">
               {invalidCommandTokens.join(", ")} {invalidCommandTokens.length === 1 ? "is" : "are"} not valid for this agent. Remove the chip{invalidCommandTokens.length === 1 ? "" : "s"} to continue.
             </p>
           )}
@@ -5698,7 +5698,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
-              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-warning/10 border-warning/30 text-warning">
                 <Clock className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
@@ -5709,7 +5709,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <RuntimeRecoveryNotice />
             )}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired && (
-              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-info/10 border-info/30 text-info">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
@@ -5943,7 +5943,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </SheetDescription>
             </SheetHeader>
             {composerIsSnapshotExpired ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-warning/10 border-warning/30 text-warning">
                 <Clock className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
@@ -5954,7 +5954,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <RuntimeRecoveryNotice border="border-b" />
             ) : null}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-info/10 border-info/30 text-info">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.

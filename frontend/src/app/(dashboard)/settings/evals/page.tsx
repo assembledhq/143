@@ -363,21 +363,21 @@ function BootstrapProgressBanner({
       text: "Bootstrap scan queued...",
     },
     running: {
-      border: "border-blue-300 dark:border-blue-700",
-      bg: "bg-blue-50 dark:bg-blue-950/30",
-      icon: <Loader2 className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />,
+      border: "border-info/30",
+      bg: "bg-info/10",
+      icon: <Loader2 className="h-4 w-4 animate-spin text-info" />,
       text: "Scanning PR history...",
     },
     completed: {
-      border: "border-emerald-300 dark:border-emerald-700",
-      bg: "bg-emerald-50 dark:bg-emerald-950/30",
-      icon: <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />,
+      border: "border-success/30",
+      bg: "bg-success/10",
+      icon: <CheckCircle2 className="h-4 w-4 text-success" />,
       text: `Scan complete — ${bootstrap.candidates?.length ?? 0} candidates found`,
     },
     failed: {
-      border: "border-red-300 dark:border-red-700",
-      bg: "bg-red-50 dark:bg-red-950/30",
-      icon: <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" />,
+      border: "border-destructive/30",
+      bg: "bg-destructive/10",
+      icon: <XCircle className="h-4 w-4 text-destructive" />,
       text: "Bootstrap scan failed",
     },
   };
@@ -398,7 +398,7 @@ function BootstrapProgressBanner({
               </span>
             )}
             {bootstrap.status === "failed" && bootstrap.error_message && (
-              <span className="text-xs text-red-600 dark:text-red-400 truncate">
+              <span className="text-xs text-destructive truncate">
                 {bootstrap.error_message}
               </span>
             )}
@@ -541,9 +541,9 @@ function BootstrapDetailSheet({
 
   const statusBadge: Record<EvalBootstrapStatus, { color: string; label: string }> = {
     pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
-    running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running" },
-    completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
-    failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed" },
+    running: { color: "bg-info/10 text-info", label: "Running" },
+    completed: { color: "bg-success/10 text-success", label: "Completed" },
+    failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
   };
 
   const badge = statusBadge[bootstrap.status];
@@ -572,9 +572,9 @@ function BootstrapDetailSheet({
 
       {/* Error banner */}
       {bootstrap.status === "failed" && bootstrap.error_message && (
-        <div className="rounded-md bg-red-500/10 border border-red-200 dark:border-red-800 px-3 py-2 mt-4">
-          <p className="text-xs font-medium text-red-700 dark:text-red-400 mb-1">Error</p>
-          <p className="text-xs text-red-600 dark:text-red-400 font-mono whitespace-pre-wrap break-all">
+        <div className="rounded-md bg-destructive/10 border border-destructive/30 px-3 py-2 mt-4">
+          <p className="text-xs font-medium text-destructive mb-1">Error</p>
+          <p className="text-xs text-destructive font-mono whitespace-pre-wrap break-all">
             {bootstrap.error_message}
           </p>
         </div>
@@ -582,8 +582,8 @@ function BootstrapDetailSheet({
 
       {/* Completed summary */}
       {bootstrap.status === "completed" && bootstrap.candidates && (
-        <div className="rounded-md bg-emerald-500/10 border border-emerald-200 dark:border-emerald-800 px-3 py-2 mt-4 flex items-center justify-between">
-          <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+        <div className="rounded-md bg-success/10 border border-success/30 px-3 py-2 mt-4 flex items-center justify-between">
+          <p className="text-xs font-medium text-success">
             {bootstrap.candidates.length} candidates ready for review
           </p>
           <Button size="sm" variant="outline" className="h-7 text-xs" asChild>
@@ -599,8 +599,8 @@ function BootstrapDetailSheet({
           {isActive && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
               </span>
               Live
             </span>
@@ -660,7 +660,7 @@ function EvalTaskRow({ task, repoName }: { task: EvalTask; repoName?: string }) 
             {complexityStyle.label}
           </span>
           {task.snapshot_broken && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-orange-500/10 px-2 py-0.5 text-xs font-medium text-orange-700 dark:text-orange-400">
+            <span className="inline-flex items-center gap-1 rounded-full bg-attention/10 px-2 py-0.5 text-xs font-medium text-attention">
               <AlertTriangle className="h-3 w-3" />
               Snapshot broken
             </span>
@@ -673,7 +673,7 @@ function EvalTaskRow({ task, repoName }: { task: EvalTask; repoName?: string }) 
           <span>{sourceStyle.label}</span>
         </div>
       </div>
-      <div className="text-right text-xs text-muted-foreground shrink-0 ml-4">
+      <div className="text-right text-xs text-muted-foreground tabular-nums shrink-0 ml-4">
         {new Date(task.created_at).toLocaleDateString()}
       </div>
     </Link>
@@ -714,19 +714,19 @@ function BatchHistory() {
                   <span className="text-xs font-medium">{batch.name || "Unnamed batch"}</span>
                   <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
                     batch.status === "completed"
-                      ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                      ? "bg-success/10 text-success"
                       : batch.status === "running"
-                      ? "bg-blue-500/10 text-blue-700 dark:text-blue-400"
+                      ? "bg-info/10 text-info"
                       : "bg-muted text-muted-foreground"
                   }`}>
                     {batch.status}
                   </span>
                 </div>
-                <div className="mt-0.5 text-xs text-muted-foreground">
+                <div className="mt-0.5 text-xs text-muted-foreground tabular-nums">
                   {batch.task_count} tasks, {batch.run_count} runs
                 </div>
               </div>
-              <span className="text-xs text-muted-foreground shrink-0 ml-4">
+              <span className="text-xs text-muted-foreground tabular-nums shrink-0 ml-4">
                 {new Date(batch.created_at).toLocaleDateString()}
               </span>
             </Link>
@@ -754,13 +754,13 @@ function BootstrapCandidatesBanner({ repoIds }: { repoIds: string[] }) {
   if (!bootstrap || bootstrap.status !== "completed" || !bootstrap.candidates?.length) return null;
 
   return (
-    <Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
+    <Card className="border-info/30 bg-info/10">
       <CardContent className="flex items-center justify-between py-3">
         <div>
-          <p className="text-xs font-medium text-blue-800 dark:text-blue-300">
+          <p className="text-xs font-medium text-info">
             {bootstrap.candidates.length} bootstrap candidates ready for review
           </p>
-          <p className="text-xs text-blue-700 dark:text-blue-400">
+          <p className="text-xs text-info">
             Review and accept candidates to create eval tasks.
           </p>
         </div>

@@ -1320,7 +1320,7 @@ export function ManualSessionComposer({
                         variant="secondary"
                         className={cn(
                           "gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1",
-                          isInvalid && "border-amber-500/60 bg-amber-100/40 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100",
+                          isInvalid && "border-warning/60 bg-warning/10 text-warning",
                         )}
                         data-invalid={isInvalid || undefined}
                         title={isInvalid
@@ -1345,7 +1345,7 @@ export function ManualSessionComposer({
                 </div>
               )}
               {hasInvalidCommands && (
-                <p className="pb-3 text-xs text-amber-600 dark:text-amber-300" role="alert">
+                <p className="pb-3 text-xs text-warning" role="alert">
                   {invalidCommandTokens.join(", ")} {invalidCommandTokens.length === 1 ? "is" : "are"} not valid for the selected agent. Remove the chip{invalidCommandTokens.length === 1 ? "" : "s"} or switch agents to continue.
                 </p>
               )}

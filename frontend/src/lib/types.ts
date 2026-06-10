@@ -1680,14 +1680,14 @@ export interface ProjectDetail {
 
 export const projectStatusConfig: Record<string, { color: string; label: string }> = {
   draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
-  active: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Active" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Done" },
+  active: { color: "bg-info/10 text-info", label: "Active" },
+  completed: { color: "bg-success/10 text-success", label: "Done" },
 };
 
 export const projectStatusDotColor: Record<string, string> = {
   draft: "bg-muted-foreground/50",
-  active: "bg-blue-500",
-  completed: "bg-emerald-500",
+  active: "bg-info",
+  completed: "bg-success",
 };
 
 // --- Session file browsing types ---
@@ -1873,9 +1873,9 @@ export const evalComplexityConfig: Record<EvalComplexity, { color: string; label
 
 export const evalRunStatusConfig: Record<EvalRunStatus, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
-  running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
-  failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed" },
+  running: { color: "bg-info/10 text-info", label: "Running" },
+  completed: { color: "bg-success/10 text-success", label: "Completed" },
+  failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
 };
 
 export const evalSourceConfig: Record<EvalTaskSource, { label: string }> = {

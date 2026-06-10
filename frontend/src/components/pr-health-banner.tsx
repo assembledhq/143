@@ -115,7 +115,7 @@ export function PRHealthBanner({
             <div className="flex items-center gap-2">
               <div className={cn(
                 "flex h-8 w-8 items-center justify-center rounded-full",
-                isHealthy ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400",
+                isHealthy ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
               )}>
                 {isHealthy ? <CheckCircle2 className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
               </div>
@@ -453,8 +453,8 @@ function checkStatusBadgeClassName(status: PullRequestCheckStatus) {
     case "failed":
       return "bg-destructive/10 text-destructive";
     case "pending":
-      return "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400";
+      return "bg-warning/10 text-warning";
     case "passed":
-      return "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400";
+      return "bg-success/10 text-success";
   }
 }

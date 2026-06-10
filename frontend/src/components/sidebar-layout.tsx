@@ -78,14 +78,14 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
       <div
         data-testid="session-switcher-rail"
         className={cn(
-          "hidden md:flex xl:hidden h-full w-12 shrink-0 items-start justify-center border-r border-border bg-muted/30 px-1 py-3",
+          "hidden md:flex xl:hidden h-full w-12 shrink-0 items-start justify-center border-r border-border bg-panel px-1 py-3",
           mobileShow === "sidebar" && "md:hidden",
         )}
       >
         <Button
           variant="ghost"
           size="icon"
-          className="h-9 w-9 rounded-md text-muted-foreground hover:bg-background hover:text-foreground"
+          className="h-9 w-9 rounded-md text-muted-foreground hover:bg-muted/50 hover:text-foreground"
           aria-label="Open session switcher"
           aria-expanded={sessionSwitcherOpen}
           aria-controls="compact-session-sidebar"
@@ -99,7 +99,7 @@ export function SidebarLayout({ sidebar, children, mobileShow = "sidebar" }: Sid
         id="compact-session-sidebar"
         data-testid="compact-sidebar-pane"
         className={cn(
-          "hidden md:block xl:hidden h-full shrink-0 overflow-hidden border-r border-border bg-muted/30 transition-[width] duration-200 ease-out",
+          "hidden md:block xl:hidden h-full shrink-0 overflow-hidden border-r border-border bg-panel transition-[width] duration-200 ease-out",
           compactSidebarVisible ? "w-[min(360px,42vw)]" : "w-0 border-r-0",
         )}
         onClickCapture={closeCompactSidebarOnLinkClick}
