@@ -3057,7 +3057,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   usePageTitle(session ? sessionTitle(session) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
-    !!session &&
+    !isProvisionalSession &&
     (centerMode === "review" ||
       detailTab === "changes")
   );
@@ -3484,7 +3484,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
-    enabled: !!session,
+    enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
