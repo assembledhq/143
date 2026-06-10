@@ -59,18 +59,18 @@ The new flow:
    - Compute a dependency cache key from install config, declared lockfiles, sandbox runtime/image, and effective cache paths.
    - Look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The DB metadata is authoritative for effective paths and checksum.
    - If metadata is found, check worker-local L1 by `cache_key` and use it when the checksum matches; otherwise stream the L2 blob from object storage into a bounded worker temp file.
-   - Verify checksum, populate worker-local L1 when configured, upsert the worker's L1 location hint, and restore only the effective cache paths.
+   - Preflight the recorded compressed size, verify checksum, validate tar members against the stored effective paths on the worker, stream extraction into the sandbox over stdin without staging a compressed blob in sandbox `/tmp`, populate worker-local L1 when configured, and upsert the worker's L1 location hint.
    - If both L1 and L2 miss, continue to the normal install path.
 5. Run the existing `preview.install` flow:
    - Compute the existing install marker key.
-   - If the marker and `verify_paths` are present, skip install.
+   - If the dependency-cache restore did not fail and the marker and `verify_paths` are present, skip install.
    - Otherwise clean `clean_paths`, run `command`, then write the marker.
 6. If install succeeds and caching is enabled, archive the effective cache paths once, write the archive to worker-local L1 when configured, upload it to shared L2 object storage, upsert the durable L2 metadata row, and upsert the worker's L1 location hint.
 7. Start preview services and readiness as today.
 
 This means cache restore is an accelerator, not the source of truth. The hydrated session snapshot remains authoritative for source files.
 
-**Restore and marker interaction:** The restore step runs before the install marker check. When the session snapshot already contains the install marker and the restored artifacts satisfy `verify_paths`, the marker check passes and install is skipped entirely — this is the primary fast path. When the marker is absent (e.g. a new session that has never completed install), effective cache paths that overlap with `clean_paths` will be wiped before install runs, making the prior restore wasteful for install commands such as `npm ci` that unconditionally reinstall. A future optimization may check for marker-file existence before deciding to restore and skip the restore when the marker is absent; the initial implementation should restore unconditionally and accept the I/O cost on first-ever cold starts, since the common case is returning to a session that has already run install. Document this trade-off in the service implementation.
+**Restore and marker interaction:** The restore step runs before the install marker check. When the session snapshot already contains the install marker and the restored artifacts satisfy `verify_paths`, the marker check passes and install is skipped entirely — this is the primary fast path. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists. When the marker is absent (e.g. a new session that has never completed install), effective cache paths that overlap with `clean_paths` will be wiped before install runs, making the prior restore wasteful for install commands such as `npm ci` that unconditionally reinstall. A future optimization may check for marker-file existence before deciding to restore and skip the restore when the marker is absent; the implementation restores unconditionally and accepts the I/O cost on first-ever cold starts, since the common case is returning to a session that has already run install.
 
 ### Cache-Key-Aware Scheduling
 
@@ -350,22 +350,27 @@ type DependencyCacheHit struct {
 }
 
 type DependencyCacheMetadata struct {
-    OrgID          uuid.UUID         `json:"org_id"`
-    RepoID         uuid.UUID         `json:"repo_id"`
-    SessionID      uuid.UUID         `json:"session_id"`
-    InstallCommand []string          `json:"install_command"`
-    EffectivePaths []string          `json:"effective_paths"`
-    LockfileHashes map[string]string `json:"lockfile_hashes"`
+    OrgID               uuid.UUID         `json:"org_id"`
+    RepoID              uuid.UUID         `json:"repo_id"`
+    SessionID           uuid.UUID         `json:"session_id"`
+    InstallCommand      []string          `json:"install_command"`
+    EffectivePaths      []string          `json:"effective_paths"`
+    LockfileHashes      map[string]string `json:"lockfile_hashes"`
+    ChecksumSHA256      string            `json:"checksum_sha256"`
+    ArchiveBytes        int64             `json:"archive_bytes,omitempty"`
+    ArchivePayloadBytes int64             `json:"archive_payload_bytes,omitempty"`
+    ArchiveFileCount    int64             `json:"archive_file_count,omitempty"`
 }
 ```
 
-`DependencyCacheMetadata.EffectivePaths` is the authoritative list of paths in the blob. `Restore` reads this field from `hit.Entry.Metadata` rather than accepting a separate `paths` argument. This eliminates the class of bugs where the caller passes a different path list than what was saved, and makes the restore self-contained. `LockfileHashes` is stored for debugging stale-cache incidents without requiring a session config lookup.
+`DependencyCacheMetadata.EffectivePaths` is the authoritative list of paths in the blob. `Restore` reads this field from `hit.Entry.Metadata` rather than accepting a separate `paths` argument. This eliminates the class of bugs where the caller passes a different path list than what was saved, and makes the restore self-contained. `LockfileHashes` is stored for debugging stale-cache incidents without requiring a session config lookup. Archive byte and file-count metadata is for operations/debugging and future cache admission policy; correctness still comes from checksum and member validation.
 
 The concrete implementation should use the same executor shape as `SnapshotCache`:
 
 - `Exec`
 - `ReadFile`
 - `WriteFile`
+- `ExecWithStdin` for restore extraction of large archives without sandbox temp-file staging
 
 ### Cache Key
 
@@ -700,14 +705,16 @@ Restore should:
 
 1. Look up the DB record for `(org_id, repo_id, cache_key)`.
 2. Use the DB metadata as the source of truth for effective paths and checksum. If local L1 is configured and has the blob for this `cache_key`, stage that local blob first; otherwise stream the blob from object storage to a bounded worker temp file.
-3. Verify checksum against stored hash.
-4. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
-5. Extract the tarball into the repo root, validating that no entry escapes via absolute paths or `..` traversal.
-6. Touch the DB `last_used_at` entry.
+3. Reject blobs whose recorded compressed size exceeds the restore cap before object-store download.
+4. Verify checksum against stored hash.
+5. Validate the gzip tar on the worker before sandbox mutation. Every member must be relative, must not traverse with `..`, must not target preview install markers, and must be contained by one of the stored effective paths.
+6. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
+7. Stream the tarball into `tar xzf - -C <workdir>` so restore does not create an extra compressed archive under sandbox `/tmp`.
+8. Touch the DB `last_used_at` entry.
 
-On checksum mismatch or object-not-found, delete the DB record and fall through to a cold install.
+On checksum mismatch or object-not-found, delete the DB record and fall through to a cold install. Other restore failures do not delete durable metadata unless they prove the blob is corrupt, but they still force the normal install path for that launch.
 
-Do not extract absolute paths or parent traversal entries. Validate tar entries during extraction, not just at archive creation time. Effective paths come from the blob's stored metadata, not from the caller, so there is no risk of a path-list mismatch between save and restore.
+Do not extract absolute paths or parent traversal entries. Validate tar entries during save and again during restore. Effective paths come from the blob's stored metadata, not from the caller, so there is no risk of a path-list mismatch between save and restore.
 
 ### Eviction
 
@@ -716,7 +723,7 @@ Object storage lifecycle rules (e.g. S3 Object Lifecycle Policies) should expire
 ## Security and Secret Handling
 
 1. Runtime secret files are written after `preview.install` today. Keep that order so dependency cache save cannot include runtime secret files.
-2. Reject `.143/cache/preview-install` in all effective cache paths so cache restore cannot forge install success markers.
+2. Reject `.143/cache/preview-install` and any parent/glob path that can include it in all dependency-cache paths so cache restore cannot forge install success markers. Broad `clean_paths` may still be used for fresh installs, but unsafe paths are excluded from dependency artifact caching.
 3. Reject `.git` to avoid credential remnants and repository metadata corruption.
 4. Cache blobs are stored in shared object storage. Access must be restricted to the service's IAM role or equivalent; the bucket must not be public. If a worker-local L1 cache is used, those files should be `0600` and the directory `0750`.
 5. Cache metadata must not include secret values, env dumps, install output, or file contents.
