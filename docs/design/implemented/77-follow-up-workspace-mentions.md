@@ -42,6 +42,10 @@ file browsing and mention search cannot drift.
 - Added a path-only recursive workspace index in `internal/services/workspace`.
 - The index stores files and directories, skips `.git`, and caps both entry
   count and serialized size.
+- Live Docker-backed index builds use a recursive listing fast path instead of
+  one Docker exec per directory, and skip common dependency/build output
+  directories such as `node_modules`, `.next`, `dist`, `build`, `target`, and
+  `vendor`.
 - Ranking is shared with the existing mention picker semantics:
   - path prefix
   - basename prefix
@@ -56,7 +60,10 @@ file browsing and mention search cannot drift.
   - in-process LRU for hot lookups
 - Redis entries are keyed by session + workspace source fingerprint:
   - snapshot-backed: snapshot key
-  - live fallback: container id + turn/activity metadata
+  - live fallback: container id + turn/workspace-generation metadata
+- Live cache keys intentionally ignore `last_activity_at` so status/message
+  churn does not force a full workspace re-index; `workspace_generation` is the
+  invalidator for filesystem-changing events.
 
 ### Proactive warmup
 

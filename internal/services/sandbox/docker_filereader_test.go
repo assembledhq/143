@@ -232,6 +232,26 @@ func TestDockerFileReader_ListDir(t *testing.T) {
 	}
 }
 
+func TestDockerFileReader_ListDirRecursive(t *testing.T) {
+	t.Parallel()
+
+	client := newMockSequenceClient([]string{
+		"dir\t/workspace/docs\nfile\t/workspace/README.md\nfile\t/workspace/docs/guide.md\ndir\t/workspace/src\nfile\t/workspace/src/app.ts\n",
+	}, []int{0})
+
+	reader := NewDockerFileReader(client)
+	entries, err := reader.ListDirRecursive(context.Background(), "container-1", "/workspace", 3, []string{"node_modules", ".git"})
+	require.NoError(t, err, "ListDirRecursive should not return an error")
+	require.Equal(t, []FileEntry{
+		{Path: "docs", Type: "dir", Size: 0},
+		{Path: "README.md", Type: "file", Size: 0},
+		{Path: "docs/guide.md", Type: "file", Size: 0},
+	}, entries, "ListDirRecursive should parse workspace-relative entries and enforce the requested cap defensively")
+	require.Equal(t, 1, client.callIndex, "ListDirRecursive should use one Docker exec call")
+	require.Contains(t, client.lastExecOptions.Cmd, "3", "recursive find should receive the requested max entry cap")
+	require.Contains(t, client.lastExecOptions.Cmd, "node_modules", "recursive find should prune ignored directory names")
+}
+
 func TestDockerFileReader_ReadFile(t *testing.T) {
 	t.Parallel()
 

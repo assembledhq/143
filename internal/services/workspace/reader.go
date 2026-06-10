@@ -60,9 +60,21 @@ type liveContainerReader struct {
 	workDir     string
 }
 
+type recursiveSandboxFileReader interface {
+	ListDirRecursive(ctx context.Context, containerID, workDir string, maxEntries int, ignoredDirNames []string) ([]sandbox.FileEntry, error)
+}
+
+type recursiveLiveContainerReader struct {
+	*liveContainerReader
+}
+
 // NewLiveContainerReader returns a Reader backed by a live Docker container.
 func NewLiveContainerReader(inner sandbox.FileReader, containerID, workDir string) Reader {
-	return &liveContainerReader{inner: inner, containerID: containerID, workDir: workDir}
+	reader := &liveContainerReader{inner: inner, containerID: containerID, workDir: workDir}
+	if _, ok := inner.(recursiveSandboxFileReader); ok {
+		return &recursiveLiveContainerReader{liveContainerReader: reader}
+	}
+	return reader
 }
 
 func (r *liveContainerReader) ListDir(ctx context.Context, dirPath string) ([]sandbox.FileEntry, error) {
@@ -75,4 +87,8 @@ func (r *liveContainerReader) ReadFile(ctx context.Context, filePath string) (st
 
 func (r *liveContainerReader) ReadFileContext(ctx context.Context, filePath string, line, above, below int) (sandbox.FileContextResult, error) {
 	return r.inner.ReadFileContext(ctx, r.containerID, r.workDir, filePath, line, above, below)
+}
+
+func (r *recursiveLiveContainerReader) ListDirRecursive(ctx context.Context, maxEntries int, ignoredDirNames []string) ([]sandbox.FileEntry, error) {
+	return r.inner.(recursiveSandboxFileReader).ListDirRecursive(ctx, r.containerID, r.workDir, maxEntries, ignoredDirNames)
 }
