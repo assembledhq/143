@@ -52,6 +52,19 @@ type Config struct {
 	// only if you also regenerate the bcrypt hash in the seed.
 	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
 	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
+	// CLIDistDir is the directory holding the cross-compiled 143-tools
+	// binaries plus checksums.txt, baked into the server image by the
+	// Dockerfile cli stage. The /install.sh and /download/143-tools/*
+	// routes serve from here; they 404 when the directory is absent
+	// (e.g. `go run` in local dev without `make build-cli`).
+	CLIDistDir string `env:"CLI_DIST_DIR" envDefault:"/opt/143/cli"`
+	// CLIMinSupportedVersion, when set to an orderable version (dotted
+	// numerics, e.g. "1.4.0"), causes authenticated requests from a CLI
+	// advertising an older `User-Agent: 143-tools/<version>` to fail with
+	// 426 CLI_UPDATE_REQUIRED so breaking API changes have a clean failure
+	// mode. Empty (the default) disables enforcement; non-orderable CLI
+	// versions (git SHAs, "dev") are never blocked.
+	CLIMinSupportedVersion string `env:"CLI_MIN_SUPPORTED_VERSION"`
 	// WorkerProcessCount controls how many worker loops run inside a single
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.

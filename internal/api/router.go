@@ -186,6 +186,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
+	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
+	userCLITokenStore := db.NewUserCLITokenStore(pool)
+	orgJoinTokenStore := db.NewOrgJoinTokenStore(pool)
+	authHandler.SetCLIAuthStores(cliAuthCodeStore, userCLITokenStore, orgJoinTokenStore, orgStore)
+	joinTokenHandler := handlers.NewJoinTokenHandler(orgJoinTokenStore, cfg.BaseURL)
+	// Local agent gateway: executes integration tools server-side for
+	// logged-in CLIs, so org credentials never land on laptops.
+	cliToolsHandler := handlers.NewCLIToolsHandler(credentialStore, logger)
+	cliToolsHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler := handlers.NewOrganizationsHandler(pool)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	if prService != nil {
@@ -341,6 +351,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		})
 	}
 	sessionHandler.SetLinearLinker(linearService)
+	// Refresh-aware Linear tokens for the local agent gateway, same resolver
+	// the sandbox env injection uses.
+	cliToolsHandler.SetLinearTokenResolver(linearService)
 	// Wire the inline team-key refresh hook so the Linear OAuth callback
 	// can populate the allowlist synchronously before falling back to the
 	// worker enqueue. See HandleLinearOAuthCallback for the two-tier
@@ -490,6 +503,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 	teamHandler.SetRepositoryStore(repoStore)
+	teamHandler.SetCLITokenStore(userCLITokenStore)
 	orgDomainStore := db.NewOrganizationDomainStore(pool)
 	orgDomainsHandler := handlers.NewOrgDomainsHandler(orgDomainStore, membershipStore, userStore, domains.NewVerifier())
 	authHandler.SetOrgDomainStore(orgDomainStore)
@@ -805,6 +819,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
 
 	apiRoutes.Group(func(r chi.Router) {
+		// CLI distribution routes (no auth — fetched by `curl | sh` and the
+		// CLI's update command, not the JSON API client). Served outside
+		// /api/v1 except for the version endpoint; the production Caddyfile
+		// routes /install* and /download/* to this server explicitly.
+		cliDistHandler := handlers.NewCLIDistributionHandler(cfg.BaseURL, cfg.CLIDistDir, cfg.CLIMinSupportedVersion)
+		r.Get("/install.sh", cliDistHandler.InstallScript)
+		r.Get("/install/{join_token}", cliDistHandler.InstallScript)
+		r.Get("/download/143-tools/checksums.txt", cliDistHandler.Checksums)
+		r.Get("/download/143-tools/{os}/{arch}", cliDistHandler.DownloadBinary)
+		r.Get("/api/v1/cli/version", cliDistHandler.Version)
+
 		// Webhook routes (no auth — called by external services, signature verified per-provider)
 		r.Route("/api/v1/webhooks", func(r chi.Router) {
 			r.Post("/github", webhookHandler.HandleGitHub)
@@ -837,6 +862,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// bucket only — exactly the guarantee this public route needs.
 		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
+		// CLI code-for-token exchange. Deliberately OUTSIDE the CSRF-wrapped
+		// auth group: the CLI has no CSRF cookie/header, and the one-time
+		// code + verifier binding is a strictly stronger anti-forgery
+		// guarantee than the double-submit cookie. Same 10/min brute-force
+		// budget as the invitation endpoints — each request names an opaque
+		// code the server looks up.
+		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/auth/cli/exchange", authHandler.CLIExchange)
+
 		// Auth routes (no auth). CSRF still wraps this group so safe public
 		// auth reads warm the double-submit cookie before email login/register.
 		r.Group(func(r chi.Router) {
@@ -844,6 +877,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/providers", authHandler.Providers)
 			r.Get("/api/v1/auth/github/login", authHandler.Login)
 			r.Get("/api/v1/auth/github/callback", authHandler.Callback)
+			// CLI browser-login entry point: stores the loopback port /
+			// challenge / join cookies and chains into the GitHub Login
+			// redirect above.
+			r.Get("/api/v1/auth/cli/start", authHandler.CLIStart)
 			r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
 			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
 			r.Post("/api/v1/auth/register", authHandler.Register)
@@ -868,8 +905,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				Memberships:      membershipStore,
 				PreviewAPITokens: previewAPITokenStore,
 				APITokens:        apiTokenStore,
+				UserCLITokens:    userCLITokenStore,
 				Audit:            auditEmitter,
 			}, []byte(cfg.CSRFSigningKey), logger))
+			r.Use(middleware.CLIVersionGate(cfg.CLIMinSupportedVersion))
 			r.Use(middleware.LogContext(logger))
 			r.Use(externalAPIRateLimiter.Middleware())
 			r.Use(middleware.ExternalAPIIdempotency(apiIdempotencyStore, logger))
@@ -890,6 +929,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
+			// Self-service CLI token management (list devices, revoke).
+			// Zero-membership-safe: a user removed from their last org must
+			// still be able to see and kill their own CLI credentials, and
+			// `143-tools logout` must work for them.
+			r.Get("/api/v1/auth/cli-tokens", authHandler.ListCLITokens)
+			r.Delete("/api/v1/auth/cli-tokens/{id}", authHandler.RevokeCLIToken)
 			// GitHub App setup callbacks are validated against a signed setup
 			// intent inside the handler. Keep them outside OrgContext so a
 			// stale active org in another tab cannot block linking to the
@@ -1061,6 +1106,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
+
+				// Local agent gateway: tool list + server-proxied execution for
+				// `143-tools mcp serve` and local CLI tool calls. Builder-tier
+				// like the rest of the create-and-iterate surface; viewers
+				// cannot reach integration write tools.
+				r.Get("/api/v1/cli/tools", cliToolsHandler.ListTools)
+				r.Post("/api/v1/cli/tools/invoke", cliToolsHandler.Invoke)
 
 				// Coding-agents config reads. Builders and members can view what's
 				// configured (so /settings/agent renders read-only when needed);
@@ -1315,6 +1367,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// admin-only here.
 				r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
 				r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
+
+				// Org join links for zero-config CLI onboarding
+				// (curl .../install/<token> | sh). Admin-only: creating one
+				// hands out org membership.
+				r.Post("/api/v1/org/join-tokens", joinTokenHandler.Create)
+				r.Get("/api/v1/org/join-tokens", joinTokenHandler.List)
+				r.Delete("/api/v1/org/join-tokens/{id}", joinTokenHandler.Revoke)
 				r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
 				r.Post("/api/v1/team/invitations", teamHandler.CreateInvitation)
 				r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)

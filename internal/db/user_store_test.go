@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -617,7 +618,7 @@ func TestUserStore_LinkGoogleAccount(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestUserStore_UpdateSettings(t *testing.T) {
+func TestUserStore_MergeSettings(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -626,64 +627,73 @@ func TestUserStore_UpdateSettings(t *testing.T) {
 
 	store := NewUserStore(mock)
 	userID := uuid.New()
-	settings := models.UserSettings{
-		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
-		},
-	}
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).
+			AddRow(json.RawMessage(`{"coding_agent_model_default":"claude-opus-4-7"}`)))
 	mock.ExpectExec("UPDATE users SET settings = @settings").
 		WithArgs(pgxmock.AnyArg(), userID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
-	err = store.UpdateSettings(context.Background(), userID, settings)
-	require.NoError(t, err, "UpdateSettings should not return an error")
+	merged, err := store.MergeSettings(context.Background(), userID, json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`))
+	require.NoError(t, err, "MergeSettings should not return an error")
+	require.Equal(t, models.UserSettings{
+		CodingAgentModelDefault: "claude-opus-4-7",
+		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
+		},
+	}, merged, "MergeSettings should keep stored fields the patch didn't touch")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestUserStore_UpdateSettings_ErrorPaths(t *testing.T) {
+func TestUserStore_MergeSettings_ErrorPaths(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
-		settings  models.UserSettings
+		patch     json.RawMessage
 		setupMock func(mock pgxmock.PgxPoolIface, userID uuid.UUID)
 		wantErr   string
 	}{
 		{
-			name: "returns marshal error for invalid settings",
-			settings: models.UserSettings{
-				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-					models.AgentTypeCodex: models.ReasoningEffortMax,
-				},
+			name:  "returns merge error for invalid patch values",
+			patch: json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`),
+			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
+				mock.ExpectRollback()
 			},
-			wantErr: "marshal user settings",
+			wantErr: "merge user settings",
 		},
 		{
-			name: "returns exec error",
-			settings: models.UserSettings{
-				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-					models.AgentTypeClaudeCode: models.ReasoningEffortMax,
-				},
-			},
+			name:  "returns exec error",
+			patch: json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
 			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 				mock.ExpectExec("UPDATE users SET settings = @settings").
 					WithArgs(pgxmock.AnyArg(), userID).
 					WillReturnError(errors.New("write failed"))
+				mock.ExpectRollback()
 			},
 			wantErr: "update user settings",
 		},
 		{
-			name: "returns no rows when user is missing",
-			settings: models.UserSettings{
-				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-					models.AgentTypeClaudeCode: models.ReasoningEffortMax,
-				},
-			},
+			name:  "returns no rows when user is missing",
+			patch: json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
 			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
-				mock.ExpectExec("UPDATE users SET settings = @settings").
-					WithArgs(pgxmock.AnyArg(), userID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}))
+				mock.ExpectRollback()
 			},
 			wantErr: pgx.ErrNoRows.Error(),
 		},
@@ -704,9 +714,9 @@ func TestUserStore_UpdateSettings_ErrorPaths(t *testing.T) {
 				tt.setupMock(mock, userID)
 			}
 
-			err = store.UpdateSettings(context.Background(), userID, tt.settings)
-			require.Error(t, err, "UpdateSettings should return the expected error")
-			require.Contains(t, err.Error(), tt.wantErr, "UpdateSettings should describe the failure")
+			_, err = store.MergeSettings(context.Background(), userID, tt.patch)
+			require.Error(t, err, "MergeSettings should return the expected error")
+			require.Contains(t, err.Error(), tt.wantErr, "MergeSettings should describe the failure")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

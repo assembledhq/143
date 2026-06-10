@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Github, Mail, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
+import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,6 +40,7 @@ import {
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { VerifiedDomainsSection } from "@/components/settings/verified-domains-section";
+import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { roleLabel } from "@/lib/roles";
@@ -94,7 +96,7 @@ export default function TeamSettingsPage() {
   const githubConnected = ghStatusData?.data.connected ?? false;
 
   useEffect(() => {
-    const handle = setTimeout(() => setDebouncedGhQuery(ghSearchQuery.trim()), 200);
+    const handle = setTimeout(() => setDebouncedGhQuery(ghSearchQuery.trim()), pollMs(200));
     return () => clearTimeout(handle);
   }, [ghSearchQuery]);
 
@@ -515,6 +517,9 @@ export default function TeamSettingsPage() {
 
       {/* Verified domains (domain capture / auto-join) */}
       {canManageTeam && <VerifiedDomainsSection />}
+
+      {/* CLI install links (admin-only: creating one hands out membership) */}
+      {canManageTeam && <CLIJoinTokensCard />}
 
       {/* Invite Member Dialog */}
       {canManageTeam && (

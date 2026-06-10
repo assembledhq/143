@@ -52,6 +52,13 @@ func TestHandlersMustNotReadLegacyUserFields(t *testing.T) {
 		"auth_signup.go:OrgID": "signup assigns user.OrgID on the new user row before insert; not a read",
 		"auth_signup.go:Role":  "signup assigns user.Role on the new user row before insert; not a read",
 
+		// Join-token JIT provisioning mirrors auth_signup: it assigns
+		// user.OrgID / user.Role on the freshly-created user row before
+		// insert (then syncs Role to the GrantAtLeast effective role). All
+		// writes, not reads.
+		"auth_cli.go:OrgID": "JIT join assigns user.OrgID on the new user row before insert; not a read",
+		"auth_cli.go:Role":  "JIT join assigns user.Role before insert and syncs the GrantAtLeast effective role; not a read",
+
 		// Auth handlers return the user back to the client (e.g. /auth/me,
 		// signup response body, invitation claim response). The legacy
 		// fields exist on the wire contract for the compat window and are

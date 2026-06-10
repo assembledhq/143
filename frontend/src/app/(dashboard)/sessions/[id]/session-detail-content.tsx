@@ -156,6 +156,7 @@ import {
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
+import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
@@ -218,7 +219,7 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
-const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = 3000;
+const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = pollMs(3000);
 
 const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
   AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
@@ -1902,7 +1903,7 @@ function SessionComposer({
 // ---------------------------------------------------------------------------
 
 const MAX_SSE_RECONNECT_ATTEMPTS = 3;
-const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+const BASE_SSE_RECONNECT_DELAY_MS = pollMs(1000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
@@ -2165,7 +2166,7 @@ function ChatPanel({
     queryKey: ["session", sessionId, "timeline"],
     queryFn: () => api.sessions.getTimeline(sessionId),
     enabled: !activeThreadId,
-    refetchInterval: isActive && !activeThreadId ? 3000 : false,
+    refetchInterval: isActive && !activeThreadId ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessagesQuery = useInfiniteQuery({
@@ -2181,7 +2182,7 @@ function ChatPanel({
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessages = useMemo(() => {
@@ -2213,7 +2214,7 @@ function ChatPanel({
       visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
     enabled: !!activeThreadId && threadMessagesQuery.isFetched,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const liveLogsQuery = useQuery({
     queryKey: liveLogsQueryKey,
@@ -2226,7 +2227,7 @@ function ChatPanel({
   const humanInputQuery = useQuery({
     queryKey: queryKeys.sessions.humanInputRequests(sessionId, humanInputStatusFilter ?? null, activeThreadId ?? null),
     queryFn: () => api.sessions.getHumanInputRequests(sessionId, { status: humanInputStatusFilter, threadId: activeThreadId ?? null }),
-    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? 3000 : false,
+    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const pendingHumanInputs = useMemo(() => {
     const requests = humanInputQuery.data?.data ?? [];
@@ -3139,7 +3140,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
       if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
-        return 2000;
+        return pollMs(2000);
       }
       return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
     },
@@ -3264,10 +3265,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     !isMobileReviewViewport &&
     (diffFullScreenOverride ?? user?.settings?.diff_viewer_full_screen ?? false);
   const { mutate: persistDiffFullScreen } = useMutation({
-    // PATCH /auth/me/settings replaces the whole settings JSONB, so merge the
-    // existing fields in rather than sending the flag alone.
+    // PATCH /auth/me/settings is a merge patch, so the flag travels alone and
+    // can't clobber settings edited concurrently elsewhere.
     mutationFn: (fullScreen: boolean) =>
-      api.auth.updateSettings({ ...(user?.settings ?? {}), diff_viewer_full_screen: fullScreen }),
+      api.auth.updateSettings({ diff_viewer_full_screen: fullScreen }),
     onSuccess: (response) => {
       queryClient.setQueryData(["auth", "me"], { data: response.data });
     },
@@ -3278,12 +3279,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const toggleDiffFullScreen = useCallback(() => {
     const next = !isDiffFullScreen;
     setDiffFullScreenOverride(next);
-    // Don't persist before the user document has loaded — the merge above
-    // would wipe the other settings fields.
-    if (user) {
-      persistDiffFullScreen(next);
-    }
-  }, [isDiffFullScreen, user, persistDiffFullScreen]);
+    persistDiffFullScreen(next);
+  }, [isDiffFullScreen, persistDiffFullScreen]);
 
   const activeThreadDelivery = activeThread?.inbox_delivery;
   const activeThreadHasRecoverableInbox =
@@ -3607,7 +3604,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (query) => {
       const mergeState = query.state.data?.data?.merge_state;
       const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? 5_000 : false;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? pollMs(5_000) : false;
     },
   });
   const prHealth = prHealthData?.data;
@@ -4754,7 +4751,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: queryKeys.sessions.threadFileEvents(id),
     queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
     enabled: threads.length > 0,
-    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? pollMs(5000) : false,
     staleTime: 2_000,
   });
   useEffect(() => {

@@ -51,6 +51,13 @@ type AuthHandler struct {
 	// http.DefaultClient (production) or a locally-scoped client with a
 	// short timeout (the noreply-email probe).
 	httpClient *http.Client
+	// CLI login flow stores (see auth_cli.go). Nil unless wired via
+	// SetCLIAuthStores; the CLI endpoints fail with a configuration error
+	// and the OAuth callback skips its CLI branch in that case.
+	cliAuthCodes *db.CLIAuthCodeStore
+	cliTokens    *db.UserCLITokenStore
+	joinTokens   *db.OrgJoinTokenStore
+	orgStore     *db.OrganizationStore
 }
 
 // SetGitHubURLsForTest overrides the GitHub API and OAuth base URLs and
@@ -182,7 +189,11 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-// UpdateSettings updates the authenticated user's personal settings document.
+// UpdateSettings applies an RFC 7386 JSON merge patch to the authenticated
+// user's personal settings document: omitted fields keep their stored value,
+// null clears a field, and nested objects merge per key. Callers send only
+// the fields they are changing — never a full document rebuilt from a client
+// cache, which would let concurrent edits from another tab clobber each other.
 func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
@@ -195,18 +206,24 @@ func (h *AuthHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body models.UserSettings
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil {
+	patch, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
-	if err := body.Validate(); err != nil {
+	var patchObject map[string]json.RawMessage
+	if err := json.Unmarshal(patch, &patchObject); err != nil || patchObject == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	// Applying the patch to an empty document exercises the same key and
+	// value validation as the real merge, so bad patches fail with a 400
+	// before we open the merge transaction.
+	if _, err := models.ApplyUserSettingsMergePatch(nil, patch); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_USER_SETTINGS", err.Error())
 		return
 	}
-	if err := h.userStore.UpdateSettings(r.Context(), user.ID, body); err != nil {
+	if _, err := h.userStore.MergeSettings(r.Context(), user.ID, patch); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "USER_SETTINGS_UPDATE_FAILED", "failed to update user settings", err)
 		return
 	}
@@ -553,6 +570,11 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Account linking: try GitHub ID → email → create new.
 	pendingInvite := readAndClearPendingInvitationCookie(w, r)
+	// CLI login handshake + join token, set by /auth/cli/start. Both nil/""
+	// for ordinary web logins, in which case every branch below behaves
+	// exactly as before.
+	cliIntent := readAndClearCLILoginIntent(w, r)
+	pendingJoin := readAndClearPendingJoinCookie(w, r)
 
 	existingUser, err := h.userStore.GetByGitHubID(r.Context(), ghUser.ID)
 	if err == nil {
@@ -568,8 +590,16 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 		h.markGitHubEmailVerified(r, existingUser.ID, ghEmails, email)
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, email, ghUser.Login, existingUser.ID)
+		// An existing user carrying a join token for an org they're not in
+		// gets the membership granted; already-a-member or a bad token is a
+		// no-op (matches ClaimInvitation's best-effort posture).
+		h.applyJoinTokenForExistingUser(r, pendingJoin, &existingUser)
 		h.storeGitHubToken(r, &existingUser, tokenResp)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
+		if cliIntent != nil {
+			h.createSessionAndFinishCLILogin(w, r, &existingUser, cliIntent)
+			return
+		}
 		h.createSessionAndRedirect(w, r, &existingUser)
 		return
 	}
@@ -592,8 +622,13 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 		h.markEmailVerified(r, emailUser.ID, true, email)
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, email, ghUser.Login, emailUser.ID)
+		h.applyJoinTokenForExistingUser(r, pendingJoin, &emailUser)
 		h.storeGitHubToken(r, &emailUser, tokenResp)
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
+		if cliIntent != nil {
+			h.createSessionAndFinishCLILogin(w, r, &emailUser, cliIntent)
+			return
+		}
 		h.createSessionAndRedirect(w, r, &emailUser)
 		return
 	}
@@ -631,11 +666,56 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			h.markGitHubEmailVerified(r, createdUser.ID, ghEmails, email)
 			h.storeGitHubToken(r, createdUser, tokenResp)
 			h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
+			if cliIntent != nil {
+				h.finishCLILoginWithSession(w, r, createdUser, sessionToken, cliIntent)
+				return
+			}
 			h.redirectWithSession(w, r, sessionToken)
 			return
 		}
 		// Invalid invitation (wrong email, expired, etc.) — fall through to
 		// a default signup so the user isn't stranded.
+	}
+
+	// New user with a join token: JIT-provision them into the token's org.
+	// Unlike the invitation flow above, an invalid/exhausted token FAILS
+	// CLOSED — no user is created. A forgiving fallback would silently log
+	// the CLI into a fresh single-member org, which is strictly worse than
+	// the error for someone trying to join a team.
+	if pendingJoin != "" {
+		user := &models.User{
+			Email:              email,
+			Name:               displayName,
+			GitHubID:           &ghUser.ID,
+			GitHubLogin:        &ghUser.Login,
+			GitHubNoreplyEmail: &noreplyEmail,
+			AvatarURL:          &ghUser.AvatarURL,
+		}
+		createdUser, sessionToken, usedToken, joinErr, createErr := h.createJoinedUser(
+			r.Context(),
+			pendingJoin,
+			user,
+			func(ctx context.Context, userStore *db.UserStore, joinedUser *models.User) error {
+				return userStore.UpsertFromGitHub(ctx, joinedUser)
+			},
+		)
+		if createErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to create account", createErr)
+			return
+		}
+		if joinErr != nil {
+			h.failCLILogin(w, r, cliIntent, joinErr.code, joinErr.message)
+			return
+		}
+		h.emitJoinTokenUsed(r, createdUser.ID, usedToken, string(createdUser.Role))
+		h.storeGitHubToken(r, createdUser, tokenResp)
+		h.emitAuthEvent(r, createdUser, models.AuditActionAuthRegister)
+		if cliIntent != nil {
+			h.finishCLILoginWithSession(w, r, createdUser, sessionToken, cliIntent)
+			return
+		}
+		h.redirectWithSession(w, r, sessionToken)
+		return
 	}
 
 	user := &models.User{
@@ -679,6 +759,10 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	h.storeGitHubToken(r, user, tokenResp)
 	h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
+	if cliIntent != nil {
+		h.finishCLILoginWithSession(w, r, user, sessionToken, cliIntent)
+		return
+	}
 	h.redirectWithSession(w, r, sessionToken)
 }
 

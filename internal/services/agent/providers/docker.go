@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1011,11 +1012,18 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 	return inspectResp.ExitCode, nil
 }
 
+// cliTokenPattern matches the distinctive 143-credential prefixes (user CLI
+// tokens "143u_", org join tokens "143j_") wherever they appear in logged
+// command lines. The prefixes exist partly so leaked tokens are
+// machine-findable — the log layer must therefore strip them before
+// shipping.
+var cliTokenPattern = regexp.MustCompile(`143[uj]_[A-Za-z0-9_-]{8,}`)
+
 func redactSandboxCommandForLog(cmd string) string {
 	if strings.Contains(cmd, "__143_SECRET_FILE__") {
 		return "[redacted preview secret file write]"
 	}
-	return cmd
+	return cliTokenPattern.ReplaceAllString(cmd, "143?_***")
 }
 
 // ReadFile reads a file from the sandbox filesystem by exec-ing cat.
@@ -1593,10 +1601,11 @@ func shellEscape(s string) string {
 }
 
 // redactToken removes an auth token from a string so it is safe to surface in
-// error messages or logs.
+// error messages or logs. CLI/join-token shapes are stripped by pattern as
+// well, since those can appear without the caller knowing the exact value.
 func redactToken(s, token string) string {
 	if token != "" {
 		s = strings.ReplaceAll(s, token, "***")
 	}
-	return s
+	return cliTokenPattern.ReplaceAllString(s, "143?_***")
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -277,26 +278,51 @@ func (s *UserStore) CreateWithPassword(ctx context.Context, user *models.User) e
 	return row.Scan(&user.ID, &user.CreatedAt)
 }
 
-// UpdateSettings replaces the user's settings JSONB document.
+// MergeSettings applies an RFC 7386 JSON merge patch to the user's settings
+// JSONB document and returns the merged result. The read-merge-write runs in
+// a transaction holding the row lock, so concurrent patches from other tabs
+// compose instead of overwriting each other (the old replace-the-document
+// contract made every writer clobber whatever it hadn't read).
 //
 // lint:allow-no-orgid reason="user-scoped self-settings update by primary key"
-func (s *UserStore) UpdateSettings(ctx context.Context, userID uuid.UUID, settings models.UserSettings) error {
-	encodedSettings, err := settings.MarshalJSONB()
-	if err != nil {
-		return fmt.Errorf("marshal user settings: %w", err)
+func (s *UserStore) MergeSettings(ctx context.Context, userID uuid.UUID, patch json.RawMessage) (models.UserSettings, error) {
+	starter, ok := s.db.(TxStarter)
+	if !ok {
+		return models.UserSettings{}, fmt.Errorf("user store db does not support transactions")
 	}
-	query := `UPDATE users SET settings = @settings WHERE id = @id`
-	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return models.UserSettings{}, fmt.Errorf("begin settings merge: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current json.RawMessage
+	row := tx.QueryRow(ctx, `SELECT settings FROM users WHERE id = @id FOR UPDATE`, pgx.NamedArgs{"id": userID})
+	if err := row.Scan(&current); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.UserSettings{}, pgx.ErrNoRows
+		}
+		return models.UserSettings{}, fmt.Errorf("load user settings for merge: %w", err)
+	}
+
+	merged, err := models.ApplyUserSettingsMergePatch(current, patch)
+	if err != nil {
+		return models.UserSettings{}, fmt.Errorf("merge user settings: %w", err)
+	}
+	encodedSettings, err := merged.MarshalJSONB()
+	if err != nil {
+		return models.UserSettings{}, fmt.Errorf("marshal user settings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET settings = @settings WHERE id = @id`, pgx.NamedArgs{
 		"settings": encodedSettings,
 		"id":       userID,
-	})
-	if err != nil {
-		return fmt.Errorf("update user settings: %w", err)
+	}); err != nil {
+		return models.UserSettings{}, fmt.Errorf("update user settings: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
+	if err := tx.Commit(ctx); err != nil {
+		return models.UserSettings{}, fmt.Errorf("commit settings merge: %w", err)
 	}
-	return nil
+	return merged, nil
 }
 
 // UpsertFromGoogle creates or updates a user based on their Google subject ID.

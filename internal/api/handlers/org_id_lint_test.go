@@ -37,6 +37,14 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AuthHandler.Register":         "public, pre-auth",
 		"AuthHandler.EmailLogin":       "public, pre-auth",
 		"TeamHandler.AcceptInvitation": "public, token-based (no auth middleware)",
+		"AuthHandler.CLIStart":         "public, pre-auth (CLI browser-login start; chains into GitHub OAuth)",
+		"AuthHandler.CLIExchange":      "public, pre-auth (one-time code + verifier exchange; org comes from the code row)",
+
+		// CLI distribution — public installer/binary routes, no auth.
+		"CLIDistributionHandler.InstallScript":  "public installer script",
+		"CLIDistributionHandler.DownloadBinary": "public binary download",
+		"CLIDistributionHandler.Checksums":      "public checksum file",
+		"CLIDistributionHandler.Version":        "public version endpoint",
 
 		// Webhook routes — signature-verified, not session-authenticated.
 		"WebhookHandler.HandleGitHub":          "external webhook, signature auth",
@@ -59,6 +67,8 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AuthHandler.SetActiveOrg":             "user-scoped preference write; validates membership directly instead of using request org context",
 		"AuthHandler.ClaimInvitation":          "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
 		"AuthHandler.ListPendingInvitations":   "user-scoped query spanning all orgs the user is invited to",
+		"AuthHandler.ListCLITokens":            "user-scoped: a user's CLI device tokens span orgs, like auth_sessions",
+		"AuthHandler.RevokeCLIToken":           "user-scoped self-service revocation; ownership enforced by user_id in the store query",
 		"AuthHandler.AcceptInvitationByID":     "invitee-scoped accept; org context comes from the invitation row itself, not the request",
 		"AuthHandler.DeclineInvitationByID":    "invitee-scoped decline; org context comes from the invitation row itself, not the request",
 		"OrgDomainsHandler.ListJoinable":       "user-scoped cross-org discovery; must work for zero-membership users outside OrgContext",
