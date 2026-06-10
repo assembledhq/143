@@ -1914,6 +1914,12 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
 const THREAD_MESSAGE_WINDOW_LIMIT = 60;
+// First-paint logs window fetched in parallel with the message window, before
+// the loaded messages have resolved which exact turns are visible. Sized to
+// cover at least the turns a full message window can span (every turn carries
+// one or more messages, so 60 messages never span more than 60 turns).
+const THREAD_LOG_BOOTSTRAP_TURNS = THREAD_MESSAGE_WINDOW_LIMIT;
+const THREAD_LOG_BOOTSTRAP_TURNS_KEY = `latest:${THREAD_LOG_BOOTSTRAP_TURNS}`;
 // Sliding window for live SSE logs that may not be visible in persisted log
 // queries yet. The buffer lives in React Query so remounting the chat panel
 // cannot drop the transcript during the SSE-to-DB handoff.
@@ -2112,11 +2118,21 @@ function ChatPanel({
     [activeThread, threadMessages],
   );
   const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
+  // Until the message window resolves which turns are visible, fetch the
+  // thread's latest turns of logs instead of waiting — this runs in parallel
+  // with the messages fetch instead of serializing one round trip behind the
+  // other. Over-fetched turns are harmless: mergeVisibleThreadLogs filters
+  // persisted logs down to the turns of the loaded messages.
+  const threadLogsBootstrapMode = !threadMessagesQuery.isFetched;
   const activeThreadLogsQueryKey = useMemo(
     () => activeThreadId
-      ? threadLogsWindowQueryKey(sessionId, activeThreadId, visibleThreadLogTurnsKey)
+      ? threadLogsWindowQueryKey(
+          sessionId,
+          activeThreadId,
+          threadLogsBootstrapMode ? THREAD_LOG_BOOTSTRAP_TURNS_KEY : visibleThreadLogTurnsKey,
+        )
       : ["session", sessionId, "thread", "none", "logs"] as const,
-    [activeThreadId, sessionId, visibleThreadLogTurnsKey],
+    [activeThreadId, sessionId, threadLogsBootstrapMode, visibleThreadLogTurnsKey],
   );
   const liveLogsQueryKey = useMemo(
     () => activeThreadId
@@ -2130,9 +2146,23 @@ function ChatPanel({
     queryFn: () => api.sessions.getThreadLogs(
       sessionId,
       activeThreadId!,
-      visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
+      threadLogsBootstrapMode
+        ? { latestTurns: THREAD_LOG_BOOTSTRAP_TURNS }
+        : visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
-    enabled: !!activeThreadId && threadMessagesQuery.isFetched,
+    enabled: !!activeThreadId,
+    // Carry the previous window across key changes within the same thread
+    // (bootstrap → precise turns, or the visible turn set growing) so tool
+    // entries don't blink out while the next window loads. Windows from a
+    // different thread must not carry over: their logs can share turn numbers
+    // with the new thread's messages and would survive the visible-turns
+    // filter.
+    placeholderData: (previousData, previousQuery) => {
+      if (!previousQuery || !activeThreadId) return undefined;
+      const threadScopedPrefix = queryKeys.sessions.threadLogs(sessionId, activeThreadId);
+      const previousPrefix = previousQuery.queryKey.slice(0, threadScopedPrefix.length);
+      return JSON.stringify(previousPrefix) === JSON.stringify(threadScopedPrefix) ? previousData : undefined;
+    },
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const liveLogsQuery = useQuery({

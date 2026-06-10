@@ -798,7 +798,10 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	opts := db.SessionLogFilterOptions{TurnNumbers: parseTurnNumbers(r.URL.Query().Get("turn_numbers"))}
+	opts := db.SessionLogFilterOptions{
+		TurnNumbers: parseTurnNumbers(r.URL.Query().Get("turn_numbers")),
+		LatestTurns: parseLatestTurns(r.URL.Query().Get("latest_turns")),
+	}
 	logs, err := h.svc.GetLogs(r.Context(), orgID, sessionID, threadID, opts)
 	if err != nil {
 		if errors.Is(err, thread.ErrThreadNotFound) {
@@ -813,6 +816,24 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{Data: logs})
+}
+
+// maxLatestTurns bounds the latest_turns parameter so a client cannot turn
+// the bounded bootstrap query back into an unbounded full-thread scan.
+const maxLatestTurns = 200
+
+func parseLatestTurns(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	if value > maxLatestTurns {
+		return maxLatestTurns
+	}
+	return value
 }
 
 func parseTurnNumbers(raw string) []int {
