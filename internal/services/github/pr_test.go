@@ -31,14 +31,25 @@ import (
 
 // mockLLMClient implements llm.Client for testing.
 type mockLLMClient struct {
-	response       string
-	err            error
-	lastUserPrompt string
+	response         string
+	err              error
+	lastSystemPrompt string
+	lastUserPrompt   string
 }
 
-func (m *mockLLMClient) Complete(_ context.Context, _, userPrompt string) (string, error) {
+func (m *mockLLMClient) Complete(_ context.Context, systemPrompt, userPrompt string) (string, error) {
+	m.lastSystemPrompt = systemPrompt
 	m.lastUserPrompt = userPrompt
 	return m.response, m.err
+}
+
+type fakeSessionThreadLister struct {
+	threads []models.SessionThread
+	err     error
+}
+
+func (f fakeSessionThreadLister) ListBySessionWithOptions(context.Context, uuid.UUID, uuid.UUID, bool) ([]models.SessionThread, error) {
+	return f.threads, f.err
 }
 
 var prTestIssueColumns = []string{
@@ -1444,6 +1455,179 @@ func TestGeneratePRContent_WithRepoTemplate(t *testing.T) {
 	// Verify the template was passed to the LLM.
 	require.Contains(t, mockLLM.lastUserPrompt, "## What", "LLM prompt should contain the repo template")
 	require.Contains(t, mockLLM.lastUserPrompt, "<pr_template>", "LLM prompt should wrap template in pr_template tags")
+}
+
+func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	primaryThreadID := uuid.New()
+	reviewThreadID := uuid.New()
+	now := time.Now()
+	// The session ResultSummary matches the review thread (last to complete), simulating
+	// a review-loop session where the review thread's summary populated run.ResultSummary.
+	reviewSummary := "Review loop: checked the code and requested naming cleanup."
+	diff := "+++ b/internal/services/github/pr.go\n+func buildPRThreadContext() string { return \"\" }\n"
+	run := &models.Session{
+		ID:              sessionID,
+		PrimaryThreadID: &primaryThreadID,
+		OrgID:           orgID,
+		AgentType:       "claude-code",
+		ResultSummary:   &reviewSummary,
+		Diff:            &diff,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Use session threads for PR context</pr_title>\n<pr_body>\n## Summary\n\nUses all session thread summaries.\n</pr_body>",
+	}
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{
+			ID:            primaryThreadID,
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         "Main",
+			Status:        models.ThreadStatusCompleted,
+			CreatedAt:     now,
+			ResultSummary: ptrString("Implemented PR context generation from thread summaries."),
+		},
+		{
+			ID:                reviewThreadID,
+			SessionID:         sessionID,
+			OrgID:             orgID,
+			Label:             "Review",
+			Status:            models.ThreadStatusCompleted,
+			CreatedAt:         now.Add(time.Minute),
+			CreatedBySource:   models.ThreadCreatedBySourceAgentTool,
+			CreatedByThreadID: &primaryThreadID,
+			ResultSummary:     ptrString(reviewSummary),
+		},
+	}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "generatePRContent should succeed when thread context loads")
+	require.Contains(t, mockLLM.lastUserPrompt, "<session_threads>", "LLM prompt should include session thread context")
+	require.Contains(t, mockLLM.lastUserPrompt, "Main (primary)", "prompt should identify the primary implementation thread")
+	require.Contains(t, mockLLM.lastUserPrompt, "Implemented PR context generation from thread summaries.", "prompt should include primary thread summary")
+	// The review thread's summary matches run.ResultSummary and is already in <agent_summary>;
+	// it must not be duplicated inside <session_threads>.
+	require.Equal(t, 1, strings.Count(mockLLM.lastUserPrompt, reviewSummary),
+		"review summary should appear exactly once (in agent_summary only, not duplicated in session_threads)")
+	agentSummaryIdx := strings.Index(mockLLM.lastUserPrompt, "<agent_summary>")
+	sessionThreadsIdx := strings.Index(mockLLM.lastUserPrompt, "<session_threads>")
+	require.Greater(t, sessionThreadsIdx, agentSummaryIdx, "session_threads block should follow agent_summary block")
+	require.Contains(t, mockLLM.lastSystemPrompt, "Use the code diff, files changed, issue/session title, and session threads as the source of truth", "system prompt should explicitly de-emphasize the newest summary")
+}
+
+func TestGeneratePRContent_ThreadStoreError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	summary := "Agent finished."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+		Diff:          &diff,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Title</pr_title>\n<pr_body>Body</pr_body>",
+	}
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+	svc.SetSessionThreadStore(fakeSessionThreadLister{err: errors.New("db unavailable")})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "generatePRContent should degrade gracefully when thread store errors")
+	require.NotContains(t, mockLLM.lastUserPrompt, "<session_threads>", "prompt should omit session_threads tag when thread store fails")
+}
+
+func TestGeneratePRContent_ThreadCapAndEmptySummaries(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:        sessionID,
+		OrgID:     orgID,
+		AgentType: "claude-code",
+		Diff:      &diff,
+	}
+
+	// Build 10 threads: one with no summary, nine with distinct summaries.
+	// The no-summary thread should be skipped; at most 8 of the 9 summaries should appear.
+	threads := make([]models.SessionThread, 0, 10)
+	threads = append(threads, models.SessionThread{
+		ID:        uuid.New(),
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Label:     "Empty",
+		Status:    models.ThreadStatusCompleted,
+		CreatedAt: now,
+		// ResultSummary intentionally nil
+	})
+	for i := range 9 {
+		s := fmt.Sprintf("Thread summary number %d with distinct content.", i+1)
+		threads = append(threads, models.SessionThread{
+			ID:            uuid.New(),
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         fmt.Sprintf("Thread%d", i+1),
+			Status:        models.ThreadStatusCompleted,
+			CreatedAt:     now.Add(time.Duration(i+1) * time.Minute),
+			ResultSummary: ptrString(s),
+		})
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Title</pr_title>\n<pr_body>Body</pr_body>",
+	}
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: threads})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err)
+	// Threads 1-8 should appear; thread 9 should be capped out.
+	for i := range 8 {
+		require.Contains(t, mockLLM.lastUserPrompt, fmt.Sprintf("Thread summary number %d", i+1))
+	}
+	require.NotContains(t, mockLLM.lastUserPrompt, "Thread summary number 9", "9th summary should be excluded by the 8-thread cap")
+	require.NotContains(t, mockLLM.lastUserPrompt, "Empty", "thread with nil summary should be excluded")
 }
 
 func TestParsePRContentResponse(t *testing.T) {

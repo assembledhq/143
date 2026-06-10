@@ -30,6 +30,7 @@ the PR body as markdown
 
 <guidelines>
 - Keep the title under 120 characters. Use imperative mood (e.g., "Fix null pointer in auth middleware").
+- Use the code diff, files changed, issue/session title, and session threads as the source of truth. Treat the agent summary as one signal, not as the entire story, especially when it describes a review loop.
 - Explain the "why", not just the "what" — the diff already shows the "what".
 - Do not mention the agent, AI, or automation in the title or body.
 - If an issue is provided, reference it naturally in the summary.
