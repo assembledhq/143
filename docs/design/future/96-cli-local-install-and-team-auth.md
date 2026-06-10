@@ -5,16 +5,24 @@
 ## Goal
 
 Let anyone on a 143 team install the `143-tools` CLI on their laptop and authenticate
-with two commands — even if they don't have a 143 account yet:
+with a single command — even if they don't have a 143 account yet:
 
 ```bash
-curl -fsSL https://143.example.com/i/<JOIN_TOKEN> | sh
-143-tools login
+curl -fsSL https://143.com/i/<JOIN_TOKEN> | sh
 ```
 
-The join token lives in the install URL itself, so the server can template the
-script with the server URL *and* the token already baked in — nothing to pass
-after `| sh`, nothing to configure.
+One command total: the installer downloads the binary, writes the config, and
+chains straight into `143-tools login`, so the browser opens for GitHub sign-in
+as the install finishes. The join token lives in the install URL itself, so the
+server can template the script with the server URL *and* the token already baked
+in — nothing to pass after `| sh`, nothing to configure.
+
+The join token is optional — the tokenless form installs and logs in exactly the
+same way, for existing users or anyone without a join link:
+
+```bash
+curl -fsSL https://143.com/i | sh
+```
 
 `login` opens the browser, the user signs in with GitHub (existing OAuth), and if they
 have no 143 account one is created and joined to the org on the spot (JIT provisioning).
@@ -69,29 +77,27 @@ flow, per-user CLI tokens, and multi-use org join tokens.
 
 ```
 admin:  Settings → Members → "CLI install link" → copies one-liner into Slack
-        curl -fsSL https://143.example.com/i/143j_Ab3x9k | sh
+        curl -fsSL https://143.com/i/143j_Ab3x9k | sh
 
 user:   pastes the one-liner
         → server returns the install script with server URL + join token templated in
         → script detects OS/arch, downloads binary to ~/.local/bin/143-tools
         → writes ~/.config/143-tools/config.json {server_url, pending join token}
-        → prints "Run: 143-tools login"
-
-user:   143-tools login
-        → CLI starts listener on 127.0.0.1:<random port>, opens browser to
-          {server}/api/v1/auth/cli/start?port=...&challenge=...&join=143j_Ab3...
-        → GitHub OAuth (existing flow)
-        → no matching user → join token validated → user + membership created
-        → browser shows "You're in — return to your terminal"
-        → CLI receives one-time code, exchanges it, stores token
-        → prints "Logged in as @octocat (Acme Org)"
+        → chains into `143-tools login`:
+            → CLI starts listener on 127.0.0.1:<random port>, opens browser to
+              {server}/api/v1/auth/cli/start?port=...&challenge=...&join=143j_Ab3...
+            → GitHub OAuth (existing flow)
+            → no matching user → join token validated → user + membership created
+            → browser shows "You're in — return to your terminal"
+            → CLI receives one-time code, exchanges it, stores token
+            → prints "Logged in as @octocat (Acme Org)"
 ```
 
 ### Existing 143 user, new laptop
 
-Same one-liner without the token segment — `curl -fsSL https://143.example.com/i | sh`
-then `143-tools login`. The OAuth callback matches their existing GitHub ID and mints
-a CLI token for the new device. (The tokened link also works fine for existing users —
+Same one-liner without the token segment — `curl -fsSL https://143.com/i | sh` —
+which likewise chains into `login`. The OAuth callback matches their existing GitHub
+ID and mints a CLI token for the new device. (The tokened link also works fine for existing users —
 the join token is simply a no-op for someone already in the org — so admins only ever
 need to share one link.)
 
@@ -365,7 +371,7 @@ rows with the same `device_name` after the new token is confirmed working — so
 Config file `~/.config/143-tools/config.json`, mode `0600`:
 
 ```json
-{ "version": 1, "server_url": "https://143.example.com", "token": "143u_...", "org_id": "..." }
+{ "version": 1, "server_url": "https://143.com", "token": "143u_...", "org_id": "..." }
 ```
 
 The `version` field exists so the format can evolve (the obvious future change is
@@ -392,8 +398,13 @@ config file, so the same binary works in both worlds.
 4. **Installer script** behavior: `uname -s/-m` detection, download + checksum
    verify, install to `~/.local/bin` (fall back to `/usr/local/bin` with sudo
    prompt), PATH hint if needed, write `server_url` (+ pending join token, both
-   pre-templated by the server) into the config file, print the `143-tools login`
-   next step. Idempotent — re-running upgrades in place. The entire script body
+   pre-templated by the server) into the config file, then **chain into
+   `143-tools login`** so install + auth is one command. The chain is skipped —
+   printing the `143-tools login` next step instead — when there's no TTY (CI,
+   provisioning scripts) or when already logged in to this server; login itself
+   reads nothing from stdin (it waits on the loopback socket), so running under
+   `curl | sh` with stdin consumed by the pipe is fine. Idempotent — re-running
+   upgrades in place. The entire script body
    must be wrapped in a function invoked on the last line, so a connection that
    drops mid-download executes nothing rather than half a script. macOS note:
    `curl` does not set the quarantine xattr, so unsigned Go binaries run without
