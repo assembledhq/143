@@ -33,19 +33,6 @@ const DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER = 4;
 const MIN_PREVIEW_MAX_PREVIEWS_PER_USER = 1;
 const MAX_PREVIEW_MAX_PREVIEWS_PER_USER = 20;
 
-const settingsTimestampFormatter = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "long",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
-
-function formatUpdatedAt(updatedAt: string | undefined): string | undefined {
-  if (!updatedAt) return undefined;
-  const date = new Date(updatedAt);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return `${settingsTimestampFormatter.format(date)} UTC`;
-}
-
 function useOrgSettingsAutosave() {
   const queryClient = useQueryClient();
   return useAutosave<SettingsPatch>({
@@ -316,10 +303,6 @@ export default function SettingsPage() {
         <PageHeader
           title="General settings"
           description="Manage your organization."
-          subtitle={(() => {
-            const formattedUpdatedAt = formatUpdatedAt(settings?.data?.updated_at);
-            return formattedUpdatedAt ? `Updated at ${formattedUpdatedAt}` : undefined;
-          })()}
         />
         <AuditLogTrigger
           filters={{ resource_type: "settings" }}

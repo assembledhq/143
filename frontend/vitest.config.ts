@@ -43,6 +43,13 @@ export default defineConfig({
   test: {
     globals: true,
     css: false,
+    // Vitest 4 defaults to the forks pool; threads runs this suite ~20%
+    // faster end-to-end with identical results.
+    pool: 'threads',
+    // Reuse workers across test files instead of rebuilding a jsdom
+    // environment and module graph per file. src/test/setup.ts and
+    // setup-node.ts restore the per-file invariants (module registry,
+    // overridden globals) that isolation otherwise provides.
     isolate: false,
     testTimeout: 5_000,
     hookTimeout: 10_000,

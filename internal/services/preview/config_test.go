@@ -1141,6 +1141,14 @@ func TestResolvePreviewInstallCachePaths(t *testing.T) {
 			enabled: true,
 		},
 		{
+			name: "excludes preview marker child clean path glob",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"Cargo.lock"},
+				CleanPaths: []string{".143/cache/preview-install*/*"},
+			},
+			enabled: false,
+		},
+		{
 			name: "explicit opt out disables paths",
 			install: &models.PreviewInstallConfig{
 				Lockfiles:  []string{"package-lock.json"},
@@ -1233,6 +1241,15 @@ func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 				Command:   []string{"npm", "ci"},
 				Lockfiles: []string{"package-lock.json"},
 				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache/preview-install"}},
+			},
+			wantErr: "must not target preview install markers",
+		},
+		{
+			name: "rejects marker parent path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache"}},
 			},
 			wantErr: "must not target preview install markers",
 		},
