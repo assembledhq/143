@@ -37,7 +37,13 @@ import (
 
 const (
 	defaultMaxConcurrent    = 10
-	mentionIndexWarmTimeout = 2 * time.Second
+	// mentionIndexWarmTimeout bounds the proactive mention-index build at
+	// turn-complete. The build walks the whole workspace through a Docker
+	// exec and takes several seconds on large repos; the warm always runs
+	// off the request path (async goroutine or post-terminal cleanup), so a
+	// generous budget costs nothing and an undersized one silently produces
+	// a cold cache for the composer's @-mention picker.
+	mentionIndexWarmTimeout = 60 * time.Second
 	planModePrefix          = "[PLAN_MODE]\n"
 
 	// Claude Code access tokens are short-lived. A sandbox credential with an
@@ -924,6 +930,13 @@ func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session 
 	}
 	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
 		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
+	}
+	// Also warm the cross-turn stale alias. The exact key above is
+	// snapshot-flavored and the composer handler looks up a live-flavored
+	// key while the container is still running, so without the alias this
+	// warm never reaches the @-mention picker's cache lookups.
+	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexStaleCacheKey(&cacheSession), index); err != nil {
+		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index alias")
 	}
 }
 

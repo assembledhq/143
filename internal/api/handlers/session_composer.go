@@ -34,6 +34,10 @@ const sessionComposerSlashCommandLimit = 30
 const sessionComposerTreeCacheTTL = 30 * time.Second
 const sessionComposerCommandContentCacheTTL = 5 * time.Minute
 
+// sessionComposerMentionWarmTimeout bounds the background mention-index
+// build kicked off by the picker-open (empty-q) warm request.
+const sessionComposerMentionWarmTimeout = 60 * time.Second
+
 type sessionComposerRepoTreeService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 	ListRepositoryTree(ctx context.Context, token, owner, repo, branch string) ([]models.RepositoryTreeEntry, error)
@@ -245,9 +249,66 @@ func rankSessionComposerIndexEntries(query string, entries []workspace.MentionIn
 	return results
 }
 
+// sessionMentionIndexKeys returns the exact cache key for the session's
+// current workspace source plus the cross-turn stale alias. The exact key
+// drops SnapshotKey when a live container will serve the build, mirroring
+// resolveReaderForSession's source selection.
+func (h *SessionComposerHandler) sessionMentionIndexKeys(session *models.Session) (string, string) {
+	cacheSession := *session
+	if session.ContainerID != nil && *session.ContainerID != "" && h.workspace.fileReader != nil {
+		cacheSession.SnapshotKey = nil
+	}
+	return workspace.SessionMentionIndexCacheKey(&cacheSession), workspace.SessionMentionIndexStaleCacheKey(session)
+}
+
+// warmSessionMentionIndex builds the session's mention index in the
+// background so a subsequent non-empty query is served from cache. Invoked
+// from the empty-q request the composer fires as soon as the @-picker opens
+// (and from the composer-mount prefetch), so the ~seconds-long workspace walk
+// overlaps with the user typing instead of blocking the first ranked
+// response. Best-effort: every failure is silent because the caller has
+// already responded.
+func (h *SessionComposerHandler) warmSessionMentionIndex(r *http.Request) {
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	detached := context.WithoutCancel(r.Context())
+
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				h.logger.Warn().Interface("panic", rec).Str("session_id", sessionID.String()).Msg("panic warming session mention index")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(detached, sessionComposerMentionWarmTimeout)
+		defer cancel()
+
+		session, err := h.workspace.loadSession(ctx, orgID, sessionID)
+		if err != nil {
+			return
+		}
+		reader, _, err := h.workspace.resolveReaderForSession(ctx, &session)
+		if err != nil {
+			return
+		}
+		cacheKey, staleKey := h.sessionMentionIndexKeys(&session)
+		if _, _, err := h.mentionIndexes.GetOrBuildStale(ctx, cacheKey, staleKey, func(ctx context.Context) (workspace.MentionIndex, error) {
+			return workspace.BuildMentionIndex(ctx, reader)
+		}); err != nil {
+			h.logger.Debug().Err(err).Str("session_id", sessionID.String()).Msg("failed to warm session mention index")
+		}
+	}()
+}
+
 func (h *SessionComposerHandler) ListSessionFileMentions(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
+		// The composer fires an empty-q request the moment the @-picker
+		// opens; use it to start building the index before the first
+		// character of the actual query arrives.
+		h.warmSessionMentionIndex(r)
 		writeJSON(w, http.StatusOK, models.ListResponse[models.SessionInputReference]{Data: []models.SessionInputReference{}})
 		return
 	}
@@ -278,12 +339,8 @@ func (h *SessionComposerHandler) ListSessionFileMentions(w http.ResponseWriter, 
 		return
 	}
 
-	cacheSession := session
-	if session.ContainerID != nil && *session.ContainerID != "" && h.workspace.fileReader != nil {
-		cacheSession.SnapshotKey = nil
-	}
-	cacheKey := workspace.SessionMentionIndexCacheKey(&cacheSession)
-	index, err := h.mentionIndexes.GetOrBuild(r.Context(), cacheKey, func(ctx context.Context) (workspace.MentionIndex, error) {
+	cacheKey, staleKey := h.sessionMentionIndexKeys(&session)
+	index, stale, err := h.mentionIndexes.GetOrBuildStale(r.Context(), cacheKey, staleKey, func(ctx context.Context) (workspace.MentionIndex, error) {
 		return workspace.BuildMentionIndex(ctx, reader)
 	})
 	if err != nil {
@@ -297,6 +354,9 @@ func (h *SessionComposerHandler) ListSessionFileMentions(w http.ResponseWriter, 
 			writeError(w, r, http.StatusInternalServerError, "SNAPSHOT_UNAVAILABLE", "session workspace could not be loaded")
 		}
 		return
+	}
+	if stale {
+		h.logger.Debug().Str("session_id", sessionID.String()).Msg("served stale session mention index while refreshing in background")
 	}
 
 	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionInputReference]{
