@@ -65,7 +65,11 @@ Status meaning always goes through state tokens — **never raw Tailwind palette
 
 Usage recipes: dot `bg-success`; text `text-success`; tinted badge `bg-success/10 text-success`; tinted banner `border-success/30 bg-success/10`; solid fill `bg-success text-success-foreground`. Same shapes for `warning`, `attention`, `info`, `destructive`.
 
-**Exception:** diff add/remove coloring in the code-review viewer keeps its conventional green/red palette classes — that is diff semantics, not status.
+**Exceptions** (the only blessed raw-palette uses):
+
+- Diff add/remove coloring in the code-review viewer keeps its conventional green/red palette classes — that is diff semantics, not status.
+- Plan-mode amber (plan bubbles in `chat-timeline.tsx`, the Plan Mode chip/composer accents in session detail) is a *mode* accent, not a status, and keeps its amber palette classes with `dark:` variants.
+- Violet PR accents are not raw palette either — they must go through `prMergedAccent` in `@/lib/pr-status-styles`, never inline violet classes.
 
 ### Typography Scale
 
@@ -113,6 +117,10 @@ The base font size is `text-[13px]` (set globally on `body`). The project uses a
 | Helper/hint text | `text-xs text-muted-foreground` |
 | Labels | `text-[13px]` (via `<Label>` component) |
 | Code/mono text | `font-mono text-xs` |
+
+#### Quantitative columns
+
+Numbers that users compare or scan (counts, costs, durations, dates in tables/metric rows) always get `tabular-nums`, and quantitative table columns are **right-aligned — header cell included**. Don't right-align the data cells while leaving the header left-aligned.
 
 ### Spacing System
 
@@ -350,7 +358,7 @@ Primary action buttons (Save, Submit) must always be **right-aligned** using `ju
 ```tsx
 <div className="flex items-center justify-end gap-3">
   {saveStatus === "success" && (
-    <span className="text-[13px] text-emerald-600 dark:text-emerald-400">Settings saved.</span>
+    <span className="text-[13px] text-success">Settings saved.</span>
   )}
   {saveStatus === "error" && (
     <span className="text-[13px] text-destructive">Failed to save settings.</span>
@@ -456,6 +464,16 @@ State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to
 | `PageHeader` | `src/components/page-header.tsx` | Standard page title + description + action |
 | `EmptyState` | `src/components/empty-state.tsx` | Empty list/data placeholder |
 | `AuthenticatedLayout` | `src/components/authenticated-layout.tsx` | Sidebar + main content shell |
+| `StatusDot` | `src/components/status-dot.tsx` | Animated/static status dots |
+| `Kbd` | `src/components/ui/kbd.tsx` | Keyboard shortcut hints |
+
+## Keyboard Shortcut Hints
+
+Use the `Kbd` primitive (`src/components/ui/kbd.tsx`) for every keyboard shortcut hint — never hand-roll `<kbd>` styling. Rules:
+
+- Shortcut hints are visual affordances only: `Kbd` renders `aria-hidden`, keeping shortcuts out of accessible names. Don't add your own `aria-label` containing the shortcut.
+- Pick the variant for the surface it sits on: `default` (cards, panels, inputs), `inverted` (tooltips, which use `bg-foreground`), `primary` (solid primary/gradient buttons).
+- Existing wiring to match: ⌘K on the Search tooltip, `/` in session search, `N` on New session.
 
 ## Button Guidelines
 
