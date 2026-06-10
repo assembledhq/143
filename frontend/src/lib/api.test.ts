@@ -1061,74 +1061,6 @@ describe('api client', () => {
     });
   });
 
-  describe('CLI install and sessions', () => {
-    it('creates org join tokens with the expected payload', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.post('/api/v1/org/join-tokens', async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({
-            data: {
-              id: 'join-1',
-              token: '143j_testtoken123',
-              install_command: 'curl -fsSL http://localhost:3000/install/143j_testtoken123 | sh',
-              token_prefix: '143j_test',
-              name: 'Team CLI install link',
-              role: 'member',
-              use_count: 0,
-              status: 'active',
-              created_at: '2026-06-01T00:00:00Z',
-            },
-          });
-        }),
-      );
-
-      const result = await api.orgJoinTokens.create({ name: 'Team CLI install link', role: 'member' });
-
-      expect(capturedBody).toEqual({ name: 'Team CLI install link', role: 'member' });
-      expect(result.data.install_command).toContain('/install/143j_testtoken123');
-    });
-
-    it('revokes org join tokens by id', async () => {
-      let capturedPath = '';
-
-      server.use(
-        http.delete('/api/v1/org/join-tokens/:id', ({ request }) => {
-          capturedPath = new URL(request.url).pathname;
-          return HttpResponse.json({ data: { status: 'revoked' } });
-        }),
-      );
-
-      await api.orgJoinTokens.revoke('join-1');
-
-      expect(capturedPath).toBe('/api/v1/org/join-tokens/join-1');
-    });
-
-    it('lists and revokes current-user CLI tokens', async () => {
-      let revokedPath = '';
-
-      server.use(
-        http.get('/api/v1/auth/cli-tokens', () => {
-          return HttpResponse.json({
-            data: [{ id: 'cli-1', token_prefix: '143u_laptop', expires_at: '2026-09-01T00:00:00Z', created_at: '2026-06-01T00:00:00Z' }],
-            meta: {},
-          });
-        }),
-        http.delete('/api/v1/auth/cli-tokens/:id', ({ request }) => {
-          revokedPath = new URL(request.url).pathname;
-          return HttpResponse.json({ data: { status: 'revoked' } });
-        }),
-      );
-
-      const result = await api.cliTokens.list();
-      await api.cliTokens.revoke('cli-1');
-
-      expect(result.data[0].token_prefix).toBe('143u_laptop');
-      expect(revokedPath).toBe('/api/v1/auth/cli-tokens/cli-1');
-    });
-  });
-
   describe('memories - updateStatus and updateRule', () => {
     it('updates memory status', async () => {
       let capturedBody: unknown;
@@ -1479,7 +1411,7 @@ describe('api client', () => {
       expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456&return_to=%2Fintegrations');
     });
 
-    it('loginSentry redirects to Sentry OAuth', () => {
+    it('loginSentry redirects to backend Sentry OAuth start', () => {
       const loc = { href: '' };
       Object.defineProperty(window, 'location', {
         value: loc,
@@ -1488,7 +1420,19 @@ describe('api client', () => {
       });
 
       api.auth.loginSentry();
-      expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
+    });
+
+    it('integration loginSentry redirects to backend Sentry OAuth start', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.integrations.loginSentry();
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
     });
 
     it('loginLinear redirects to backend Linear OAuth start', () => {

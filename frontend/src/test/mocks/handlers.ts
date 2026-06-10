@@ -700,44 +700,6 @@ export const handlers = [
     } satisfies ListResponse<User>);
   }),
 
-  http.get('/api/v1/org/join-tokens', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
-    });
-  }),
-
-  http.post('/api/v1/org/join-tokens', () => {
-    return HttpResponse.json({
-      data: {
-        id: 'join-1',
-        token: '143j_testtoken123',
-        install_command: 'curl -fsSL http://localhost:3000/install/143j_testtoken123 | sh',
-        token_prefix: '143j_test',
-        name: 'Team CLI install link',
-        role: 'member',
-        use_count: 0,
-        status: 'active',
-        created_at: '2026-06-01T00:00:00Z',
-      },
-    });
-  }),
-
-  http.delete('/api/v1/org/join-tokens/:id', () => {
-    return HttpResponse.json({ data: { status: 'revoked' } });
-  }),
-
-  http.get('/api/v1/auth/cli-tokens', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
-    });
-  }),
-
-  http.delete('/api/v1/auth/cli-tokens/:id', () => {
-    return HttpResponse.json({ data: { status: 'revoked' } });
-  }),
-
   http.get('/api/v1/repositories/summary', () => {
     return HttpResponse.json({
       data: [],

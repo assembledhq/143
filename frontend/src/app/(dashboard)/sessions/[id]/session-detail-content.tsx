@@ -3265,10 +3265,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     !isMobileReviewViewport &&
     (diffFullScreenOverride ?? user?.settings?.diff_viewer_full_screen ?? false);
   const { mutate: persistDiffFullScreen } = useMutation({
-    // PATCH /auth/me/settings replaces the whole settings JSONB, so merge the
-    // existing fields in rather than sending the flag alone.
+    // PATCH /auth/me/settings is a merge patch, so the flag travels alone and
+    // can't clobber settings edited concurrently elsewhere.
     mutationFn: (fullScreen: boolean) =>
-      api.auth.updateSettings({ ...(user?.settings ?? {}), diff_viewer_full_screen: fullScreen }),
+      api.auth.updateSettings({ diff_viewer_full_screen: fullScreen }),
     onSuccess: (response) => {
       queryClient.setQueryData(["auth", "me"], { data: response.data });
     },
@@ -3279,12 +3279,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const toggleDiffFullScreen = useCallback(() => {
     const next = !isDiffFullScreen;
     setDiffFullScreenOverride(next);
-    // Don't persist before the user document has loaded — the merge above
-    // would wipe the other settings fields.
-    if (user) {
-      persistDiffFullScreen(next);
-    }
-  }, [isDiffFullScreen, user, persistDiffFullScreen]);
+    persistDiffFullScreen(next);
+  }, [isDiffFullScreen, persistDiffFullScreen]);
 
   const activeThreadDelivery = activeThread?.inbox_delivery;
   const activeThreadHasRecoverableInbox =

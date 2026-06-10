@@ -63,7 +63,16 @@ export interface ThreadMessageWindowResponse {
   meta: ThreadMessageWindowMeta;
 }
 
-export type UserSettingsUpdateRequest = UserSettings;
+// PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
+// fields keep their stored value, null clears a field, and nested objects
+// merge per key. Send only the fields being changed — never a full settings
+// document rebuilt from the query cache, which would clobber concurrent
+// edits from other tabs.
+export interface UserSettingsUpdateRequest {
+  coding_agent_model_default?: string | null;
+  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max" | null>> | null;
+  diff_viewer_full_screen?: boolean | null;
+}
 
 export interface AuthProviders {
   github: boolean;
@@ -1268,6 +1277,46 @@ export interface InvitationResponse {
   created_at: string;
 }
 
+// JoinToken is a multi-use, revocable org join link backing the CLI install
+// one-liner (`curl .../install/<token> | sh`). Only the display prefix is
+// ever returned after creation.
+export interface JoinToken {
+  id: string;
+  token_prefix: string;
+  name: string;
+  role: string;
+  max_uses?: number | null;
+  use_count: number;
+  expires_at?: string | null;
+  status: 'active' | 'revoked' | 'expired' | 'exhausted';
+  created_at: string;
+}
+
+// CreatedJoinToken is the create response: the plaintext token and the
+// ready-to-paste install command, shown exactly once.
+export interface CreatedJoinToken {
+  id: string;
+  token: string;
+  token_prefix: string;
+  role: string;
+  name: string;
+  expires_at?: string | null;
+  max_uses?: number | null;
+  install_command: string;
+}
+
+// CliToken is one row in the user's own "CLI sessions" list — a per-device
+// credential minted by `143-tools login`.
+export interface CliToken {
+  id: string;
+  token_prefix: string;
+  device_name: string;
+  expires_at: string;
+  last_used_at?: string | null;
+  last_used_ip?: string | null;
+  created_at: string;
+}
+
 // PendingInvitationForUser is the invitee-facing shape: the recipient of an
 // invitation only needs to know which org they're being invited into, by whom,
 // at what role, and when it expires. The token is intentionally omitted —
@@ -1282,42 +1331,6 @@ export interface PendingInvitationForUser {
     name: string;
   };
   expires_at: string;
-  created_at: string;
-}
-
-export interface OrgJoinToken {
-  id: string;
-  token_prefix: string;
-  name: string;
-  role: string;
-  use_count: number;
-  max_uses?: number | null;
-  expires_at?: string | null;
-  revoked_at?: string | null;
-  status: string;
-  created_at: string;
-}
-
-export interface OrgJoinTokenCreated extends OrgJoinToken {
-  token: string;
-  install_command: string;
-}
-
-export interface CreateOrgJoinTokenRequest {
-  name: string;
-  role: string;
-  max_uses?: number | null;
-  expires_in_days?: number | null;
-}
-
-export interface CLIToken {
-  id: string;
-  token_prefix: string;
-  device_name?: string;
-  last_org_id?: string | null;
-  expires_at: string;
-  last_used_at?: string | null;
-  last_used_ip?: string | null;
   created_at: string;
 }
 

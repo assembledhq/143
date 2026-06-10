@@ -256,7 +256,7 @@ export function SetupChecklist() {
             circleciConnected={Boolean(circleciIntegration)}
             mezmoConnected={Boolean(mezmoIntegration)}
             linearLoading={false}
-            onConnectSentry={() => api.auth.loginSentry()}
+            onConnectSentry={() => api.integrations.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
             onConnectNotion={() => { /* Notion requires token input — use the Integrations page */ }}

@@ -103,6 +103,10 @@ func TestMultiTenancyAudit(t *testing.T) {
 		// "users WHERE id = @id" without org_id must add its own exemption
 		// (with its own justification) rather than silently piggybacking.
 		{"users", "where id = @id`"},
+		// MergeSettings: user-scoped settings merge locks the user row by
+		// primary key inside the patch transaction. Same backtick anchoring
+		// rationale as the exemption above.
+		{"users", "where id = @id for update`"},
 
 		{"organization_memberships", "count(*) from organization_memberships where user_id"}, // CountForUser: user-scoped aggregate; the membership set IS the authoritative org list
 		{"coding_credentials", "where status = 'pending_auth'"},                              // JanitorDeletePendingAuthOlderThan: cross-org system cleanup of expired OAuth handshakes

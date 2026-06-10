@@ -2,16 +2,16 @@
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, ShieldCheck, Terminal, Trash2, type LucideIcon } from "lucide-react";
+import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
+import { CLISessionsCard } from "@/components/cli-sessions-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
-import { CopyButton } from "@/components/copy-button";
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -35,7 +35,6 @@ import type {
   CodingAuthAgent,
   CodingAuthStatus,
   CodingCredentialSummary,
-  CLIToken,
   ListResponse,
   UserSettingsUpdateRequest,
 } from "@/lib/types";
@@ -78,23 +77,6 @@ function statusLabel(status: CodingAuthStatus | string | undefined) {
     default:
       return "Unknown";
   }
-}
-
-const cliDateFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-});
-
-function formatCliDate(value: string | null | undefined): string {
-  if (!value) return "Never";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Never";
-  return cliDateFormatter.format(date);
-}
-
-function cliDeviceLabel(token: CLIToken): string {
-  return token.device_name?.trim() || "Unnamed device";
 }
 
 function CredentialList({
@@ -225,6 +207,11 @@ function CredentialList({
 // (Codex + Claude Code today).
 type PersonalAuthType = "subscription" | "api_key";
 
+// Local display map of reasoning defaults (no nulls) vs the wire patch sent
+// to the merge-patch settings endpoint (null clears an agent's entry).
+type ReasoningDefaults = ReturnType<typeof getCodingAgentReasoningDefaultsFromSettings>;
+type ReasoningDefaultsPatch = NonNullable<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]>;
+
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -239,9 +226,9 @@ export default function AccountPage() {
   const [showCodexModal, setShowCodexModal] = useState(false);
   const [showClaudeModal, setShowClaudeModal] = useState(false);
   const [pendingDefaultModel, setPendingDefaultModel] = useState<string | null>(null);
-  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<ReasoningDefaults | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
-  const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const queuedReasoningDefaultsRef = useRef<ReasoningDefaultsPatch | null>(null);
 
   // Personal stack — the user's own credentials, ordered by priority.
   const { data: personalResp } = useQuery<ListResponse<CodingCredentialSummary>>({
@@ -253,30 +240,13 @@ export default function AccountPage() {
     queryKey: ["coding-credentials", "org"],
     queryFn: () => api.codingCredentials.list("org"),
   });
-  const {
-    data: cliTokensResp,
-    isLoading: cliTokensLoading,
-    isError: cliTokensError,
-  } = useQuery<ListResponse<CLIToken>>({
-    queryKey: ["cli-tokens"],
-    queryFn: () => api.cliTokens.list(),
-  });
 
   const personalRows = personalResp?.data ?? [];
   const orgRows = orgResp?.data ?? [];
-  const cliTokens = cliTokensResp?.data ?? [];
-  const showCLICard = Boolean(cliTokensResp) && !cliTokensError;
-  const cliInstallCommand = `curl -fsSL ${
-    typeof window === "undefined" ? "http://localhost:3000" : window.location.origin
-  }/install.sh | sh`;
 
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
   const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
-  const hasEffectiveReasoningDefaults = Object.keys(effectiveReasoningDefaults).length > 0;
-  // Not editable on this page (toggled from the diff viewer toolbar), but it
-  // must ride along with every settings PATCH or it would be wiped.
-  const storedDiffFullScreen = user?.settings?.diff_viewer_full_screen ?? false;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -324,30 +294,14 @@ export default function AccountPage() {
     },
   });
 
-  const revokeCliTokenMutation = useMutation({
-    mutationFn: (id: string) => api.cliTokens.revoke(id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["cli-tokens"] });
-      toast.success("CLI session revoked");
-    },
-    onError: (error) => {
-      captureError(error, { feature: "cli-token-revoke" });
-      toast.error("Could not revoke CLI session");
-    },
-  });
-
   const updateReasoningDefaultsMutation = useMutation({
-    // PATCH replaces the whole settings document, so every settings mutation
-    // on this page must carry the fields it isn't editing.
-    mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
-      api.auth.updateSettings({
-        ...(effectiveDefaultModel ? { coding_agent_model_default: effectiveDefaultModel } : {}),
-        ...(defaults && Object.keys(defaults).length > 0 ? { coding_agent_reasoning_defaults: defaults } : {}),
-        ...(storedDiffFullScreen ? { diff_viewer_full_screen: true } : {}),
-      }),
-    onMutate: (defaults) => {
+    // The settings endpoint is a JSON merge patch, so each save carries only
+    // the per-agent entries that changed (null clears an entry back to the
+    // built-in default).
+    mutationFn: (patch: ReasoningDefaultsPatch) =>
+      api.auth.updateSettings({ coding_agent_reasoning_defaults: patch }),
+    onMutate: () => {
       reasoningSaveInFlightRef.current = true;
-      setPendingReasoningDefaults(defaults);
     },
     onSuccess: (response) => {
       queryClient.setQueryData(["auth", "me"], { data: response.data });
@@ -375,22 +329,28 @@ export default function AccountPage() {
     },
   });
 
-  function saveReasoningDefaults(defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) {
-    setPendingReasoningDefaults(defaults);
+  function saveReasoningDefault(agentType: keyof ReasoningDefaultsPatch, effort: ReasoningDefaults[keyof ReasoningDefaults] | null) {
+    const nextDefaults = { ...effectiveReasoningDefaults };
+    if (effort) {
+      nextDefaults[agentType] = effort;
+    } else {
+      delete nextDefaults[agentType];
+    }
+    setPendingReasoningDefaults(nextDefaults);
     if (reasoningSaveInFlightRef.current) {
-      queuedReasoningDefaultsRef.current = defaults;
+      // Merge queued entries per agent so rapid edits to different agents
+      // all land instead of the last patch replacing the queue.
+      queuedReasoningDefaultsRef.current = { ...queuedReasoningDefaultsRef.current, [agentType]: effort };
       return;
     }
-    updateReasoningDefaultsMutation.mutate(defaults);
+    updateReasoningDefaultsMutation.mutate({ [agentType]: effort });
   }
 
   const updateDefaultModelMutation = useMutation({
+    // Merge-patch endpoint: send just the model, with null clearing the
+    // stored default when the user picks "Default".
     mutationFn: (model: string) =>
-      api.auth.updateSettings({
-        ...(model ? { coding_agent_model_default: model } : {}),
-        ...(hasEffectiveReasoningDefaults ? { coding_agent_reasoning_defaults: effectiveReasoningDefaults } : {}),
-        ...(storedDiffFullScreen ? { diff_viewer_full_screen: true } : {}),
-      }),
+      api.auth.updateSettings({ coding_agent_model_default: model || null }),
     onMutate: (model) => {
       setPendingDefaultModel(model);
     },
@@ -476,75 +436,6 @@ export default function AccountPage() {
           )}
         />
 
-        {showCLICard && (
-          <Card>
-            <CardHeader>
-              <CardTitle role="heading" aria-level={2} className="flex items-center gap-2">
-                <Terminal className="h-4 w-4 text-muted-foreground" />
-                143-tools CLI
-              </CardTitle>
-              <CardDescription>
-                Install the local CLI on this machine, then sign in with GitHub to use this org from local coding agents.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4 pb-6">
-              <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-medium text-foreground">Install command</p>
-                  <CopyButton value={cliInstallCommand} label="Copy CLI install command" />
-                </div>
-                <pre className="overflow-x-auto rounded-md bg-background px-3 py-2 text-xs text-foreground">
-                  <code>{cliInstallCommand}</code>
-                </pre>
-              </div>
-
-              <div className="space-y-2">
-                <h3 className="text-xs font-medium text-foreground">CLI sessions</h3>
-                {cliTokensLoading ? (
-                  <div className="rounded-md border border-border px-3 py-3 text-xs text-muted-foreground">
-                    Loading CLI sessions...
-                  </div>
-                ) : cliTokens.length === 0 ? (
-                  <div className="rounded-md border border-border px-3 py-3 text-xs text-muted-foreground">
-                    No CLI sessions yet.
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border rounded-md border border-border">
-                    {cliTokens.map((token) => {
-                      const device = cliDeviceLabel(token);
-                      return (
-                        <div key={token.id} className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="min-w-0 space-y-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-xs font-medium text-foreground">{device}</span>
-                              <Badge variant="outline" className="font-mono">{token.token_prefix}</Badge>
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              Last used {formatCliDate(token.last_used_at)} · Expires {formatCliDate(token.expires_at)}
-                            </div>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="w-full justify-start text-destructive hover:text-destructive sm:w-auto"
-                            disabled={revokeCliTokenMutation.isPending}
-                            aria-label={`Revoke CLI session ${device}`}
-                            onClick={() => revokeCliTokenMutation.mutate(token.id)}
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Revoke
-                          </Button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
         <Card>
           <CardHeader>
             <CardTitle>My coding agents</CardTitle>
@@ -588,6 +479,8 @@ export default function AccountPage() {
             />
           </CardContent>
         </Card>
+
+        <CLISessionsCard />
 
         <Card>
           <CardHeader>
@@ -633,13 +526,7 @@ export default function AccountPage() {
                       value={defaultReasoning || "__default__"}
                       onValueChange={(value) => {
                         const nextValue = value === "__default__" ? "" : toCodingAgentReasoningEffort(value);
-                        const nextDefaults = { ...effectiveReasoningDefaults };
-                        if (nextValue) {
-                          nextDefaults[agentType as "codex" | "claude_code"] = nextValue;
-                        } else {
-                          delete nextDefaults[agentType as "codex" | "claude_code"];
-                        }
-                        saveReasoningDefaults(nextDefaults);
+                        saveReasoningDefault(agentType as "codex" | "claude_code", nextValue || null);
                       }}
                     >
                       <SelectTrigger

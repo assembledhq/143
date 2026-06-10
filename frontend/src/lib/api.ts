@@ -2,8 +2,6 @@ import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
 import { normalizeAPIResponse } from './api-normalize';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
-const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
-const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
 
 export class ApiError extends Error {
   constructor(public code: string, message: string, public details?: unknown) {
@@ -178,12 +176,7 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/auth/google/login${qs ? `?${qs}` : ''}`;
     },
     loginSentry: () => {
-      const params = new URLSearchParams({
-        client_id: SENTRY_CLIENT_ID,
-        response_type: 'code',
-        redirect_uri: SENTRY_REDIRECT_URI,
-      });
-      window.location.href = `https://sentry.io/oauth/authorize/?${params.toString()}`;
+      window.location.href = `${API_BASE}/api/v1/integrations/sentry/login`;
     },
     loginEmail: (email: string, password: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
@@ -707,6 +700,9 @@ export const api = {
     loginLinear: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
     },
+    loginSentry: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/sentry/login`;
+    },
     connectLinear: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/linear/connect'),
     loginSlack: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
@@ -876,17 +872,17 @@ export const api = {
         `/api/v1/team/github/users?q=${encodeURIComponent(q)}`,
       ),
   },
-  orgJoinTokens: {
-    list: () =>
-      get<import('./types').ListResponse<import('./types').OrgJoinToken>>('/api/v1/org/join-tokens'),
-    create: (body: import('./types').CreateOrgJoinTokenRequest) =>
-      post<import('./types').SingleResponse<import('./types').OrgJoinTokenCreated>>('/api/v1/org/join-tokens', body),
-    revoke: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
-  },
-  cliTokens: {
-    list: () =>
-      get<import('./types').ListResponse<import('./types').CLIToken>>('/api/v1/auth/cli-tokens'),
-    revoke: (id: string) => del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/auth/cli-tokens/${id}`),
+  cli: {
+    // Org join links for the `curl .../install/<token> | sh` onboarding flow (admin-only).
+    listJoinTokens: () =>
+      get<import('./types').ListResponse<import('./types').JoinToken>>('/api/v1/org/join-tokens'),
+    createJoinToken: (body: { name?: string; role?: string; max_uses?: number; expires_in_days?: number }) =>
+      post<import('./types').SingleResponse<import('./types').CreatedJoinToken>>('/api/v1/org/join-tokens', body),
+    revokeJoinToken: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
+    // The caller's own CLI device tokens (any authenticated user).
+    listCliTokens: () =>
+      get<import('./types').ListResponse<import('./types').CliToken>>('/api/v1/auth/cli-tokens'),
+    revokeCliToken: (id: string) => del<void>(`/api/v1/auth/cli-tokens/${id}`),
   },
   projects: {
     list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; created_by_ids?: string[]; include_archived?: boolean; only_archived?: boolean }) => {

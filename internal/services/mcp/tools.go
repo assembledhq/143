@@ -52,6 +52,16 @@ func taskManagerUnauthorizedDetail(providerName string, err error) string {
 	return detail
 }
 
+// ToolSource is the dispatch surface shared by the MCP server and the CLI:
+// a listing of available tools plus a call entry point. Implemented by
+// ToolRegistry (direct execution with local credentials, the sandbox model)
+// and by the CLI's server-proxied source (laptop model — credentials stay
+// server-side and every call is audited per-user).
+type ToolSource interface {
+	ListTools() []Tool
+	CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult
+}
+
 // ToolRegistry builds MCP tool definitions from an integration registry and
 // dispatches tool calls to the appropriate integration method.
 type ToolRegistry struct {

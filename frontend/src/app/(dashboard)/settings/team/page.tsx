@@ -2,13 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Github, Mail, Terminal, Trash2, UserPlus } from "lucide-react";
+import { Github, Mail, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -39,7 +39,7 @@ import {
 } from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
-import { CopyButton } from "@/components/copy-button";
+import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { roleLabel } from "@/lib/roles";
@@ -50,8 +50,6 @@ import type {
   SingleResponse,
   GitHubInviteStatus,
   GitHubUserSuggestion,
-  OrgJoinToken,
-  OrgJoinTokenCreated,
 } from "@/lib/types";
 
 type InviteDraft =
@@ -69,8 +67,6 @@ export default function TeamSettingsPage() {
   const [githubNotificationEmail, setGithubNotificationEmail] = useState("");
   const [inviteError, setInviteError] = useState("");
   const [actionError, setActionError] = useState("");
-  const [cliInstallCommand, setCliInstallCommand] = useState("");
-  const [cliActionError, setCliActionError] = useState("");
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
   const [removingMember, setRemovingMember] = useState<User | null>(null);
   const [pendingRoleChange, setPendingRoleChange] = useState<{
@@ -97,16 +93,6 @@ export default function TeamSettingsPage() {
     enabled: canManageTeam,
   });
   const githubConnected = ghStatusData?.data.connected ?? false;
-
-  const {
-    data: joinTokensData,
-    isLoading: joinTokensLoading,
-    isError: joinTokensError,
-  } = useQuery<ListResponse<OrgJoinToken>>({
-    queryKey: ["org-join-tokens"],
-    queryFn: () => api.orgJoinTokens.list(),
-    enabled: canManageTeam,
-  });
 
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedGhQuery(ghSearchQuery.trim()), pollMs(200));
@@ -185,39 +171,8 @@ export default function TeamSettingsPage() {
     },
   });
 
-  const createJoinTokenMutation = useMutation<SingleResponse<OrgJoinTokenCreated>, Error>({
-    mutationFn: () =>
-      api.orgJoinTokens.create({
-        name: "Team CLI install link",
-        role: "member",
-      }),
-    onSuccess: (response) => {
-      setCliInstallCommand(response.data.install_command);
-      setCliActionError("");
-      queryClient.invalidateQueries({ queryKey: ["org-join-tokens"] });
-    },
-    onError: (error: Error) => {
-      captureError(error, { feature: "team-cli-install-link-create" });
-      setCliActionError(error.message || "Failed to create CLI install link.");
-    },
-  });
-
-  const revokeJoinTokenMutation = useMutation({
-    mutationFn: (id: string) => api.orgJoinTokens.revoke(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["org-join-tokens"] });
-      setCliActionError("");
-    },
-    onError: (error: Error) => {
-      captureError(error, { feature: "team-cli-install-link-revoke" });
-      setCliActionError(error.message || "Failed to revoke CLI install link.");
-    },
-  });
-
   const members = membersData?.data ?? [];
   const invitations = invitationsData?.data ?? [];
-  const joinTokens = joinTokensData?.data ?? [];
-  const showCLIInstallCard = canManageTeam && Boolean(joinTokensData) && !joinTokensError;
 
   const resetInviteForm = () => {
     setInviteEmail("");
@@ -330,10 +285,6 @@ export default function TeamSettingsPage() {
   const inviteDraftMatchesMode = inviteDraft?.mode === inviteMode;
   const emailDraftActive = inviteMode === "email" && inviteDraftMatchesMode;
   const githubDraftActive = inviteMode === "github" && inviteDraftMatchesMode;
-  const joinTokenUsageLabel = (token: OrgJoinToken) => {
-    const uses = `${token.use_count} ${token.use_count === 1 ? "use" : "uses"}`;
-    return token.max_uses ? `${uses} of ${token.max_uses}` : uses;
-  };
 
   return (
     <PageContainer size="default">
@@ -357,103 +308,6 @@ export default function TeamSettingsPage() {
         <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
           Only admins can manage team roles, invitations, and removals.
         </div>
-      )}
-
-      {showCLIInstallCard && (
-        <section className="space-y-3" aria-labelledby="cli-install-heading">
-          <Card>
-            <CardHeader className="border-b border-border/60">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="space-y-1.5">
-                  <CardTitle id="cli-install-heading" role="heading" aria-level={2} className="flex items-center gap-2">
-                    <Terminal className="h-4 w-4 text-muted-foreground" />
-                    CLI install
-                  </CardTitle>
-                  <CardDescription>
-                    Create a join-capable install command for teammates setting up 143-tools on their laptop.
-                  </CardDescription>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="w-full sm:w-auto"
-                  disabled={createJoinTokenMutation.isPending}
-                  onClick={() => createJoinTokenMutation.mutate()}
-                >
-                  Create install link
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {cliActionError && (
-                <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  {cliActionError}
-                </div>
-              )}
-
-              {cliInstallCommand && (
-                <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-xs font-medium text-foreground">One-time install command</p>
-                    <CopyButton value={cliInstallCommand} label="Copy CLI install command" />
-                  </div>
-                  <pre className="overflow-x-auto rounded-md bg-background px-3 py-2 text-xs text-foreground">
-                    <code>{cliInstallCommand}</code>
-                  </pre>
-                  <p className="text-xs text-muted-foreground">
-                    This full command is shown once. Existing active links remain listed by prefix below.
-                  </p>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-medium text-foreground">Active links</h3>
-                </div>
-                {joinTokensLoading ? (
-                  <div className="rounded-md border border-border px-3 py-3 text-xs text-muted-foreground">
-                    Loading CLI install links...
-                  </div>
-                ) : joinTokens.length === 0 ? (
-                  <div className="rounded-md border border-border px-3 py-3 text-xs text-muted-foreground">
-                    No CLI install links yet.
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border rounded-md border border-border">
-                    {joinTokens.map((token) => (
-                      <div key={token.id} className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-xs font-medium text-foreground">{token.token_prefix}</span>
-                            <Badge variant={token.status === "active" ? "secondary" : "outline"}>
-                              {token.status}
-                            </Badge>
-                            <Badge variant="outline">{roleLabel(token.role)}</Badge>
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {token.name || "CLI install link"} · {joinTokenUsageLabel(token)}
-                          </div>
-                        </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="w-full justify-start text-destructive hover:text-destructive sm:w-auto"
-                          disabled={revokeJoinTokenMutation.isPending}
-                          aria-label={`Revoke CLI install link ${token.token_prefix}`}
-                          onClick={() => revokeJoinTokenMutation.mutate(token.id)}
-                        >
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Revoke
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </section>
       )}
 
       {/* Members List */}
@@ -659,6 +513,9 @@ export default function TeamSettingsPage() {
           </Card>
         </section>
       )}
+
+      {/* CLI install links (admin-only: creating one hands out membership) */}
+      {canManageTeam && <CLIJoinTokensCard />}
 
       {/* Invite Member Dialog */}
       {canManageTeam && (

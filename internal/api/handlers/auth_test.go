@@ -1056,9 +1056,14 @@ func TestAuthHandler_UpdateSettings(t *testing.T) {
 	now := time.Now()
 	settings := []byte(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`)
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 	mock.ExpectExec("UPDATE users SET settings = @settings").
 		WithArgs(pgxmock.AnyArg(), userID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -1155,9 +1160,25 @@ func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
 			expectedBody: "INVALID_BODY",
 		},
 		{
+			name:         "returns invalid body for non-object patch",
+			handler:      newAuthHandlerWithUserStore(t, nil),
+			body:         `[{"diff_viewer_full_screen":true}]`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_BODY",
+		},
+		{
 			name:         "returns invalid settings for unsupported effort",
 			handler:      newAuthHandlerWithUserStore(t, nil),
 			body:         `{"coding_agent_reasoning_defaults":{"codex":"max"}}`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_USER_SETTINGS",
+		},
+		{
+			name:         "returns invalid settings for unknown patch field",
+			handler:      newAuthHandlerWithUserStore(t, nil),
+			body:         `{"not_a_setting":null}`,
 			setupCtx:     withAuthUser,
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_USER_SETTINGS",
@@ -1169,9 +1190,14 @@ func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
 				require.NoError(t, err, "should create pgxmock pool without error")
 				t.Cleanup(func() { mock.Close() })
 				userID := authCoverageUserID
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 				mock.ExpectExec("UPDATE users SET settings = @settings").
 					WithArgs(pgxmock.AnyArg(), userID).
 					WillReturnError(errors.New("write failed"))
+				mock.ExpectRollback()
 				return NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
 			}(),
 			body:         `{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`,
@@ -1186,9 +1212,14 @@ func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
 				require.NoError(t, err, "should create pgxmock pool without error")
 				t.Cleanup(func() { mock.Close() })
 				userID := authCoverageUserID
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 				mock.ExpectExec("UPDATE users SET settings = @settings").
 					WithArgs(pgxmock.AnyArg(), userID).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectCommit()
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 					WithArgs(userID).
 					WillReturnError(errors.New("reload failed"))
