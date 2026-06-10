@@ -23,8 +23,39 @@ import {
 } from "@/components/ui/alert-dialog";
 import type { ListResponse, OrganizationDomain } from "@/lib/types";
 
+// copyText writes to the clipboard, falling back to the legacy
+// execCommand path when the async Clipboard API is unavailable —
+// navigator.clipboard only exists in secure contexts, and self-hosted
+// deployments reached over plain HTTP (e.g. a LAN IP) are a real audience
+// for this screen. Returns whether the copy succeeded.
+async function copyText(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Permission denied or transient failure — try the legacy path.
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 // CopyButton copies a DNS record fragment and flashes a checkmark. Local
 // state per button so copying the name doesn't light up the value's button.
+// On copy failure the record stays selectable as plain text, so the flow
+// degrades to manual selection rather than dead-ending.
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -35,7 +66,8 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       className="h-6 w-6 p-0 shrink-0"
       aria-label={`Copy ${label}`}
       onClick={() => {
-        void navigator.clipboard.writeText(value).then(() => {
+        void copyText(value).then((ok) => {
+          if (!ok) return;
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
         });

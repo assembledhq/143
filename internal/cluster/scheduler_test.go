@@ -835,7 +835,10 @@ type mockDomainStore struct {
 	}
 }
 
-func (m *mockDomainStore) ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time) ([]models.OrganizationDomain, error) {
+func (m *mockDomainStore) ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time, limit int) ([]models.OrganizationDomain, error) {
+	if len(m.due) > limit {
+		return m.due[:limit], m.listErr
+	}
 	return m.due, m.listErr
 }
 

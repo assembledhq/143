@@ -175,17 +175,40 @@ func (s *OrganizationDomainStore) AutoJoinDomainExists(ctx context.Context, doma
 	return exists, nil
 }
 
-// ListVerifiedDueForRecheck returns verified domains whose last check is
-// older than the cutoff (or never ran), for the daily DNS re-check sweep.
+// VerifiedDomainExists reports whether ANY org has verified the given
+// domain (regardless of the auto-join toggle). Used for identity
+// stickiness: an account email on a company-verified domain is treated as
+// the user's canonical identity and survives profile-email churn.
+//
+// lint:allow-no-orgid reason="org-blind existence probe over verified company domains"
+func (s *OrganizationDomainStore) VerifiedDomainExists(ctx context.Context, domain string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM organization_domains
+			WHERE domain = @domain AND status = 'verified'
+		)`, pgx.NamedArgs{"domain": domain}).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check verified domain existence: %w", err)
+	}
+	return exists, nil
+}
+
+// ListVerifiedDueForRecheck returns up to limit verified domains whose last
+// check is older than the cutoff (or never ran), oldest-checked first, for
+// the daily DNS re-check sweep. The limit bounds DNS work per scheduler
+// tick (each check is up to two lookups with 5s timeouts); the
+// last_checked_at watermark drains any backlog across subsequent ticks.
 //
 // lint:allow-no-orgid reason="cross-org system sweep run by the leader-elected scheduler"
-func (s *OrganizationDomainStore) ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time) ([]models.OrganizationDomain, error) {
+func (s *OrganizationDomainStore) ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time, limit int) ([]models.OrganizationDomain, error) {
 	query := fmt.Sprintf(`
 		SELECT %s FROM organization_domains
 		WHERE status = 'verified'
 		  AND (last_checked_at IS NULL OR last_checked_at < @checked_before)
-		ORDER BY last_checked_at ASC NULLS FIRST`, orgDomainSelectColumns)
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"checked_before": checkedBefore})
+		ORDER BY last_checked_at ASC NULLS FIRST
+		LIMIT @limit`, orgDomainSelectColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"checked_before": checkedBefore, "limit": limit})
 	if err != nil {
 		return nil, fmt.Errorf("query domains due for recheck: %w", err)
 	}

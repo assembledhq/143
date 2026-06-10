@@ -118,7 +118,7 @@ type Scheduler struct {
 // schedulerDomainStore is the verified-domain surface for the daily DNS
 // re-check sweep (expired/transferred-domain hygiene for auto-join).
 type schedulerDomainStore interface {
-	ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time) ([]models.OrganizationDomain, error)
+	ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time, limit int) ([]models.OrganizationDomain, error)
 	RecordRecheckSuccess(ctx context.Context, id uuid.UUID) error
 	RecordRecheckFailure(ctx context.Context, id uuid.UUID, maxFailures int) (int, bool, error)
 }
@@ -133,6 +133,13 @@ type schedulerDomainVerifier interface {
 // so the 10-minute scheduler tick re-checks each domain about once a day
 // without extra bookkeeping.
 const domainRecheckInterval = 24 * time.Hour
+
+// domainRecheckBatchSize bounds DNS work per scheduler tick: each domain
+// costs up to two lookups with 5s timeouts, and runOnce is sequential, so
+// an unbounded sweep on a bad DNS day could starve every other scheduler
+// pass. 25/tick clears 3600 domains/day — far above any realistic count —
+// while capping a worst-case tick at ~4 minutes of DNS.
+const domainRecheckBatchSize = 25
 
 func NewScheduler(
 	lock schedulerLock,
@@ -352,7 +359,7 @@ func (s *Scheduler) recheckVerifiedDomains(ctx context.Context, now time.Time) {
 		return
 	}
 
-	due, err := s.domainStore.ListVerifiedDueForRecheck(ctx, now.Add(-domainRecheckInterval))
+	due, err := s.domainStore.ListVerifiedDueForRecheck(ctx, now.Add(-domainRecheckInterval), domainRecheckBatchSize)
 	if err != nil {
 		s.logger.Warn().Err(err).Msg("failed to list verified domains due for recheck")
 		return

@@ -580,7 +580,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		// Known GitHub user — update and sign in.
 		existingUser.Name = displayName
-		existingUser.Email = email
+		existingUser.Email = h.resolveExistingGitHubEmail(r.Context(), existingUser.Email, email, ghEmails)
 		existingUser.GitHubLogin = &ghUser.Login
 		existingUser.AvatarURL = &ghUser.AvatarURL
 		existingUser.GitHubNoreplyEmail = &noreplyEmail
@@ -588,8 +588,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusInternalServerError, "USER_UPSERT_FAILED", "failed to upsert user", upsertErr)
 			return
 		}
-		h.markGitHubEmailVerified(r, existingUser.ID, ghEmails, email)
-		h.claimPendingInvitationForExistingUser(r, pendingInvite, email, ghUser.Login, existingUser.ID)
+		h.markGitHubEmailVerified(r, existingUser.ID, ghEmails, existingUser.Email)
+		h.claimPendingInvitationForExistingUser(r, pendingInvite, existingUser.Email, ghUser.Login, existingUser.ID)
 		// An existing user carrying a join token for an org they're not in
 		// gets the membership granted; already-a-member or a bad token is a
 		// no-op (matches ClaimInvitation's best-effort posture).
@@ -1071,6 +1071,46 @@ func (h *AuthHandler) markEmailVerified(r *http.Request, userID uuid.UUID, attes
 	if err := h.userStore.SetEmailVerification(r.Context(), userID, email, attested); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", userID.String()).Msg("failed to record email verification")
 	}
+}
+
+// resolveExistingGitHubEmail decides which email an existing GitHub-linked
+// account keeps on login. The default is today's refresh behavior: adopt
+// the incoming profile email. The exception is identity stickiness for
+// captured work addresses — when the stored email is still GitHub-verified
+// AND its domain is company-verified, it IS the account's canonical
+// identity (invitations, the team directory, and every domain feature key
+// on it), and the profile email — typically the noreply fallback or a
+// personal address — must not overwrite it. Without this, an account
+// created via alternate-email domain capture silently reverts to its
+// noreply address on the second login.
+//
+// The protection drops the moment GitHub stops attesting the stored
+// address (e.g. it was removed after leaving the company) or the domain's
+// verification is deleted; a nil emails list (failed fetch) also falls
+// back to the refresh path rather than trusting stale state.
+func (h *AuthHandler) resolveExistingGitHubEmail(ctx context.Context, stored, incoming string, emails []gitHubEmail) string {
+	if stored == "" || strings.EqualFold(stored, incoming) {
+		return incoming
+	}
+	if !gitHubEmailVerified(emails, stored) {
+		return incoming
+	}
+	if h.orgDomains == nil {
+		return incoming
+	}
+	storedDomain := domains.EmailDomain(stored)
+	if storedDomain == "" || domains.IsPublicEmailDomain(storedDomain) {
+		return incoming
+	}
+	exists, err := h.orgDomains.VerifiedDomainExists(ctx, storedDomain)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("verified-domain lookup failed during email resolution; refreshing from profile")
+		return incoming
+	}
+	if exists {
+		return stored
+	}
+	return incoming
 }
 
 // markGitHubEmailVerified is markEmailVerified with GitHub's tri-state

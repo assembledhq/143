@@ -263,3 +263,100 @@ func TestAuthHandler_Callback_LinkBlockedForUnverifiedEmail(t *testing.T) {
 	require.Contains(t, w.Body.String(), "EMAIL_NOT_VERIFIED")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+// TestResolveExistingGitHubEmail pins identity stickiness: an account whose
+// email is a GitHub-verified address on a company-verified domain keeps it
+// across logins; everyone else gets today's refresh-from-profile behavior.
+func TestResolveExistingGitHubEmail(t *testing.T) {
+	t.Parallel()
+
+	const work = "alice@assembledhq.com"
+	noreply := "42+alicehub@users.noreply.github.com"
+
+	t.Run("captured work identity survives a noreply profile email", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectQuery("SELECT EXISTS").
+			WithArgs("assembledhq.com").
+			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, nil, nil)
+		handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+
+		got := handler.resolveExistingGitHubEmail(context.Background(), work, noreply,
+			[]gitHubEmail{{Email: work, Primary: true, Verified: true}, {Email: noreply, Verified: true}})
+		require.Equal(t, work, got, "the captured identity must not revert to the noreply address on later logins")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("protection drops when GitHub stops attesting the stored address", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		// No domain query: an unattested stored address never reaches the
+		// DB check (e.g. the work email was removed after offboarding).
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, nil, nil)
+		handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+
+		got := handler.resolveExistingGitHubEmail(context.Background(), work, noreply,
+			[]gitHubEmail{{Email: noreply, Verified: true}})
+		require.Equal(t, noreply, got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("non-captured domains keep the refresh behavior", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		mock.ExpectQuery("SELECT EXISTS").
+			WithArgs("elsewhere.example").
+			WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, nil, nil)
+		handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+
+		got := handler.resolveExistingGitHubEmail(context.Background(), "bob@elsewhere.example", "bob-new@personal.example",
+			[]gitHubEmail{
+				{Email: "bob@elsewhere.example", Verified: true},
+				{Email: "bob-new@personal.example", Primary: true, Verified: true},
+			})
+		require.Equal(t, "bob-new@personal.example", got, "ordinary profile-email changes must still refresh")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("public-domain stored email short-circuits without a DB call", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, nil, nil)
+		handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+
+		got := handler.resolveExistingGitHubEmail(context.Background(), "old@gmail.com", work,
+			[]gitHubEmail{{Email: "old@gmail.com", Verified: true}, {Email: work, Primary: true, Verified: true}})
+		require.Equal(t, work, got)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("nil emails list falls back to refresh", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, nil, nil)
+		handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+
+		got := handler.resolveExistingGitHubEmail(context.Background(), work, noreply, nil)
+		require.Equal(t, noreply, got, "a failed /user/emails fetch must not freeze a possibly-stale identity")
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}

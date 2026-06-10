@@ -80,7 +80,14 @@ resolver failures surface as errors.
    email — engineers commonly keep the profile email private (noreply
    fallback) or personal while the verified work address sits in
    `/user/emails`; the matched address becomes the account identity,
-   unless an existing account already owns it.
+   unless an existing account already owns it. The captured identity is
+   sticky: on later logins a stored email that is still GitHub-verified
+   and on a company-verified domain survives the profile-email refresh
+   (`resolveExistingGitHubEmail`) — otherwise the second login would
+   silently revert the account to its noreply/personal address and break
+   invitation matching and the domain surfaces. The protection drops
+   when GitHub stops attesting the address (offboarding) or the domain
+   claim is deleted.
 2. **Password signup**: Register emails a verification link; confirming it
    auto-joins the captured org (see above).
 3. **Existing users**: `GET /api/v1/orgs/joinable` lists matching orgs
@@ -104,7 +111,9 @@ takeover, which domain capture would otherwise make more attractive.
 
 A leader-elected scheduler sweep re-checks each verified domain's TXT
 record roughly daily (`recheckVerifiedDomains`, gated by
-`last_checked_at`). After 3 consecutive affirmative-missing checks
+`last_checked_at`, bounded to 25 domains per tick so a bad DNS day
+cannot starve the scheduler's other passes). After 3 consecutive
+affirmative-missing checks
 (`failed_checks`; resolver errors don't count and don't stamp), auto-join
 is disabled and a system audit event emitted — bounding how long an
 expired/transferred domain keeps admitting new members. The verified claim
