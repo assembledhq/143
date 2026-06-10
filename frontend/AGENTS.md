@@ -464,6 +464,16 @@ Always include `dark:` variants for banners that use **hardcoded Tailwind color 
 
 When in doubt, write the immutable version first. It's almost always fast enough and it sidesteps a whole class of stale-render and cache-corruption bugs.
 
+## Settings Mutations: Patch, Don't Replace
+
+Settings-style endpoints (user settings, org settings, per-resource preference documents) use **JSON merge-patch semantics** (RFC 7386): omitted fields keep their stored value, `null` clears a field, and nested objects merge per key. `PATCH /api/v1/auth/me/settings` works this way.
+
+- **Send only the fields the user changed.** A toggle sends `{ diff_viewer_full_screen: true }` — nothing else.
+- **Clear a field with an explicit `null`**, not by omitting it: `{ coding_agent_model_default: null }`.
+- **Never rebuild the full settings document from the React Query cache** (`{ ...user.settings, changed_field: value }`) and send it as the mutation body. The local cache can be stale, so the write clobbers concurrent edits made in another tab or surface (cross-tab last-write-wins). This was the old contract for `/auth/me/settings` and it caused exactly that bug.
+- **When adding a new settings-style endpoint, give it merge-patch semantics on the backend** rather than full-document replace, so callers are never forced into the cache-merge pattern. See `UserStore.MergeSettings` + `models.ApplyUserSettingsMergePatch` for the server-side reference implementation, and the backend rule in `internal/AGENTS.md`.
+- If multiple rapid edits to the same patch field are coalesced client-side (in-flight + queued refs), **merge queued patches per key** instead of replacing the queue, so edits to different keys all land.
+
 ## Error Reporting (Sentry)
 
 Errors are reported to Sentry via `@sentry/nextjs`. Three layers handle this automatically:
@@ -514,3 +524,4 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.
 10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.
 11. **Insufficient header-to-scroll-area spacing** — Fixed header sections above scrollable content must have at least `pb-3` (12px) bottom padding. Using `pb-2` or less causes the scroll area to overlap with the last header element (e.g., filter tabs, buttons), clipping their bottom border or active indicator.
+12. **Full-document settings writes** — Never spread the cached settings object into a mutation body to "preserve" unchanged fields. Settings endpoints are merge patches; send only the changed fields (see "Settings Mutations: Patch, Don't Replace").
