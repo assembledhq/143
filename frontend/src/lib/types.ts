@@ -892,8 +892,13 @@ export interface PullRequestCheckSummary {
 export interface PullRequestActiveRepair {
   action_type: "fix_tests" | "resolve_conflicts";
   session_id: string;
+  thread_id?: string;
   session_status: SessionStatus;
   health_version: number;
+}
+
+export interface PullRequestRepairRequest {
+  thread_id?: string;
 }
 
 export type PullRequestMergeWhenReadyState =
@@ -945,6 +950,7 @@ export interface PullRequestHealthResponse {
 
 export interface PullRequestRepairResponse {
   session_id: string;
+  thread_id?: string;
   mode: "existing" | "resumed" | "reconstructed";
   reused_in_flight: boolean;
   head_sha: string;

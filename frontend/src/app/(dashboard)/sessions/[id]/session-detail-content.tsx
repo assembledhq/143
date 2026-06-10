@@ -3616,9 +3616,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (!pullRequestId) {
         throw new Error("Pull request not found");
       }
+      const body = activeThread?.id ? { thread_id: activeThread.id } : undefined;
       return action === "fix_tests"
-        ? api.pullRequests.fixTests(pullRequestId)
-        : api.pullRequests.resolveConflicts(pullRequestId);
+        ? api.pullRequests.fixTests(pullRequestId, body)
+        : api.pullRequests.resolveConflicts(pullRequestId, body);
     },
     onMutate: (action) => {
       setRepairActionError(null);
@@ -3633,6 +3634,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
         return;
+      }
+      if (response.data.thread_id && response.data.thread_id !== activeThreadId) {
+        setActiveThreadId(response.data.thread_id);
       }
       try {
         await queryClient.refetchQueries({ queryKey: repairHealthQueryKey, type: "active" });
@@ -5382,6 +5386,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <PRHealthBanner
                 health={prHealth}
                 currentSessionId={id}
+                currentThreadId={activeThread?.id ?? null}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
@@ -5391,7 +5396,13 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onMerge={handleMergeAction}
                 onQueueMergeWhenReady={handleQueueMergeWhenReady}
                 onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
+                onOpenRepairSession={(sessionId, threadId) => {
+                  if (sessionId === id && threadId) {
+                    setActiveThreadId(threadId);
+                    return;
+                  }
+                  router.push(`/sessions/${sessionId}`);
+                }}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
