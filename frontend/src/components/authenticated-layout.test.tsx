@@ -241,6 +241,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
     expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
     expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/settings/autopilot")).toBeDefined();
+    expect(screen.getByRole("link", { name: "Runtime" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
@@ -288,6 +289,7 @@ describe("AuthenticatedLayout", () => {
     // Admin-only entries are hidden.
     expect(screen.queryByRole("link", { name: "General" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "LLM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Runtime" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Usage" })).not.toBeInTheDocument();
   });

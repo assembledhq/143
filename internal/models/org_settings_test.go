@@ -505,6 +505,94 @@ func TestParseOrgSettings_PreviewMaxPreviewsPerUser(t *testing.T) {
 	}
 }
 
+func TestParseOrgSettings_SandboxLifecycleDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		raw                  json.RawMessage
+		expectedRetention    int
+		expectedIdlePreview  int
+		expectedPreviewHolds bool
+	}{
+		{
+			name:                 "defaults",
+			raw:                  json.RawMessage(`{}`),
+			expectedRetention:    DefaultCompletedSessionRetentionMinutes,
+			expectedIdlePreview:  DefaultIdlePreviewTTLMinutes,
+			expectedPreviewHolds: true,
+		},
+		{
+			name:                 "custom values pass through",
+			raw:                  json.RawMessage(`{"sandbox_lifecycle":{"completed_session_retention_minutes":120,"idle_preview_ttl_minutes":300,"preview_holds_sandbox":false}}`),
+			expectedRetention:    120,
+			expectedIdlePreview:  300,
+			expectedPreviewHolds: false,
+		},
+		{
+			name:                 "values clamp to supported bounds",
+			raw:                  json.RawMessage(`{"sandbox_lifecycle":{"completed_session_retention_minutes":-1,"idle_preview_ttl_minutes":99999}}`),
+			expectedRetention:    MinCompletedSessionRetentionMinutes,
+			expectedIdlePreview:  MaxIdlePreviewTTLMinutes,
+			expectedPreviewHolds: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept sandbox lifecycle settings")
+			require.Equal(t, tt.expectedRetention, s.SandboxLifecycle.CompletedSessionRetentionMinutes, "completed-session retention should be normalized")
+			require.Equal(t, tt.expectedIdlePreview, s.SandboxLifecycle.IdlePreviewTTLMinutes, "idle-preview ttl should be normalized")
+			require.Equal(t, tt.expectedPreviewHolds, s.SandboxLifecycle.EffectivePreviewHoldsSandbox(), "preview hold policy should be effective")
+		})
+	}
+}
+
+func TestParseOrgSettings_SandboxResourceDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{"sandbox_resources":{"agent_default_tier":"large","preview_default_tier":"small","allow_repo_resource_requests":false,"preview_max_tier":"standard"}}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should accept sandbox resource settings")
+	require.Equal(t, SandboxResourceTierLarge, s.SandboxResources.AgentDefaultTier, "agent default tier should pass through")
+	require.Equal(t, SandboxResourceTierSmall, s.SandboxResources.PreviewDefaultTier, "preview default tier should pass through")
+	require.False(t, s.SandboxResources.EffectiveAllowRepoResourceRequests(), "explicit false should be preserved")
+	require.Equal(t, SandboxResourceTierStandard, s.SandboxResources.PreviewMaxTier, "preview max tier should pass through")
+}
+
+func TestSandboxResourceTierValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		tier    SandboxResourceTier
+		wantErr bool
+	}{
+		{name: "empty valid", tier: "", wantErr: false},
+		{name: "small valid", tier: SandboxResourceTierSmall, wantErr: false},
+		{name: "standard valid", tier: SandboxResourceTierStandard, wantErr: false},
+		{name: "large valid", tier: SandboxResourceTierLarge, wantErr: false},
+		{name: "invalid", tier: SandboxResourceTier("xlarge"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.tier.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should reject invalid sandbox resource tiers")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known sandbox resource tiers")
+		})
+	}
+}
+
 func TestParseOrgSettings_RuntimeBudgets_Defaults(t *testing.T) {
 	t.Parallel()
 

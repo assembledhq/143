@@ -41,6 +41,24 @@ func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Cont
 	return c.available, c.err
 }
 
+type testRuntimeStatusSessionCounter struct {
+	count int
+	err   error
+}
+
+func (c testRuntimeStatusSessionCounter) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
+	return c.count, c.err
+}
+
+type testRuntimeStatusPreviewCounter struct {
+	count int
+	err   error
+}
+
+func (c testRuntimeStatusPreviewCounter) CountActivePreviewsByOrg(context.Context, uuid.UUID) (int, error) {
+	return c.count, c.err
+}
+
 func TestSettingsHandler_Get(t *testing.T) {
 	t.Parallel()
 
@@ -178,8 +196,51 @@ func TestSettingsHandler_GetNetworkStatusRequiresCapableWorker(t *testing.T) {
 	handler.GetNetworkStatus(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "network status should return success")
 	require.Contains(t, w.Body.String(), `"static_egress_available":false`, "network status should be unavailable without capable workers")
-	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"not all active session workers are static-egress-capable for the configured public IP"`, "network status should explain worker availability")
+	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"static egress is not currently available for new sandbox starts"`, "network status should explain worker availability generically")
 	require.Contains(t, w.Body.String(), `"static_egress_public_ip":"203.0.113.10"`, "network status should still expose the configured allowlist IP")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_GetRuntimeStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true},"max_concurrent_runs":5,"preview_max_previews_per_user":4}`),
+				now,
+				now,
+			),
+		)
+
+	handler := NewSettingsHandler(db.NewOrganizationStore(mock), nil)
+	handler.SetStaticEgressStatus(StaticEgressStatus{
+		Available: true,
+		PublicIP:  "203.0.113.10",
+	})
+	handler.SetRuntimeStatusCounters(
+		testRuntimeStatusSessionCounter{count: 2},
+		testRuntimeStatusPreviewCounter{count: 3},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetRuntimeStatus(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "runtime status should return success")
+	require.Contains(t, w.Body.String(), `"static_egress":{"available":true,"enabled":true,"public_ip":"203.0.113.10"}`, "runtime status should include sanitized static egress state")
+	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should include sanitized capacity counts")
+	require.NotContains(t, w.Body.String(), "static_egress_unavailable_reason", "runtime status must not expose backend diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -387,6 +448,24 @@ func TestSettingsHandler_Update(t *testing.T) {
 		{
 			name: "returns bad request for preview capacity below minimum",
 			body: `{"settings":{"preview_max_previews_per_user":-1}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
+			name: "returns bad request for invalid sandbox resource tier",
+			body: `{"settings":{"sandbox_resources":{"agent_default_tier":"xlarge"}}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
+			name: "returns bad request for invalid sandbox lifecycle retention",
+			body: `{"settings":{"sandbox_lifecycle":{"completed_session_retention_minutes":99999}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				// no DB calls expected
 			},
