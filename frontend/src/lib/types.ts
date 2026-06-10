@@ -1079,6 +1079,9 @@ export interface OrgSettings {
     preview_default_tier?: SandboxResourceTier;
     allow_repo_resource_requests?: boolean;
     preview_max_tier?: SandboxResourceTier;
+    preview_max_cpu_millis?: number;
+    preview_max_memory_mib?: number;
+    preview_max_ephemeral_disk_mib?: number;
   };
 }
 
