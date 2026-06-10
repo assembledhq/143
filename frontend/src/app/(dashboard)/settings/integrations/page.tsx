@@ -1247,18 +1247,18 @@ export default function IntegrationsPage() {
         title="Connect Mezmo"
         description={
           <>
-            Paste a Mezmo service key so agents can query your production logs.
-            Create one under{" "}
+            Open Mezmo, select the right organization, then go to Settings &gt;
+            Organization &gt; API Keys. Create a service key there so agents can query production logs.{" "}
             <a
-              href="https://app.mezmo.com/profile/api"
+              href="https://app.mezmo.com/"
               target="_blank"
               rel="noopener noreferrer"
               className="underline"
             >
-              Organization → API Keys
+              Open Mezmo
             </a>
-            . Base URL and dataset are optional — leave them blank to use the
-            Mezmo defaults.
+            . Base URL and dataset are optional; leave them blank to use the
+            default Mezmo search scope.
           </>
         }
         fields={[
@@ -1280,6 +1280,10 @@ export default function IntegrationsPage() {
             placeholder: "e.g. production",
             type: "text",
             optional: true,
+            tooltip: {
+              ariaLabel: "Where to find the Mezmo dataset",
+              content: "In Mezmo Log Analysis, open Search, then use the dataset selector near the top of the log viewer. Copy that selected dataset name exactly. Leave blank to query across the default Mezmo scope.",
+            },
           },
         ]}
         submitting={mezmoConnectMutation.isPending}
