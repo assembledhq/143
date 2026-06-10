@@ -63,7 +63,16 @@ export interface ThreadMessageWindowResponse {
   meta: ThreadMessageWindowMeta;
 }
 
-export type UserSettingsUpdateRequest = UserSettings;
+// PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
+// fields keep their stored value, null clears a field, and nested objects
+// merge per key. Send only the fields being changed — never a full settings
+// document rebuilt from the query cache, which would clobber concurrent
+// edits from other tabs.
+export interface UserSettingsUpdateRequest {
+  coding_agent_model_default?: string | null;
+  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max" | null>> | null;
+  diff_viewer_full_screen?: boolean | null;
+}
 
 export interface AuthProviders {
   github: boolean;

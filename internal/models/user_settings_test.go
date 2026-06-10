@@ -79,6 +79,106 @@ func TestParseUserSettings(t *testing.T) {
 	}
 }
 
+func TestApplyUserSettingsMergePatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		current json.RawMessage
+		patch   json.RawMessage
+		want    UserSettings
+		wantErr string
+	}{
+		{
+			name:    "sets a field without touching the others",
+			current: json.RawMessage(`{"coding_agent_model_default":"claude-opus-4-7","coding_agent_reasoning_defaults":{"codex":"xhigh"}}`),
+			patch:   json.RawMessage(`{"diff_viewer_full_screen":true}`),
+			want: UserSettings{
+				CodingAgentModelDefault: "claude-opus-4-7",
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentTypeCodex: ReasoningEffortXHigh,
+				},
+				DiffViewerFullScreen: true,
+			},
+		},
+		{
+			name:    "merges nested reasoning defaults per agent",
+			current: json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"xhigh"}}`),
+			patch:   json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
+			want: UserSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentTypeCodex:      ReasoningEffortXHigh,
+					AgentTypeClaudeCode: ReasoningEffortMax,
+				},
+			},
+		},
+		{
+			name:    "null clears a top-level field",
+			current: json.RawMessage(`{"coding_agent_model_default":"claude-opus-4-7","diff_viewer_full_screen":true}`),
+			patch:   json.RawMessage(`{"coding_agent_model_default":null}`),
+			want:    UserSettings{DiffViewerFullScreen: true},
+		},
+		{
+			name:    "null clears a nested reasoning default",
+			current: json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"xhigh","claude_code":"max"}}`),
+			patch:   json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":null}}`),
+			want: UserSettings{
+				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
+					AgentTypeClaudeCode: ReasoningEffortMax,
+				},
+			},
+		},
+		{
+			name:  "applies to an empty current document",
+			patch: json.RawMessage(`{"diff_viewer_full_screen":true}`),
+			want:  UserSettings{DiffViewerFullScreen: true},
+		},
+		{
+			name:    "empty patch is a no-op",
+			current: json.RawMessage(`{"diff_viewer_full_screen":true}`),
+			patch:   json.RawMessage(`{}`),
+			want:    UserSettings{DiffViewerFullScreen: true},
+		},
+		{
+			name:    "rejects non-object patch",
+			patch:   json.RawMessage(`"settings"`),
+			wantErr: "must be a JSON object",
+		},
+		{
+			name:    "rejects null patch",
+			patch:   json.RawMessage(`null`),
+			wantErr: "must be a JSON object",
+		},
+		{
+			name:    "rejects unknown patch field",
+			patch:   json.RawMessage(`{"unknown":null}`),
+			wantErr: `unknown settings field "unknown"`,
+		},
+		{
+			name:    "rejects invalid merged value",
+			current: json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
+			patch:   json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`),
+			wantErr: "is not supported",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := ApplyUserSettingsMergePatch(tt.current, tt.patch)
+			if tt.wantErr != "" {
+				require.Error(t, err, "ApplyUserSettingsMergePatch should reject the patch")
+				require.Contains(t, err.Error(), tt.wantErr, "ApplyUserSettingsMergePatch should explain the rejection")
+				return
+			}
+			require.NoError(t, err, "ApplyUserSettingsMergePatch should accept the patch")
+			require.Equal(t, tt.want, got, "ApplyUserSettingsMergePatch should return the merged settings")
+		})
+	}
+}
+
 func TestUserSettings_MarshalJSONB(t *testing.T) {
 	t.Parallel()
 
