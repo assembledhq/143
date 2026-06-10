@@ -602,6 +602,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	evalHandler.SetSessionStore(sessionStore)
 	evalHandler.SetDatasetStore(evalDatasetStore)
 	evalHandler.SetReleaseGateStore(evalReleaseGateStore)
+	evalHandler.SetRepositoryStore(repoStore)
 	if prService != nil && sandboxProvider != nil {
 		evalHandler.SetCandidateValidator(handlers.NewEvalCandidateValidator(repoStore, prService, sandboxProvider))
 	}

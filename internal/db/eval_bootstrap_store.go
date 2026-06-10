@@ -114,6 +114,27 @@ func (s *EvalBootstrapStore) UpdateStatus(ctx context.Context, orgID, id uuid.UU
 	return nil
 }
 
+func (s *EvalBootstrapStore) AttachSessionThread(ctx context.Context, orgID, id, sessionID uuid.UUID, threadID *uuid.UUID) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE eval_bootstrap_runs
+		 SET session_id = @session_id, thread_id = @thread_id
+		 WHERE id = @id AND org_id = @org_id AND session_id IS NULL`,
+		pgx.NamedArgs{
+			"id":         id,
+			"org_id":     orgID,
+			"session_id": sessionID,
+			"thread_id":  threadID,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("attach eval bootstrap session: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 const evalBootstrapCandidateColumns = `id, org_id, bootstrap_run_id, session_id, thread_id, repo_id, candidate_index, pr_number, pr_title, base_commit_sha, solution_commit_sha, solution_diff, issue_description, scoring_criteria, complexity, fitness_score, fitness_reasoning, evidence, warnings, payload, status, rejection_reason, created_by_tool, reviewed_by, reviewed_at, accepted_task_id, created_at`
 
 func scanEvalBootstrapCandidate(row pgx.Row) (models.EvalBootstrapCandidateRow, error) {

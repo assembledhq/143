@@ -64,6 +64,19 @@ func (s *EvalDatasetStore) ListByOrg(ctx context.Context, orgID uuid.UUID, repos
 	return datasets, rows.Err()
 }
 
+func (s *EvalDatasetStore) GetByID(ctx context.Context, orgID, datasetID uuid.UUID) (models.EvalDataset, error) {
+	query := fmt.Sprintf(`SELECT %s
+		FROM eval_datasets d
+		LEFT JOIN eval_dataset_tasks dt ON dt.org_id = d.org_id AND dt.dataset_id = d.id
+		WHERE d.org_id = @org_id AND d.id = @id
+		GROUP BY d.id`, evalDatasetColumns)
+	dataset, err := scanEvalDataset(s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID, "id": datasetID}))
+	if err != nil {
+		return dataset, fmt.Errorf("get eval dataset: %w", err)
+	}
+	return dataset, nil
+}
+
 func (s *EvalDatasetStore) Create(ctx context.Context, dataset *models.EvalDataset) error {
 	if dataset.DatasetType == "" {
 		dataset.DatasetType = models.EvalDatasetTypeGolden

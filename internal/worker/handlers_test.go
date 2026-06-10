@@ -3862,6 +3862,26 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
 }
 
+func TestRegisterHandlers_LegacyEvalJobsRemainRegisteredDuringRollout(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.EvalTasks = db.NewEvalTaskStore(mock)
+	stores.EvalRuns = db.NewEvalRunStore(mock)
+	stores.EvalBootstraps = db.NewEvalBootstrapStore(mock)
+
+	logger := zerolog.Nop()
+	w := New(nil, logger, "test-node")
+
+	RegisterHandlers(w, stores, &Services{}, DataRetentionConfig{}, logger)
+
+	_, ok := w.handlers["run_eval"]
+	require.True(t, ok, "legacy run_eval jobs should remain registered so pending jobs do not dead-letter during rollout")
+	_, ok = w.handlers["run_eval_bootstrap"]
+	require.True(t, ok, "legacy run_eval_bootstrap jobs should remain registered so pending jobs do not dead-letter during rollout")
+}
+
 type mockPreviewStarter struct {
 	called        bool
 	payload       previewsvc.StartPreviewJobPayload

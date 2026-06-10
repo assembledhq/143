@@ -45,6 +45,7 @@ type EvalHandler struct {
 	bootstrapStore     *db.EvalBootstrapStore
 	datasetStore       *db.EvalDatasetStore
 	releaseGateStore   *db.EvalReleaseGateStore
+	repositoryStore    *db.RepositoryStore
 	sessionStore       *db.SessionStore
 	jobStore           *db.JobStore
 	txStarter          db.TxStarter
@@ -104,6 +105,10 @@ func (h *EvalHandler) SetDatasetStore(store *db.EvalDatasetStore) {
 
 func (h *EvalHandler) SetReleaseGateStore(store *db.EvalReleaseGateStore) {
 	h.releaseGateStore = store
+}
+
+func (h *EvalHandler) SetRepositoryStore(store *db.RepositoryStore) {
+	h.repositoryStore = store
 }
 
 func (h *EvalHandler) SetCandidateValidator(validator evalCandidateValidator) {
@@ -262,6 +267,20 @@ func (h *EvalHandler) CreateDataset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_DATASET_TYPE", "dataset_type must be golden, shadow, or adversarial")
 		return
 	}
+	if req.RepositoryID != nil {
+		if h.repositoryStore == nil {
+			writeError(w, r, http.StatusNotImplemented, "REPOSITORY_VALIDATION_DISABLED", "repository validation is not configured")
+			return
+		}
+		if _, err := h.repositoryStore.GetByID(r.Context(), orgID, *req.RepositoryID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository was not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to validate repository", err)
+			return
+		}
+	}
 	var createdBy *uuid.UUID
 	if user != nil {
 		createdBy = &user.ID
@@ -385,6 +404,20 @@ func (h *EvalHandler) UpsertReleaseGate(w http.ResponseWriter, r *http.Request) 
 	if minPassAt1 < 0 || minPassAt1 > 1 || minPassAtK < 0 || minPassAtK > 1 || maxPolicyViolations < 0 {
 		writeError(w, r, http.StatusBadRequest, "INVALID_GATE", "release gate thresholds must be within valid ranges")
 		return
+	}
+	if req.DatasetID != nil {
+		if h.datasetStore == nil {
+			writeError(w, r, http.StatusNotImplemented, "DATASET_VALIDATION_DISABLED", "eval dataset validation is not configured")
+			return
+		}
+		if _, err := h.datasetStore.GetByID(r.Context(), orgID, *req.DatasetID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "DATASET_NOT_FOUND", "eval dataset was not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "DATASET_LOOKUP_FAILED", "failed to validate eval dataset", err)
+			return
+		}
 	}
 	var updatedBy *uuid.UUID
 	if user != nil {

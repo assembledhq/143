@@ -103,6 +103,64 @@ func newEvalHandler(mock pgxmock.PgxPoolIface) *EvalHandler {
 	)
 }
 
+func TestEvalHandler_CreateDatasetRejectsRepositoryOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	handler := newEvalHandler(mock)
+	handler.SetDatasetStore(db.NewEvalDatasetStore(mock))
+	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
+
+	mock.ExpectQuery("(?s)SELECT .* FROM repositories.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	body := fmt.Sprintf(`{"repository_id":%q,"name":"Golden set","dataset_type":"golden"}`, repoID.String())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/datasets", strings.NewReader(body))
+	req = req.WithContext(evalCtx(orgID, userID))
+	w := httptest.NewRecorder()
+
+	handler.CreateDataset(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "CreateDataset should reject repositories that are not in the active org")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalHandler_UpsertReleaseGateRejectsDatasetOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	datasetID := uuid.New()
+	handler := newEvalHandler(mock)
+	handler.SetDatasetStore(db.NewEvalDatasetStore(mock))
+	handler.SetReleaseGateStore(db.NewEvalReleaseGateStore(mock))
+
+	mock.ExpectQuery("(?s)SELECT .* FROM eval_datasets").
+		WithArgs(anyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	body := fmt.Sprintf(`{"gate_name":"default","dataset_id":%q}`, datasetID.String())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/release-gates", strings.NewReader(body))
+	req = req.WithContext(evalCtx(orgID, userID))
+	w := httptest.NewRecorder()
+
+	handler.UpsertReleaseGate(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "UpsertReleaseGate should reject datasets that are not in the active org")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func evalCtx(orgID uuid.UUID, userID uuid.UUID) context.Context {
 	ctx := context.Background()
 	ctx = middleware.WithOrgID(ctx, orgID)

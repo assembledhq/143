@@ -357,6 +357,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if stores != nil && stores.EvalRuns != nil && stores.EvalTasks != nil {
 		w.Register("run_eval_grader", newEvalGraderHandler(stores, services, logger))
+		w.Register("run_eval", newLegacyRunEvalCompatHandler(stores, logger))
+	}
+	if stores != nil && stores.EvalBootstraps != nil {
+		w.Register("run_eval_bootstrap", newLegacyRunEvalBootstrapCompatHandler(stores, logger))
 	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
@@ -4676,6 +4680,220 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.completed", "143 session completed", "The session finished successfully.")
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
 		return nil
+	}
+}
+
+func newLegacyRunEvalCompatHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			EvalRunID string `json:"eval_run_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal legacy run_eval payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		runID, err := uuid.Parse(input.EvalRunID)
+		if err != nil {
+			return fmt.Errorf("parse eval run ID: %w", err)
+		}
+		if stores == nil || stores.EvalRuns == nil || stores.EvalTasks == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("legacy run_eval compatibility requires eval, session, and job stores")
+		}
+		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval run: %w", err)
+		}
+		if run.SessionID != nil && *run.SessionID != uuid.Nil {
+			session, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load converted eval session: %w", err)
+			}
+			if !sessionStatusNeedsRunAgent(session.Status) {
+				return nil
+			}
+			return enqueueCompatRunAgent(ctx, stores, orgID, session)
+		}
+		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval task: %w", err)
+		}
+		session := legacyEvalRunSessionFromTask(orgID, task, run.Model, run.ConfigRef)
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			return fmt.Errorf("create session for legacy eval run: %w", err)
+		}
+		if err := stores.EvalRuns.AttachSession(ctx, orgID, run.ID, session.ID, session.PrimaryThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				logger.Info().Str("eval_run_id", run.ID.String()).Msg("legacy eval run was already converted by another worker")
+				return nil
+			}
+			return fmt.Errorf("attach legacy eval run session: %w", err)
+		}
+		return enqueueCompatRunAgent(ctx, stores, orgID, *session)
+	}
+}
+
+func newLegacyRunEvalBootstrapCompatHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			BootstrapRunID string `json:"bootstrap_run_id"`
+			OrgID          string `json:"org_id"`
+			RepoID         string `json:"repo_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal legacy run_eval_bootstrap payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		bootstrapRunID, err := uuid.Parse(input.BootstrapRunID)
+		if err != nil {
+			return fmt.Errorf("parse bootstrap run ID: %w", err)
+		}
+		if stores == nil || stores.EvalBootstraps == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("legacy run_eval_bootstrap compatibility requires bootstrap, session, and job stores")
+		}
+		run, err := stores.EvalBootstraps.GetByID(ctx, orgID, bootstrapRunID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval bootstrap run: %w", err)
+		}
+		if run.SessionID != nil && *run.SessionID != uuid.Nil {
+			session, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load converted eval bootstrap session: %w", err)
+			}
+			if !sessionStatusNeedsRunAgent(session.Status) {
+				return nil
+			}
+			return enqueueCompatRunAgent(ctx, stores, orgID, session)
+		}
+		repoID := run.RepoID
+		if repoID == uuid.Nil && input.RepoID != "" {
+			parsed, err := uuid.Parse(input.RepoID)
+			if err != nil {
+				return fmt.Errorf("parse repo ID: %w", err)
+			}
+			repoID = parsed
+		}
+		session := legacyEvalBootstrapSession(orgID, repoID, run.CreatedBy)
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			return fmt.Errorf("create session for legacy eval bootstrap: %w", err)
+		}
+		if err := stores.EvalBootstraps.AttachSessionThread(ctx, orgID, run.ID, session.ID, session.PrimaryThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				logger.Info().Str("bootstrap_run_id", run.ID.String()).Msg("legacy eval bootstrap was already converted by another worker")
+				return nil
+			}
+			return fmt.Errorf("attach legacy eval bootstrap session: %w", err)
+		}
+		return enqueueCompatRunAgent(ctx, stores, orgID, *session)
+	}
+}
+
+func enqueueCompatRunAgent(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session) error {
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+		return fmt.Errorf("enqueue converted eval session: %w", err)
+	}
+	return nil
+}
+
+func sessionStatusNeedsRunAgent(status models.SessionStatus) bool {
+	switch status {
+	case models.SessionStatusPending, models.SessionStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyEvalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model string, configRef *string) *models.Session {
+	title := "Eval: " + task.Name
+	agentType := legacyEvalRunAgentType(model)
+	baseCommitSHA := task.BaseCommitSHA
+	var modelOverride *string
+	if model != "codex" && model != "gemini-cli" {
+		modelOverride = &model
+	}
+	configLine := "Use the repository's default runtime configuration."
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		configLine = fmt.Sprintf("Use eval config ref %s. Apply that configuration before starting the task.", strings.TrimSpace(*configRef))
+	}
+	inputManifestMap := map[string]any{
+		"eval_task_id":    task.ID.String(),
+		"base_commit_sha": task.BaseCommitSHA,
+		"model":           model,
+	}
+	if task.SolutionCommitSHA != nil && *task.SolutionCommitSHA != "" {
+		inputManifestMap["solution_commit_sha"] = *task.SolutionCommitSHA
+	}
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		inputManifestMap["config_ref"] = strings.TrimSpace(*configRef)
+	}
+	inputManifest, err := json.Marshal(inputManifestMap)
+	if err != nil {
+		inputManifest = json.RawMessage(`{}`)
+	}
+	prompt := fmt.Sprintf(`Run this coding-agent eval exactly as specified.
+
+Repository setup:
+- Start from base commit %s before changing code.
+- %s
+- Do not inspect or apply the known solution diff.
+
+Task:
+%s
+
+When finished, leave the working tree with only the changes needed to solve the task.`, task.BaseCommitSHA, configLine, task.IssueDescription)
+	return &models.Session{
+		OrgID:            orgID,
+		Origin:           models.SessionOriginEvalRun,
+		InteractionMode:  models.SessionInteractionModeSingleRun,
+		ValidationPolicy: models.SessionValidationPolicyOnSessionEnd,
+		AgentType:        agentType,
+		Status:           models.SessionStatusPending,
+		AutonomyLevel:    models.DefaultSessionAutonomy,
+		TokenMode:        models.SessionTokenModeHigh,
+		ModelOverride:    modelOverride,
+		Title:            &title,
+		PMApproach:       &prompt,
+		RepositoryID:     &task.RepoID,
+		BaseCommitSHA:    &baseCommitSHA,
+		InputManifest:    inputManifest,
+	}
+}
+
+func legacyEvalBootstrapSession(orgID, repoID uuid.UUID, createdBy *uuid.UUID) *models.Session {
+	title := "Bootstrap eval tasks"
+	prompt := "Analyze this repository's pull request history and add high-quality candidate eval tasks with `143-tools eval add`."
+	return &models.Session{
+		OrgID:             orgID,
+		Origin:            models.SessionOriginEvalBootstrap,
+		InteractionMode:   models.SessionInteractionModeSingleRun,
+		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
+		AgentType:         models.AgentTypeCodex,
+		Status:            models.SessionStatusPending,
+		AutonomyLevel:     models.DefaultSessionAutonomy,
+		TokenMode:         models.SessionTokenModeLow,
+		TriggeredByUserID: createdBy,
+		Title:             &title,
+		PMApproach:        &prompt,
+		RepositoryID:      &repoID,
+	}
+}
+
+func legacyEvalRunAgentType(model string) models.AgentType {
+	switch model {
+	case "gemini-cli":
+		return models.AgentTypeGeminiCLI
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		return models.AgentTypeClaudeCode
+	default:
+		return models.AgentTypeCodex
 	}
 }
 

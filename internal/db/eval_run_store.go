@@ -126,6 +126,27 @@ func (s *EvalRunStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid
 	return scanEvalRun(row)
 }
 
+func (s *EvalRunStore) AttachSession(ctx context.Context, orgID, runID, sessionID uuid.UUID, threadID *uuid.UUID) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE eval_runs
+		 SET session_id = @session_id, thread_id = @thread_id
+		 WHERE id = @id AND org_id = @org_id AND session_id IS NULL`,
+		pgx.NamedArgs{
+			"id":         runID,
+			"org_id":     orgID,
+			"session_id": sessionID,
+			"thread_id":  threadID,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("attach eval run session: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 func (s *EvalRunStore) ListByTask(ctx context.Context, orgID, taskID uuid.UUID, limit int) ([]models.EvalRun, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
