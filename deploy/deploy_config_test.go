@@ -1,6 +1,7 @@
 package deploy_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -248,6 +250,12 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, fleetText, `Skipping $ROLE@$IP`, "fleet deploy should log skipped maintenance roles so operators can tell they were intentionally left alone")
 	require.Contains(t, fleetText, `if [ "$ROLE" = "egress" ]; then`, "fleet deploy should skip egress inventory entries even when ROLES=all is requested")
 	require.Contains(t, fleetText, "make provision-egress", "fleet deploy should point operators at the dedicated egress gateway provisioning flow")
+	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should default to a bounded four-node deploy fan-out")
+	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should deploy matching nodes concurrently instead of serializing the whole fleet")
+	require.Contains(t, fleetText, `LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"`, "parallel fleet deploy should keep per-host logs inspectable after failures")
+	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
+	require.Contains(t, fleetText, `FAILED: one or more deploys failed`, "fleet deploy should finish pending parallel deploys and then fail loudly when any host fails")
+	require.Contains(t, fleetText, `DEPLOY_JOBS=1`, "fleet deploy should document how to recover the old one-host-at-a-time rollout behavior")
 
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
@@ -258,6 +266,8 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(makefile), "ROLES ?= app,worker", "Makefile should make the default fleet role set visible to operators")
 	require.Contains(t, string(makefile), "force ?=", "Makefile should expose active-session force deploys as a make argument")
 	require.Contains(t, string(makefile), "TAG ?= latest", "Makefile should expose the image tag as the same kind of make argument as roles")
+	require.Contains(t, string(makefile), "DEPLOY_JOBS ?= 4", "Makefile should make the default fleet deploy parallelism visible to operators")
+	require.Contains(t, string(makefile), "make deploy-fleet DEPLOY_JOBS=1", "Makefile should document how to serialize fleet deploys when needed")
 	require.Contains(t, string(makefile), "WORKER_BLUE_GREEN_PORT_START ?= 8080", "Makefile should default manual worker deploys to the CI blue/green port range start")
 	require.Contains(t, string(makefile), "WORKER_BLUE_GREEN_PORT_END ?= 8087", "Makefile should default manual worker deploys to the CI blue/green port range end")
 	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy.sh $(1) $(HOST) $(SSH_KEY) $(TAG)", "single-role deploy targets should honor force and the default blue/green range")
@@ -265,11 +275,132 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=all", "Makefile should document how to run an explicit all-role maintenance deploy with a make argument")
 	require.Contains(t, string(makefile), "make deploy-fleet ROLES=app,worker", "Makefile should document the manual non-disruptive worker deploy command")
 	require.Contains(t, string(makefile), "make deploy-fleet force=true", "Makefile should document how to override the active-session guardrail with a make argument")
-	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)", "Makefile should pass role, tag, force, and the default blue/green range through to deploy-fleet.sh")
+	require.Contains(t, string(makefile), "$(worker-blue-green-env) $(deploy-force-env) DEPLOY_JOBS=$(DEPLOY_JOBS) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)", "Makefile should pass role, tag, force, parallelism, and the default blue/green range through to deploy-fleet.sh")
 
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy.sh")
 	require.Contains(t, string(deployScript), `-e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}"`, "worker deploy guardrail container should receive the force override from the deploy environment")
+}
+
+func TestDeployFleetRunsMatchingHostsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	stateDir := filepath.Join(tempDir, "state")
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+role="$1"
+ip="$2"
+state="${FAKE_DEPLOY_STATE:?}"
+mkdir -p "$state"
+while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done
+touch "$state/$role-$ip.started"
+rmdir "$state/lock"
+deadline=$((SECONDS + 5))
+while [ "$(find "$state" -name '*.started' | wc -l | tr -d ' ')" -lt 2 ]; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "timed out waiting for concurrent deploy peer" >&2
+    exit 42
+  fi
+  sleep 0.05
+done
+echo "$role@$ip deployed by fake script"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
+	cmd.Env = append(os.Environ(),
+		"DEPLOY_JOBS=2",
+		"FAKE_DEPLOY_STATE="+stateDir,
+		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.2,db:10.0.0.3,egress:10.0.0.4",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "deploy-fleet should complete when two matching hosts can run concurrently: %s", string(output))
+	require.Contains(t, string(output), "Deploying 2 node(s), 2 at a time", "deploy-fleet should report bounded parallel fan-out")
+	require.FileExists(t, filepath.Join(stateDir, "app-10.0.0.1.started"), "fake app deploy should have started")
+	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.2.started"), "fake worker deploy should have started")
+	require.NoFileExists(t, filepath.Join(stateDir, "db-10.0.0.3.started"), "unrequested db deploy should not have started")
+}
+
+func TestDeployFleetSerializesDeploysToTheSameHost(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	stateDir := filepath.Join(tempDir, "state")
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+role="$1"
+ip="$2"
+state="${FAKE_DEPLOY_STATE:?}"
+mkdir -p "$state"
+host_safe="${ip//[^A-Za-z0-9_.-]/_}"
+lock="$state/host-$host_safe.lock"
+if [ "$role" = "app" ]; then
+  sleep 0.2
+fi
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "same host deployed concurrently: $ip" >&2
+  exit 43
+fi
+trap 'rmdir "$lock"' EXIT
+touch "$state/$role-$ip.started"
+printf '%s@%s\n' "$role" "$ip" >> "$state/order.log"
+sleep 0.4
+echo "$role@$ip deployed by fake script"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "all")
+	cmd.Env = append(os.Environ(),
+		"DEPLOY_JOBS=3",
+		"FAKE_DEPLOY_STATE="+stateDir,
+		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.1,redis:10.0.0.2",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "deploy-fleet should serialize role deploys that target the same host: %s", string(output))
+	require.FileExists(t, filepath.Join(stateDir, "app-10.0.0.1.started"), "same-host app deploy should have started")
+	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.1.started"), "same-host worker deploy should have started after the app deploy released the host")
+	require.FileExists(t, filepath.Join(stateDir, "redis-10.0.0.2.started"), "different-host deploy should still be eligible for parallel execution")
+
+	orderBytes, err := os.ReadFile(filepath.Join(stateDir, "order.log"))
+	require.NoError(t, err, "test should read the fake deploy order log")
+	order := strings.Split(strings.TrimSpace(string(orderBytes)), "\n")
+	appIndex := indexOfString(order, "app@10.0.0.1")
+	workerIndex := indexOfString(order, "worker@10.0.0.1")
+	require.NotEqual(t, -1, appIndex, "order log should include the same-host app deploy")
+	require.NotEqual(t, -1, workerIndex, "order log should include the same-host worker deploy")
+	require.Less(t, appIndex, workerIndex, "same-host deploys should preserve FLEET_HOSTS order")
+}
+
+func indexOfString(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestWorkerDeployPreflightTargetValidatesBlueGreenReadiness(t *testing.T) {
