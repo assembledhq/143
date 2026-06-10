@@ -43,6 +43,7 @@ export default defineConfig({
   test: {
     globals: true,
     css: false,
+    isolate: false,
     testTimeout: 5_000,
     hookTimeout: 10_000,
     reporters: process.env.CI ? ['dot'] : ['default'],
@@ -52,6 +53,7 @@ export default defineConfig({
         test: {
           name: 'node',
           environment: 'node',
+          setupFiles: ['./src/test/setup-node.ts'],
           include: nodeTestFiles,
         },
       },
