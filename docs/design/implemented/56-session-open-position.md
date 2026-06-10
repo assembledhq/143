@@ -81,6 +81,9 @@ This should be lightweight and forgiving:
 
 - Persist per user, per session, with scroll positions scoped per thread when a
   session has multiple agent tabs.
+- For thread-scoped transcripts, persist a structured message anchor plus
+  offset (`version: 2`, message id, offset px, raw scroll fallback) so long
+  sessions can reopen in one bounded window request.
 - Persist the last active thread per user and session so reopening a multi-tab
   session restores the same conversation lane before reading scroll state.
 - Update on debounced scroll or on unmount.
@@ -188,16 +191,22 @@ entry and then starts the transcript/detail queries.
    - Fall back to the primary visible thread.
    - Do not render one thread and then switch to another after messages load.
 
-2. Fetch the latest message window first.
+2. Fetch the relevant bounded message window first.
    - Request the newest messages for the active thread in descending or
      cursor-friendly order, then render chronologically in the viewport.
+   - If a structured saved position exists, request
+     `/threads/{tid}/messages?position=around&anchor_message_id=...` and render
+     the returned older/anchor/newer range chronologically.
    - Include enough messages to cover at least one desktop viewport and one
      mobile viewport, with margin for the latest assistant turn.
    - The payload should include cursors for older messages and enough metadata
      to locate the latest assistant turn boundary.
 
 3. Choose the initial anchor before showing real transcript content.
-   - If a structured saved position exists, restore it.
+   - If a structured saved position exists and the anchor was found, scroll to
+     that message plus the saved offset.
+   - If the anchor is missing, fall back to the latest window and ignore the
+     stale raw scroll value for that initial restore.
    - Else if the thread is active, anchor to the live edge.
    - Else anchor to the start of the latest assistant turn when present.
    - Else fall back to the bottom of the loaded window.
@@ -217,7 +226,15 @@ entry and then starts the transcript/detail queries.
    - Show a compact top loading row or short skeleton while the older page is
      pending.
 
-6. Keep live auto-follow separate from initial anchoring.
+6. Load newer messages below anchored windows.
+   - Anchor-centered windows can represent the middle of a long transcript, so
+     the response includes `has_newer` and `next_newer_cursor`.
+   - When the user scrolls near the bottom of an anchored range, fetch
+     `after=<newest_loaded_id>` and append the newer messages.
+   - `Jump to latest` skips page-by-page newer loading and requests the latest
+     window directly.
+
+7. Keep live auto-follow separate from initial anchoring.
    - During initial load, suppress repeated scroll-to-bottom effects.
    - After the anchor resolves, active sessions can follow the live edge only
      while the user remains near bottom.

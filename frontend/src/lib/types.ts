@@ -53,8 +53,13 @@ export interface UserSettings {
 export interface ThreadMessageWindowMeta {
   next_older_cursor?: string;
   has_older: boolean;
+  next_newer_cursor?: string;
+  has_newer?: boolean;
+  anchor_message_id?: number;
+  anchor_found?: boolean;
   latest_assistant_message_id?: number;
   live_edge_message_id?: number;
+  window_position?: "latest" | "older" | "newer" | "around";
   thread_status: ThreadStatus;
 }
 
