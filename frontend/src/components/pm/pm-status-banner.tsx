@@ -50,9 +50,9 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
       </AgentStatusBar>
 
       {analyzeError && (
-        <div className="flex items-center justify-between rounded-md bg-red-50 dark:bg-red-950/30 px-3 py-2">
-          <p className="text-xs text-red-700 dark:text-red-300">{analyzeError}</p>
-          <button onClick={dismissError} className="text-xs text-red-500 hover:text-red-700 ml-2">dismiss</button>
+        <div className="flex items-center justify-between rounded-md bg-destructive/10 px-3 py-2">
+          <p className="text-xs text-destructive">{analyzeError}</p>
+          <button onClick={dismissError} className="text-xs text-destructive/70 hover:text-destructive ml-2">dismiss</button>
         </div>
       )}
     </div>

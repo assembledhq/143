@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -101,6 +102,58 @@ func TestUserCredentialStoreConfiguration(t *testing.T) {
 
 	store.SetCodingMirror(nil)
 	require.NotNil(t, store.codingMirror, "nil mirror should install a no-op mirror")
+}
+
+func TestUserCredentialStoreUpsertReturnsMirrorError(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockUserCredentialStore(t)
+	defer mock.Close()
+
+	mirrorErr := errors.New("mirror unavailable")
+	store.SetCodingMirror(failingCodingCredentialMirror{err: mirrorErr})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+	now := time.Now().UTC()
+	cfg := models.OpenAIConfig{APIKey: "sk-openai-123456"}
+
+	mock.ExpectQuery("INSERT INTO user_credentials").
+		WithArgs(codingAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(credID, now, now))
+	mock.ExpectQuery("SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at").
+		WithArgs(credID, orgID).
+		WillReturnRows(pgxmock.NewRows(userCredentialTestColumns).
+			AddRow(userCredentialRow(t, store, orgID, userID, credID, models.ProviderOpenAI, cfg, false)...))
+
+	err := store.Upsert(context.Background(), userID, orgID, cfg, false)
+
+	require.ErrorIs(t, err, mirrorErr, "Upsert should return coding credential mirror failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUserCredentialStoreDisableReturnsMirrorError(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockUserCredentialStore(t)
+	defer mock.Close()
+
+	mirrorErr := errors.New("mirror unavailable")
+	store.SetCodingMirror(failingCodingCredentialMirror{err: mirrorErr})
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+
+	mock.ExpectQuery("UPDATE user_credentials").
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(credID))
+
+	err := store.Disable(context.Background(), orgID, userID, models.ProviderOpenAI)
+
+	require.ErrorIs(t, err, mirrorErr, "Disable should return coding credential mirror failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestUserCredentialStoreUpsertAndQueries(t *testing.T) {
@@ -313,11 +366,11 @@ func TestUserCredentialStoreSetTeamDefaultMirrorsClearedDefault(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(newID))
 	mock.ExpectCommit()
 	mock.ExpectQuery("SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at").
-		WithArgs(oldID).
+		WithArgs(oldID, orgID).
 		WillReturnRows(pgxmock.NewRows(userCredentialTestColumns).
 			AddRow(userCredentialRow(t, store, orgID, oldUserID, oldID, provider, cfg, false)...))
 	mock.ExpectQuery("SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at").
-		WithArgs(newID).
+		WithArgs(newID, orgID).
 		WillReturnRows(pgxmock.NewRows(userCredentialTestColumns).
 			AddRow(userCredentialRow(t, store, orgID, newUserID, newID, provider, cfg, true)...))
 

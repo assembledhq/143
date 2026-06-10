@@ -251,11 +251,11 @@ export function HumanInputRequestCard({
   return (
     <>
       <div className="w-full">
-        <Card className="w-full rounded-lg border-amber-300/70 bg-amber-50/60 shadow-sm dark:border-amber-800/60 dark:bg-amber-950/20">
-          <CardHeader className="border-b border-amber-200/70 bg-amber-50/80 pb-4 dark:border-amber-900/60 dark:bg-amber-950/20">
+        <Card className="w-full rounded-lg border-warning/40 bg-warning/5 shadow-sm">
+          <CardHeader className="border-b border-warning/30 bg-warning/10 pb-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="flex min-w-0 items-start gap-3">
-                <div className="rounded-md bg-background p-2 text-amber-700 shadow-sm dark:text-amber-300">
+                <div className="rounded-md bg-background p-2 text-warning shadow-sm">
                   <Icon className="h-4 w-4" />
                 </div>
                 <div className="min-w-0 flex-1 space-y-1.5">

@@ -146,6 +146,7 @@ type threadStoreWithProvenance interface {
 type LogStore interface {
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
 	ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 // JobStore defines the job DB operations needed by the thread service.
@@ -1524,9 +1525,12 @@ func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.U
 	}
 
 	var logs []models.SessionLog
-	if len(opts.TurnNumbers) > 0 {
+	switch {
+	case len(opts.TurnNumbers) > 0:
 		logs, err = s.logStore.ListByThreadTurns(ctx, orgID, threadID, opts.TurnNumbers)
-	} else {
+	case opts.LatestTurns > 0:
+		logs, err = s.logStore.ListByThreadLatestTurns(ctx, orgID, threadID, opts.LatestTurns)
+	default:
 		logs, err = s.logStore.ListByThread(ctx, orgID, threadID)
 	}
 	if err != nil {

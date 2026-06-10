@@ -20,6 +20,11 @@ type SessionLogStore struct {
 
 type SessionLogFilterOptions struct {
 	TurnNumbers []int
+	// LatestTurns limits results to the N highest turn numbers present for
+	// the thread. The session detail page uses it to fetch a useful first
+	// window of logs in parallel with the message window, before it knows
+	// which exact turns are visible. Ignored when TurnNumbers is set.
+	LatestTurns int
 }
 
 func NewSessionLogStore(db DBTX) *SessionLogStore {
@@ -176,6 +181,35 @@ func (s *SessionLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query thread logs by turns: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
+}
+
+// ListByThreadLatestTurns returns the thread's logs for its latestTurns
+// highest turn numbers. The subquery anchors on the thread's max turn so a
+// thread with sparse turn numbering still returns its most recent activity.
+func (s *SessionLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+	if latestTurns <= 0 {
+		return []models.SessionLog{}, nil
+	}
+	query := `
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		FROM session_logs sl
+		WHERE sl.thread_id = @thread_id AND sl.org_id = @org_id
+		  AND sl.turn_number > (
+			SELECT COALESCE(MAX(inner_sl.turn_number), 0) - @latest_turns
+			FROM session_logs inner_sl
+			WHERE inner_sl.thread_id = @thread_id AND inner_sl.org_id = @org_id
+		  )
+		ORDER BY sl.id ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"thread_id":    threadID,
+		"org_id":       orgID,
+		"latest_turns": latestTurns,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query thread logs by latest turns: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
 }

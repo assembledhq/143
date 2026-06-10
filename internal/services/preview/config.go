@@ -57,13 +57,18 @@ const (
 	MaxInstallTimeoutSeconds     = 1800
 
 	DefaultPreviewDiskMiB = 10 * 1024
-	// Per-topology memory defaults (MiB). Large frontend dev servers can need
-	// several GiB; lower defaults caused dev servers to be OOM-killed while
-	// serving bundles.
+	// Per-topology memory defaults (MiB). Large frontend dev servers (e.g. an
+	// rspack/webpack build running alongside a backend service) routinely need
+	// several GiB; the previous 384/768/1024 defaults caused the dev server to
+	// be OOM-killed mid-response, truncating bundles and serving a blank page.
 	DefaultSingleServiceMemory = 1024
 	DefaultMultiServiceMemory  = 2048
 	DefaultInfraServiceMemory  = 4096
 	MaxPreviewCPUMillis        = models.MaxPreviewMaxCPUMillis
+	// MaxPreviewMemoryMiB is the ceiling a repo may request via
+	// preview.resources.{requests,limits}.memory in .143/config.json. Defaults
+	// stay modest (above) to bound per-worker capacity; repos that need more
+	// opt in explicitly up to this cap.
 	MaxPreviewMemoryMiB        = models.MaxPreviewMaxMemoryMiB
 	MaxPreviewEphemeralDiskMiB = models.MaxPreviewMaxEphemeralDiskMiB
 )

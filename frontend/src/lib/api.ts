@@ -189,10 +189,26 @@ export const api = {
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
+    // (Re)send the email-verification link to the signed-in user's own
+    // address. Verifying unlocks email-domain auto-join for password
+    // accounts; OAuth accounts are attested by their provider already.
+    sendEmailVerification: () => post<void>('/api/v1/auth/email-verifications'),
+    confirmEmailVerification: (token: string) =>
+      post<import('./types').SingleResponse<import('./types').ConfirmEmailVerificationResponse>>(
+        '/api/v1/auth/email-verifications/confirm',
+        { token },
+      ),
   },
   organizations: {
     create: (name: string) =>
       post<import('./types').SingleResponse<import('./types').OrganizationCreated>>('/api/v1/organizations', { name }),
+    // Workspaces the current user can join because their provider-verified
+    // email domain matches an org's verified auto-join domain. User-scoped,
+    // works for zero-membership users — same family as invitations.listPending.
+    listJoinable: () =>
+      get<import('./types').JoinableOrgsResponse>('/api/v1/orgs/joinable'),
+    join: (orgId: string) =>
+      post<import('./types').SingleResponse<import('./types').MembershipSummary>>(`/api/v1/orgs/${orgId}/join`),
   },
   repositories: {
     list: (opts?: { includeDisconnected?: boolean }) => {
@@ -491,19 +507,25 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
-    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest'; before?: string; limit?: number } = { position: 'latest' }) => {
+    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest' | 'around'; before?: string; after?: string; anchorMessageId?: number; limit?: number } = { position: 'latest' }) => {
       const searchParams = new URLSearchParams();
       if (params.position) searchParams.set('position', params.position);
       if (params.before) searchParams.set('before', params.before);
+      if (params.after) searchParams.set('after', params.after);
+      if (params.anchorMessageId) searchParams.set('anchor_message_id', String(params.anchorMessageId));
       if (params.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
       return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
     },
-    getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[] } = {}) => {
+    getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[]; latestTurns?: number } = {}) => {
       const searchParams = new URLSearchParams();
       const turnNumbers = Array.from(new Set((params.turnNumbers ?? []).filter((turn) => Number.isInteger(turn) && turn >= 0))).sort((a, b) => a - b);
       if (turnNumbers.length > 0) {
         searchParams.set('turn_numbers', turnNumbers.join(','));
+      } else if (params.latestTurns && Number.isInteger(params.latestTurns) && params.latestTurns > 0) {
+        // Bootstrap mode: fetch the thread's most recent N turns of logs
+        // before the message window has resolved which turns are visible.
+        searchParams.set('latest_turns', String(params.latestTurns));
       }
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs${qs ? `?${qs}` : ''}`);
@@ -865,6 +887,15 @@ export const api = {
     createInvitation: (body: { email?: string; github_username?: string; acceptance_method?: 'email' | 'github' | 'either'; role: string }) =>
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
+    listDomains: () =>
+      get<import('./types').ListResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains'),
+    addDomain: (domain: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains', { domain }),
+    verifyDomain: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}/verify`),
+    updateDomain: (id: string, body: { auto_join_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}`, body),
+    removeDomain: (id: string) => del<void>(`/api/v1/team/domains/${id}`),
     githubInviteStatus: () =>
       get<import('./types').SingleResponse<import('./types').GitHubInviteStatus>>('/api/v1/team/github/status'),
     searchGitHubUsers: (q: string) =>

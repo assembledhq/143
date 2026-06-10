@@ -5,38 +5,74 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ---------------------------------------------------------------------------
+   Surface hierarchy
+   ---------------------------------------------------------------------------
+   The app uses a fixed ramp of surfaces, darkest at the structural edge and
+   lightest where the user reads or works. Both themes use the same ramp —
+   dark mode inverts values, never the roles.
+
+     shell  (--sidebar)    global navigation: app sidebar, rails, top bars.
+                           The ONLY tinted structural surface — everything
+                           else separates with borders, not background color.
+     panel  (--panel)      secondary navigation: session list, file trees,
+                           any pane that lists/filters objects. Currently
+                           equal to canvas; kept as its own token so panes
+                           stay declaratively distinct from the canvas.
+     canvas (--background) primary content: where the user reads and works
+     card   (--card)       grouped content on the canvas; lifted by
+                           border + shadow, not by a different gray
+
+   Feature panes must not invent their own background color — pick the surface
+   that matches the pane's role. Selected objects sit on panel surfaces as
+   card-colored chips; primary actions use --primary.
+
+   State colors are tokens too: --success, --warning (agent waiting on you),
+   --attention (agent needs guidance), --info, --destructive. Never use raw
+   Tailwind palette classes (emerald-500, amber-500, …) for status meaning.
+   ------------------------------------------------------------------------ */
+
 :root {
-  --border: oklch(0.91 0.004 250);
-  --muted: oklch(0.955 0 0);
+  --border: oklch(0.88 0.005 260);
+  --muted: oklch(0.955 0.003 260);
   --card: oklch(1 0 0);
   --radius: 0.5rem;
-  --background: oklch(0.98 0.003 260);
+  --background: oklch(0.985 0.004 260);
   --foreground: oklch(0.145 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0.52 0.14 260);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.95 0 0);
+  --secondary: oklch(0.95 0.003 260);
   --secondary-foreground: oklch(0.205 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.95 0 0);
+  --muted-foreground: oklch(0.5 0.012 260);
+  --accent: oklch(0.95 0.003 260);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --input: oklch(0.9 0 0);
+  --success: oklch(0.527 0.154 150);
+  --success-foreground: oklch(0.985 0 0);
+  --warning: oklch(0.666 0.179 58.3);
+  --warning-foreground: oklch(0.985 0 0);
+  --attention: oklch(0.646 0.222 41.116);
+  --attention-foreground: oklch(0.985 0 0);
+  --info: oklch(0.546 0.215 262.881);
+  --info-foreground: oklch(0.985 0 0);
+  --input: oklch(0.86 0.006 260);
   --ring: oklch(0.52 0.14 260);
   --chart-1: oklch(0.55 0.05 250);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.97 0.005 260);
-  --sidebar-foreground: oklch(0.145 0 0);
+  --panel: oklch(0.985 0.004 260);
+  --sidebar: oklch(0.962 0.007 260);
+  --sidebar-foreground: oklch(0.25 0.012 260);
   --sidebar-primary: oklch(0.56 0.17 255);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.94 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-accent: oklch(0.93 0.008 260);
+  --sidebar-accent-foreground: oklch(0.145 0 0);
+  --sidebar-border: oklch(0.885 0.008 260);
   --sidebar-ring: oklch(0.55 0.05 250);
   --gradient-primary: linear-gradient(135deg, oklch(0.5 0.16 270), oklch(0.45 0.18 300));
   --gradient-primary-hover: linear-gradient(135deg, oklch(0.45 0.16 270), oklch(0.4 0.18 300));
@@ -65,7 +101,16 @@
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
+  --color-panel: var(--panel);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-attention: var(--attention);
+  --color-attention-foreground: var(--attention-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -104,36 +149,45 @@
 }
 
 .dark {
-  --background: oklch(0.13 0.008 260);
+  --background: oklch(0.145 0.008 260);
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.17 0.006 260);
+  --card: oklch(0.185 0.006 260);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.17 0.006 260);
+  --popover: oklch(0.205 0.006 260);
   --popover-foreground: oklch(0.985 0 0);
   --primary: oklch(0.7 0.15 270);
   --primary-foreground: oklch(0.145 0 0);
-  --secondary: oklch(0.22 0.005 260);
+  --secondary: oklch(0.24 0.006 260);
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.22 0.005 260);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.25 0.02 250);
+  --muted: oklch(0.24 0.006 260);
+  --muted-foreground: oklch(0.72 0.01 260);
+  --accent: oklch(0.26 0.02 250);
   --accent-foreground: oklch(0.8 0.04 250);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 7%);
-  --input: oklch(1 0 0 / 15%);
+  --success: oklch(0.765 0.177 163.223);
+  --success-foreground: oklch(0.145 0 0);
+  --warning: oklch(0.828 0.189 84.429);
+  --warning-foreground: oklch(0.145 0 0);
+  --attention: oklch(0.75 0.183 55.934);
+  --attention-foreground: oklch(0.145 0 0);
+  --info: oklch(0.707 0.165 254.624);
+  --info-foreground: oklch(0.145 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 16%);
   --ring: oklch(0.55 0.05 250);
   --chart-1: oklch(0.65 0.06 250);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.11 0.01 260);
-  --sidebar-foreground: oklch(0.985 0 0);
+  --panel: oklch(0.145 0.008 260);
+  --sidebar: oklch(0.125 0.008 260);
+  --sidebar-foreground: oklch(0.93 0.005 260);
   --sidebar-primary: oklch(0.75 0.05 250);
   --sidebar-primary-foreground: oklch(0.145 0 0);
-  --sidebar-accent: oklch(0.25 0.02 250);
-  --sidebar-accent-foreground: oklch(0.8 0.04 250);
-  --sidebar-border: oklch(1 0 0 / 6%);
+  --sidebar-accent: oklch(0.22 0.02 250);
+  --sidebar-accent-foreground: oklch(0.93 0.04 250);
+  --sidebar-border: oklch(1 0 0 / 8%);
   --sidebar-ring: oklch(0.55 0.05 250);
   --gradient-primary: linear-gradient(135deg, oklch(0.6 0.18 270), oklch(0.55 0.2 300));
   --gradient-primary-hover: linear-gradient(135deg, oklch(0.55 0.18 270), oklch(0.5 0.2 300));
@@ -206,7 +260,18 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground text-xs antialiased;
+    /* 13px base per the documented type scale — 12px (text-xs) is reserved
+       for badges, timestamps, and metadata, not body copy. */
+    @apply bg-background text-foreground text-[13px] antialiased;
+  }
+  ::selection {
+    background-color: color-mix(in oklch, var(--primary) 22%, transparent);
+  }
+  /* Thin, unobtrusive scrollbars on every pane (standard properties;
+     Chrome 121+/Safari 18.2+, older engines fall back to OS default). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--muted-foreground) 28%, transparent) transparent;
   }
   button, a, [role="button"] {
     transition-property: color, background-color, background-image, border-color, box-shadow, opacity, transform;

@@ -40,6 +40,10 @@ export interface User {
   github_login?: string;
   avatar_url?: string;
   google_id?: string;
+  // Whether the account's current email is attested (OAuth provider claim,
+  // verification link, or emailed-invite claim). Gates the "verify your
+  // email" prompt and email-domain auto-join.
+  email_verified?: boolean;
   settings?: UserSettings;
   created_at: string;
 }
@@ -53,8 +57,13 @@ export interface UserSettings {
 export interface ThreadMessageWindowMeta {
   next_older_cursor?: string;
   has_older: boolean;
+  next_newer_cursor?: string;
+  has_newer?: boolean;
+  anchor_message_id?: number;
+  anchor_found?: boolean;
   latest_assistant_message_id?: number;
   live_edge_message_id?: number;
+  window_position?: "latest" | "older" | "newer" | "around";
   thread_status: ThreadStatus;
 }
 
@@ -1371,6 +1380,50 @@ export interface PendingInvitationForUser {
   created_at: string;
 }
 
+export type OrgDomainStatus = 'pending' | 'verified';
+
+// OrganizationDomain is one verified-domain row from /api/v1/team/domains.
+// The server decorates the row with the exact DNS TXT record to publish
+// (dns_record_name / dns_record_value) so the UI never reconstructs the
+// format itself.
+export interface OrganizationDomain {
+  id: string;
+  org_id: string;
+  domain: string;
+  verification_token: string;
+  status: OrgDomainStatus;
+  auto_join_enabled: boolean;
+  created_at: string;
+  verified_at?: string | null;
+  last_checked_at?: string | null;
+  failed_checks: number;
+  dns_record_name: string;
+  dns_record_value: string;
+}
+
+// JoinableOrganization is a workspace the current user may join because
+// their provider-verified email domain matches the org's verified
+// auto-join domain.
+export interface JoinableOrganization {
+  org_id: string;
+  org_name: string;
+  domain: string;
+}
+
+// JoinableOrgsResponse wraps the joinable list with the hint that the
+// user's domain IS captured but their email isn't verified yet — the org
+// identity stays hidden until they prove the address.
+export interface JoinableOrgsResponse {
+  data: JoinableOrganization[];
+  email_verification_required: boolean;
+}
+
+// ConfirmEmailVerificationResponse is the verify-email confirm payload.
+export interface ConfirmEmailVerificationResponse {
+  verified: boolean;
+  joined_org?: JoinableOrganization | null;
+}
+
 export interface GitHubInviteStatus {
   connected: boolean;
 }
@@ -1717,14 +1770,14 @@ export interface ProjectDetail {
 
 export const projectStatusConfig: Record<string, { color: string; label: string }> = {
   draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
-  active: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Active" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Done" },
+  active: { color: "bg-info/10 text-info", label: "Active" },
+  completed: { color: "bg-success/10 text-success", label: "Done" },
 };
 
 export const projectStatusDotColor: Record<string, string> = {
   draft: "bg-muted-foreground/50",
-  active: "bg-blue-500",
-  completed: "bg-emerald-500",
+  active: "bg-info",
+  completed: "bg-success",
 };
 
 // --- Session file browsing types ---
@@ -1910,9 +1963,9 @@ export const evalComplexityConfig: Record<EvalComplexity, { color: string; label
 
 export const evalRunStatusConfig: Record<EvalRunStatus, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
-  running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
-  failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed" },
+  running: { color: "bg-info/10 text-info", label: "Running" },
+  completed: { color: "bg-success/10 text-success", label: "Completed" },
+  failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
 };
 
 export const evalSourceConfig: Record<EvalTaskSource, { label: string }> = {

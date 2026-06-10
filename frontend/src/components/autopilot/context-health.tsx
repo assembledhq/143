@@ -14,7 +14,7 @@ function HealthIndicator({ set, label, detail }: { set: boolean; label: string; 
   return (
     <div className="flex items-center gap-2 text-xs">
       {set ? (
-        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+        <CheckCircle2 className="h-3.5 w-3.5 text-success shrink-0" />
       ) : (
         <Circle className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
       )}
@@ -55,9 +55,9 @@ export function ContextHealth({ productContext, settingsUpdatedAt, documents }: 
     score >= 0.75 ? "Healthy" : score >= 0.5 ? "Moderate" : "Needs attention";
   const scoreColor =
     score >= 0.75
-      ? "text-emerald-600 dark:text-emerald-400"
+      ? "text-success"
       : score >= 0.5
-        ? "text-amber-600 dark:text-amber-400"
+        ? "text-warning"
         : "text-muted-foreground";
 
   return (
@@ -81,8 +81,8 @@ export function ContextHealth({ productContext, settingsUpdatedAt, documents }: 
         />
         {directionSet && directionAge && (
           <div className="flex items-center gap-2 text-xs ml-6">
-            <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
-            <span className="text-amber-600 dark:text-amber-400">Consider refreshing your direction</span>
+            <AlertTriangle className="h-3 w-3 text-warning shrink-0" />
+            <span className="text-warning">Consider refreshing your direction</span>
           </div>
         )}
         <HealthIndicator

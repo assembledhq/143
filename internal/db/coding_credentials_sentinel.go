@@ -48,7 +48,7 @@ func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 	// — unified or legacy. Legacy rows that haven't yet been copied by 000111
 	// still represent split work the post-step must do once the data lands in
 	// coding_credentials.
-	unifiedCount, err := countAnthropicRows(ctx, dbtx, "coding_credentials")
+	unifiedCount, err := countActiveUnifiedAnthropicRows(ctx, dbtx)
 	if err != nil {
 		return fmt.Errorf("count pre-split anthropic rows: %w", err)
 	}
@@ -82,6 +82,22 @@ func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 func countAnthropicRows(ctx context.Context, dbtx DBTX, table string) (int, error) {
 	var count int
 	q := `SELECT count(*) FROM ` + pgx.Identifier{table}.Sanitize() + ` WHERE provider = 'anthropic'`
+	if err := dbtx.QueryRow(ctx, q).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// countActiveUnifiedAnthropicRows is the coding_credentials variant of
+// countAnthropicRows. Under the insert-only versioning schema (migration
+// 000167) inactive rows are immutable history and never deleted, so an
+// anthropic credential that was deactivated long ago must not hold the boot
+// gate closed — only active config versions represent split work.
+//
+// lint:allow-no-orgid reason="schema-level invariant; not tenant data"
+func countActiveUnifiedAnthropicRows(ctx context.Context, dbtx DBTX) (int, error) {
+	var count int
+	q := `SELECT count(*) FROM coding_credentials WHERE provider = 'anthropic' AND active = true`
 	if err := dbtx.QueryRow(ctx, q).Scan(&count); err != nil {
 		return 0, err
 	}

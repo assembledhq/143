@@ -249,10 +249,16 @@ func runBatch(
 	// Cursor pagination: keyset on (created_at, id) so a single stuck row can
 	// be skipped (operator manually advances the cursor and re-runs) without
 	// rescanning earlier rows.
+	// Only active config versions are split. Inactive rows are immutable
+	// version history under the insert-only schema (migration 000167) and
+	// must keep the (provider, config) pair they were written with. The
+	// active filter also keeps the (created_at, id) keyset unique — created_at
+	// is carried across versions of the same logical id.
 	rows, err := tx.Query(ctx, `
 		SELECT id, org_id, user_id, label, config, priority, status, created_by, last_verified_at, created_at, updated_at
 		FROM coding_credentials
 		WHERE provider = 'anthropic'
+		  AND active = true
 		  AND (created_at, id) > ($1, $2)
 		ORDER BY created_at, id
 		LIMIT $3`,
@@ -339,7 +345,7 @@ func runBatch(
 		tag, err := tx.Exec(ctx,
 			`UPDATE coding_credentials
 			 SET provider = 'anthropic_subscription', config = $1, updated_at = now()
-			 WHERE id = $2 AND provider = 'anthropic'`,
+			 WHERE id = $2 AND provider = 'anthropic' AND active = true`,
 			outcome.NewCipher, r.ID,
 		)
 		if err != nil {

@@ -242,6 +242,20 @@ func clampMentionIndexBlob(index MentionIndex, maxBlobBytes int) (MentionIndex, 
 	return index, nil
 }
 
+// SessionMentionIndexStaleCacheKey identifies the most recently built index
+// for a session regardless of which container, snapshot, turn, or workspace
+// generation produced it. The exact key (SessionMentionIndexCacheKey) churns
+// on every completed turn, so the picker would otherwise pay a full rebuild
+// each time the composer is opened; this alias lets the handler serve the
+// previous turn's index immediately while a background refresh repopulates
+// the exact key.
+func SessionMentionIndexStaleCacheKey(session *models.Session) string {
+	if session == nil {
+		return "session-mention-index:v1:unknown:latest"
+	}
+	return fmt.Sprintf("session-mention-index:v1:%s:%s:latest", session.OrgID, session.ID)
+}
+
 func SessionMentionIndexCacheKey(session *models.Session) string {
 	if session == nil {
 		return "session-mention-index:v1:unknown"

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -107,8 +108,38 @@ type Scheduler struct {
 	pool           schedulerTxBeginner         // needed for automation scheduling transactions
 	logger         zerolog.Logger
 
+	domainStore    schedulerDomainStore    // nil-safe: verified-domain recheck disabled if nil
+	domainVerifier schedulerDomainVerifier // nil-safe: verified-domain recheck disabled if nil
+	audit          *db.AuditEmitter        // nil-safe: recheck disable events unlogged if nil
+
 	lastDailyJobDates map[string]string // tracks UTC date of last daily scheduling per job type
 }
+
+// schedulerDomainStore is the verified-domain surface for the daily DNS
+// re-check sweep (expired/transferred-domain hygiene for auto-join).
+type schedulerDomainStore interface {
+	ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time, limit int) ([]models.OrganizationDomain, error)
+	RecordRecheckSuccess(ctx context.Context, id uuid.UUID) error
+	RecordRecheckFailure(ctx context.Context, id uuid.UUID, maxFailures int) (int, bool, error)
+}
+
+// schedulerDomainVerifier checks a domain's verification TXT record.
+type schedulerDomainVerifier interface {
+	Verify(ctx context.Context, domain, token string) (bool, error)
+}
+
+// domainRecheckInterval is how stale a verified domain's last check may be
+// before the sweep re-verifies it. The data is the gate (last_checked_at),
+// so the 10-minute scheduler tick re-checks each domain about once a day
+// without extra bookkeeping.
+const domainRecheckInterval = 24 * time.Hour
+
+// domainRecheckBatchSize bounds DNS work per scheduler tick: each domain
+// costs up to two lookups with 5s timeouts, and runOnce is sequential, so
+// an unbounded sweep on a bad DNS day could starve every other scheduler
+// pass. 25/tick clears 3600 domains/day — far above any realistic count —
+// while capping a worst-case tick at ~4 minutes of DNS.
+const domainRecheckBatchSize = 25
 
 func NewScheduler(
 	lock schedulerLock,
@@ -149,6 +180,14 @@ func (s *Scheduler) SetAutomationStores(automations schedulerAutomationStore, ru
 // don't exercise it).
 func (s *Scheduler) SetSessionStore(sessions schedulerSessionStore) {
 	s.sessions = sessions
+}
+
+// SetDomainRecheck injects the stores for the daily verified-domain DNS
+// re-check sweep. If unset, the sweep is a no-op.
+func (s *Scheduler) SetDomainRecheck(store schedulerDomainStore, verifier schedulerDomainVerifier, audit *db.AuditEmitter) {
+	s.domainStore = store
+	s.domainVerifier = verifier
+	s.audit = audit
 }
 
 func (s *Scheduler) Start(ctx context.Context, interval time.Duration) {
@@ -301,6 +340,73 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// the only path that reconciles the cache against Linear's source of
 	// truth.
 	s.scheduleLinearTeamKeyRefresh(ctx, orgIDs, now)
+
+	// Eighth pass: re-verify auto-join domains' DNS TXT records roughly
+	// daily. A domain that expires or transfers must not keep admitting new
+	// members forever — after MaxDomainRecheckFailures consecutive missing
+	// records, auto-join is disabled (the verified claim is kept so nobody
+	// else can grab the domain; re-enabling is an explicit admin action).
+	s.recheckVerifiedDomains(ctx, now)
+}
+
+// recheckVerifiedDomains is the expired/transferred-domain hygiene sweep.
+// Resolver errors are skipped without a write — "DNS is down" carries no
+// information about the record, and the next tick retries; only an
+// affirmative present/absent answer moves last_checked_at or the failure
+// streak.
+func (s *Scheduler) recheckVerifiedDomains(ctx context.Context, now time.Time) {
+	if s.domainStore == nil || s.domainVerifier == nil {
+		return
+	}
+
+	due, err := s.domainStore.ListVerifiedDueForRecheck(ctx, now.Add(-domainRecheckInterval), domainRecheckBatchSize)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to list verified domains due for recheck")
+		return
+	}
+
+	for _, d := range due {
+		ok, verr := s.domainVerifier.Verify(ctx, d.Domain, d.VerificationToken)
+		if verr != nil {
+			s.logger.Warn().Err(verr).Str("domain", d.Domain).Msg("domain recheck lookup failed; will retry next tick")
+			continue
+		}
+		if ok {
+			if err := s.domainStore.RecordRecheckSuccess(ctx, d.ID); err != nil {
+				s.logger.Warn().Err(err).Str("domain", d.Domain).Msg("failed to record domain recheck success")
+			}
+			continue
+		}
+
+		failedChecks, disabled, err := s.domainStore.RecordRecheckFailure(ctx, d.ID, models.MaxDomainRecheckFailures)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("domain", d.Domain).Msg("failed to record domain recheck failure")
+			continue
+		}
+		s.logger.Warn().
+			Str("domain", d.Domain).
+			Str("org_id", d.OrgID.String()).
+			Int("failed_checks", failedChecks).
+			Bool("auto_join_disabled", disabled).
+			Msg("verified domain TXT record missing on recheck")
+
+		if disabled && s.audit != nil {
+			idStr := d.ID.String()
+			details, _ := json.Marshal(map[string]any{
+				"domain":        d.Domain,
+				"reason":        "dns_recheck_failed",
+				"failed_checks": failedChecks,
+			})
+			s.audit.EmitSystemAction(ctx, db.SystemActionParams{
+				OrgID:        d.OrgID,
+				ActorID:      "domain-recheck",
+				Action:       models.AuditActionTeamDomainUpdated,
+				ResourceType: models.AuditResourceOrgDomain,
+				ResourceID:   &idStr,
+				Details:      details,
+			})
+		}
+	}
 }
 
 // scheduleLinearTeamKeyRefresh enqueues a per-org refresh_linear_team_keys

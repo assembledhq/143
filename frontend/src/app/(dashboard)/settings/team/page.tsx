@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { VerifiedDomainsSection } from "@/components/settings/verified-domains-section";
 import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -339,7 +340,7 @@ export default function TeamSettingsPage() {
               </div>
             ) : (
               <div className="divide-y divide-border/50">
-                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
                   <div>Name</div>
                   <div>Email</div>
                   <div>Role</div>
@@ -513,6 +514,9 @@ export default function TeamSettingsPage() {
           </Card>
         </section>
       )}
+
+      {/* Verified domains (domain capture / auto-join) */}
+      {canManageTeam && <VerifiedDomainsSection />}
 
       {/* CLI install links (admin-only: creating one hands out membership) */}
       {canManageTeam && <CLIJoinTokensCard />}

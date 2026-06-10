@@ -58,25 +58,27 @@ func (s *UserCredentialStore) logMirrorFailure(action string, id uuid.UUID, err 
 
 // reflectUserCredentialByID re-loads a user_credentials row and asks the
 // mirror to reflect it. Same pattern as OrgCredentialStore.reflectOrgCredentialByID.
-func (s *UserCredentialStore) reflectUserCredentialByID(ctx context.Context, id uuid.UUID) {
-	if s.codingMirror == nil {
-		return
+func (s *UserCredentialStore) reflectUserCredentialByID(ctx context.Context, orgID, id uuid.UUID) error {
+	if s.codingMirror == nil || isNoopCodingCredentialMirror(s.codingMirror) {
+		return nil
 	}
-	row, cfg, err := s.loadUserCredentialByID(ctx, id)
+	row, cfg, err := s.loadUserCredentialByID(ctx, orgID, id)
 	if err != nil {
 		s.logMirrorFailure("load-by-id", id, err)
-		return
+		return fmt.Errorf("load user credential for versioned mirror: %w", err)
 	}
 	if mirrErr := s.codingMirror.MirrorUserCredential(ctx, row, cfg); mirrErr != nil {
 		s.logMirrorFailure("upsert", id, mirrErr)
+		return fmt.Errorf("mirror user credential into versioned coding_credentials: %w", mirrErr)
 	}
+	return nil
 }
 
-func (s *UserCredentialStore) loadUserCredentialByID(ctx context.Context, id uuid.UUID) (models.UserCredential, models.ProviderConfig, error) {
+func (s *UserCredentialStore) loadUserCredentialByID(ctx context.Context, orgID, id uuid.UUID) (models.UserCredential, models.ProviderConfig, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, user_id, org_id, provider, config, is_team_default, status, last_verified_at, created_at, updated_at
-		 FROM user_credentials WHERE id = @id`,
-		pgx.NamedArgs{"id": id},
+		 FROM user_credentials WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
 	)
 	if err != nil {
 		return models.UserCredential{}, nil, fmt.Errorf("load user credential: %w", err)
@@ -131,8 +133,7 @@ func (s *UserCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUI
 	if err != nil {
 		return fmt.Errorf("upsert user %s credential: %w", provider, err)
 	}
-	s.reflectUserCredentialByID(ctx, id)
-	return nil
+	return s.reflectUserCredentialByID(ctx, orgID, id)
 }
 
 // GetForUser retrieves a user's credential for a specific provider.
@@ -258,6 +259,7 @@ func (s *UserCredentialStore) Disable(ctx context.Context, orgID, userID uuid.UU
 	for _, id := range collectMirrorIDs(rows) {
 		if mirrErr := s.codingMirror.MirrorUserCredentialDisable(ctx, id, orgID, userID, provider); mirrErr != nil {
 			s.logMirrorFailure("disable", id, mirrErr)
+			return fmt.Errorf("mirror disabled user credential into versioned coding_credentials: %w", mirrErr)
 		}
 	}
 	return nil
@@ -278,7 +280,9 @@ func (s *UserCredentialStore) ClearTeamDefault(ctx context.Context, orgID uuid.U
 	// the new is_team_default=false state so the mirror flips it back to a
 	// personal row.
 	for _, id := range collectMirrorIDs(rows) {
-		s.reflectUserCredentialByID(ctx, id)
+		if err := s.reflectUserCredentialByID(ctx, orgID, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -334,9 +338,13 @@ func (s *UserCredentialStore) SetTeamDefault(ctx context.Context, orgID, userID 
 		return err
 	}
 	for _, clearedID := range clearedIDs {
-		s.reflectUserCredentialByID(ctx, clearedID)
+		if err := s.reflectUserCredentialByID(ctx, orgID, clearedID); err != nil {
+			return err
+		}
 	}
-	s.reflectUserCredentialByID(ctx, setID)
+	if err := s.reflectUserCredentialByID(ctx, orgID, setID); err != nil {
+		return err
+	}
 	return nil
 }
 

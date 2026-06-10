@@ -322,3 +322,100 @@ func cliAuthCodeTestColumns() []string {
 	return []string{"id", "code_hash", "challenge", "user_id", "org_id",
 		"device_name", "expires_at", "consumed_at", "created_at"}
 }
+
+// TestCallbackCLIBranchDomainAutoJoinRedirectsToLoopback pins the merge
+// interaction between CLI login and domain capture: a brand-new user at a
+// captured-domain org running `143-tools login` as their very first
+// sign-in must finish on the CLI loopback handshake, not get bounced to
+// the web app while their terminal hangs.
+func TestCallbackCLIBranchDomainAutoJoinRedirectsToLoopback(t *testing.T) {
+	t.Parallel()
+	mock := newPgxMock(t)
+	h := newCLIAuthTestHandler(t, mock)
+	h.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+
+	userID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"alice@assembledhq.com","avatar_url":""}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"alice@assembledhq.com","primary":true,"verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+	h.SetGitHubURLsForTest(github.URL, github.URL, github.Client())
+
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login",
+		"github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+
+	// Brand-new user: no GitHub-id match, no email match.
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users\s+WHERE github_id = @github_id`).
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\) = LOWER\(@email\)`).
+		WithArgs("alice@assembledhq.com").
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	// Domain lookup: once in selectGitHubAutoJoinEmail, once in tryDomainAutoJoin.
+	for range 2 {
+		mock.ExpectQuery("SELECT d.org_id, o.name AS org_name, d.domain").
+			WithArgs("assembledhq.com").
+			WillReturnRows(pgxmock.NewRows([]string{"org_id", "org_name", "domain"}).
+				AddRow(orgID, "Assembled", "assembledhq.com"))
+	}
+	// createAutoJoinUser transaction.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+	mock.ExpectQuery("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec("UPDATE users SET email_verified_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE users SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUserLastOrgLookup(mock, userID, &orgID)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+	mock.ExpectCommit()
+	// finishCLILoginWithSession: resolveCLILoginOrg + auth-code mint.
+	expectUserLastOrgLookup(mock, userID, &orgID)
+	mock.ExpectExec(`DELETE FROM cli_auth_codes`).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	mock.ExpectQuery(`INSERT INTO cli_auth_codes`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(cliAuthCodeTestColumns()).AddRow(
+			uuid.New(), "hash", strings.Repeat("ab", 32), userID, &orgID, "laptop",
+			now.Add(time.Minute), nil, now,
+		))
+
+	challenge := strings.Repeat("ab", 32)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?code=gh-code&state=state-1", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "state-1"})
+	req.AddCookie(&http.Cookie{Name: "cli_port", Value: "52123"})
+	req.AddCookie(&http.Cookie{Name: "cli_challenge", Value: challenge})
+	req.AddCookie(&http.Cookie{Name: "cli_device", Value: "laptop"})
+	w := httptest.NewRecorder()
+
+	h.Callback(w, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "body: %s", w.Body.String())
+	location, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:52123", location.Host,
+		"a CLI-initiated captured-domain signup must finish on the loopback handshake, not the web redirect")
+	require.NotEmpty(t, location.Query().Get("code"))
+	require.NoError(t, mock.ExpectationsWereMet())
+}

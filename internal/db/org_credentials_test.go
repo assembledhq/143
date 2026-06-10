@@ -20,6 +20,29 @@ import (
 var credColumns = []string{"id", "org_id", "provider", "label", "config", "status", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
 var codingAuthColumns = []string{"id", "org_id", "provider", "label", "config", "status", "priority", "last_verified_at", "last_used_at", "created_by", "created_at", "updated_at"}
 
+type failingCodingCredentialMirror struct {
+	err error
+}
+
+func (m failingCodingCredentialMirror) MirrorOrgCredential(context.Context, models.OrgCredential, models.ProviderConfig) error {
+	return m.err
+}
+func (m failingCodingCredentialMirror) MirrorOrgCredentialDelete(context.Context, uuid.UUID, uuid.UUID) error {
+	return m.err
+}
+func (m failingCodingCredentialMirror) MirrorOrgCredentialDisable(context.Context, uuid.UUID, uuid.UUID) error {
+	return m.err
+}
+func (m failingCodingCredentialMirror) MirrorUserCredential(context.Context, models.UserCredential, models.ProviderConfig) error {
+	return m.err
+}
+func (m failingCodingCredentialMirror) MirrorUserCredentialDelete(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ProviderName) error {
+	return m.err
+}
+func (m failingCodingCredentialMirror) MirrorUserCredentialDisable(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ProviderName) error {
+	return m.err
+}
+
 func TestOrgCredentialStore_Upsert(t *testing.T) {
 	t.Parallel()
 
@@ -104,6 +127,100 @@ func TestOrgCredentialStore_Upsert(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestOrgCredentialStore_UpsertWithLabelReturnsMirrorError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewOrgCredentialStore(mock, nil)
+	mirrorErr := errors.New("mirror unavailable")
+	store.SetCodingMirror(failingCodingCredentialMirror{err: mirrorErr})
+
+	orgID := uuid.New()
+	createdBy := uuid.New()
+	credID := uuid.New()
+	now := time.Now().UTC()
+	cfg := models.OpenAIChatGPTConfig{
+		AccessToken:  "access",
+		RefreshToken: "refresh",
+		ExpiresAt:    now.Add(time.Hour),
+	}
+	encrypted, err := store.marshalAndEncrypt(cfg)
+	require.NoError(t, err, "test config should encrypt")
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(priority\), 0\) \+ 1`).
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"priority"}).AddRow(1))
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(orgID, string(models.ProviderOpenAIChatGPT), "team-a", pgxmock.AnyArg(), &createdBy, 1).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(credID))
+	mock.ExpectCommit()
+	mock.ExpectQuery(`SELECT id, org_id, provider, label, config, status, priority, last_verified_at, last_used_at, created_by, created_at, updated_at FROM org_credentials WHERE id = @id AND org_id = @org_id`).
+		WithArgs(credID, orgID).
+		WillReturnRows(pgxmock.NewRows(codingAuthColumns).
+			AddRow(credID, orgID, string(models.ProviderOpenAIChatGPT), "team-a", encrypted, string(models.CredentialStatusActive), 1, nil, nil, &createdBy, now, now))
+
+	id, err := store.UpsertWithLabel(context.Background(), orgID, &createdBy, "team-a", cfg)
+
+	require.ErrorIs(t, err, mirrorErr, "UpsertWithLabel should return mirror failures for coding credentials")
+	require.Nil(t, id, "UpsertWithLabel should not return an id when versioned mirror persistence fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOrgCredentialStore_UpsertByIDReturnsNoRowsWithoutMirroring(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	credID := uuid.New()
+	store := NewOrgCredentialStore(mock, nil)
+	store.SetCodingMirror(failingCodingCredentialMirror{err: errors.New("mirror should not run")})
+
+	mock.ExpectExec(`UPDATE org_credentials SET config = @config, status = 'active', last_verified_at = now\(\), updated_at = now\(\) WHERE id = @id AND org_id = @org_id AND status != 'disabled'`).
+		WithArgs(pgxmock.AnyArg(), credID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.UpsertByID(context.Background(), orgID, credID, models.OpenAIChatGPTConfig{
+		AccessToken:  "access",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	})
+
+	require.ErrorIs(t, err, pgx.ErrNoRows, "UpsertByID should report not found when the scoped update touches zero rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "zero-row UpsertByID should not attempt a mirror reload")
+}
+
+func TestOrgCredentialStore_UpdateStatusByIDReturnsNoRowsWithoutMirroring(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	credID := uuid.New()
+	store := NewOrgCredentialStore(mock, nil)
+	store.SetCodingMirror(failingCodingCredentialMirror{err: errors.New("mirror should not run")})
+
+	mock.ExpectExec(`UPDATE org_credentials SET status = @status, last_verified_at = now\(\), updated_at = now\(\) WHERE id = @id AND org_id = @org_id`).
+		WithArgs(string(models.CredentialStatusInvalid), credID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	err = store.UpdateStatusByID(context.Background(), orgID, credID, models.CredentialStatusInvalid)
+
+	require.ErrorIs(t, err, pgx.ErrNoRows, "UpdateStatusByID should report not found when the scoped update touches zero rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "zero-row UpdateStatusByID should not attempt a mirror reload")
 }
 
 func TestOrgCredentialStore_InsertPendingAuth(t *testing.T) {

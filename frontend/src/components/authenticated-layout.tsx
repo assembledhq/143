@@ -45,7 +45,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { useCallback, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
@@ -53,6 +56,7 @@ import { SidebarSettingsSection } from "@/components/sidebar-settings-section";
 import { CreateSessionDialog } from "@/components/create-session-dialog";
 import { ResizeHandle } from "@/components/resize-handle";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
+import { Kbd } from "@/components/ui/kbd";
 
 type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
 
@@ -102,7 +106,7 @@ function VersionMenuItem() {
         Version <span className="font-mono">{shortSha}</span>
       </span>
       {copied ? (
-        <Check className="h-3.5 w-3.5 text-green-500" />
+        <Check className="h-3.5 w-3.5 text-success" />
       ) : (
         <Copy className="h-3.5 w-3.5 opacity-60" />
       )}
@@ -190,7 +194,9 @@ function SidebarBody({
                     <Search className={iconSize} />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom" sideOffset={4}>Search</TooltipContent>
+                <TooltipContent side="bottom" sideOffset={4} className="flex items-center gap-1.5">
+                  Search <Kbd variant="inverted">⌘K</Kbd>
+                </TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -228,8 +234,8 @@ function SidebarBody({
                 "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-colors duration-150 active:bg-sidebar-accent",
                 navItemClasses,
                 isActive
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+                  ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
               )}
             >
               <item.icon className="h-4 w-4 shrink-0" />
@@ -246,14 +252,14 @@ function SidebarBody({
       </nav>
 
       {/* Repo context switcher */}
-      <div className="relative px-2 pb-1 border-t border-border/50 pt-2">
+      <div className="relative px-2 pb-1 border-t border-sidebar-border/70 pt-2">
         <RepoContextSwitcher />
       </div>
 
       {/* User menu */}
       <div
         className={cn(
-          "relative px-2 border-t border-border/50 pt-2",
+          "relative px-2 border-t border-sidebar-border/70 pt-2",
           isMobile ? "pb-[max(0.5rem,env(safe-area-inset-bottom))]" : "pb-1"
         )}
       >
@@ -264,7 +270,7 @@ function SidebarBody({
                 variant="ghost"
                 size="sm"
                 className={cn(
-                  "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-colors duration-150 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                  "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-colors duration-150 text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
                   isMobile ? "h-11 text-sm" : "h-8 text-xs"
                 )}
               >
@@ -318,7 +324,7 @@ function CompactSidebarRail({
     <TooltipProvider>
       <aside
         data-testid="app-sidebar-rail"
-        className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2"
+        className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-2"
         aria-label="Primary navigation"
       >
         <div data-testid="app-sidebar-rail-quick-actions" className="flex flex-col items-center gap-0.5">
@@ -334,7 +340,9 @@ function CompactSidebarRail({
                 <Search className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="right" sideOffset={8}>Search</TooltipContent>
+            <TooltipContent side="right" sideOffset={8} className="flex items-center gap-1.5">
+              Search <Kbd variant="inverted">⌘K</Kbd>
+            </TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -365,8 +373,8 @@ function CompactSidebarRail({
                     className={cn(
                       "relative flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
                       isActive
-                        ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                        : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                        ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+                        : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
                     )}
                   >
                     <item.icon className="h-4 w-4" />
@@ -385,8 +393,8 @@ function CompactSidebarRail({
                 className={cn(
                   "flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
                   pathname.startsWith("/settings")
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                    : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                    ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
                 )}
               >
                 <Settings className="h-4 w-4" />
@@ -432,11 +440,11 @@ function CompactSidebarRail({
             <div className="space-y-3 p-3">
               <div className="space-y-1">
                 <p className="px-1 text-xs font-medium text-muted-foreground">Workspace</p>
-                <div className="rounded-md border border-border/60 bg-background px-2 py-1.5">
+                <div className="rounded-md border border-border/60 bg-panel px-2 py-1.5">
                   <OrgSwitcher userEmail={user?.email} />
                 </div>
               </div>
-              <div className="rounded-md border border-border/60 bg-background p-1">
+              <div className="rounded-md border border-border/60 bg-panel p-1">
                 <RepoContextSwitcher />
               </div>
               <div className="border-t border-border/60 pt-2">
@@ -466,9 +474,26 @@ type MobileTopBarProps = {
   menuOpen: boolean;
 };
 
-function isSessionDetailRoute(pathname: string): boolean {
+// Returns the second path segment of a /sessions/<segment> route, or null
+// for anything else (including /sessions/new). Shared by the loose UI check
+// below and the strict prefetch guard so the route shape is parsed once.
+function sessionDetailRouteSegment(pathname: string): string | null {
   const segments = pathname.split("/").filter(Boolean);
-  return segments.length === 2 && segments[0] === "sessions" && segments[1] !== "new";
+  if (segments.length !== 2 || segments[0] !== "sessions" || segments[1] === "new") return null;
+  return segments[1];
+}
+
+function isSessionDetailRoute(pathname: string): boolean {
+  return sessionDetailRouteSegment(pathname) !== null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Strict variant for the auth-gate prefetch: only a UUID segment is worth a
+// speculative request, so non-id paths never hit the API.
+export function sessionDetailRouteId(pathname: string): string | null {
+  const segment = sessionDetailRouteSegment(pathname);
+  return segment !== null && UUID_RE.test(segment) ? segment : null;
 }
 
 function MobileTopBar({
@@ -478,7 +503,7 @@ function MobileTopBar({
   menuOpen,
 }: MobileTopBarProps) {
   return (
-    <header className="md:hidden flex h-14 shrink-0 items-center gap-1 border-b border-border/50 bg-background px-2">
+    <header className="md:hidden flex h-14 shrink-0 items-center gap-1 border-b border-sidebar-border bg-sidebar px-2">
       <Button
         variant="ghost"
         size="icon"
@@ -529,6 +554,30 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // On a cold load this layout renders only a skeleton until /auth/me
+  // resolves, so the page behind it can't start its own data fetches — every
+  // round trip serializes behind auth. Warm the session detail cache for
+  // /sessions/[id] routes in parallel with /auth/me; when the page mounts,
+  // React Query dedupes against the in-flight prefetch (or serves the settled
+  // payload) instead of paying a fresh round trip. prefetchQuery swallows
+  // errors by design: a 401 here just means the auth gate is about to
+  // redirect to /login anyway.
+  const queryClient = useQueryClient();
+  const didPrefetchRouteDataRef = useRef(false);
+  useEffect(() => {
+    if (didPrefetchRouteDataRef.current) return;
+    didPrefetchRouteDataRef.current = true;
+    // Auth already settled (warm navigation) — the page mounts immediately
+    // and owns its fetches; prefetching would only duplicate work.
+    if (user || !isLoading) return;
+    const sessionId = sessionDetailRouteId(pathname);
+    if (!sessionId) return;
+    void queryClient.prefetchQuery({
+      queryKey: queryKeys.sessions.detail(sessionId),
+      queryFn: () => api.sessions.get(sessionId),
+    });
+  }, [isLoading, pathname, queryClient, user]);
   const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
     storageKey: APP_SIDEBAR_STORAGE_KEY,
     defaultWidth: APP_SIDEBAR_DEFAULT_WIDTH,
@@ -617,12 +666,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     return (
       <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
         {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
-        <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-border/50 bg-sidebar py-2" />
+        <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-2" />
         <aside
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            "hidden xl:flex bg-sidebar flex-col w-[var(--app-sidebar-w)]"
+            "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)]"
           )}
         >
           <div className="px-4 py-4">
@@ -647,7 +696,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
         </div>
         <div className="flex flex-1 min-w-0 flex-col">
-          <header className="md:hidden flex h-14 items-center gap-2 border-b border-border/50 bg-background px-3">
+          <header className="md:hidden flex h-14 items-center gap-2 border-b border-sidebar-border bg-sidebar px-3">
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
             <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
             <div className="h-6 w-6 rounded bg-muted animate-pulse" />
@@ -689,7 +738,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         data-testid="app-sidebar"
         style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          "hidden xl:flex bg-sidebar flex-col relative w-[var(--app-sidebar-w)]"
+          "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col relative w-[var(--app-sidebar-w)]"
         )}
       >
         <SidebarBody
@@ -711,7 +760,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           side="left"
           hideCloseButton
           aria-describedby={undefined}
-          className="w-[min(85vw,320px)] p-0 bg-sidebar border-r border-border/50 flex flex-col gap-0"
+          className="w-[min(85vw,320px)] p-0 bg-sidebar border-r border-sidebar-border flex flex-col gap-0"
         >
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <SidebarBody
