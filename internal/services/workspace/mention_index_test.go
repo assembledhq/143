@@ -277,6 +277,41 @@ func TestMentionIndexCache_GetOrBuildStale_BuildsSynchronouslyWhenCold(t *testin
 	require.Equal(t, built, got, "the alias should serve the previous turn's index")
 }
 
+func TestMentionIndexCache_GetOrBuildStale_BacksOffAfterFailedRefresh(t *testing.T) {
+	t.Parallel()
+
+	c := NewMentionIndexCache(MentionIndexCacheConfig{Logger: zerolog.Nop()})
+
+	staleKey := "session-mention-index:v1:o:s3:latest"
+	exactKey := "session-mention-index:v1:o:s3:live:ctr:turn:3:workspace:3"
+	staleIndex := MentionIndex{Entries: []MentionIndexEntry{{Kind: "file", Path: "old.go"}}}
+	require.NoError(t, c.Warm(context.Background(), staleKey, staleIndex), "warming the stale alias should succeed")
+
+	var buildCalls atomic.Int32
+	failingBuild := func(ctx context.Context) (MentionIndex, error) {
+		buildCalls.Add(1)
+		return MentionIndex{}, context.DeadlineExceeded
+	}
+
+	got, stale, err := c.GetOrBuildStale(context.Background(), exactKey, staleKey, failingBuild)
+	require.NoError(t, err, "the stale serve should succeed even though the refresh will fail")
+	require.True(t, stale, "the alias should be served while the refresh runs")
+	require.Equal(t, staleIndex, got, "the stale alias index should be returned")
+
+	require.Eventually(t, func() bool {
+		return c.refreshRecentlyFailed(exactKey, time.Now())
+	}, 5*time.Second, 10*time.Millisecond, "the failed refresh should be recorded for backoff")
+	require.Equal(t, int32(1), buildCalls.Load(), "the failing refresh should have built exactly once")
+
+	got, stale, err = c.GetOrBuildStale(context.Background(), exactKey, staleKey, failingBuild)
+	require.NoError(t, err, "subsequent stale serves should still succeed during backoff")
+	require.True(t, stale, "the alias should still be served during backoff")
+	require.Equal(t, staleIndex, got, "the stale alias index should still be returned during backoff")
+	require.Never(t, func() bool {
+		return buildCalls.Load() > 1
+	}, 200*time.Millisecond, 20*time.Millisecond, "no second rebuild should be attempted within the backoff window")
+}
+
 func TestMentionIndexCache_GetOrBuild_UsesRedisAndLocalHotCache(t *testing.T) {
 	t.Parallel()
 

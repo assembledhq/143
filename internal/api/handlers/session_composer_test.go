@@ -488,6 +488,60 @@ func TestSessionComposerHandler_ListSessionFileMentions(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet(), "database expectations should be met")
 	})
 
+	t.Run("warms the mention index in the background on the picker-open empty query", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock pool should be created")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		containerID := "ctr-warm"
+		setupSessionMockWithSnapshot(mock, orgID, sessionID, &containerID, nil)
+
+		handler := NewSessionComposerHandlerWithWorkspace(
+			nil,
+			db.NewSessionStore(mock),
+			nil,
+			&mockFileReader{
+				listDirFn: func(ctx context.Context, gotContainerID, workDir, dirPath string) ([]sandbox.FileEntry, error) {
+					if dirPath == "." {
+						return []sandbox.FileEntry{{Type: "file", Path: "docs/warmed.md"}}, nil
+					}
+					return []sandbox.FileEntry{}, nil
+				},
+			},
+			nil,
+			nil,
+			zerolog.Nop(),
+		)
+
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/sessions/%s/composer/files?q=", sessionID), nil)
+		req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+		w := httptest.NewRecorder()
+
+		withSessionComposerRoute(handler.ListSessionFileMentions).ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "the empty-q warm request should respond immediately")
+
+		var resp models.ListResponse[models.SessionInputReference]
+		err = json.Unmarshal(w.Body.Bytes(), &resp)
+		require.NoError(t, err, "response should decode")
+		require.Empty(t, resp.Data, "the empty-q request should return no suggestions")
+
+		// The warm runs after the response; probe the cache via the stale
+		// alias with a builder that fails, so the probe only succeeds once
+		// the background build has populated the cache.
+		staleKey := workspace.SessionMentionIndexStaleCacheKey(&models.Session{ID: sessionID, OrgID: orgID})
+		require.Eventually(t, func() bool {
+			index, err := handler.mentionIndexes.GetOrBuild(context.Background(), staleKey, func(ctx context.Context) (workspace.MentionIndex, error) {
+				return workspace.MentionIndex{}, context.DeadlineExceeded
+			})
+			return err == nil && len(index.Entries) == 1 && index.Entries[0].Path == "docs/warmed.md"
+		}, 5*time.Second, 10*time.Millisecond, "the empty-q request should build the mention index in the background")
+		require.NoError(t, mock.ExpectationsWereMet(), "the warm should have loaded the session")
+	})
+
 	t.Run("returns NO_SANDBOX when the referenced snapshot is missing", func(t *testing.T) {
 		t.Parallel()
 

@@ -19,13 +19,20 @@ const defaultMentionIndexRedisTTL = 24 * time.Hour
 const defaultMentionIndexLocalMaxItems = 128
 const defaultMentionIndexRefreshTimeout = 60 * time.Second
 
+// mentionIndexRefreshFailureBackoff suppresses repeated background rebuild
+// attempts for a key after one fails. Without it, every stale serve against
+// a workspace that can no longer be read (e.g. a reaped container) would
+// spawn a doomed rebuild. Keyed by the exact cache key, which churns each
+// turn, so a new turn always gets a fresh attempt.
+const mentionIndexRefreshFailureBackoff = 30 * time.Second
+
 type MentionIndexCacheConfig struct {
 	Redis         *cache.Client
 	Logger        zerolog.Logger
 	RedisTTL      time.Duration
 	LocalMaxItems int
-	// RefreshTimeout bounds background rebuilds kicked off by
-	// GetOrBuildStale and RefreshInBackground.
+	// RefreshTimeout bounds the background rebuilds GetOrBuildStale kicks
+	// off when it serves a stale index.
 	RefreshTimeout time.Duration
 }
 
@@ -36,10 +43,11 @@ type MentionIndexCache struct {
 	localMaxItems  int
 	refreshTimeout time.Duration
 
-	mu      sync.Mutex
-	entries map[string]*list.Element
-	lru     *list.List
-	sf      singleflight.Group
+	mu              sync.Mutex
+	entries         map[string]*list.Element
+	lru             *list.List
+	refreshFailures map[string]time.Time
+	sf              singleflight.Group
 }
 
 type mentionIndexCacheEntry struct {
@@ -58,13 +66,14 @@ func NewMentionIndexCache(cfg MentionIndexCacheConfig) *MentionIndexCache {
 		cfg.RefreshTimeout = defaultMentionIndexRefreshTimeout
 	}
 	return &MentionIndexCache{
-		redis:          cfg.Redis,
-		logger:         cfg.Logger,
-		redisTTL:       cfg.RedisTTL,
-		localMaxItems:  cfg.LocalMaxItems,
-		refreshTimeout: cfg.RefreshTimeout,
-		entries:        make(map[string]*list.Element),
-		lru:            list.New(),
+		redis:           cfg.Redis,
+		logger:          cfg.Logger,
+		redisTTL:        cfg.RedisTTL,
+		localMaxItems:   cfg.LocalMaxItems,
+		refreshTimeout:  cfg.RefreshTimeout,
+		entries:         make(map[string]*list.Element),
+		lru:             list.New(),
+		refreshFailures: make(map[string]time.Time),
 	}
 }
 
@@ -136,12 +145,12 @@ func (c *MentionIndexCache) GetOrBuildStale(ctx context.Context, key, staleKey s
 		}
 		if staleKey != "" {
 			if index, ok := c.getLocal(staleKey); ok {
-				c.RefreshInBackground(key, staleKey, build)
+				c.refreshInBackground(key, staleKey, build)
 				return lookupResult{index: index, stale: true}, nil
 			}
 			if index, ok := c.getShared(ctx, staleKey); ok {
 				c.putLocal(staleKey, index)
-				c.RefreshInBackground(key, staleKey, build)
+				c.refreshInBackground(key, staleKey, build)
 				return lookupResult{index: index, stale: true}, nil
 			}
 		}
@@ -159,13 +168,17 @@ func (c *MentionIndexCache) GetOrBuildStale(ctx context.Context, key, staleKey s
 	return result.index, result.stale, nil
 }
 
-// RefreshInBackground rebuilds the index for key on a detached context and
+// refreshInBackground rebuilds the index for key on a detached context and
 // stores it under both key and staleKey. Concurrent refreshes for the same
-// key coalesce via singleflight, and the rebuild is skipped entirely when the
-// key is already cached (locally or in Redis), so callers may invoke this on
+// key coalesce via singleflight, the rebuild is skipped entirely when the
+// key is already cached (locally or in Redis), and a failed rebuild backs
+// off for mentionIndexRefreshFailureBackoff — so callers may invoke this on
 // every stale serve without stampeding the workspace reader.
-func (c *MentionIndexCache) RefreshInBackground(key, staleKey string, build func(context.Context) (MentionIndex, error)) {
+func (c *MentionIndexCache) refreshInBackground(key, staleKey string, build func(context.Context) (MentionIndex, error)) {
 	if c == nil || key == "" || build == nil {
+		return
+	}
+	if c.refreshRecentlyFailed(key, time.Now()) {
 		return
 	}
 	go func() {
@@ -187,12 +200,40 @@ func (c *MentionIndexCache) RefreshInBackground(key, staleKey string, build func
 			index, err := build(ctx)
 			if err != nil {
 				c.logger.Warn().Err(err).Str("key", key).Msg("failed to refresh mention index in background")
+				c.recordRefreshFailure(key, time.Now())
 				return nil, nil
 			}
+			c.clearRefreshFailure(key)
 			c.store(ctx, key, staleKey, index)
 			return nil, nil
 		})
 	}()
+}
+
+func (c *MentionIndexCache) refreshRecentlyFailed(key string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failedAt, ok := c.refreshFailures[key]
+	return ok && now.Sub(failedAt) < mentionIndexRefreshFailureBackoff
+}
+
+func (c *MentionIndexCache) recordRefreshFailure(key string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Prune expired entries while we hold the lock so the map stays bounded
+	// by the number of keys that failed within the backoff window.
+	for k, failedAt := range c.refreshFailures {
+		if now.Sub(failedAt) >= mentionIndexRefreshFailureBackoff {
+			delete(c.refreshFailures, k)
+		}
+	}
+	c.refreshFailures[key] = now
+}
+
+func (c *MentionIndexCache) clearRefreshFailure(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.refreshFailures, key)
 }
 
 // store writes the index under the exact key and, when set, the stale alias,

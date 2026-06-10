@@ -34,6 +34,10 @@ const sessionComposerSlashCommandLimit = 30
 const sessionComposerTreeCacheTTL = 30 * time.Second
 const sessionComposerCommandContentCacheTTL = 5 * time.Minute
 
+// sessionComposerMentionWarmTimeout bounds the background mention-index
+// build kicked off by the picker-open (empty-q) warm request.
+const sessionComposerMentionWarmTimeout = 60 * time.Second
+
 type sessionComposerRepoTreeService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
 	ListRepositoryTree(ctx context.Context, token, owner, repo, branch string) ([]models.RepositoryTreeEntry, error)
@@ -278,7 +282,7 @@ func (h *SessionComposerHandler) warmSessionMentionIndex(r *http.Request) {
 				h.logger.Warn().Interface("panic", rec).Str("session_id", sessionID.String()).Msg("panic warming session mention index")
 			}
 		}()
-		ctx, cancel := context.WithTimeout(detached, defaultMentionIndexWarmTimeout)
+		ctx, cancel := context.WithTimeout(detached, sessionComposerMentionWarmTimeout)
 		defer cancel()
 
 		session, err := h.workspace.loadSession(ctx, orgID, sessionID)
@@ -297,8 +301,6 @@ func (h *SessionComposerHandler) warmSessionMentionIndex(r *http.Request) {
 		}
 	}()
 }
-
-const defaultMentionIndexWarmTimeout = 60 * time.Second
 
 func (h *SessionComposerHandler) ListSessionFileMentions(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
