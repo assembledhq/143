@@ -154,25 +154,24 @@ func (d *DockerFileReader) ListDirRecursive(ctx context.Context, containerID, wo
 	return appendFindEntries(nil, absPath, stdout, maxEntries), nil
 }
 
+// recursiveFindScript labels each path as dir/file via two find passes piped
+// through sed, instead of one pass through a shell while-read loop. The shell
+// loop cost ~100µs per entry in busybox ash (read + stat + printf per line),
+// which is multiple seconds on 50k+ entry workspaces; sed processes the same
+// stream at C speed. The root dir itself is emitted by the -type d pass and
+// filtered out by appendFindEntries. The sed replacements contain a literal
+// tab to match the "kind\tpath" wire format.
 const recursiveFindScript = `root=$1
 limit=$2
 shift 2
-count=0
-find "$root" "$@" \( -type d -o -type f \) -print | while IFS= read -r path; do
-  if [ "$path" = "$root" ]; then
-    continue
-  fi
-  if [ "$limit" -gt 0 ] && [ "$count" -ge "$limit" ]; then
-    break
-  fi
-  count=$((count + 1))
-  if [ -d "$path" ]; then
-    kind=dir
-  else
-    kind=file
-  fi
-  printf '%s\t%s\n' "$kind" "$path"
-done`
+if [ "$limit" -le 0 ]; then
+  limit=2147483646
+fi
+limit=$((limit + 1))
+{
+  find "$root" "$@" -type d -print | sed "s|^|dir	|"
+  find "$root" "$@" -type f -print | sed "s|^|file	|"
+} | head -n "$limit"`
 
 func recursiveFindArgv(absPath string, ignoredDirNames []string, maxEntries int) []string {
 	argv := []string{"sh", "-c", recursiveFindScript, "find-recursive", absPath, strconv.Itoa(maxEntries)}
