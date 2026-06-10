@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -161,6 +161,31 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/server ./cmd/server
 	go build -o bin/migrate ./cmd/migrate
 	go build -o bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split
+
+# Cross-compile the 143-tools CLI for laptop installs. Outputs to dist/cli/
+# plus a checksums.txt the installer script verifies against. The server
+# image bakes this directory in at /opt/143/cli (see Dockerfile) and serves
+# it from /download/143-tools/*. The platform matrix must stay in sync with
+# cliPlatforms in internal/api/handlers/cli_distribution.go.
+CLI_DIST_DIR := dist/cli
+CLI_PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+
+build-cli:
+	rm -rf $(CLI_DIST_DIR)
+	mkdir -p $(CLI_DIST_DIR)
+	@set -e; for platform in $(CLI_PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		echo "building $(CLI_DIST_DIR)/143-tools-$$os-$$arch"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o $(CLI_DIST_DIR)/143-tools-$$os-$$arch ./cmd/tools; \
+	done
+	@cd $(CLI_DIST_DIR) && if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum 143-tools-* > checksums.txt; \
+	else \
+		shasum -a 256 143-tools-* > checksums.txt; \
+	fi
+	@echo "wrote $(CLI_DIST_DIR)/checksums.txt"
 
 frontend-dev:
 	cd frontend && npm run dev
