@@ -2976,6 +2976,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
+  // null means "follow the saved user-settings preference"; a boolean means
+  // the user toggled full screen in this session (and we persist it).
+  const [diffFullScreenOverride, setDiffFullScreenOverride] = useState<boolean | null>(null);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
@@ -3253,6 +3256,35 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  // Full-screen diff viewer. The preference lives on the user settings
+  // document so it sticks across sessions; mobile review already fills the
+  // viewport, so the mode is desktop-only.
+  const isDiffFullScreen =
+    !isMobileReviewViewport &&
+    (diffFullScreenOverride ?? user?.settings?.diff_viewer_full_screen ?? false);
+  const { mutate: persistDiffFullScreen } = useMutation({
+    // PATCH /auth/me/settings replaces the whole settings JSONB, so merge the
+    // existing fields in rather than sending the flag alone.
+    mutationFn: (fullScreen: boolean) =>
+      api.auth.updateSettings({ ...(user?.settings ?? {}), diff_viewer_full_screen: fullScreen }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+    },
+    onError: () => {
+      toast.error("Couldn't save full screen preference");
+    },
+  });
+  const toggleDiffFullScreen = useCallback(() => {
+    const next = !isDiffFullScreen;
+    setDiffFullScreenOverride(next);
+    // Don't persist before the user document has loaded — the merge above
+    // would wipe the other settings fields.
+    if (user) {
+      persistDiffFullScreen(next);
+    }
+  }, [isDiffFullScreen, user, persistDiffFullScreen]);
+
   const activeThreadDelivery = activeThread?.inbox_delivery;
   const activeThreadHasRecoverableInbox =
     !!activeThreadDelivery &&
@@ -5712,9 +5744,16 @@ export function SessionDetailContent({ id }: { id: string }) {
               )}
             </div>
           ) : null}
-          {/* Review diff view — mounted only when active */}
+          {/* Review diff view — mounted only when active. Full screen lifts
+              the same mounted subtree into a viewport overlay (z-40 stays
+              below dialogs/sheets at z-50) so diff state survives toggling. */}
           {centerMode === "review" && (
-            <div className="h-full animate-in fade-in duration-150 flex flex-col">
+            <div
+              className={cn(
+                "animate-in fade-in duration-150 flex flex-col",
+                isDiffFullScreen ? "fixed inset-0 z-40 bg-background" : "h-full"
+              )}
+            >
               <div className="flex-1 min-h-0">
                 {isDiffDisplayLoading ? (
                   <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />
@@ -5751,6 +5790,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                     onDeleteComment={deleteComment}
                     diffSearchQuery={diffSearchQuery}
                     onDiffSearchChange={setDiffSearchQuery}
+                    isFullScreen={isDiffFullScreen}
+                    onToggleFullScreen={toggleDiffFullScreen}
                   />
                 )}
               </div>

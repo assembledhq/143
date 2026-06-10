@@ -33,6 +33,11 @@ func TestParseUserSettings(t *testing.T) {
 			},
 		},
 		{
+			name: "parses diff viewer full screen preference",
+			raw:  json.RawMessage(`{"diff_viewer_full_screen":true}`),
+			want: UserSettings{DiffViewerFullScreen: true},
+		},
+		{
 			name:    "rejects malformed json",
 			raw:     json.RawMessage(`{"coding_agent_reasoning_defaults":`),
 			wantErr: true,
@@ -88,6 +93,18 @@ func TestUserSettings_MarshalJSONB(t *testing.T) {
 		}).MarshalJSONB()
 		require.NoError(t, err, "MarshalJSONB should accept valid settings")
 		require.JSONEq(t, `{"coding_agent_model_default":"claude-opus-4-7","coding_agent_reasoning_defaults":{"claude_code":"max"}}`, string(raw), "MarshalJSONB should encode the settings document")
+	})
+
+	t.Run("omits diff viewer full screen when false", func(t *testing.T) {
+		t.Parallel()
+
+		raw, err := (UserSettings{DiffViewerFullScreen: false}).MarshalJSONB()
+		require.NoError(t, err, "MarshalJSONB should accept zero-value settings")
+		require.JSONEq(t, `{}`, string(raw), "MarshalJSONB should omit the default full screen preference")
+
+		raw, err = (UserSettings{DiffViewerFullScreen: true}).MarshalJSONB()
+		require.NoError(t, err, "MarshalJSONB should accept full screen preference")
+		require.JSONEq(t, `{"diff_viewer_full_screen":true}`, string(raw), "MarshalJSONB should encode the full screen preference")
 	})
 
 	t.Run("rejects invalid settings", func(t *testing.T) {

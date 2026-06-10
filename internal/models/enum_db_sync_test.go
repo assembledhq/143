@@ -167,6 +167,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			IntegrationProviderGitHub, IntegrationProviderSentry,
 			IntegrationProviderLinear, IntegrationProviderSlack,
 			IntegrationProviderNotion, IntegrationProviderCircleCI,
+			IntegrationProviderMezmo,
 		),
 		// issue_source.go
 		"issues_source": toStrings(

@@ -807,6 +807,52 @@ func TestParseProviderConfig_Notion_Invalid(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestMaskedSummary_Mezmo(t *testing.T) {
+	t.Parallel()
+
+	cfg := MezmoConfig{APIKey: "mezmo_service_key_12345"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderMezmo, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.Equal(t, MaskKey("mezmo_service_key_12345"), summary.MaskedKey, "summary should mask the api key")
+	require.NotContains(t, summary.MaskedKey, "mezmo_service_key_12345", "summary must not leak the raw key")
+}
+
+func TestMezmoConfig_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, MezmoConfig{APIKey: "key"}.Validate())
+	require.NoError(t, MezmoConfig{APIKey: "key", BaseURL: "https://logs.example.com", Dataset: "prod"}.Validate())
+	require.Error(t, MezmoConfig{APIKey: ""}.Validate())
+}
+
+func TestMezmoConfig_Provider(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, ProviderMezmo, MezmoConfig{}.Provider())
+}
+
+func TestParseProviderConfig_Mezmo(t *testing.T) {
+	t.Parallel()
+
+	input := `{"api_key":"mezmo_key","base_url":"https://logs.example.com","dataset":"prod"}`
+	cfg, err := ParseProviderConfig(ProviderMezmo, []byte(input))
+	require.NoError(t, err)
+
+	mc, ok := cfg.(MezmoConfig)
+	require.True(t, ok, "config should be MezmoConfig")
+	require.Equal(t, "mezmo_key", mc.APIKey)
+	require.Equal(t, "https://logs.example.com", mc.BaseURL)
+	require.Equal(t, "prod", mc.Dataset)
+}
+
+func TestParseProviderConfig_Mezmo_Invalid(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseProviderConfig(ProviderMezmo, []byte(`{bad json`))
+	require.Error(t, err)
+}
+
 func TestIsCodingAgentProvider(t *testing.T) {
 	t.Parallel()
 

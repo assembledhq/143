@@ -242,6 +242,9 @@ export default function AccountPage() {
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
   const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
   const hasEffectiveReasoningDefaults = Object.keys(effectiveReasoningDefaults).length > 0;
+  // Not editable on this page (toggled from the diff viewer toolbar), but it
+  // must ride along with every settings PATCH or it would be wiped.
+  const storedDiffFullScreen = user?.settings?.diff_viewer_full_screen ?? false;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -290,10 +293,13 @@ export default function AccountPage() {
   });
 
   const updateReasoningDefaultsMutation = useMutation({
+    // PATCH replaces the whole settings document, so every settings mutation
+    // on this page must carry the fields it isn't editing.
     mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
       api.auth.updateSettings({
         ...(effectiveDefaultModel ? { coding_agent_model_default: effectiveDefaultModel } : {}),
         ...(defaults && Object.keys(defaults).length > 0 ? { coding_agent_reasoning_defaults: defaults } : {}),
+        ...(storedDiffFullScreen ? { diff_viewer_full_screen: true } : {}),
       }),
     onMutate: (defaults) => {
       reasoningSaveInFlightRef.current = true;
@@ -339,6 +345,7 @@ export default function AccountPage() {
       api.auth.updateSettings({
         ...(model ? { coding_agent_model_default: model } : {}),
         ...(hasEffectiveReasoningDefaults ? { coding_agent_reasoning_defaults: effectiveReasoningDefaults } : {}),
+        ...(storedDiffFullScreen ? { diff_viewer_full_screen: true } : {}),
       }),
     onMutate: (model) => {
       setPendingDefaultModel(model);

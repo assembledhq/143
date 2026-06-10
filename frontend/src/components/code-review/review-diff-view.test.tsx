@@ -306,6 +306,14 @@ describe("ReviewDiffView", () => {
     expect(props.onBack).toHaveBeenCalled();
   });
 
+  it("exits full screen on Escape instead of leaving review mode", () => {
+    const props = defaultProps({ isFullScreen: true, onToggleFullScreen: vi.fn() });
+    render(<ReviewDiffView {...props} />);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(props.onToggleFullScreen).toHaveBeenCalled();
+    expect(props.onBack).not.toHaveBeenCalled();
+  });
+
   it("does not call onBack on Escape when in explorer mode", () => {
     const props = defaultProps();
     render(<ReviewDiffView {...props} />);

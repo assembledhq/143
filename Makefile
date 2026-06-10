@@ -454,15 +454,23 @@ provision-egress:
 #
 # On an already-running fleet you must pass REPROVISION=true: provision.sh
 # aborts when services are already running, so plain mode only works for
-# fresh hosts. REPROVISION=true serially tears down and rebuilds each worker
-# (drains active jobs first; one worker down at a time). Reprovisioning can
-# orphan old `nodes` rows when NODE_IDs change — see the reprovision notes
-# above provision-worker. A mid-fleet failure stops the loop; rerun to
-# resume (secrets sync and gateway provisioning are idempotent).
+# fresh hosts. REPROVISION=true tears down and rebuilds each worker (drains
+# active jobs first). Reprovisioning can orphan old `nodes` rows when
+# NODE_IDs change — see the reprovision notes above provision-worker.
+#
+# Workers are provisioned concurrently, PROVISION_JOBS at a time (default 4),
+# with per-host output written to log files under /tmp. Note that with
+# REPROVISION=true and PROVISION_JOBS>1, several workers can be down at the
+# same time — set PROVISION_JOBS=1 to keep the old one-worker-down-at-a-time
+# behavior. A failed host doesn't stop the others; the target exits nonzero
+# at the end. Rerun to resume (secrets sync and gateway provisioning are
+# idempotent).
 # Usage:
 #   make provision-workers
 #   make provision-workers REPROVISION=true
+#   make provision-workers PROVISION_JOBS=8
 #   make provision-workers EGRESS_SSH_USER=admin EGRESS_SSH_KEY=~/.ssh/custom-egress-key
+PROVISION_JOBS ?= 4
 provision-workers:
 	$(check-ssh-key)
 	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
@@ -473,10 +481,20 @@ provision-workers:
 	if [ -z "$$HOSTS" ]; then \
 		echo "ERROR: no worker:<host> entries in FLEET_HOSTS."; exit 1; \
 	fi; \
-	for h in $$HOSTS; do \
-		echo "=== provisioning worker $$h ==="; \
-		./deploy/scripts/provision.sh worker "$$h" $(SSH_KEY) $(if $(REPROVISION),--reprovision) || { echo "FAILED on $$h"; exit 1; }; \
-	done
+	LOG_DIR="$$(mktemp -d /tmp/provision-workers.XXXXXX)"; \
+	echo "=== provisioning $$(echo "$$HOSTS" | wc -l | tr -d ' ') workers, $(PROVISION_JOBS) at a time (logs: $$LOG_DIR) ==="; \
+	if echo "$$HOSTS" | LOG_DIR="$$LOG_DIR" xargs -n1 -P "$(PROVISION_JOBS)" sh -c '\
+		h="$$1"; log="$$LOG_DIR/$$h.log"; \
+		echo "--- provisioning worker $$h (log: $$log)"; \
+		if ./deploy/scripts/provision.sh worker "$$h" $(SSH_KEY) $(if $(REPROVISION),--reprovision) >"$$log" 2>&1; then \
+			echo "--- OK: $$h"; \
+		else \
+			echo "--- FAILED: $$h (log: $$log)"; exit 1; \
+		fi' provision-one; then \
+		echo "=== all workers provisioned ==="; \
+	else \
+		echo "=== FAILED: one or more workers failed; see logs in $$LOG_DIR ==="; exit 1; \
+	fi
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
@@ -536,6 +554,7 @@ spin-down-worker:
 TAG ?= latest
 ROLES ?= app,worker
 force ?=
+DEPLOY_JOBS ?= 4
 WORKER_BLUE_GREEN_PORT_START ?= 8080
 WORKER_BLUE_GREEN_PORT_END ?= 8087
 
@@ -649,9 +668,11 @@ deploy-redis:
 #   make deploy-fleet TAG=<sha> ROLES=app,worker
 # To override the active-session guardrail:
 #   make deploy-fleet force=true
+# To serialize node deploys:
+#   make deploy-fleet DEPLOY_JOBS=1
 deploy-fleet:
 	$(check-ssh-key)
-	$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
+	$(worker-blue-green-env) $(deploy-force-env) DEPLOY_JOBS=$(DEPLOY_JOBS) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet

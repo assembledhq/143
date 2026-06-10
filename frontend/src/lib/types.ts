@@ -51,6 +51,7 @@ export interface User {
 export interface UserSettings {
   coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
+  diff_viewer_full_screen?: boolean;
 }
 
 export interface ThreadMessageWindowMeta {
@@ -237,6 +238,8 @@ export interface Integration {
   notion_workspace_id?: string;
   notion_workspace_name?: string;
   circleci_project_slug?: string;
+  mezmo_dataset?: string;
+  mezmo_base_url?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
