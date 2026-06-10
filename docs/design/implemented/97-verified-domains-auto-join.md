@@ -33,7 +33,7 @@ lands in the team workspace automatically.
 
 ### Data model
 
-`organization_domains` (migration 000165): org_id, domain (lowercase),
+`organization_domains` (migration 000167): org_id, domain (lowercase),
 verification_token, status (`pending`/`verified` CHECK), auto_join_enabled,
 timestamps. Unique on (org_id, domain); partial unique on domain WHERE
 verified — pending claims may coexist, first successful DNS verification
