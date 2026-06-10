@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
+import { pollMs } from "@/lib/poll-intervals";
 import {
   PREVIEW_ERROR_CODES,
   type PreviewStatus,
@@ -486,7 +487,7 @@ export function PreviewPanel({
       ) {
         return false;
       }
-      return 3000;
+      return pollMs(3000);
     },
     retry: (failureCount, error) => {
       // Don't retry NO_ACTIVE_PREVIEW — it's a normal state, not a transient failure.
@@ -539,7 +540,7 @@ export function PreviewPanel({
         ? api.sessions.preview.logs(sessionId, { tail: true })
         : api.sessions.preview.logs(sessionId),
     enabled: Boolean(instance) && shouldLoadPreviewLogs,
-    refetchInterval: previewLogsTail ? 2000 : false,
+    refetchInterval: previewLogsTail ? pollMs(2000) : false,
     retry: 1,
   });
   const startupErrorLogs = useMemo(() => {

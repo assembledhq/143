@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
+import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
 import {
   ResponsiveModal,
@@ -83,7 +84,7 @@ export function CodexDeviceCodeModal({
           if (timerRef.current) clearInterval(timerRef.current);
           setTimeout(() => {
             onConnectedRef.current?.();
-          }, 1500);
+          }, pollMs(1500));
         } else if (resp.data.status === "expired") {
           setStatus("expired");
           setError("Code expired. Please try again.");
@@ -98,7 +99,7 @@ export function CodexDeviceCodeModal({
       } catch (err) {
         captureError(err, { feature: "codex-auth-poll" });
       }
-    }, 3000);
+    }, pollMs(3000));
 
     timerRef.current = setInterval(() => {
       setTimeLeft((time) => Math.max(0, time - 1));
