@@ -1134,8 +1134,25 @@ function SessionComposer({
     queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
     enabled: showMentionPicker,
     staleTime: 30 * 1000,
+    // Keep the previous query's results rendered while the next keystroke's
+    // request is in flight so the picker doesn't blank out between queries.
+    placeholderData: (previous) => previous,
   });
   const fileMentions = useMemo(() => fileMentionsQuery.data?.data ?? [], [fileMentionsQuery.data]);
+
+  const mentionWarmQueryClient = useQueryClient();
+  useEffect(() => {
+    // Warm the backend's mention index as soon as the composer mounts: the
+    // empty-q request returns [] immediately but kicks off the workspace
+    // walk server-side, so the index is (usually) hot by the time the user
+    // opens the @-picker with a real query.
+    if (!repositoryId) return;
+    void mentionWarmQueryClient.prefetchQuery({
+      queryKey: queryKeys.sessions.composerFiles(sessionId, ""),
+      queryFn: () => api.sessions.composerFiles(sessionId, ""),
+      staleTime: 30 * 1000,
+    });
+  }, [mentionWarmQueryClient, sessionId, repositoryId]);
 
   const slashCommandsQuery = useSessionComposerSlashCommands({
     agentType,
