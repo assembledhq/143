@@ -13,6 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
+import { pollMs } from "@/lib/poll-intervals";
 
 export default function PullRequestPreviewPage({
   params,
@@ -39,7 +40,7 @@ export function PullRequestPreviewContent({
     queryFn: () => api.previews.getPullRequest(owner, repo, number),
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      return status === "starting" ? 3000 : false;
+      return status === "starting" ? pollMs(3000) : false;
     },
   });
   const startLatest = useMutation({

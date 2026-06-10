@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { addSSEListener, type SSEEventPayloads } from "./sse";
+import { pollMs } from "./poll-intervals";
 import type { EvalBatchStatus, EvalBootstrapStatus } from "./types";
 
 // Connect cadence shared between the two eval SSE consumers (batch detail
@@ -9,7 +10,7 @@ import type { EvalBatchStatus, EvalBootstrapStatus } from "./types";
 // → 8s → 15s ceiling) so a transient Redis outage doesn't burn into the
 // page lifecycle, but a sustained outage hands off to the polling backstop
 // in the calling component without retrying forever.
-const SSE_INITIAL_RECONNECT_DELAY_MS = 1_000;
+const SSE_INITIAL_RECONNECT_DELAY_MS = pollMs(1_000);
 const SSE_MAX_RECONNECT_DELAY_MS = 15_000;
 const SSE_MAX_RECONNECT_ATTEMPTS = 5;
 
