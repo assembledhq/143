@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { AgentBadge } from "@/components/agent-badge";
 
 export function SessionTimelineSkeleton() {
   const rows: { align: "left" | "right"; widths: string[] }[] = [
@@ -46,7 +47,24 @@ function SkeletonLine({ className }: { className: string }) {
   return <div className={cn("rounded bg-muted-foreground/15", className)} />;
 }
 
-export function SessionDetailLoadingSkeleton() {
+// Metadata that is already known while the rest of the page loads (from the
+// sidebar-seeded provisional cache or a settled detail payload). Rendering it
+// in the skeleton header means the user immediately sees what they opened,
+// instead of an all-shimmer page hiding data the client already has.
+// Precomputed strings (not the session object) so this component never needs
+// imports from session-detail-content — that would be an import cycle.
+export type SessionDetailSkeletonMetadata = {
+  title: string;
+  statusLabel: string;
+  statusColor: string;
+  agentType?: string | null;
+};
+
+export function SessionDetailLoadingSkeleton({
+  metadata,
+}: {
+  metadata?: SessionDetailSkeletonMetadata | null;
+}) {
   return (
     <div
       data-testid="session-detail-loading-skeleton"
@@ -55,10 +73,30 @@ export function SessionDetailLoadingSkeleton() {
     >
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
-          <div className="min-w-0 flex-1 animate-pulse space-y-2">
-            <SkeletonLine className="h-4 w-2/5 max-w-[360px]" />
-            <SkeletonLine className="h-3 w-1/4 max-w-[220px]" />
-          </div>
+          {metadata ? (
+            // Mirrors the loaded header's title row (same type classes and
+            // status pill) so the swap to the real page does not shift layout.
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <h1 className="text-sm font-medium text-foreground truncate">
+                {metadata.title}
+              </h1>
+              <span
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${metadata.statusColor}`}
+              >
+                {metadata.statusLabel}
+              </span>
+              {metadata.agentType && (
+                <span className="hidden shrink-0 lg:inline-flex">
+                  <AgentBadge agentType={metadata.agentType} className="h-4 w-4" labelClassName="text-xs" />
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="min-w-0 flex-1 animate-pulse space-y-2">
+              <SkeletonLine className="h-4 w-2/5 max-w-[360px]" />
+              <SkeletonLine className="h-3 w-1/4 max-w-[220px]" />
+            </div>
+          )}
           <div className="flex shrink-0 gap-2 animate-pulse">
             <SkeletonLine className="h-8 w-8 rounded-md" />
             <SkeletonLine className="h-8 w-8 rounded-md" />

@@ -3212,7 +3212,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const rawSession = data?.data;
   const isProvisionalSession = isProvisionalSessionDetail(rawSession);
   const session = isProvisionalSession ? undefined : rawSession;
-  usePageTitle(session ? sessionTitle(session) : null, "Session");
+  // Tab title from whatever payload is available — the provisional row's
+  // title matches what the user just clicked, so don't wait for the
+  // authoritative detail to label the tab.
+  usePageTitle(rawSession ? sessionTitle(rawSession) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
     !isProvisionalSession &&
@@ -5174,7 +5177,26 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   if (isLoading || (isProvisionalSession && !error)) {
-    return <SessionDetailLoadingSkeleton />;
+    // Metadata-first paint: the provisional row seeded by the sidebar (or a
+    // partially settled payload) already carries the title, status, and
+    // agent. Show those immediately and confine the shimmer to the parts we
+    // genuinely don't have yet, so opening a session never hides data the
+    // client already holds.
+    const provisionalStatus = rawSession ? getDisplayStatus(rawSession.status) : null;
+    return (
+      <SessionDetailLoadingSkeleton
+        metadata={
+          rawSession && provisionalStatus
+            ? {
+                title: sessionTitle(rawSession),
+                statusLabel: provisionalStatus.label,
+                statusColor: provisionalStatus.color,
+                agentType: rawSession.agent_type,
+              }
+            : null
+        }
+      />
+    );
   }
 
   if (error || !session) {

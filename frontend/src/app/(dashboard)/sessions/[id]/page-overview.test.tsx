@@ -127,7 +127,10 @@ describe('SessionDetailPage overview and review loop', () => {
       expect(detailRequests).toBe(1);
     });
     expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
-    expect(screen.queryByText('Provisional list title')).not.toBeInTheDocument();
+    // Metadata-first paint: the provisional row's title shows in the skeleton
+    // header immediately, while the data-bearing queries still wait for the
+    // authoritative payload.
+    expect(screen.getByText('Provisional list title')).toBeInTheDocument();
     expect(timelineRequests).toBe(0);
     expect(prRequests).toBe(0);
 
