@@ -1,7 +1,16 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterAll, afterEach, beforeAll } from 'vitest';
+import { afterAll, afterEach, beforeAll, vi } from 'vitest';
 import { server } from './mocks/server';
+
+// Shrink polling/backoff delays so tests that wait on poll-driven state
+// transitions (PR creation, thread refetch, SSE reconnect, debounced
+// inputs) resolve in tens of milliseconds instead of sitting through real
+// multi-second cycles. waitFor() polls every 50ms, so a 50ms floor keeps
+// the shrunk delays observable without busy-looping.
+vi.mock('@/lib/poll-intervals', () => ({
+  pollMs: (ms: number) => Math.max(50, Math.round(ms / 20)),
+}));
 
 // Polyfill ResizeObserver for JSDOM (used by Radix UI Slider)
 globalThis.ResizeObserver ??= class ResizeObserver {
