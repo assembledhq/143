@@ -7,6 +7,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -229,6 +232,53 @@ func TestDockerFileReader_ListDir(t *testing.T) {
 			require.NoError(t, err, "ListDir should not return an error")
 			require.Equal(t, tt.expected, entries, "ListDir should return the expected entries")
 		})
+	}
+}
+
+// TestRecursiveFindScript_RealShell runs the actual script through a real
+// shell against a temp tree, since the Docker-level tests only assert against
+// mocked exec output. Guards the busybox-portable pieces: positional arg
+// handling after shift, prune args via "$@", literal-tab sed labels, and the
+// head-based entry cap.
+func TestRecursiveFindScript_RealShell(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available on this host")
+	}
+
+	root := t.TempDir()
+	for _, dir := range []string{"docs", "src", "node_modules/pkg"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755), "test tree directories should be created")
+	}
+	for _, file := range []string{"README.md", "docs/guide.md", "src/app.ts", "node_modules/pkg/index.js"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o644), "test tree files should be created")
+	}
+
+	run := func(maxEntries int) []FileEntry {
+		argv := recursiveFindArgv(root, []string{"node_modules", ".git"}, maxEntries)
+		out, err := exec.Command(argv[0], argv[1:]...).Output()
+		require.NoError(t, err, "recursive find script should exit zero")
+		return appendFindEntries(nil, root, string(out), maxEntries)
+	}
+
+	unlimited := run(0)
+	byPath := map[string]string{}
+	for _, entry := range unlimited {
+		byPath[entry.Path] = entry.Type
+	}
+	require.Equal(t, map[string]string{
+		"docs":          "dir",
+		"src":           "dir",
+		"README.md":     "file",
+		"docs/guide.md": "file",
+		"src/app.ts":    "file",
+	}, byPath, "the script should label kinds, exclude the root itself, and prune ignored directories")
+
+	capped := run(3)
+	require.Len(t, capped, 3, "the head-based cap should bound the entry count")
+	for _, entry := range capped {
+		require.NotContains(t, entry.Path, "node_modules", "pruned directories should never appear in capped output")
 	}
 }
 
