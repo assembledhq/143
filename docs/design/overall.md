@@ -523,19 +523,29 @@ Deepen the context layer based on what you've learned from real agent runs about
 
 **Milestone**: ❌ Unblocked — Phases 3-4 provide real agent runs and prioritization data to learn from.
 
-## Phase 8: Evals + Quality Gates (doc: 16) — NOT STARTED
+## Phase 8: Evals + Quality Gates (docs: 16, 42, 96) — PARTIALLY IMPLEMENTED
 
-Now that you have real production data and observed failure modes, build the evaluation system on solid ground.
+Settings -> Evals now has a session-backed task builder and execution path.
+Eval bootstrap and eval runs use normal `sessions` infrastructure with
+`sessions.origin` values of `eval_bootstrap` and `eval_run`, linked
+`eval_bootstrap_runs` / `eval_runs` rows, normal `run_agent` jobs, session logs,
+threads, sandbox lifecycle, and terminal-state finalization. Bootstrap agents
+can propose candidates through the gated `143-tools eval add` command, which is
+only exposed inside explicit eval-bootstrap sessions and persists normalized
+`eval_bootstrap_candidates` rows. The Settings -> Evals candidate review surface
+uses stable candidate IDs and status to accept selected candidates into
+`eval_tasks`. Detailed implementation: [implemented/96-session-backed-eval-tools.md](implemented/96-session-backed-eval-tools.md).
 
-No eval infrastructure tables exist. Entirely future work:
+Remaining quality-gate work:
 
-1. **Eval taxonomy + schema** — ❌ No eval tables
-2. **Dataset pipeline** — ❌ No dataset infrastructure
-3. **Grader stack** — ❌ No grader implementation
-4. **Release gates + rollout** — ❌ No release gate tables or logic
-5. **Continuous eval flywheel** — ❌ No flywheel
-
-**Milestone**: ❌ Partially unblocked — Phases 3-4 are complete, Phase 5 still needed for full production data.
+1. **Post-session grader pipeline** — deterministic checks and LLM judges should
+   run as separate jobs that consume the session snapshot/diff.
+2. **Dataset roles and slices** — golden, shadow, adversarial, and other
+   role-based reporting remain future product work.
+3. **Release gates + rollout** — gate authoring, candidate-config comparison,
+   and promotion decisions still need a dedicated workflow.
+4. **Continuous eval flywheel** — scheduled candidate discovery and regression
+   reporting remain future work.
 
 ## Future: Additional Ingestion Sources
 

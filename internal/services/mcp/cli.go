@@ -30,6 +30,7 @@ const (
 	NamespacePR      CLINamespace = "pr"
 	NamespaceProject CLINamespace = "project"
 	NamespaceTabs    CLINamespace = "session-tabs"
+	NamespaceEval    CLINamespace = "eval"
 )
 
 // Fixed actions for the hardcoded 143-owned namespace mappings.
@@ -40,6 +41,7 @@ const (
 	ActionMessages CLIAction = "messages"
 	ActionPropose  CLIAction = "propose"
 	ActionSend     CLIAction = "send"
+	ActionAdd      CLIAction = "add"
 )
 
 // RunCLI executes a tool call from command-line arguments, printing the result
@@ -200,6 +202,8 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceTabs, ActionSend, true
 	case name == "session_tabs_messages":
 		return NamespaceTabs, ActionMessages, true
+	case name == "eval_add":
+		return NamespaceEval, ActionAdd, true
 	case strings.HasPrefix(name, "log_"):
 		return NamespaceLogs, CLIAction(strings.TrimPrefix(name, "log_")), true
 	default:
@@ -223,6 +227,8 @@ func cliCategory(namespace CLINamespace, action CLIAction) string {
 		return "143 projects"
 	case NamespaceTabs:
 		return "Session tabs"
+	case NamespaceEval:
+		return "Eval"
 	}
 	a := string(action)
 	switch {
