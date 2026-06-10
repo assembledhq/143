@@ -40,6 +40,10 @@ export interface User {
   github_login?: string;
   avatar_url?: string;
   google_id?: string;
+  // Whether the account's current email is attested (OAuth provider claim,
+  // verification link, or emailed-invite claim). Gates the "verify your
+  // email" prompt and email-domain auto-join.
+  email_verified?: boolean;
   settings?: UserSettings;
   created_at: string;
 }
@@ -1371,6 +1375,50 @@ export interface PendingInvitationForUser {
   };
   expires_at: string;
   created_at: string;
+}
+
+export type OrgDomainStatus = 'pending' | 'verified';
+
+// OrganizationDomain is one verified-domain row from /api/v1/team/domains.
+// The server decorates the row with the exact DNS TXT record to publish
+// (dns_record_name / dns_record_value) so the UI never reconstructs the
+// format itself.
+export interface OrganizationDomain {
+  id: string;
+  org_id: string;
+  domain: string;
+  verification_token: string;
+  status: OrgDomainStatus;
+  auto_join_enabled: boolean;
+  created_at: string;
+  verified_at?: string | null;
+  last_checked_at?: string | null;
+  failed_checks: number;
+  dns_record_name: string;
+  dns_record_value: string;
+}
+
+// JoinableOrganization is a workspace the current user may join because
+// their provider-verified email domain matches the org's verified
+// auto-join domain.
+export interface JoinableOrganization {
+  org_id: string;
+  org_name: string;
+  domain: string;
+}
+
+// JoinableOrgsResponse wraps the joinable list with the hint that the
+// user's domain IS captured but their email isn't verified yet — the org
+// identity stays hidden until they prove the address.
+export interface JoinableOrgsResponse {
+  data: JoinableOrganization[];
+  email_verification_required: boolean;
+}
+
+// ConfirmEmailVerificationResponse is the verify-email confirm payload.
+export interface ConfirmEmailVerificationResponse {
+  verified: boolean;
+  joined_org?: JoinableOrganization | null;
 }
 
 export interface GitHubInviteStatus {

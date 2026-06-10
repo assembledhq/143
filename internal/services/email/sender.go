@@ -12,6 +12,9 @@ import (
 // Sender sends transactional emails.
 type Sender interface {
 	SendInvitation(ctx context.Context, to, inviterName, orgName, acceptURL string) error
+	// SendEmailVerification sends the proof-of-address link to a
+	// password-signup user. Verifying unlocks email-domain auto-join.
+	SendEmailVerification(ctx context.Context, to, verifyURL string) error
 }
 
 // SMTPConfig holds SMTP connection details.
@@ -36,9 +39,22 @@ func NewSMTPSender(cfg SMTPConfig) *SMTPSender {
 // SendInvitation sends a plain-text invitation email.
 func (s *SMTPSender) SendInvitation(ctx context.Context, to, inviterName, orgName, acceptURL string) error {
 	subject := fmt.Sprintf("Invitation: join %s on 143.dev", orgName)
+	if err := s.sendPlainText(to, subject, invitationText(inviterName, orgName, acceptURL)); err != nil {
+		return fmt.Errorf("send invitation email to %s: %w", to, err)
+	}
+	return nil
+}
 
-	body := invitationText(inviterName, orgName, acceptURL)
+// SendEmailVerification sends a plain-text verify-your-email message.
+func (s *SMTPSender) SendEmailVerification(ctx context.Context, to, verifyURL string) error {
+	if err := s.sendPlainText(to, "Verify your email for 143.dev", emailVerificationText(verifyURL)); err != nil {
+		return fmt.Errorf("send verification email to %s: %w", to, err)
+	}
+	return nil
+}
 
+// sendPlainText assembles and sends a UTF-8 plain-text message.
+func (s *SMTPSender) sendPlainText(to, subject, body string) error {
 	msg := strings.Join([]string{
 		"From: " + s.cfg.From,
 		"To: " + to,
@@ -51,11 +67,7 @@ func (s *SMTPSender) SendInvitation(ctx context.Context, to, inviterName, orgNam
 
 	addr := s.cfg.Host + ":" + s.cfg.Port
 	auth := smtp.PlainAuth("", s.cfg.Username, s.cfg.Password, s.cfg.Host)
-
-	if err := smtp.SendMail(addr, auth, s.cfg.From, []string{to}, []byte(msg)); err != nil {
-		return fmt.Errorf("send invitation email to %s: %w", to, err)
-	}
-	return nil
+	return smtp.SendMail(addr, auth, s.cfg.From, []string{to}, []byte(msg))
 }
 
 // NoopSender logs invitation details without sending an email.
@@ -74,6 +86,15 @@ func (n *NoopSender) SendInvitation(ctx context.Context, to, inviterName, orgNam
 		Str("inviter", inviterName).
 		Str("org", orgName).
 		Str("accept_url", acceptURL).
+		Msg("email sending skipped (SMTP not configured)")
+	return nil
+}
+
+// SendEmailVerification logs the verification link instead of sending it.
+func (n *NoopSender) SendEmailVerification(ctx context.Context, to, verifyURL string) error {
+	zerolog.Ctx(ctx).Info().
+		Str("to", to).
+		Str("verify_url", verifyURL).
 		Msg("email sending skipped (SMTP not configured)")
 	return nil
 }
@@ -99,4 +120,18 @@ Accept invitation:
 
 This link expires in 7 days.
 If you weren’t expecting this, you can ignore this email.`, orgName, inviterText, orgName, acceptURL)
+}
+
+// emailVerificationText returns the plain-text body for a verification email.
+func emailVerificationText(verifyURL string) string {
+	return fmt.Sprintf(`Verify your email for 143.dev
+
+Confirm this address belongs to you. If your company has verified its
+domain, verifying also adds you to your team’s workspace automatically.
+
+Verify your email:
+%s
+
+This link expires in 24 hours.
+If you didn’t create a 143.dev account, you can ignore this email.`, verifyURL)
 }

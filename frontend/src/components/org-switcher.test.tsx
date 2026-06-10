@@ -573,4 +573,95 @@ describe("OrgSwitcher", () => {
       expect(screen.getByTestId("org-switcher")).toHaveTextContent("Globex");
     });
   });
+
+  describe("domain-joinable workspaces", () => {
+    function mockJoinable(
+      orgs: Array<{ org_id: string; org_name: string; domain: string }>,
+      emailVerificationRequired = false,
+    ) {
+      server.use(
+        http.get("/api/v1/orgs/joinable", () =>
+          HttpResponse.json({ data: orgs, email_verification_required: emailVerificationRequired }),
+        ),
+      );
+    }
+
+    it("renders the joinable section with the verified-domain hint", async () => {
+      mockMemberships([{ org_id: "org-1", org_name: "Mine", role: "admin" }]);
+      mockJoinable([{ org_id: "org-2", org_name: "Assembled", domain: "assembledhq.com" }]);
+
+      renderWithProviders(<OrgSwitcher userEmail="alice@assembledhq.com" />);
+      await userEvent.click(await screen.findByTestId("org-switcher"));
+
+      expect(await screen.findByTestId("joinable-orgs-section")).toBeInTheDocument();
+      expect(screen.getByText("Assembled")).toBeInTheDocument();
+      expect(screen.getByText(/assembledhq\.com email grants access/)).toBeInTheDocument();
+    });
+
+    it("does not offer joining an org the user already belongs to", async () => {
+      mockMemberships([{ org_id: "org-2", org_name: "Assembled", role: "member" }]);
+      // Stale joinable response naming an org the memberships cache knows.
+      mockJoinable([{ org_id: "org-2", org_name: "Assembled", domain: "assembledhq.com" }]);
+
+      renderWithProviders(<OrgSwitcher userEmail="alice@assembledhq.com" />);
+      await userEvent.click(await screen.findByTestId("org-switcher"));
+
+      await waitFor(() => {
+        expect(screen.getByTestId("org-switcher-item-org-2")).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("joinable-orgs-section")).not.toBeInTheDocument();
+    });
+
+    it("joining shows the inline confirmation without auto-switching", async () => {
+      mockMemberships([{ org_id: "org-1", org_name: "Mine", role: "admin" }]);
+      mockJoinable([{ org_id: "org-2", org_name: "Assembled", domain: "assembledhq.com" }]);
+      server.use(
+        http.post("/api/v1/orgs/org-2/join", () =>
+          HttpResponse.json({ data: { org_id: "org-2", org_name: "Assembled", role: "member" } }),
+        ),
+      );
+
+      renderWithProviders(<OrgSwitcher userEmail="alice@assembledhq.com" />);
+      await userEvent.click(await screen.findByTestId("org-switcher"));
+      await userEvent.click(await screen.findByTestId("joinable-org-join-org-2"));
+
+      expect(await screen.findByText("Joined Assembled")).toBeInTheDocument();
+      expect(getActiveOrgId()).toBeNull();
+    });
+
+    it("a join rejected as NOT_ELIGIBLE surfaces an error toast", async () => {
+      mockMemberships([{ org_id: "org-1", org_name: "Mine", role: "admin" }]);
+      mockJoinable([{ org_id: "org-2", org_name: "Assembled", domain: "assembledhq.com" }]);
+      server.use(
+        http.post("/api/v1/orgs/org-2/join", () =>
+          HttpResponse.json(
+            { error: { code: "NOT_ELIGIBLE", message: "no" } },
+            { status: 403 },
+          ),
+        ),
+      );
+
+      renderWithProviders(<OrgSwitcher userEmail="alice@assembledhq.com" />);
+      await userEvent.click(await screen.findByTestId("org-switcher"));
+      await userEvent.click(await screen.findByTestId("joinable-org-join-org-2"));
+
+      await waitFor(() => {
+        expect(toastError).toHaveBeenCalledWith(
+          expect.stringContaining("no longer available"),
+        );
+      });
+    });
+
+    it("prompts unverified users to verify their email without naming the org", async () => {
+      mockMemberships([{ org_id: "org-1", org_name: "Mine", role: "admin" }]);
+      mockJoinable([], true);
+
+      renderWithProviders(<OrgSwitcher userEmail="bob@assembledhq.com" />);
+      await userEvent.click(await screen.findByTestId("org-switcher"));
+
+      expect(await screen.findByTestId("verify-email-prompt")).toBeInTheDocument();
+      expect(screen.getByText("Your team has a workspace")).toBeInTheDocument();
+      expect(screen.queryByTestId("joinable-orgs-section")).not.toBeInTheDocument();
+    });
+  });
 });

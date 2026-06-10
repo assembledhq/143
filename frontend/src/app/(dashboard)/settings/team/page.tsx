@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { VerifiedDomainsSection } from "@/components/settings/verified-domains-section";
 import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -513,6 +514,9 @@ export default function TeamSettingsPage() {
           </Card>
         </section>
       )}
+
+      {/* Verified domains (domain capture / auto-join) */}
+      {canManageTeam && <VerifiedDomainsSection />}
 
       {/* CLI install links (admin-only: creating one hands out membership) */}
       {canManageTeam && <CLIJoinTokensCard />}
