@@ -505,7 +505,7 @@ func validateDependencyCacheArchiveReader(reader io.Reader, paths []string) (dep
 		if header.Size > 0 {
 			stats.payloadBytes += header.Size
 		}
-		if header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA {
+		if header.Typeflag == tar.TypeReg {
 			stats.fileCount++
 		}
 	}
@@ -724,10 +724,6 @@ func (c *SharedDependencyCache) localBlobEntries() ([]dependencyCacheLocalEntry,
 		return nil
 	})
 	return entries, total, err
-}
-
-func dependencyCacheTmpPath() string {
-	return "/tmp/preview-dependency-cache-" + uuid.NewString() + ".tar.gz"
 }
 
 func buildDependencyCacheExtractCommand(workDir, tmpPath string, paths []string) string {
