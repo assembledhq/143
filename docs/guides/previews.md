@@ -202,7 +202,7 @@ Session previews also use a dependency artifact cache when object storage is con
 clean_paths + cache.paths + inferred paths from known dependency files
 ```
 
-Platform-owned install marker paths are excluded from dependency caching. Do not declare `.143/cache`, `.143/cache/preview-install`, or any parent/glob path that can include `.143/cache/preview-install` as a dependency cache path. `clean_paths` may still remove broad build output before a fresh install, but those paths are not automatically safe to persist as reusable artifacts.
+Platform-owned preview cache paths are excluded from dependency caching. Do not declare `.143/cache` or any descendant as a dependency cache path. `clean_paths` may still remove broad build output before a fresh install, but those paths are not automatically safe to persist as reusable artifacts.
 
 Initial inferred paths:
 
@@ -214,7 +214,9 @@ Initial inferred paths:
 
 Inference is relative to the lockfile directory, so `frontend/package-lock.json` infers `frontend/node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. `cache.paths` is additive and is useful for specific paths such as `.next/cache`, `.pnpm-store`, or `.turbo/cache`.
 
-Do not cache source directories, secret files, `.git`, or preview install markers. Large caches are best handled by narrowing `cache.paths` to high-value dependency/build-cache directories or setting `cache.enabled: false` for that preview config. Raising `preview.resources.limits.ephemeral-storage` can help final extracted dependencies fit, but it should not be required for cache restore correctness and is capped by platform policy. `requirements.txt` can be unsafe when it contains unpinned ranges such as `flask>=2.0`; pin dependencies, use a real lockfile, or set `cache.enabled: false`. Mutable preview image tags such as `latest` can also produce stale caches; prefer immutable digests or versioned tags.
+Do not cache source directories, secret files, `.git`, `.143/cache`, or preview install markers. Large caches are best handled by narrowing `cache.paths` to high-value dependency/build-cache directories or setting `cache.enabled: false` for that preview config. Raising `preview.resources.limits.ephemeral-storage` can help final extracted dependencies fit, but it should not be required for cache restore correctness and is capped by platform policy. `requirements.txt` can be unsafe when it contains unpinned ranges such as `flask>=2.0`; pin dependencies, use a real lockfile, or set `cache.enabled: false`. Mutable preview image tags such as `latest` can also produce stale caches; prefer immutable digests or versioned tags.
+
+Deployment operators enable shared dependency caching by setting `PREVIEW_DEPENDENCY_CACHE_BUCKET`. Worker-local L1 cache defaults to `/var/cache/143/preview-dependency-cache` and is host-mounted by the production worker compose file; set `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR=off` to disable only the worker-local L1 layer while keeping shared object-storage restores enabled.
 
 Npm workspace example:
 
