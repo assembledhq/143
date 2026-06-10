@@ -169,8 +169,9 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
-	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadFn            func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn       func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadLatestTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
@@ -183,6 +184,13 @@ func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UU
 func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
 	if m.listByThreadTurnsFn != nil {
 		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+	if m.listByThreadLatestTurnsFn != nil {
+		return m.listByThreadLatestTurnsFn(ctx, orgID, threadID, latestTurns)
 	}
 	return nil, nil
 }
@@ -1949,6 +1957,42 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 			expectedLen:  1,
 		},
 		{
+			name:           "success with latest turns window",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "log lookup should be scoped to the request organization")
+					require.Equal(t, threadID, gotThreadID, "log lookup should target the requested thread")
+					require.Equal(t, 50, latestTurns, "log lookup should pass the requested latest-turns window")
+					return []models.SessionLog{
+						{ID: 3, SessionID: sessionID, ThreadID: &threadID, Level: "info", Message: "latest turn", TurnNumber: 12, Timestamp: now},
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  1,
+		},
+		{
+			name:           "latest turns clamped to the server cap",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, _, _ uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, maxLatestTurns, latestTurns, "oversized latest_turns should be clamped, not honored")
+					return []models.SessionLog{}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+		{
 			name:           "invalid session ID",
 			sessionIDParam: "bad-id",
 			threadIDParam:  threadID.String(),
@@ -1989,6 +2033,12 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 			if tt.name == "success with turn filter" {
 				target += "?turn_numbers=7,6,7,5,bad"
 			}
+			if tt.name == "success with latest turns window" {
+				target += "?latest_turns=50"
+			}
+			if tt.name == "latest turns clamped to the server cap" {
+				target += "?latest_turns=99999"
+			}
 			req := threadRequest(http.MethodGet, target, "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
 			w := httptest.NewRecorder()
 
@@ -2016,4 +2066,15 @@ func TestParseTurnNumbersRejectsOverflow(t *testing.T) {
 	turnNumbers := parseTurnNumbers("1,2147483647,2147483648,999999999999999999999999999999")
 
 	require.Equal(t, []int{1, 2147483647}, turnNumbers, "turn parsing should reject values that cannot fit in the database integer column")
+}
+
+func TestParseLatestTurns(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 0, parseLatestTurns(""), "empty input should disable the latest-turns window")
+	require.Equal(t, 0, parseLatestTurns("bad"), "non-numeric input should disable the latest-turns window")
+	require.Equal(t, 0, parseLatestTurns("-5"), "negative input should disable the latest-turns window")
+	require.Equal(t, 0, parseLatestTurns("0"), "zero should disable the latest-turns window")
+	require.Equal(t, 50, parseLatestTurns(" 50 "), "valid input should parse with surrounding whitespace")
+	require.Equal(t, maxLatestTurns, parseLatestTurns("99999"), "oversized input should clamp to the server cap")
 }

@@ -517,11 +517,15 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
     },
-    getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[] } = {}) => {
+    getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[]; latestTurns?: number } = {}) => {
       const searchParams = new URLSearchParams();
       const turnNumbers = Array.from(new Set((params.turnNumbers ?? []).filter((turn) => Number.isInteger(turn) && turn >= 0))).sort((a, b) => a - b);
       if (turnNumbers.length > 0) {
         searchParams.set('turn_numbers', turnNumbers.join(','));
+      } else if (params.latestTurns && Number.isInteger(params.latestTurns) && params.latestTurns > 0) {
+        // Bootstrap mode: fetch the thread's most recent N turns of logs
+        // before the message window has resolved which turns are visible.
+        searchParams.set('latest_turns', String(params.latestTurns));
       }
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs${qs ? `?${qs}` : ''}`);
