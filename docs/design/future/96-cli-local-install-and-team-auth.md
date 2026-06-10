@@ -8,7 +8,7 @@ Let anyone on a 143 team install the `143-tools` CLI on their laptop and authent
 with a single command — even if they don't have a 143 account yet:
 
 ```bash
-curl -fsSL https://143.com/i/<JOIN_TOKEN> | sh
+curl -fsSL https://143.com/install/<JOIN_TOKEN> | sh
 ```
 
 One command total: the installer downloads the binary, writes the config, and
@@ -21,7 +21,7 @@ The join token is optional — the tokenless form installs and logs in exactly t
 same way, for existing users or anyone without a join link:
 
 ```bash
-curl -fsSL https://143.com/i | sh
+curl -fsSL https://143.com/install.sh | sh
 ```
 
 `login` opens the browser, the user signs in with GitHub (existing OAuth), and if they
@@ -77,7 +77,7 @@ flow, per-user CLI tokens, and multi-use org join tokens.
 
 ```
 admin:  Settings → Members → "CLI install link" → copies one-liner into Slack
-        curl -fsSL https://143.com/i/143j_Ab3x9k | sh
+        curl -fsSL https://143.com/install/143j_Ab3x9k | sh
 
 user:   pastes the one-liner
         → server returns the install script with server URL + join token templated in
@@ -95,7 +95,7 @@ user:   pastes the one-liner
 
 ### Existing 143 user, new laptop
 
-Same one-liner without the token segment — `curl -fsSL https://143.com/i | sh` —
+Same one-liner without the token segment — `curl -fsSL https://143.com/install.sh | sh` —
 which likewise chains into `login`. The OAuth callback matches their existing GitHub
 ID and mints a CLI token for the new device. (The tokened link also works fine for existing users —
 the join token is simply a no-op for someone already in the org — so admins only ever
@@ -273,9 +273,8 @@ opportunistically (`DELETE ... WHERE expires_at < now() - interval '1 hour'` on 
 
 | Route | Method | Description |
 |---|---|---|
-| `/i` | GET | Shell installer, templated with the server's own `BaseURL`. |
-| `/i/{join_token}` | GET | Same installer with the join token additionally templated into the config-write step. **Syntactic validation is mandatory**: the segment must match `^143j_[A-Za-z0-9]{12,64}$` or the route 404s — this is untrusted input being templated into a script the user pipes to `sh`, so anything outside that charset is a shell-injection vector, and the templating must single-quote the value besides. Existence/validity is deliberately **not** checked here (revoked links should still install the binary; the join is validated at login). |
-| `/install.sh` | GET | Alias of `/i` for discoverability. |
+| `/install.sh` | GET | Shell installer, templated with the server's own `BaseURL`. The path follows the dominant industry convention (`tailscale.com/install.sh`, `fly.io/install.sh`, `ollama.com/install.sh`, `claude.ai/install.sh`) — instantly recognizable and self-documenting. A `get.` subdomain (Docker/k3s style) was rejected: it would force every self-hoster to provision extra DNS + TLS, while a path works on whatever domain the server already has. |
+| `/install/{join_token}` | GET | Same installer with the join token additionally templated into the config-write step. The token is a path segment rather than `?join=` query because an unquoted `?` breaks under zsh (the macOS default shell) with "no matches found". **Syntactic validation is mandatory**: the segment must match `^143j_[A-Za-z0-9]{12,64}$` or the route 404s — this is untrusted input being templated into a script the user pipes to `sh`, so anything outside that charset is a shell-injection vector, and the templating must single-quote the value besides. Existence/validity is deliberately **not** checked here (revoked links should still install the binary; the join is validated at login). |
 | `/download/143-tools/{os}/{arch}` | GET | Binary. `os ∈ {darwin, linux}`, `arch ∈ {amd64, arm64}`. 404 for unknown pairs. Sets `X-Checksum-Sha256` header. |
 | `/download/143-tools/checksums.txt` | GET | SHA-256 checksums for all four binaries; the installer verifies after download. |
 | `/api/v1/cli/version` | GET | `{"data": {"version": "<git sha/tag>", "min_supported": "..."}}`. `min_supported` is enforced, not advisory: authenticated requests from a CLI sending a `User-Agent: 143-tools/<version>` below it get `426 CLI_UPDATE_REQUIRED` with a message naming `143-tools update`, so breaking API changes have a clean failure mode instead of confusing errors. |
@@ -284,10 +283,10 @@ These are served outside `/api/v1` (except version) because they are fetched by
 `curl`/`sh`, not the JSON API client. **Routing caveat**: the production Caddyfile
 (`deploy/Caddyfile`) routes only `/api/*` to the Go server — everything else falls
 through to the Next.js frontend. These routes therefore need explicit `handle`
-blocks (`/i*`, `/install.sh`, `/download/*`) pointing at the `api` upstream,
+blocks (`/install*`, `/download/*`) pointing at the `api` upstream,
 inserted before the frontend fallthrough, with the change covered by
 `deploy/deploy_config_test.go`. Self-hosters with their own proxy need the same
-three rules (document this in the install docs). Rate-limit modestly; responses
+two rules (document this in the install docs). Rate-limit modestly; responses
 are static files read from `/opt/143/cli/` inside the server image.
 
 ### CLI login flow
@@ -339,7 +338,7 @@ revocation — not expiry — is the real control here.
 
 | Route | Method | Auth | Description |
 |---|---|---|---|
-| `/api/v1/org/join-tokens` | POST | session, admin | Body: `{"name", "role", "max_uses?", "expires_in_days?"}`. Returns plaintext token once: `{"data": {"id", "token": "143j_...", "install_command": "curl -fsSL .../i/143j_... \| sh"}}`. |
+| `/api/v1/org/join-tokens` | POST | session, admin | Body: `{"name", "role", "max_uses?", "expires_in_days?"}`. Returns plaintext token once: `{"data": {"id", "token": "143j_...", "install_command": "curl -fsSL .../install/143j_... \| sh"}}`. |
 | `/api/v1/org/join-tokens` | GET | session, admin | List (prefix, name, role, use_count, status). |
 | `/api/v1/org/join-tokens/{id}` | DELETE | session, admin | Revoke. |
 | `/api/v1/auth/cli-tokens` | GET | any auth | List the caller's own CLI tokens (device, prefix, last_used). |
@@ -415,10 +414,10 @@ config file, so the same binary works in both worlds.
 
 - **Join token blast radius**: grants membership only (default `member`), never API
   access. Revocable and listable in the UI; optional `max_uses`/expiry. It will leak
-  into shell history and — because it rides in the `/i/{join_token}` URL — into
+  into shell history and — because it rides in the `/install/{join_token}` URL — into
   server access logs and any intermediary proxy logs, by design. That's acceptable
   for this privilege level, and one-click revoke is the mitigation; still, the
-  server's request logger must redact the path segment (log as `/i/:token`), and
+  server's request logger must redact the path segment (log as `/install/:token`), and
   the route must be HTTPS-only. Rate-limit join attempts per token.
 - **One-time code**: 60-second TTL, single use, stored hashed, bound to the CLI's
   verifier (challenge = SHA-256). The browser/history only ever sees the code, never
@@ -460,7 +459,7 @@ bearer branch, `/cli/start` + callback extension + `/cli/exchange`, CLI
 in on a clean machine, `whoami` works, revoke kills it.*
 
 Phase 3 — join tokens + JIT: `org_join_tokens` migration + CHECK-pin test, admin
-CRUD endpoints, callback JIT path, Members-page UI card, `/i/{join_token}`
+CRUD endpoints, callback JIT path, Members-page UI card, `/install/{join_token}`
 installer templating + access-log redaction. *Verify: brand-new GitHub user goes from Slack one-liner to `whoami`
 showing the right org without touching the web app first.*
 
