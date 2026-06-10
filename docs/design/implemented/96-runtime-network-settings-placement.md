@@ -203,7 +203,10 @@ Settings shape:
     "agent_default_tier": "standard",
     "preview_default_tier": "standard",
     "allow_repo_resource_requests": true,
-    "preview_max_tier": "large"
+    "preview_max_tier": "large",
+    "preview_max_cpu_millis": 2000,
+    "preview_max_memory_mib": 8192,
+    "preview_max_ephemeral_disk_mib": 10240
   }
 }
 ```
@@ -338,6 +341,9 @@ Reusable fields:
 | Preview default tier | `settings.sandbox_resources.preview_default_tier` |
 | Repo resource request policy | `settings.sandbox_resources.allow_repo_resource_requests` |
 | Preview max tier | `settings.sandbox_resources.preview_max_tier` |
+| Preview CPU request max | `settings.sandbox_resources.preview_max_cpu_millis` |
+| Preview memory request max | `settings.sandbox_resources.preview_max_memory_mib` |
+| Preview ephemeral disk request max | `settings.sandbox_resources.preview_max_ephemeral_disk_mib` |
 | Runtime diagnostics | `GET /api/v1/settings/runtime/status` |
 
 Resource tiers are typed backend enum strings: `small`, `standard`, and `large`. Runtime status uses org-scoped active session and active preview counters and does not return worker internals.

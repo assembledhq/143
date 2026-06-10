@@ -325,7 +325,7 @@ func (h *PreviewHandler) resolveSandboxWorkDir(ctx context.Context, session *mod
 //     new container, restore the snapshot, and publish the new container_id.
 //   - Expired/Unavailable: no container and no usable snapshot; caller should
 //     return 410 only when the reaper explicitly expired the snapshot.
-func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
+func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, reservation *models.PreviewInstance) acquireSandboxResult {
 	workDir := h.resolveSandboxWorkDir(ctx, session)
 	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, h.orgStore, orgID, h.staticEgress)
 	if expectedErr != nil {
@@ -412,7 +412,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
-	preview.ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	preview.ApplyPreviewInstanceResourceLimitsToSandboxConfig(&sandboxCfg, reservation)
 	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, h.orgStore, orgID, h.staticEgress, &sandboxCfg); err != nil {
 		return acquireSandboxResult{
 			ErrCode: "STATIC_EGRESS_UNAVAILABLE",
@@ -753,7 +753,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	//   3. SnapshotExpired / SnapshotUnavailable — neither a container nor a
 	//      usable snapshot exists.
 	hydrateStarted := time.Now()
-	acq := h.acquireSandbox(ctx, orgID, &session, input.Config)
+	acq := h.acquireSandbox(ctx, orgID, &session, reservation)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, orgID.String(), "hydrate", time.Since(hydrateStarted))
 	if acq.Err != nil {
 		h.logger.Warn().Err(acq.Err).
