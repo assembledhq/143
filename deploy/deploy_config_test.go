@@ -544,17 +544,112 @@ func TestWorkerDeployFingerprintsAreSeparatedByBlastRadius(t *testing.T) {
 	require.Contains(t, workerProcess, "worker", "worker process fingerprint should target the worker service")
 
 	require.NotContains(t, supportServices, "fingerprint_files \\\n        /opt/143/docker-compose.worker.yml", "support-service fingerprint should not hash the entire worker compose file")
-	require.Contains(t, supportServices, "chrome", "support-service fingerprint should include the chrome service block")
-	require.Contains(t, supportServices, "gvisor-check", "support-service fingerprint should include the gVisor check service block")
-	require.Contains(t, supportServices, "sandbox-dns", "support-service fingerprint should include the sandbox DNS service block")
-	require.Contains(t, supportServices, "docker-compose.dns-probe.yml", "support-service fingerprint should include the DNS probe compose file")
+	require.Contains(t, supportServices, "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES", "support-service fingerprint should hash the shared support compose service list")
+	require.Contains(t, supportServices, "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES", "support-service fingerprint should hash the shared support file list")
 
-	require.Contains(t, hostRuntime, "reconcile-worker-host.sh", "host-runtime fingerprint should include worker host reconciliation")
-	require.Contains(t, hostRuntime, "sandbox-firewall.sh", "host-runtime fingerprint should include sandbox firewall rules")
-	require.Contains(t, hostRuntime, "sandbox-resolv-conf.sh", "host-runtime fingerprint should include sandbox resolv.conf generation")
+	supportComposeServices := extractFingerprintListVar(t, deploy, "WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")
+	require.Contains(t, supportComposeServices, "chrome", "support-service fingerprint should include the chrome service block")
+	require.Contains(t, supportComposeServices, "gvisor-check", "support-service fingerprint should include the gVisor check service block")
+	require.Contains(t, supportComposeServices, "sandbox-dns", "support-service fingerprint should include the sandbox DNS service block")
+	supportFiles := extractFingerprintListVar(t, deploy, "WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")
+	require.Contains(t, supportFiles, "Dockerfile.dnsmasq", "support-service fingerprint should include the dnsmasq Dockerfile")
+	require.Contains(t, supportFiles, "docker-compose.dns-probe.yml", "support-service fingerprint should include the DNS probe compose file")
 
-	require.Contains(t, dockerDaemon, "install-docker-dns.sh", "docker-daemon fingerprint should include Docker DNS installation")
-	require.Contains(t, dockerDaemon, "install-log-rotation.sh", "docker-daemon fingerprint should include Docker log rotation installation")
+	require.Contains(t, hostRuntime, "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES", "host-runtime fingerprint should hash the shared host-runtime file list")
+	hostRuntimeFiles := extractFingerprintListVar(t, deploy, "WORKER_HOST_RUNTIME_FINGERPRINT_FILES")
+	require.Contains(t, hostRuntimeFiles, "reconcile-worker-host.sh", "host-runtime fingerprint should include worker host reconciliation")
+	require.Contains(t, hostRuntimeFiles, "sandbox-firewall.sh", "host-runtime fingerprint should include sandbox firewall rules")
+	require.Contains(t, hostRuntimeFiles, "sandbox-resolv-conf.sh", "host-runtime fingerprint should include sandbox resolv.conf generation")
+	require.Contains(t, hostRuntimeFiles, "install-static-egress-worker.sh", "host-runtime fingerprint should include static egress WireGuard installation")
+
+	require.Contains(t, dockerDaemon, "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES", "docker-daemon fingerprint should hash the shared docker-daemon file list")
+	dockerDaemonFiles := extractFingerprintListVar(t, deploy, "WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")
+	require.Contains(t, dockerDaemonFiles, "install-docker-dns.sh", "docker-daemon fingerprint should include Docker DNS installation")
+	require.Contains(t, dockerDaemonFiles, "install-log-rotation.sh", "docker-daemon fingerprint should include Docker log rotation installation")
+}
+
+// extractFingerprintListVar returns the canonical (single, top-level)
+// definition of one of the shared worker fingerprint input lists. The
+// negative character class skips the detached-rollover heredoc line that
+// re-binds the variable to itself ('$WORKER_...').
+func extractFingerprintListVar(t *testing.T, deployText, name string) string {
+	t.Helper()
+
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(name) + `='([^'$][^']*)'$`)
+	matches := re.FindAllStringSubmatch(deployText, -1)
+	require.Len(t, matches, 1, "deploy.sh should define %s exactly once as the canonical fingerprint input list", name)
+	return matches[0][1]
+}
+
+// Regression test for the routine-deploy failure loop: the staged fingerprint
+// gate and the blue/green rollover each used to carry their own hardcoded
+// fingerprint input lists. When the lists diverged (install-static-egress-
+// worker.sh was added to the gate's host-runtime list but not the rollover's),
+// every routine deploy failed with "host-runtime config changed": the gate
+// repaired the on-host baseline to a hash the rollover never computed, and a
+// maintenance deploy wrote the rollover's hash back, re-arming the failure.
+func TestWorkerFingerprintInputListsAreSharedBetweenGateAndRollover(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	gate := extractTopLevelShellBlock(t, deploy, "fingerprint_candidate_files", "\nREMOTE\n}")
+	rollover := extractShellFunction(t, deploy, "worker_support_service_fingerprint", "ensure_routine_worker_fingerprints_compatible")
+
+	listVars := []string{
+		"WORKER_HOST_RUNTIME_FINGERPRINT_FILES",
+		"WORKER_DOCKER_DAEMON_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES",
+	}
+	for _, name := range listVars {
+		extractFingerprintListVar(t, deploy, name)
+		require.Contains(t, gate, "$"+name, "staged fingerprint gate should consume the shared %s list", name)
+		require.Contains(t, rollover, "$"+name, "blue/green rollover fingerprints should consume the shared %s list", name)
+		require.Equal(t, 2, strings.Count(deploy, "remote_env_assignment "+name+" "), "both the gate and the main remote payload should receive %s over SSH", name)
+		require.Contains(t, deploy, name+"='$"+name+"'", "detached rollover script should bake the shared %s list because it runs in a fresh process", name)
+	}
+}
+
+// The staged gate repairs the persisted fingerprint baseline using
+// fingerprint_candidate_files while the rollover recomputes it with
+// fingerprint_files. The repaired baseline only satisfies the rollover if the
+// two implementations hash identical files to identical digests — pin that
+// here so a format change in either copy fails at PR time, not on the fleet.
+func TestGateAndRolloverFingerprintImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	gateFn := extractTopLevelShellFunction(t, deploy, "fingerprint_candidate_files", "fingerprint_active_files")
+	rolloverFn := extractShellFunction(t, deploy, "fingerprint_files", "compose_service_fingerprint")
+
+	tmpDir := t.TempDir()
+	first := filepath.Join(tmpDir, "reconcile-worker-host.sh")
+	second := filepath.Join(tmpDir, "sandbox-firewall.sh")
+	require.NoError(t, os.WriteFile(first, []byte("echo reconcile\n"), 0o755), "test should seed first fingerprinted file")
+	require.NoError(t, os.WriteFile(second, []byte("echo firewall\n"), 0o755), "test should seed second fingerprinted file")
+
+	script := gateFn + rolloverFn + `
+set -euo pipefail
+gate="$(fingerprint_candidate_files "$FILE_ONE" "$FILE_TWO")"
+rollover="$(fingerprint_files "$FILE_ONE" "$FILE_TWO")"
+printf '%s\n%s\n' "$gate" "$rollover"
+`
+
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(), "FILE_ONE="+first, "FILE_TWO="+second)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "fingerprint implementations should execute successfully: %s", output)
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	require.Len(t, lines, 2, "comparison script should print both fingerprints")
+	require.Len(t, lines[0], 64, "gate fingerprint should be a sha256 hex digest")
+	require.Equal(t, lines[0], lines[1], "gate and rollover must compute identical fingerprints for identical files or routine deploys fail on a repaired baseline")
 }
 
 func TestStagedFingerprintIgnoresCandidateFilename(t *testing.T) {
@@ -617,6 +712,18 @@ func TestStagedFingerprintGateRepairsStaleBaselineWhenCandidateMatchesActive(t *
 
 	cmd := exec.Command("bash", "-c", gateScript)
 	cmd.Env = append(os.Environ(), "DEPLOY_MODE=routine")
+	// The gate reads the shared fingerprint input lists from its environment
+	// (deploy.sh passes them over SSH); feed it the real lists, retargeted at
+	// the temp directory.
+	for _, name := range []string{
+		"WORKER_HOST_RUNTIME_FINGERPRINT_FILES",
+		"WORKER_DOCKER_DAEMON_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES",
+		"WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES",
+	} {
+		value := extractFingerprintListVar(t, string(deployScript), name)
+		cmd.Env = append(cmd.Env, name+"="+strings.ReplaceAll(value, "/opt/143", tmpDir))
+	}
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "staged fingerprint gate should allow stale baseline repair when candidate matches active files: %s", output)
 	require.Contains(t, string(output), "stored worker support-service fingerprint is stale", "gate should explain stale support fingerprint repair")

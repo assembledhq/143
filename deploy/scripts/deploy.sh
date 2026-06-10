@@ -138,14 +138,35 @@ apply_static_egress_worker_host_map() {
   done
 }
 
+# Canonical worker fingerprint input lists, shared by the staged fingerprint
+# gate and the blue/green rollover (including the detached rollover script).
+# Both sides MUST hash the same inputs: the gate repairs the persisted
+# baseline from these lists, and the rollover compares its own computation
+# against that baseline. If they diverge, every routine deploy fails with
+# "config changed" even when nothing changed — the gate writes one hash, the
+# rollover expects another, and DEPLOY_MODE=maintenance just re-arms the loop.
+WORKER_HOST_RUNTIME_FINGERPRINT_FILES='/opt/143/deploy/scripts/reconcile-worker-host.sh /opt/143/deploy/scripts/sandbox-firewall.sh /opt/143/deploy/scripts/sandbox-resolv-conf.sh /opt/143/deploy/scripts/install-static-egress-worker.sh'
+WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='/opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-log-rotation.sh'
+WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='/opt/143/Dockerfile.dnsmasq /opt/143/docker-compose.dns-probe.yml'
+WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='chrome gvisor-check sandbox-dns'
+
 run_worker_staged_fingerprint_gate() {
   if [ "$ROLE" != "worker" ]; then
     return 0
   fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+    "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
     'bash -s' <<'REMOTE'
 set -euo pipefail
+
+: "${WORKER_HOST_RUNTIME_FINGERPRINT_FILES:?deploy.sh must pass the shared host-runtime fingerprint file list}"
+: "${WORKER_DOCKER_DAEMON_FINGERPRINT_FILES:?deploy.sh must pass the shared docker-daemon fingerprint file list}"
+: "${WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES:?deploy.sh must pass the shared support-service fingerprint file list}"
+: "${WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES:?deploy.sh must pass the shared support-service compose service list}"
 
 fingerprint_candidate_files() {
   local selected=()
@@ -247,50 +268,44 @@ worker_process_config_fingerprint() {
   compose_service_fingerprint /opt/143/docker-compose.worker.yml worker
 }
 
+# The shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES lists are intentionally
+# expanded unquoted: they are space-separated lists of paths/services.
 worker_support_service_fingerprint() {
   {
-    compose_service_fingerprint /opt/143/docker-compose.worker.yml chrome gvisor-check sandbox-dns
-    fingerprint_candidate_files \
-      /opt/143/Dockerfile.dnsmasq \
-      /opt/143/docker-compose.dns-probe.yml
+    # shellcheck disable=SC2086
+    compose_service_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+    # shellcheck disable=SC2086
+    fingerprint_candidate_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
   } | sha256sum | awk '{print $1}'
 }
 
 worker_active_support_service_fingerprint() {
   {
-    compose_service_active_fingerprint /opt/143/docker-compose.worker.yml chrome gvisor-check sandbox-dns
-    fingerprint_active_files \
-      /opt/143/Dockerfile.dnsmasq \
-      /opt/143/docker-compose.dns-probe.yml
+    # shellcheck disable=SC2086
+    compose_service_active_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+    # shellcheck disable=SC2086
+    fingerprint_active_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
   } | sha256sum | awk '{print $1}'
 }
 
 worker_host_runtime_fingerprint() {
-  fingerprint_candidate_files \
-    /opt/143/deploy/scripts/reconcile-worker-host.sh \
-    /opt/143/deploy/scripts/sandbox-firewall.sh \
-    /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
-    /opt/143/deploy/scripts/install-static-egress-worker.sh
+  # shellcheck disable=SC2086
+  fingerprint_candidate_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
 }
 
 worker_active_host_runtime_fingerprint() {
-  fingerprint_active_files \
-    /opt/143/deploy/scripts/reconcile-worker-host.sh \
-    /opt/143/deploy/scripts/sandbox-firewall.sh \
-    /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
-    /opt/143/deploy/scripts/install-static-egress-worker.sh
+  # shellcheck disable=SC2086
+  fingerprint_active_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
 }
 
 worker_docker_daemon_fingerprint() {
-  fingerprint_candidate_files \
-    /opt/143/deploy/scripts/install-docker-dns.sh \
-    /opt/143/deploy/scripts/install-log-rotation.sh
+  # shellcheck disable=SC2086
+  fingerprint_candidate_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
 }
 
 worker_active_docker_daemon_fingerprint() {
-  fingerprint_active_files \
-    /opt/143/deploy/scripts/install-docker-dns.sh \
-    /opt/143/deploy/scripts/install-log-rotation.sh
+  # shellcheck disable=SC2086
+  fingerprint_active_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
 }
 
 repair_stale_worker_fingerprint() {
@@ -785,6 +800,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
   "$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")" \
   "$(remote_env_assignment DEPLOY_DOCKER_VOLUME_PRUNE "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}")" \
+  "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
@@ -1450,26 +1469,27 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     compose_service_fingerprint /opt/143/docker-compose.worker.yml worker
   }
 
+  # These fingerprints must match the staged fingerprint gate's computation
+  # exactly, so both read the shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES
+  # lists (passed via SSH env here, baked into the detached rollover script).
+  # The lists are space-separated, hence the intentional unquoted expansion.
   worker_support_service_fingerprint() {
     {
-      compose_service_fingerprint /opt/143/docker-compose.worker.yml chrome gvisor-check sandbox-dns
-      fingerprint_files \
-        /opt/143/Dockerfile.dnsmasq \
-        /opt/143/docker-compose.dns-probe.yml
+      # shellcheck disable=SC2086
+      compose_service_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+      # shellcheck disable=SC2086
+      fingerprint_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
     } | sha256sum | awk '{print $1}'
   }
 
   worker_host_runtime_fingerprint() {
-    fingerprint_files \
-      /opt/143/deploy/scripts/reconcile-worker-host.sh \
-      /opt/143/deploy/scripts/sandbox-firewall.sh \
-      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
+    # shellcheck disable=SC2086
+    fingerprint_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
   }
 
   worker_docker_daemon_fingerprint() {
-    fingerprint_files \
-      /opt/143/deploy/scripts/install-docker-dns.sh \
-      /opt/143/deploy/scripts/install-log-rotation.sh
+    # shellcheck disable=SC2086
+    fingerprint_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
   }
 
   ensure_routine_worker_fingerprints_compatible() {
@@ -2058,6 +2078,10 @@ WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS='${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}'
 WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS='${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}'
 WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
 WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
+WORKER_HOST_RUNTIME_FINGERPRINT_FILES='$WORKER_HOST_RUNTIME_FINGERPRINT_FILES'
+WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES'
+WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES'
+WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES'
 
 # Always write a status file so the verify step has a deterministic signal.
 # If we exit before the success line writes "ok", the trap leaves "fail".
