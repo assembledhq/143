@@ -523,9 +523,6 @@ func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, i
 			integration.CircleCIProjectSlug = integrationStringPtr(cfg.ProjectSlug)
 		}
 	case models.MezmoConfig:
-		if cfg.Dataset != "" {
-			integration.MezmoDataset = integrationStringPtr(cfg.Dataset)
-		}
 		if cfg.BaseURL != "" {
 			integration.MezmoBaseURL = integrationStringPtr(cfg.BaseURL)
 		}
@@ -3027,13 +3024,13 @@ func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token st
 // runtime provider default in internal/services/integration.NewMezmoProvider.
 const mezmoDefaultBaseURL = "https://api.mezmo.com"
 
-// ConnectMezmo accepts a Mezmo service key (plus optional base URL and dataset),
-// validates it against the log-search endpoint, stores the credential, and
-// creates an active integration record. Mezmo uses a paste-the-key flow because
-// its log-query API authenticates with a service key rather than OAuth. The
-// stored credential is injected into sandboxes as MEZMO_* env vars by the
-// orchestrator (see internal/services/agent/env.go) so the agent's 143-tools
-// log commands query this org's Mezmo with its own key.
+// ConnectMezmo accepts a Mezmo access token or legacy service key (plus optional
+// base URL), validates it against the export endpoint, stores the
+// credential, and creates an active integration record. Mezmo uses a
+// paste-the-key flow because its log-query API authenticates with a long-lived
+// token rather than OAuth. The stored credential is injected into sandboxes as
+// MEZMO_* env vars by the orchestrator (see internal/services/agent/env.go) so
+// the agent's 143-tools log commands query this org's Mezmo with its own key.
 func (h *IntegrationHandler) ConnectMezmo(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
@@ -3051,6 +3048,10 @@ func (h *IntegrationHandler) ConnectMezmo(w http.ResponseWriter, r *http.Request
 	req.Dataset = strings.TrimSpace(req.Dataset)
 	if req.APIKey == "" {
 		writeError(w, r, http.StatusBadRequest, "MISSING_API_KEY", "api_key is required")
+		return
+	}
+	if req.Dataset != "" {
+		writeError(w, r, http.StatusBadRequest, "UNSUPPORTED_DATASET", "Mezmo dataset scoping is not supported by the current export API; leave dataset blank")
 		return
 	}
 	if req.BaseURL != "" {
@@ -3091,55 +3092,70 @@ func (h *IntegrationHandler) ConnectMezmo(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
 }
 
-// validateMezmoToken issues a minimal log search against the Mezmo API to
-// confirm the service key is accepted. It mirrors the auth path the runtime
-// provider uses (POST /v1/logs/search with a `servicekey` header — see
-// internal/services/integration/log_http.go).
+// validateMezmoToken issues a minimal export request against the Mezmo API to
+// confirm the key is accepted. It mirrors the runtime provider's documented
+// GET /v2/export path and prefers the current Authorization token auth, with a
+// fallback for legacy service keys.
 func (h *IntegrationHandler) validateMezmoToken(ctx context.Context, cfg models.MezmoConfig) error {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = mezmoDefaultBaseURL
 	}
 	now := time.Now()
-	body := map[string]any{
-		"query":      "*",
-		"start_time": now.Add(-time.Minute).Format(time.RFC3339Nano),
-		"end_time":   now.Format(time.RFC3339Nano),
-		"limit":      1,
-	}
-	if cfg.Dataset != "" {
-		body["dataset"] = cfg.Dataset
-	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/logs/search", bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("servicekey", cfg.APIKey)
+	values := url.Values{}
+	values.Set("query", "*")
+	values.Set("from", strconv.FormatInt(now.Add(-time.Minute).Unix(), 10))
+	values.Set("to", strconv.FormatInt(now.Unix(), 10))
+	values.Set("size", "1")
+	values.Set("prefer", "tail")
 
-	resp, err := h.client.Do(req)
+	statusCode, err := h.validateMezmoTokenRequest(ctx, baseURL, values, "Authorization", "Token "+cfg.APIKey)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		fallbackStatus, fallbackErr := h.validateMezmoTokenRequest(ctx, baseURL, values, "servicekey", cfg.APIKey)
+		if fallbackErr != nil {
+			return fmt.Errorf("request failed: %w", fallbackErr)
+		}
+		statusCode = fallbackStatus
+	}
 
 	// We're validating the key, not the query. Only an auth rejection is a
-	// definitive "bad key", and a 5xx means Mezmo is unhealthy right now (worth
-	// surfacing so the user retries). Any other 4xx (e.g. an unknown dataset, an
-	// unsupported query shape, or a 429 rate-limit) means the key was accepted
-	// and the request reached the API, so we let the connection succeed rather
-	// than block a valid key on a query-shape quirk.
+	// definitive "bad key", 404/405 means the configured endpoint is wrong or
+	// no longer serves the export API, and a 5xx means Mezmo is unhealthy right
+	// now (worth surfacing so the user retries). Other 4xx responses can be
+	// query-shape/rate-limit quirks after auth, so do not block a valid key.
 	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		return fmt.Errorf("invalid or expired key")
-	case resp.StatusCode >= 500:
-		return fmt.Errorf("mezmo API returned %d", resp.StatusCode)
+	case statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed:
+		return fmt.Errorf("mezmo API endpoint not found")
+	case statusCode >= 500:
+		return fmt.Errorf("mezmo API returned %d", statusCode)
 	default:
 		return nil
 	}
+}
+
+func (h *IntegrationHandler) validateMezmoTokenRequest(ctx context.Context, baseURL string, values url.Values, authHeader, authValue string) (int, error) {
+	endpoint := strings.TrimRight(baseURL, "/") + "/v2/export"
+	if encoded := values.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set(authHeader, authValue)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return 0, err
+	}
+	return resp.StatusCode, nil
 }
