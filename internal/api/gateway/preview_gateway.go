@@ -624,15 +624,19 @@ func acceptsHTMLDocument(accept string) bool {
 }
 
 func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
+	originalReq := r
 	runtime, err := g.store.GetActivePreviewRuntime(r.Context(), orgID, previewID)
 	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to resolve active preview runtime")
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, nil, "").
+			Msg("failed to resolve active preview runtime")
 		writeRuntimeUnavailable(w)
 		return
 	}
+	upstreamPath := previewWorkerProxyPath(previewID, r.URL.Path)
 	targetURL, err := url.Parse(runtime.EndpointURL)
 	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("endpoint_url", runtime.EndpointURL).Msg("failed to parse preview runtime endpoint url")
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
+			Msg("failed to parse preview runtime endpoint url")
 		writeRuntimeUnavailable(w)
 		return
 	}
@@ -646,7 +650,8 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		ExpiresAt:    time.Now().Add(30 * time.Second),
 	})
 	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to sign preview worker token")
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
+			Msg("failed to sign preview worker token")
 		http.Error(w, "preview unavailable", http.StatusBadGateway)
 		return
 	}
@@ -655,7 +660,7 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		Director: func(req *http.Request) {
 			req.URL.Scheme = targetURL.Scheme
 			req.URL.Host = targetURL.Host
-			req.URL.Path = fmt.Sprintf("/internal/preview/%s/proxy%s", previewID.String(), req.URL.Path)
+			req.URL.Path = upstreamPath
 			req.Host = targetURL.Host
 			req.RequestURI = ""
 			stripPreviewCookie(req)
@@ -684,12 +689,60 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("proxy error")
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
+				Msg("proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func previewWorkerProxyPath(previewID uuid.UUID, requestPath string) string {
+	return fmt.Sprintf("/internal/preview/%s/proxy%s", previewID.String(), requestPath)
+}
+
+func addPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, upstreamPath string) *zerolog.Event {
+	requestPath := ""
+	requestHost := ""
+	requestMethod := ""
+	queryPresent := false
+	secFetchDest := ""
+	if r != nil {
+		requestHost = r.Host
+		requestMethod = r.Method
+		secFetchDest = r.Header.Get("Sec-Fetch-Dest")
+		if r.URL != nil {
+			requestPath = r.URL.Path
+			queryPresent = r.URL.RawQuery != ""
+		}
+	}
+
+	event = event.
+		Str("org_id", orgID.String()).
+		Str("preview_id", previewID.String()).
+		Str("request_method", requestMethod).
+		Str("request_host", requestHost).
+		Str("request_path", requestPath).
+		Bool("query_present", queryPresent).
+		Str("sec_fetch_dest", secFetchDest).
+		Str("upstream_path", upstreamPath)
+
+	if runtime == nil {
+		return event
+	}
+
+	return event.
+		Str("runtime_id", runtime.ID.String()).
+		Int("runtime_epoch", runtime.RuntimeEpoch).
+		Str("runtime_status", string(runtime.Status)).
+		Str("worker_node_id", runtime.WorkerNodeID).
+		Str("endpoint_url", runtime.EndpointURL).
+		Str("preview_handle", runtime.PreviewHandle).
+		Int("primary_port", runtime.PrimaryPort).
+		Time("runtime_lease_expires_at", runtime.LeaseExpiresAt).
+		Time("runtime_last_heartbeat_at", runtime.LastHeartbeatAt).
+		Str("runtime_unavailable_reason", string(runtime.UnavailableReason))
 }
 
 func translateWorkerRuntimeMismatch(resp *http.Response) bool {
