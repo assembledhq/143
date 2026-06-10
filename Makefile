@@ -554,6 +554,7 @@ spin-down-worker:
 TAG ?= latest
 ROLES ?= app,worker
 force ?=
+DEPLOY_JOBS ?= 4
 WORKER_BLUE_GREEN_PORT_START ?= 8080
 WORKER_BLUE_GREEN_PORT_END ?= 8087
 
@@ -667,9 +668,11 @@ deploy-redis:
 #   make deploy-fleet TAG=<sha> ROLES=app,worker
 # To override the active-session guardrail:
 #   make deploy-fleet force=true
+# To serialize node deploys:
+#   make deploy-fleet DEPLOY_JOBS=1
 deploy-fleet:
 	$(check-ssh-key)
-	$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
+	$(worker-blue-green-env) $(deploy-force-env) DEPLOY_JOBS=$(DEPLOY_JOBS) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
