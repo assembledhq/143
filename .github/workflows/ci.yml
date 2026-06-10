@@ -100,6 +100,10 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+      # Drives DB-backed migration behavior tests (e.g. the coding-credential
+      # versioning test in internal/db). They self-skip when unset, so this
+      # must point at the job's Postgres service or they never run anywhere.
+      TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v6
         with:

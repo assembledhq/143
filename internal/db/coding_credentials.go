@@ -902,34 +902,14 @@ func (s *CodingCredentialStore) PromotePending(ctx context.Context, scope models
 	return nil
 }
 
-// UpdateConfig overwrites the encrypted config for an active credential.
-func (s *CodingCredentialStore) UpdateConfig(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
-	encrypted, err := s.marshalAndEncrypt(cfg)
-	if err != nil {
-		return err
-	}
-	var provider models.ProviderName
-	if err := s.withScopedConfigTx(ctx, scope, id, func(tx pgx.Tx, current codingCredentialConfigSnapshot, runtime codingCredentialRuntimeSnapshot) error {
-		if current.Provider != cfg.Provider() {
-			return fmt.Errorf("provider mismatch: row is %q, config is %q", current.Provider, cfg.Provider())
-		}
-		if runtime.Status == models.CodingCredentialStatusDisabled {
-			return ErrCodingCredentialNotFound
-		}
-		provider = current.Provider
-		current.Config = encrypted
-		return s.insertConfigVersionTx(ctx, tx, current)
-	}); err != nil {
-		return err
-	}
-	s.invalidate(scope, provider)
-	return nil
-}
-
 // UpdateConfigVerified overwrites config and records a successful verification
 // runtime version in the same transaction. Used by OAuth completion, token
 // refresh, and sandbox credential harvest paths where the new credential
-// material has just been accepted by the upstream provider.
+// material has just been accepted by the upstream provider. Every production
+// config-replacement path goes through here — a config-only UpdateConfig
+// variant (new material without re-verification) was dropped as dead code;
+// reintroduce it as a withScopedConfigTx + insertConfigVersionTx wrapper if a
+// caller ever needs unverified config edits.
 func (s *CodingCredentialStore) UpdateConfigVerified(ctx context.Context, scope models.Scope, id uuid.UUID, cfg models.ProviderConfig) error {
 	encrypted, err := s.marshalAndEncrypt(cfg)
 	if err != nil {
@@ -1197,7 +1177,6 @@ func (s *CodingCredentialStore) JanitorDeletePendingAuthOlderThan(ctx context.Co
 			FROM coding_credentials cc
 			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
 			WHERE cc.active = true
-			  AND cc.org_id IS NOT NULL
 			  AND rt.status = 'pending_auth'
 			  AND cc.created_at < now() - @ttl::interval
 		),
@@ -1222,6 +1201,41 @@ func (s *CodingCredentialStore) JanitorDeletePendingAuthOlderThan(ctx context.Co
 		return 0, fmt.Errorf("janitor sweep: %w", err)
 	}
 	return deactivated, nil
+}
+
+// ReconcileCodingCredentialRuntimeState backfills an active runtime-state
+// version for any active config row that lacks one, copying the legacy
+// runtime columns still kept in sync on coding_credentials.
+//
+// The versioned store always writes config and runtime rows in one
+// transaction, so this is a no-op in steady state. The gap it heals is the
+// rolling-deploy window after migration 000164: pre-versioning code inserts
+// config rows only (credential create, pending-auth insert, OAuth promote),
+// and those credentials would otherwise be invisible to every versioned read
+// and mutation path forever. Runs at boot next to the migration sentinel;
+// idempotent, and the ON CONFLICT guard makes concurrent boots safe.
+//
+// lint:allow-no-orgid reason="cross-org self-healing sweep at boot; not caller-scoped tenant data"
+func ReconcileCodingCredentialRuntimeState(ctx context.Context, dbtx DBTX) (int64, error) {
+	tag, err := dbtx.Exec(ctx,
+		`INSERT INTO coding_credential_runtime_state (
+			credential_id, org_id, user_id, status, last_verified_at,
+			rate_limited_until, rate_limited_observed_at, rate_limit_message, active
+		)
+		SELECT cc.id, cc.org_id, cc.user_id, cc.status, cc.last_verified_at,
+		       cc.rate_limited_until, cc.rate_limited_observed_at, cc.rate_limit_message, true
+		FROM coding_credentials cc
+		WHERE cc.active = true
+		  AND NOT EXISTS (
+			SELECT 1 FROM coding_credential_runtime_state rt
+			WHERE rt.credential_id = cc.id AND rt.active = true
+		  )
+		ON CONFLICT (credential_id) WHERE active = true DO NOTHING`,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile coding credential runtime state: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // ----- Internals -----

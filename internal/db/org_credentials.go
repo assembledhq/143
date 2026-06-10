@@ -228,12 +228,16 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 	}
 
 	// Non-coding providers (GitHub, Sentry, Linear, Notion, …) ignore priority
-	// — it's only meaningful for the coding-agent fallback stack.
+	// — it's only meaningful for the coding-agent fallback stack. They also do
+	// not stamp last_verified_at: only the coding path above treats an upsert
+	// as a verified-credential replacement (the OAuth services hand it material
+	// the upstream provider just accepted, and the mirror propagates the
+	// timestamp into the versioned runtime state).
 	query := `
 		INSERT INTO org_credentials (org_id, provider, label, config, status, created_by)
 		VALUES (@org_id, @provider, @label, @config, 'active', @created_by)
 		ON CONFLICT (org_id, provider, label)
-		DO UPDATE SET config = EXCLUDED.config, status = 'active', last_verified_at = now(), updated_at = now()
+		DO UPDATE SET config = EXCLUDED.config, status = 'active', updated_at = now()
 		RETURNING id`
 
 	args := pgx.NamedArgs{

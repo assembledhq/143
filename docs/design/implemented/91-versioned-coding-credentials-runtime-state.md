@@ -16,9 +16,11 @@ Runtime-versioned fields include status, `last_verified_at`, rate-limit metadata
 
 ## Mutation Rules
 
-Config-only mutations insert new `coding_credentials` versions without touching runtime state. These include label changes, provider config edits that have not just been verified, and priority moves.
+Config-only mutations insert new `coding_credentials` versions without touching runtime state. These include label changes and priority moves. (Every production config-replacement path re-verifies, so the store currently exposes no unverified config-edit method.)
 
 Verified credential replacement inserts both a new config version and a new runtime state version with `status = 'active'`, a fresh `last_verified_at`, and cleared rate-limit metadata. These paths include OAuth completion, token refresh, harvested Claude/Codex subscription credentials, API-key replacement, and re-authentication over an invalid credential.
+
+Legacy dual-write mirror upserts carry the existing runtime version's rate-limit metadata forward: legacy tables know nothing about rate limits, so a legacy write (status update, stack reorder) must not clear a credential's durable rate-limit marker.
 
 Runtime mutations insert new `coding_credential_runtime_state` versions only. These include disable, invalidation/auth rejection, status changes, rate-limit marking/clearing, and verification timestamp changes.
 
@@ -37,3 +39,11 @@ Partial unique indexes enforce one active config version per logical `id`, one a
 ## Rollout Notes
 
 The cutover migration backfills a config `version_id`, marks existing config rows active, creates and backfills `coding_credential_runtime_state` from the old runtime columns on `coding_credentials`, and swaps indexes to active-row partial indexes. A trigger rejects orphaned runtime rows and keeps the temporary legacy runtime columns synced for rollback/debug visibility. New code reads runtime state; a later cleanup PR can drop the old columns and trigger together.
+
+**Rolling-deploy window.** `deploy.sh` runs migrations before rolling api containers, and worker hosts deploy after the app, so pre-versioning code runs against the migrated schema for a window. New→old compatibility is handled by the legacy-column sync trigger. Old→new is one-directional:
+
+- Old code that *creates* a credential (create, pending-auth insert, OAuth promote) writes a config row with no runtime-state row, invisible to every versioned read and mutation. `ReconcileCodingCredentialRuntimeState` heals these at boot (both `cmd/server` binaries), copying the legacy runtime columns into a fresh active runtime version.
+- Old workers' runtime writes (rate-limit marks, auth-reject status) land only in the legacy columns and are not seen by versioned readers until the workers are rolled. Deploy app and workers back-to-back to keep this window short.
+- Old replicas have no `active = true` filter, so once new code writes a second version they see duplicate rows per credential, and new-code deactivations stay visible to them. Same mitigation: keep the window short.
+
+The Postgres-backed behavior test (`TestCodingCredentialsVersioningMigrationPostgresBehavior`, driven by `TEST_DATABASE_URL` in CI) exercises the up migration's invariants, the deploy-window reconciliation, and the down migration round-trip.

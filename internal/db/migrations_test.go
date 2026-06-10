@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -173,6 +174,9 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	userID := uuid.New()
 	orgCredID := uuid.New()
 	userCredID := uuid.New()
+	// DDL runs as one no-arg Exec (simple protocol allows multiple
+	// statements); the parameterized seed INSERTs must run one at a time
+	// because the extended protocol rejects multi-statement strings.
 	_, err = conn.Exec(ctx, `
 		CREATE TABLE organizations (id uuid PRIMARY KEY);
 		CREATE TABLE users (id uuid PRIMARY KEY);
@@ -211,15 +215,21 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 		CREATE INDEX idx_coding_credentials_rate_limited_until
 			ON coding_credentials (rate_limited_until)
 			WHERE rate_limited_until IS NOT NULL;
-		INSERT INTO organizations (id) VALUES ($1);
-		INSERT INTO users (id) VALUES ($2);
-		INSERT INTO coding_credentials (
-			id, org_id, user_id, provider, label, config, priority, status, last_verified_at
-		) VALUES
-			($3, $1, NULL, 'openai', 'org-a', decode('76303a7b7d', 'hex'), 1, 'active', now()),
-			($4, $1, $2, 'anthropic', 'user-a', decode('76303a7b7d', 'hex'), 2, 'invalid', NULL);
-	`, orgID, userID, orgCredID, userCredID)
+	`)
 	require.NoError(t, err, "test should create the pre-migration coding credential shape")
+
+	_, err = conn.Exec(ctx, `INSERT INTO organizations (id) VALUES ($1)`, orgID)
+	require.NoError(t, err, "test should seed an organization")
+	_, err = conn.Exec(ctx, `INSERT INTO users (id) VALUES ($1)`, userID)
+	require.NoError(t, err, "test should seed a user")
+	_, err = conn.Exec(ctx, `
+		INSERT INTO coding_credentials (
+			id, org_id, user_id, provider, label, config, priority, status, last_verified_at, rate_limited_until, rate_limit_message
+		) VALUES
+			($1, $3, NULL, 'openai', 'org-a', decode('76303a7b7d', 'hex'), 1, 'active', now(), now() + interval '1 hour', 'cool down'),
+			($2, $3, $4, 'anthropic', 'user-a', decode('76303a7b7d', 'hex'), 2, 'invalid', NULL, NULL, NULL)`,
+		orgCredID, userCredID, orgID, userID)
+	require.NoError(t, err, "test should seed pre-migration coding credentials")
 
 	body, err := os.ReadFile("../../migrations/000164_coding_credentials_insert_only_versioning.up.sql")
 	require.NoError(t, err, "test should read the versioning migration")
@@ -279,6 +289,62 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	err = conn.QueryRow(ctx, `SELECT status FROM coding_credentials WHERE id = $1 AND active = true`, orgCredID).Scan(&syncedStatus)
 	require.NoError(t, err, "test should read trigger-synced status")
 	require.Equal(t, "invalid", syncedStatus, "runtime trigger should sync legacy runtime columns on active config")
+
+	// Simulate a pre-versioning writer racing the rolling deploy: it inserts a
+	// config row with no runtime-state row, which the versioned read paths
+	// cannot see. Boot-time reconciliation must heal it.
+	strayID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO coding_credentials (id, org_id, user_id, provider, label, config, priority, status)
+		VALUES ($1, $2, NULL, 'openai', 'deploy-window', decode('76303a7b7d', 'hex'), 3, 'active')`,
+		strayID, orgID)
+	require.NoError(t, err, "pre-versioning code should still be able to insert config rows")
+
+	healed, err := ReconcileCodingCredentialRuntimeState(ctx, conn)
+	require.NoError(t, err, "reconciliation should heal config rows missing runtime state")
+	require.Equal(t, int64(1), healed, "reconciliation should backfill exactly the orphaned credential")
+	var strayStatus string
+	err = conn.QueryRow(ctx,
+		`SELECT status FROM coding_credential_runtime_state WHERE credential_id = $1 AND active = true`, strayID,
+	).Scan(&strayStatus)
+	require.NoError(t, err, "healed credential should have an active runtime row")
+	require.Equal(t, "active", strayStatus, "healed runtime state should copy the legacy status column")
+
+	healed, err = ReconcileCodingCredentialRuntimeState(ctx, conn)
+	require.NoError(t, err, "reconciliation should be idempotent")
+	require.Zero(t, healed, "second reconciliation pass should be a no-op")
+
+	downBody, err := os.ReadFile("../../migrations/000164_coding_credentials_insert_only_versioning.down.sql")
+	require.NoError(t, err, "test should read the versioning down migration")
+	_, err = conn.Exec(ctx, string(downBody))
+	require.NoError(t, err, "versioning down migration should apply cleanly")
+
+	var totalRows int
+	err = conn.QueryRow(ctx, `SELECT count(*) FROM coding_credentials`).Scan(&totalRows)
+	require.NoError(t, err, "test should count post-rollback rows")
+	require.Equal(t, 3, totalRows, "down migration should collapse versions back to one row per credential")
+
+	var restoredStatus string
+	var restoredRateLimit *time.Time
+	err = conn.QueryRow(ctx,
+		`SELECT status, rate_limited_until FROM coding_credentials WHERE id = $1`, orgCredID,
+	).Scan(&restoredStatus, &restoredRateLimit)
+	require.NoError(t, err, "test should read the rolled-back credential")
+	require.Equal(t, "active", restoredStatus, "down migration should restore status from the active runtime row")
+	require.NotNil(t, restoredRateLimit, "down migration should restore rate-limit state from the active runtime row")
+
+	var pkColumns string
+	err = conn.QueryRow(ctx, `
+		SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+		FROM pg_constraint c
+		JOIN pg_class r ON r.oid = c.conrelid
+		JOIN pg_namespace n ON n.oid = r.relnamespace
+		CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+		JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+		WHERE n.nspname = $1 AND r.relname = 'coding_credentials' AND c.contype = 'p'
+	`, schema).Scan(&pkColumns)
+	require.NoError(t, err, "test should inspect the rolled-back primary key")
+	require.Equal(t, "id", pkColumns, "down migration should restore the primary key on id")
 
 	t.Logf("validated migration behavior in schema %q", schema)
 }

@@ -123,8 +123,12 @@ type CodingCredential struct {
 // directly — callers convert to CodingCredentialSummary before crossing
 // the API boundary.
 type DecryptedCodingCredential struct {
-	ID                    uuid.UUID                 `json:"id"`
-	VersionID             uuid.UUID                 `json:"version_id,omitempty"`
+	ID uuid.UUID `json:"id"`
+	// VersionID identifies the physical config-version row backing this
+	// read. Internal until a credential-history API exposes versions
+	// deliberately; omitempty is a no-op on a [16]byte array, so the field
+	// is excluded outright rather than always serialising.
+	VersionID             uuid.UUID                 `json:"-"`
 	OrgID                 uuid.UUID                 `json:"org_id"`
 	UserID                *uuid.UUID                `json:"user_id,omitempty"`
 	Provider              ProviderName              `json:"provider"`

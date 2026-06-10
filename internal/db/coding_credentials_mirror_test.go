@@ -712,6 +712,79 @@ func TestMirrorUpsertNaturalKeyFallback(t *testing.T) {
 		"natural-key fallback must record exactly one observation so the cleanup PR can confirm the path is unused before deleting it")
 }
 
+// TestMirrorUpsertPreservesRateLimitState locks in that a legacy mirror write
+// carries forward the durable rate-limit metadata held only by the unified
+// runtime state. Legacy tables know nothing about rate limits, so without the
+// carry-forward every legacy write (status update, stack reorder, …) would
+// silently clear a credential's cross-worker rate-limit marker.
+func TestMirrorUpsertPreservesRateLimitState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "creating mock pool should not error")
+	defer mock.Close()
+
+	store := NewCodingCredentialStore(mock, nil)
+	orgID := uuid.New()
+	rowID := uuid.New()
+	until := time.Now().UTC().Add(30 * time.Minute)
+	observed := until.Add(-time.Minute)
+	message := "rate limited by provider"
+
+	limited := codingCredentialSnapshotRow(t, store, models.Scope{OrgID: orgID}, rowID, models.ProviderAnthropic, models.CodingCredentialStatusActive)
+	limited[14] = &until    // rate_limited_until
+	limited[15] = &observed // rate_limited_observed_at
+	limited[16] = &message  // rate_limit_message
+
+	mock.ExpectBegin()
+	// Fetch by id finds the existing logical credential with rate-limit state.
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).AddRow(limited...))
+	// The natural-key fetch resolves to the same logical id — no fallback.
+	mock.ExpectQuery(`FROM coding_credentials cc\s+JOIN coding_credential_runtime_state`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns).AddRow(limited...))
+	mock.ExpectExec(`UPDATE coding_credentials\s+SET active = false`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`INSERT INTO coding_credentials`).
+		WithArgs(codingAnyArgs(11)...).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Positional order on the runtime INSERT: credential_id, org_id, user_id,
+	// status, last_verified_at, rate_limited_until, rate_limited_observed_at,
+	// rate_limit_message. The last three must be the carried-forward values.
+	mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			&until,
+			&observed,
+			&message,
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	org := models.OrgCredential{
+		ID:        rowID,
+		OrgID:     orgID,
+		Provider:  models.ProviderAnthropic,
+		Status:    "active",
+		Label:     "team",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	require.NoError(t, store.MirrorOrgCredential(context.Background(), org, models.AnthropicConfig{APIKey: "sk-ant-test-1234567890"}))
+	require.NoError(t, mock.ExpectationsWereMet(), "mirror runtime version must carry forward rate-limit state")
+}
+
 func TestMirrorUpsertNaturalKeyFallbackDeletesStaleIDRow(t *testing.T) {
 	t.Parallel()
 

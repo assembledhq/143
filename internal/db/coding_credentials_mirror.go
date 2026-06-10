@@ -437,7 +437,7 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 	newScope := models.Scope{OrgID: row.OrgID, UserID: row.UserID}
 	var invalidations mirrorInvalidations
 
-	current, _, err := s.fetchActiveConfigByIDAnyScopeTx(ctx, tx, row.OrgID, row.ID, true)
+	current, currentRuntime, err := s.fetchActiveConfigByIDAnyScopeTx(ctx, tx, row.OrgID, row.ID, true)
 	if err != nil && !errors.Is(err, ErrCodingCredentialNotFound) {
 		return fmt.Errorf("mirror fetch by id: %w", err)
 	}
@@ -460,7 +460,7 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 			if err := s.insertConfigVersionTx(ctx, tx, next); err != nil {
 				return fmt.Errorf("mirror config version: %w", err)
 			}
-			if err := s.insertRuntimeVersionTx(ctx, tx, newScope, current.ID, row.runtimeSnapshot()); err != nil {
+			if err := s.insertRuntimeVersionTx(ctx, tx, newScope, current.ID, row.runtimeSnapshot(currentRuntime)); err != nil {
 				return fmt.Errorf("mirror runtime version: %w", err)
 			}
 			invalidations[1] = &mirrorInvalidation{orgID: row.OrgID, userID: row.UserID, provider: row.Provider}
@@ -474,7 +474,7 @@ func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirro
 		if err := s.insertInitialConfigVersionTx(ctx, tx, row.configSnapshot(row.ID, uuid.Nil, row.createdAtOrNow(s.clock))); err != nil {
 			return fmt.Errorf("mirror insert config: %w", err)
 		}
-		if err := s.insertInitialRuntimeVersionTx(ctx, tx, newScope, row.ID, row.runtimeSnapshot()); err != nil {
+		if err := s.insertInitialRuntimeVersionTx(ctx, tx, newScope, row.ID, row.runtimeSnapshot(nil)); err != nil {
 			return fmt.Errorf("mirror insert runtime: %w", err)
 		}
 		invalidations[0] = &mirrorInvalidation{orgID: row.OrgID, userID: row.UserID, provider: row.Provider}
@@ -511,23 +511,35 @@ func (row mirroredRow) configSnapshot(id, versionID uuid.UUID, createdAt time.Ti
 	}
 }
 
-func (row mirroredRow) runtimeSnapshot() codingCredentialRuntimeSnapshot {
-	return codingCredentialRuntimeSnapshot{
+// runtimeSnapshot builds the runtime version a legacy mirror write should
+// produce. Legacy tables own status and last_verified_at, but know nothing
+// about rate-limit health — that lives only in the unified runtime state, so
+// it is carried forward from the existing active runtime version instead of
+// being reset on every legacy write (e.g. a stack reorder must not clear a
+// credential's durable rate-limit marker).
+func (row mirroredRow) runtimeSnapshot(existing *codingCredentialRuntimeSnapshot) codingCredentialRuntimeSnapshot {
+	next := codingCredentialRuntimeSnapshot{
 		Status:         row.Status,
 		LastVerifiedAt: row.LastVerifiedAt,
 	}
+	if existing != nil {
+		next.RateLimitedUntil = existing.RateLimitedUntil
+		next.RateLimitedObservedAt = existing.RateLimitedObservedAt
+		next.RateLimitMessage = existing.RateLimitMessage
+	}
+	return next
 }
 
 func (s *CodingCredentialStore) updateMirroredRowByNaturalKeyTx(ctx context.Context, tx pgx.Tx, row mirroredRow) (*mirrorInvalidation, error) {
 	scope := models.Scope{OrgID: row.OrgID, UserID: row.UserID}
-	current, _, err := s.fetchActiveConfigByProviderLabelTx(ctx, tx, scope, row.Provider, row.Label, true)
+	current, currentRuntime, err := s.fetchActiveConfigByProviderLabelTx(ctx, tx, scope, row.Provider, row.Label, true)
 	if err != nil {
 		return nil, fmt.Errorf("mirror update by natural key: %w", err)
 	}
 	if err := s.insertConfigVersionTx(ctx, tx, row.configSnapshot(current.ID, current.VersionID, current.CreatedAt)); err != nil {
 		return nil, fmt.Errorf("mirror natural-key config version: %w", err)
 	}
-	if err := s.insertRuntimeVersionTx(ctx, tx, scope, current.ID, row.runtimeSnapshot()); err != nil {
+	if err := s.insertRuntimeVersionTx(ctx, tx, scope, current.ID, row.runtimeSnapshot(currentRuntime)); err != nil {
 		return nil, fmt.Errorf("mirror natural-key runtime version: %w", err)
 	}
 	return &mirrorInvalidation{orgID: row.OrgID, userID: row.UserID, provider: row.Provider}, nil

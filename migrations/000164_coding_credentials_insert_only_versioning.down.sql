@@ -17,7 +17,9 @@ SET
     rate_limited_until = rt.rate_limited_until,
     rate_limited_observed_at = rt.rate_limited_observed_at,
     rate_limit_message = rt.rate_limit_message,
-    updated_at = rt.created_at
+    -- A config change after the last runtime change must not move
+    -- updated_at backwards.
+    updated_at = GREATEST(cc.updated_at, rt.created_at)
 FROM coding_credential_runtime_state rt
 WHERE cc.id = rt.credential_id
   AND cc.org_id = rt.org_id
@@ -25,8 +27,7 @@ WHERE cc.id = rt.credential_id
   AND rt.active = true;
 
 DELETE FROM coding_credentials
-WHERE active = false
-  AND org_id IS NOT NULL;
+WHERE active = false;
 
 ALTER TABLE coding_credentials
     DROP CONSTRAINT coding_credentials_pkey,
