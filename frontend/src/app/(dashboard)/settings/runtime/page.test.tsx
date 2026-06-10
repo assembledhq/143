@@ -156,6 +156,34 @@ describe("RuntimeSettingsPage", () => {
     });
   });
 
+  it("does not show unavailability message when static egress is intentionally disabled", async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: { sandbox_network: { static_egress_enabled: false } },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: false,
+        static_egress_enabled: false,
+        static_egress_public_ip: "203.0.113.10",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Use static egress IP for sessions and previews")).not.toBeChecked();
+    });
+    expect(
+      screen.queryByText("Static egress is not currently available for new sandbox starts."),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not show backend worker capability diagnostics", async () => {
     settingsNetworkStatusMock.mockResolvedValue({
       data: {

@@ -58,7 +58,7 @@ describe('SettingsLayout', () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it('redirects members away from admin-only pages (LLM, General, Usage, etc.)', async () => {
+  it('redirects members away from admin-only pages (Runtime, LLM, General, Usage, etc.)', async () => {
     useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
     pathnameMock.value = '/settings/runtime';
 

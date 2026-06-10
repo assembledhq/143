@@ -81,7 +81,7 @@ function SandboxNetworkSection() {
               <p className="text-xs text-muted-foreground">
                 Uses a stable public IP for new and hydrated sandboxes.
               </p>
-              {!available && (
+              {enabled && networkStatusResponse && !available && (
                 <p className="text-xs text-muted-foreground">
                   Static egress is not currently available for new sandbox starts.
                 </p>
@@ -227,13 +227,13 @@ function SessionRuntimeSection() {
           </div>
           <div className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-1">
-              <Label htmlFor="agent-tab-tools">Sandbox tab tools</Label>
+              <Label htmlFor="sandbox-tab-tools">Sandbox tab tools</Label>
               <p className="text-xs text-muted-foreground">
                 Allows agent tabs in the same session to coordinate through the 143 tools CLI.
               </p>
             </div>
             <Switch
-              id="agent-tab-tools"
+              id="sandbox-tab-tools"
               checked={tabToolsEnabled}
               onCheckedChange={(checked) => {
                 autosave.save({ settings: { coding_agent_tab_tools_enabled: checked } });
@@ -266,12 +266,6 @@ function RuntimeDiagnosticsSection() {
       value: staticEgressAvailable ? "Available" : "Unavailable",
       detail: staticEgressEnabled ? "Enabled for new sandbox starts" : "Disabled for new sandbox starts",
       tone: staticEgressAvailable ? "default" : "secondary",
-    },
-    {
-      label: "Public IP",
-      value: networkStatus?.static_egress_public_ip ?? "Not configured",
-      detail: "Allowlist this address with external services that require stable source IPs.",
-      tone: "outline",
     },
   ] as const;
 
