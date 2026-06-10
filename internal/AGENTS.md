@@ -43,6 +43,12 @@ The existing test `internal/db/tenancy_test.go` is a third layer of defense: it 
 
 When in doubt, write the immutable version first. It's almost always fast enough, and it eliminates an entire class of aliasing and data-race bugs (especially important for anything shared across goroutines).
 
+## Settings Documents: Merge Patch, Not Replace
+
+Endpoints that update a JSONB settings/preferences document (user settings, org settings, and anything similar added later) must accept an **RFC 7386 JSON merge patch**, not a full replacement document: omitted fields keep their stored value, `null` clears a field, nested objects merge per key. Full-document replace forces clients to rebuild the body from their local cache, which silently clobbers concurrent edits from other tabs (cross-tab last-write-wins).
+
+Apply the patch server-side as a read-merge-write inside a transaction with the row locked (`SELECT ... FOR UPDATE`) so concurrent patches compose, and validate the merged document before committing. Reference implementation: `UserStore.MergeSettings` (`internal/db/users.go`) + `models.ApplyUserSettingsMergePatch` (`internal/models/user_settings.go`), wired up in `AuthHandler.UpdateSettings`. The frontend-side rules live in `frontend/AGENTS.md` ("Settings Mutations: Patch, Don't Replace").
+
 ## No N+1 Queries
 
 Never query the database inside a loop. Always batch using `ANY()`, JOINs, or bulk fetches. If a batch store method doesn't exist yet, create one using the `ANY()` pattern in the db package.

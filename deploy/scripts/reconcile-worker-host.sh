@@ -14,6 +14,7 @@ STATIC_EGRESS_DNS_IP="172.31.0.2"
 STATIC_EGRESS_CAPABILITY_FILE="/etc/143/static-egress-capable"
 STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
 STATIC_EGRESS_SECRETS_FILE="${STATIC_EGRESS_SECRETS_FILE:-/opt/143/static-egress-worker.env}"
+WORKER_COMPOSE_FILE="${WORKER_COMPOSE_FILE:-/opt/143/docker-compose.worker.yml}"
 DEFAULT_NETWORK="${2:-143_default}"
 
 load_static_egress_env_key() {
@@ -79,6 +80,30 @@ ensure_bridge() {
   fi
 }
 
+ensure_static_egress_dns() {
+  local compose_dir
+  local compose_file
+
+  if [ ! -f "$WORKER_COMPOSE_FILE" ]; then
+    echo "ERROR: $WORKER_COMPOSE_FILE is required before static egress verification." >&2
+    exit 1
+  fi
+  compose_dir="$(dirname "$WORKER_COMPOSE_FILE")"
+  compose_file="$(basename "$WORKER_COMPOSE_FILE")"
+  if [ ! -f "$compose_dir/Dockerfile.dnsmasq" ]; then
+    echo "ERROR: $compose_dir/Dockerfile.dnsmasq is required before static egress verification." >&2
+    exit 1
+  fi
+
+  # Fresh SSH provisioning verifies static egress before the full worker
+  # compose stack is started, so make the pinned sandbox DNS IP available
+  # without starting the worker service early.
+  (
+    cd "$compose_dir"
+    docker compose -f "$compose_file" up -d --build --no-deps sandbox-dns
+  )
+}
+
 # Ensure the shared sandbox bridges exist with pinned subnets. The subnets let
 # sandbox-dns claim stable addresses in docker-compose.worker.yml. Leave bridge
 # ICC at Docker's default so gVisor sandboxes can reach sandbox-dns.
@@ -125,6 +150,7 @@ if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
   : "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:?STATIC_EGRESS_GATEWAY_PUBLIC_KEY is required when STATIC_EGRESS_PUBLIC_IP is configured}"
   : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:?STATIC_EGRESS_WORKER_PRIVATE_KEY is required when STATIC_EGRESS_PUBLIC_IP is configured}"
   : "${STATIC_EGRESS_WORKER_WG_ADDRESS:?STATIC_EGRESS_WORKER_WG_ADDRESS is required when STATIC_EGRESS_PUBLIC_IP is configured}"
+  ensure_static_egress_dns
   /opt/143/deploy/scripts/install-static-egress-worker.sh
 else
   rm -f "$STATIC_EGRESS_CAPABILITY_FILE"

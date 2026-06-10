@@ -10,6 +10,10 @@ const repos = [
   repo("repo-2", "assembledhq/docs"),
 ];
 
+function changeFieldValue(element: HTMLElement, value: string) {
+  fireEvent.change(element, { target: { value } });
+}
+
 describe("PreviewSettingsPage", () => {
   it("renders the renamed Preview settings surface and loads bundles for the selected repository", async () => {
     const bundleRequests: string[] = [];
@@ -80,9 +84,9 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "staging");
-    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
-    await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
+    changeFieldValue(screen.getByLabelText("Bundle name"), "staging");
+    changeFieldValue(screen.getByLabelText("Secret name"), "API_TOKEN");
+    changeFieldValue(screen.getByLabelText("Secret value"), "super-secret");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -123,9 +127,9 @@ describe("PreviewSettingsPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.click(screen.getByRole("combobox", { name: "Bundle repository" }));
     await userEvent.click(await screen.findByRole("option", { name: "assembledhq/docs" }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "docs-preview");
-    await userEvent.type(screen.getByLabelText("Secret name"), "API_TOKEN");
-    await userEvent.type(screen.getByLabelText("Secret value"), "super-secret");
+    changeFieldValue(screen.getByLabelText("Bundle name"), "docs-preview");
+    changeFieldValue(screen.getByLabelText("Secret name"), "API_TOKEN");
+    changeFieldValue(screen.getByLabelText("Secret value"), "super-secret");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -179,10 +183,10 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "file-only" } });
+    changeFieldValue(screen.getByLabelText("Bundle name"), "file-only");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "development.conf.json" } });
-    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"token":"super-secret"}' } });
+    changeFieldValue(screen.getByLabelText("Secret file path"), "development.conf.json");
+    changeFieldValue(screen.getByLabelText("Secret file contents"), '{"token":"super-secret"}');
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -215,15 +219,15 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "mixed" } });
-    fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "DATABASE_URL" } });
-    fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "postgres://dev" } });
+    changeFieldValue(screen.getByLabelText("Bundle name"), "mixed");
+    changeFieldValue(screen.getByLabelText("Secret name"), "DATABASE_URL");
+    changeFieldValue(screen.getByLabelText("Secret value"), "postgres://dev");
     await userEvent.click(screen.getByRole("button", { name: "Add value" }));
-    fireEvent.change(screen.getByLabelText("Secret name 2"), { target: { value: "GOOGLE_DRIVE_REFRESH_TOKEN" } });
-    fireEvent.change(screen.getByLabelText("Secret value 2"), { target: { value: "refresh-token" } });
+    changeFieldValue(screen.getByLabelText("Secret name 2"), "GOOGLE_DRIVE_REFRESH_TOKEN");
+    changeFieldValue(screen.getByLabelText("Secret value 2"), "refresh-token");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "development.conf" } });
-    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"api":"secret"}' } });
+    changeFieldValue(screen.getByLabelText("Secret file path"), "development.conf");
+    changeFieldValue(screen.getByLabelText("Secret file contents"), '{"api":"secret"}');
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -267,9 +271,9 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "no-outputs");
+    changeFieldValue(screen.getByLabelText("Bundle name"), "no-outputs");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    await userEvent.type(screen.getByLabelText("Secret file path"), "development.conf.json");
+    changeFieldValue(screen.getByLabelText("Secret file path"), "development.conf.json");
 
     // Save is disabled until the selected secret-file delivery method is configured.
     expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
@@ -289,7 +293,7 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    await userEvent.type(screen.getByLabelText("Bundle name"), "my-bundle");
+    changeFieldValue(screen.getByLabelText("Bundle name"), "my-bundle");
 
     expect(screen.getByRole("tab", { name: "Environment variables" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
@@ -370,11 +374,11 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "bad-json" } });
+    changeFieldValue(screen.getByLabelText("Bundle name"), "bad-json");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "config.json" } });
+    changeFieldValue(screen.getByLabelText("Secret file path"), "config.json");
     await chooseSecretFileType("JSON");
-    fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: "not valid json{{" } });
+    changeFieldValue(screen.getByLabelText("Secret file contents"), "not valid json{{");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     expect(await screen.findByText(/must be valid JSON/i)).toBeInTheDocument();
@@ -390,20 +394,20 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
-    fireEvent.change(screen.getByLabelText("Bundle name"), { target: { value: "json-file" } });
+    changeFieldValue(screen.getByLabelText("Bundle name"), "json-file");
     await userEvent.click(screen.getByRole("tab", { name: "Secret file" }));
-    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "config.json" } });
+    changeFieldValue(screen.getByLabelText("Secret file path"), "config.json");
     await chooseSecretFileType("JSON");
 
     vi.useFakeTimers();
     try {
-      fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: "not valid json{{" } });
+      changeFieldValue(screen.getByLabelText("Secret file contents"), "not valid json{{");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400);
       });
       expect(screen.getByText(/must be valid JSON/i)).toBeInTheDocument();
 
-      fireEvent.change(screen.getByLabelText("Secret file contents"), { target: { value: '{"token":"ok"}' } });
+      changeFieldValue(screen.getByLabelText("Secret file contents"), '{"token":"ok"}');
       await act(async () => {
         await vi.advanceTimersByTimeAsync(400);
       });
@@ -432,7 +436,7 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
     // In edit mode the key is pre-filled from the existing bundle outputs; only the value needs re-entry.
-    await userEvent.type(screen.getByLabelText("Secret value"), "new-secret");
+    changeFieldValue(screen.getByLabelText("Secret value"), "new-secret");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -464,7 +468,7 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
     await userEvent.click(screen.getByLabelText("Secret value"));
-    await userEvent.type(screen.getByLabelText("Secret value"), "********TOKEN");
+    changeFieldValue(screen.getByLabelText("Secret value"), "********TOKEN");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -502,7 +506,7 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
-    fireEvent.change(screen.getByLabelText("Secret file path"), { target: { value: "development.conf.json" } });
+    changeFieldValue(screen.getByLabelText("Secret file path"), "development.conf.json");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -548,9 +552,7 @@ describe("PreviewSettingsPage", () => {
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
     await userEvent.click(screen.getByLabelText("Secret file contents"));
-    fireEvent.change(screen.getByLabelText("Secret file contents"), {
-      target: { value: "********\n********\n********\nactual-content" },
-    });
+    changeFieldValue(screen.getByLabelText("Secret file contents"), "********\n********\n********\nactual-content");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
@@ -728,7 +730,7 @@ describe("PreviewSettingsPage", () => {
     expect(repositoryAccess.closest('[data-slot="badge"]')).not.toBeNull();
 
     await userEvent.click(within(apiSection).getByRole("button", { name: /create token/i }));
-    await userEvent.type(screen.getByLabelText("Name"), "Docs preview");
+    changeFieldValue(screen.getByLabelText("Name"), "Docs preview");
     await userEvent.click(screen.getByLabelText("previews:create"));
     await userEvent.click(screen.getByLabelText("previews:stop"));
     await userEvent.click(screen.getByLabelText("assembledhq/docs"));

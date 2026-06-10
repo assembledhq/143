@@ -1,6 +1,6 @@
 # Design: Session Open Position for Existing Sessions
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-18
+> **Status:** Implemented | **Last reviewed:** 2026-06-10
 
 ## Summary
 
@@ -165,13 +165,21 @@ window before the user sees partial transcript paint.
 
 The product goal is a quiet reopen:
 
-- the session chrome appears immediately,
+- the route changes and session chrome appear immediately,
 - the transcript area has stable structure while the first message window loads,
 - real recent messages replace placeholders without changing the user's
   perceived position,
 - older history loads above the viewport only when needed,
 - auto-follow behavior starts only after the initial anchor decision has
   completed.
+
+Session-list navigation may seed React Query with list-row session metadata so
+the destination route can mount without waiting for `/sessions/{id}`. That
+seeded payload is explicitly marked provisional. While provisional data is the
+only cached detail, the detail route renders the normal skeleton and suppresses
+session-specific child requests such as timeline, diff, review-loop, PR, and
+file-event fetches. The authoritative detail response replaces the provisional
+entry and then starts the transcript/detail queries.
 
 ### Target Behavior
 

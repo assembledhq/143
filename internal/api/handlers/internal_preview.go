@@ -449,21 +449,23 @@ func (h *InternalPreviewHandler) Proxy(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if isWebSocketUpgrade(r) {
-		h.handleWebSocketProxy(w, r, orgID, previewID)
+		h.handleWebSocketProxy(w, r, orgID, previewID, claims)
 		return
 	}
-	h.handleHTTPProxy(w, r, orgID, previewID)
+	h.handleHTTPProxy(w, r, orgID, previewID, claims)
 }
 
-func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
+func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims) {
+	originalReq := r
+	backendPath := trimInternalPreviewProxyPath(r.URL.Path, previewID)
+	if backendPath == "" {
+		backendPath = "/"
+	}
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			req.URL.Host = "preview-target"
-			req.URL.Path = trimInternalPreviewProxyPath(req.URL.Path, previewID)
-			if req.URL.Path == "" {
-				req.URL.Path = "/"
-			}
+			req.URL.Path = backendPath
 			req.RequestURI = ""
 			req.Host = "preview-target"
 			req.Header.Del("Authorization")
@@ -475,17 +477,23 @@ func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.
 			previewID: previewID,
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			h.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("internal preview proxy error")
+			addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), originalReq, orgID, previewID, claims, backendPath).
+				Msg("internal preview proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
 }
 
-func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
+func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims) {
+	backendPath := trimInternalPreviewProxyPath(r.URL.Path, previewID)
+	if backendPath == "" {
+		backendPath = "/"
+	}
 	backendConn, err := h.manager.DialPreview(r.Context(), orgID, previewID)
 	if err != nil {
-		h.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("internal websocket dial failed")
+		addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), r, orgID, previewID, claims, backendPath).
+			Msg("internal websocket dial failed")
 		http.Error(w, "preview unavailable", http.StatusBadGateway)
 		return
 	}
@@ -505,7 +513,8 @@ func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *
 
 	backendReq := cloneWebSocketRequestForInternalProxy(r, previewID)
 	if err := backendReq.Write(backendConn); err != nil {
-		h.logger.Warn().Err(err).Msg("internal websocket: failed to forward upgrade request")
+		addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), r, orgID, previewID, claims, backendPath).
+			Msg("internal websocket: failed to forward upgrade request")
 		return
 	}
 	if clientBuf.Reader.Buffered() > 0 {
@@ -527,6 +536,45 @@ func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *
 		h.logger.Debug().Err(err).Str("preview_id", previewID.String()).Msg("internal websocket client->backend copy ended")
 	}
 	<-done
+}
+
+func addInternalPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims, backendPath string) *zerolog.Event {
+	requestPath := ""
+	requestHost := ""
+	requestMethod := ""
+	queryPresent := false
+	secFetchDest := ""
+	if r != nil {
+		requestHost = r.Host
+		requestMethod = r.Method
+		secFetchDest = r.Header.Get("Sec-Fetch-Dest")
+		if r.URL != nil {
+			requestPath = r.URL.Path
+			queryPresent = r.URL.RawQuery != ""
+		}
+	}
+
+	event = event.
+		Str("org_id", orgID.String()).
+		Str("preview_id", previewID.String()).
+		Str("request_method", requestMethod).
+		Str("request_host", requestHost).
+		Str("request_path", requestPath).
+		Bool("query_present", queryPresent).
+		Str("sec_fetch_dest", secFetchDest).
+		Str("backend_path", backendPath)
+
+	if claims == nil {
+		return event
+	}
+
+	event = event.
+		Str("target_node_id", claims.TargetNodeID).
+		Int("runtime_epoch", claims.RuntimeEpoch)
+	if claims.RuntimeID != nil {
+		event = event.Str("runtime_id", claims.RuntimeID.String())
+	}
+	return event
 }
 
 type internalPreviewTransport struct {

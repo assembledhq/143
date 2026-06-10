@@ -138,7 +138,7 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('updates the header timestamp after a successful settings save', async () => {
+  it('uses the audit activity row as the only updated timestamp', async () => {
     settingsGetMock.mockResolvedValue({
       data: {
         id: 'org-1',
@@ -148,32 +148,23 @@ describe('SettingsPage', () => {
         updated_at: '2026-05-01T12:00:00Z',
       },
     });
-    settingsUpdateMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Updated Org',
-        settings: {},
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-06T15:30:00Z',
-      },
+    auditLogsListMock.mockResolvedValue({
+      data: [{
+        id: 1,
+        org_id: 'org-1',
+        actor_type: 'system',
+        actor_id: 'system',
+        action: 'settings.updated',
+        resource_type: 'settings',
+        created_at: new Date(Date.now() - 3 * 60000).toISOString(),
+      }],
+      meta: {},
     });
 
     renderWithProviders(<SettingsPage />);
 
-    expect(await screen.findByText(/Updated at .*May 1, 2026.*12:00 PM UTC/)).toBeInTheDocument();
-
-    const input = screen.getByLabelText('Organization name');
-    const user = userEvent.setup();
-    await user.click(input);
-    await user.keyboard('{Control>}a{/Control}Updated Org');
-    await user.tab();
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({ name: 'Updated Org' });
-    });
-    await waitFor(() => {
-      expect(screen.getByText(/Updated at .*May 6, 2026.*3:30 PM UTC/)).toBeInTheDocument();
-    });
+    expect(await screen.findByText(/Updated .* ago by System/)).toBeInTheDocument();
+    expect(screen.queryByText(/Updated at .*May 1, 2026.*12:00 PM UTC/)).not.toBeInTheDocument();
   });
 
   it('uses the canonical organization returned by the server after saving settings', async () => {

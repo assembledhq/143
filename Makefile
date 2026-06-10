@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -161,6 +161,31 @@ build:
 	go build -ldflags "$(LDFLAGS)" -o bin/server ./cmd/server
 	go build -o bin/migrate ./cmd/migrate
 	go build -o bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split
+
+# Cross-compile the 143-tools CLI for laptop installs. Outputs to dist/cli/
+# plus a checksums.txt the installer script verifies against. The server
+# image bakes this directory in at /opt/143/cli (see Dockerfile) and serves
+# it from /download/143-tools/*. The platform matrix must stay in sync with
+# cliPlatforms in internal/api/handlers/cli_distribution.go.
+CLI_DIST_DIR := dist/cli
+CLI_PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+
+build-cli:
+	rm -rf $(CLI_DIST_DIR)
+	mkdir -p $(CLI_DIST_DIR)
+	@set -e; for platform in $(CLI_PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		echo "building $(CLI_DIST_DIR)/143-tools-$$os-$$arch"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o $(CLI_DIST_DIR)/143-tools-$$os-$$arch ./cmd/tools; \
+	done
+	@cd $(CLI_DIST_DIR) && if command -v sha256sum >/dev/null 2>&1; then \
+		sha256sum 143-tools-* > checksums.txt; \
+	else \
+		shasum -a 256 143-tools-* > checksums.txt; \
+	fi
+	@echo "wrote $(CLI_DIST_DIR)/checksums.txt"
 
 frontend-dev:
 	cd frontend && npm run dev
@@ -356,9 +381,10 @@ secrets-rotate:
 #   generated static egress fields in .env.production.enc, reloads the egress
 #   gateway from the egress:<host> FLEET_HOSTS entry, then provisions the
 #   worker. Add worker:<HOST> to FLEET_HOSTS before running make
-#   provision-worker HOST=<HOST>. EGRESS_SSH_KEY and SSH_USER let the gateway
-#   use a different key/user from workers, e.g. AWS Ubuntu hosts:
-#   make provision-worker HOST=<worker-ip> EGRESS_SSH_KEY=~/Downloads/143-john.pem SSH_USER=ubuntu
+#   provision-worker HOST=<HOST>. EGRESS_SSH_KEY defaults to
+#   ~/.ssh/143-egress or ~/.ssh/143-egress.pem when present, then falls back
+#   to SSH_KEY. The gateway SSH user is auto-detected as root or ubuntu; set
+#   EGRESS_SSH_USER only for unusual images.
 #
 # To tear down and reprovision an existing node:
 #   make provision-app    HOST=87.99.150.138  REPROVISION=true
@@ -415,11 +441,12 @@ export TS_AUTH_KEY
 export TS_TAG
 export TS_HOSTNAME
 export TS_ADVERTISE_ROUTES
+export EGRESS_SSH_USER
 export SSH_USER
 
 # Auto-detect SSH key: use ~/.ssh/143-deploy if it exists.
 SSH_KEY ?= $(wildcard ~/.ssh/143-deploy)
-EGRESS_SSH_KEY ?= $(SSH_KEY)
+EGRESS_SSH_KEY ?= $(or $(wildcard ~/.ssh/143-egress),$(wildcard ~/.ssh/143-egress.pem),$(SSH_KEY))
 
 # Guard: fail with a helpful message when SSH_KEY is empty.
 define check-ssh-key
@@ -434,15 +461,65 @@ provision-app:
 provision-worker:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-worker HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
-	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-egress:
-	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@deploy/scripts/sync-static-egress-secrets.sh --apply
 	@deploy/scripts/provision-egress.sh "$(HOST)" "$(EGRESS_SSH_KEY)"
+
+# Provision (or re-provision) every worker:<host> in FLEET_HOSTS in one pass.
+# Syncs per-worker WireGuard secrets and provisions the egress gateway once,
+# then runs provision.sh for each worker host. Use after enabling/repairing
+# static egress so every worker rewrites /etc/143/static-egress-capable and
+# starts advertising static_egress_capable in its node metadata.
+#
+# On an already-running fleet you must pass REPROVISION=true: provision.sh
+# aborts when services are already running, so plain mode only works for
+# fresh hosts. REPROVISION=true tears down and rebuilds each worker (drains
+# active jobs first). Reprovisioning can orphan old `nodes` rows when
+# NODE_IDs change — see the reprovision notes above provision-worker.
+#
+# Workers are provisioned concurrently, PROVISION_JOBS at a time (default 4),
+# with per-host output written to log files under /tmp. Note that with
+# REPROVISION=true and PROVISION_JOBS>1, several workers can be down at the
+# same time — set PROVISION_JOBS=1 to keep the old one-worker-down-at-a-time
+# behavior. A failed host doesn't stop the others; the target exits nonzero
+# at the end. Rerun to resume (secrets sync and gateway provisioning are
+# idempotent).
+# Usage:
+#   make provision-workers
+#   make provision-workers REPROVISION=true
+#   make provision-workers PROVISION_JOBS=8
+#   make provision-workers EGRESS_SSH_USER=admin EGRESS_SSH_KEY=~/.ssh/custom-egress-key
+PROVISION_JOBS ?= 4
+provision-workers:
+	$(check-ssh-key)
+	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
+	@deploy/scripts/sync-static-egress-secrets.sh --apply
+	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
+	@$(read-fleet-hosts); \
+	HOSTS="$$(echo "$$FLEET" | tr ',' '\n' | grep '^worker:' | cut -d: -f2)"; \
+	if [ -z "$$HOSTS" ]; then \
+		echo "ERROR: no worker:<host> entries in FLEET_HOSTS."; exit 1; \
+	fi; \
+	LOG_DIR="$$(mktemp -d /tmp/provision-workers.XXXXXX)"; \
+	echo "=== provisioning $$(echo "$$HOSTS" | wc -l | tr -d ' ') workers, $(PROVISION_JOBS) at a time (logs: $$LOG_DIR) ==="; \
+	if echo "$$HOSTS" | LOG_DIR="$$LOG_DIR" xargs -n1 -P "$(PROVISION_JOBS)" sh -c '\
+		h="$$1"; log="$$LOG_DIR/$$h.log"; \
+		echo "--- provisioning worker $$h (log: $$log)"; \
+		if ./deploy/scripts/provision.sh worker "$$h" $(SSH_KEY) $(if $(REPROVISION),--reprovision) >"$$log" 2>&1; then \
+			echo "--- OK: $$h"; \
+		else \
+			echo "--- FAILED: $$h (log: $$log)"; exit 1; \
+		fi' provision-one; then \
+		echo "=== all workers provisioned ==="; \
+	else \
+		echo "=== FAILED: one or more workers failed; see logs in $$LOG_DIR ==="; exit 1; \
+	fi
 
 provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
@@ -502,6 +579,7 @@ spin-down-worker:
 TAG ?= latest
 ROLES ?= app,worker
 force ?=
+DEPLOY_JOBS ?= 4
 WORKER_BLUE_GREEN_PORT_START ?= 8080
 WORKER_BLUE_GREEN_PORT_END ?= 8087
 
@@ -615,9 +693,11 @@ deploy-redis:
 #   make deploy-fleet TAG=<sha> ROLES=app,worker
 # To override the active-session guardrail:
 #   make deploy-fleet force=true
+# To serialize node deploys:
+#   make deploy-fleet DEPLOY_JOBS=1
 deploy-fleet:
 	$(check-ssh-key)
-	$(worker-blue-green-env) $(deploy-force-env) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
+	$(worker-blue-green-env) $(deploy-force-env) DEPLOY_JOBS=$(DEPLOY_JOBS) ./deploy/scripts/deploy-fleet.sh $(SSH_KEY) $(TAG) $(ROLES)
 
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet

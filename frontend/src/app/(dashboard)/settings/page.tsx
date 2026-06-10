@@ -21,19 +21,6 @@ const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
 
-const settingsTimestampFormatter = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "long",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
-
-function formatUpdatedAt(updatedAt: string | undefined): string | undefined {
-  if (!updatedAt) return undefined;
-  const date = new Date(updatedAt);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return `${settingsTimestampFormatter.format(date)} UTC`;
-}
-
 function PRAuthorshipSettings() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -152,10 +139,6 @@ export default function SettingsPage() {
         <PageHeader
           title="General settings"
           description="Manage your organization."
-          subtitle={(() => {
-            const formattedUpdatedAt = formatUpdatedAt(settings?.data?.updated_at);
-            return formattedUpdatedAt ? `Updated at ${formattedUpdatedAt}` : undefined;
-          })()}
         />
         <AuditLogTrigger
           filters={{ resource_type: "settings" }}

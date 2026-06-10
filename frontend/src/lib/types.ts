@@ -47,6 +47,7 @@ export interface User {
 export interface UserSettings {
   coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
+  diff_viewer_full_screen?: boolean;
 }
 
 export interface ThreadMessageWindowMeta {
@@ -62,7 +63,16 @@ export interface ThreadMessageWindowResponse {
   meta: ThreadMessageWindowMeta;
 }
 
-export type UserSettingsUpdateRequest = UserSettings;
+// PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
+// fields keep their stored value, null clears a field, and nested objects
+// merge per key. Send only the fields being changed — never a full settings
+// document rebuilt from the query cache, which would clobber concurrent
+// edits from other tabs.
+export interface UserSettingsUpdateRequest {
+  coding_agent_model_default?: string | null;
+  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max" | null>> | null;
+  diff_viewer_full_screen?: boolean | null;
+}
 
 export interface AuthProviders {
   github: boolean;
@@ -233,6 +243,8 @@ export interface Integration {
   notion_workspace_id?: string;
   notion_workspace_name?: string;
   circleci_project_slug?: string;
+  mezmo_dataset?: string;
+  mezmo_base_url?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -1290,6 +1302,46 @@ export interface InvitationResponse {
     name: string;
   };
   expires_at: string;
+  created_at: string;
+}
+
+// JoinToken is a multi-use, revocable org join link backing the CLI install
+// one-liner (`curl .../install/<token> | sh`). Only the display prefix is
+// ever returned after creation.
+export interface JoinToken {
+  id: string;
+  token_prefix: string;
+  name: string;
+  role: string;
+  max_uses?: number | null;
+  use_count: number;
+  expires_at?: string | null;
+  status: 'active' | 'revoked' | 'expired' | 'exhausted';
+  created_at: string;
+}
+
+// CreatedJoinToken is the create response: the plaintext token and the
+// ready-to-paste install command, shown exactly once.
+export interface CreatedJoinToken {
+  id: string;
+  token: string;
+  token_prefix: string;
+  role: string;
+  name: string;
+  expires_at?: string | null;
+  max_uses?: number | null;
+  install_command: string;
+}
+
+// CliToken is one row in the user's own "CLI sessions" list — a per-device
+// credential minted by `143-tools login`.
+export interface CliToken {
+  id: string;
+  token_prefix: string;
+  device_name: string;
+  expires_at: string;
+  last_used_at?: string | null;
+  last_used_ip?: string | null;
   created_at: string;
 }
 

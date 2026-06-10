@@ -62,6 +62,11 @@ const (
 type integrationCredentialStore interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
+	// Disable marks the singleton (label="") credential for a provider as
+	// disabled so it stops being injected into sandboxes. Disconnect calls this
+	// so revoking an integration in the UI actually revokes runtime access, not
+	// just the integration row's status. Re-connecting re-activates it via Upsert.
+	Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
 }
 
 // githubAppService provides GitHub App installation tokens for fetching repos.
@@ -495,7 +500,7 @@ func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, i
 	}
 
 	switch integration.Provider {
-	case models.IntegrationProviderNotion, models.IntegrationProviderCircleCI:
+	case models.IntegrationProviderNotion, models.IntegrationProviderCircleCI, models.IntegrationProviderMezmo:
 	default:
 		return
 	}
@@ -516,6 +521,10 @@ func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, i
 	case models.CircleCIConfig:
 		if cfg.ProjectSlug != "" {
 			integration.CircleCIProjectSlug = integrationStringPtr(cfg.ProjectSlug)
+		}
+	case models.MezmoConfig:
+		if cfg.BaseURL != "" {
+			integration.MezmoBaseURL = integrationStringPtr(cfg.BaseURL)
 		}
 	}
 }
@@ -597,6 +606,19 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 				writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect github installation links", err)
 				return
 			}
+		}
+	}
+
+	// Disable the stored org credential so sandboxes stop receiving this
+	// provider's secrets. The sandbox env-injection path reads org_credentials
+	// (status != 'disabled') independently of integrations.status, so without
+	// this a "disconnected" provider would keep being injected and remain
+	// usable by agents. Reconnecting re-activates the row via Upsert. No-op for
+	// providers whose credentials don't live in org_credentials (e.g. GitHub).
+	if h.credentialStore != nil {
+		if err := h.credentialStore.Disable(r.Context(), orgID, models.ProviderName(provider)); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disable integration credential", err)
+			return
 		}
 	}
 
@@ -2996,4 +3018,144 @@ func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token st
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// mezmoDefaultBaseURL is the public Mezmo API host. Kept in sync with the
+// runtime provider default in internal/services/integration.NewMezmoProvider.
+const mezmoDefaultBaseURL = "https://api.mezmo.com"
+
+// ConnectMezmo accepts a Mezmo access token or legacy service key (plus optional
+// base URL), validates it against the export endpoint, stores the
+// credential, and creates an active integration record. Mezmo uses a
+// paste-the-key flow because its log-query API authenticates with a long-lived
+// token rather than OAuth. The stored credential is injected into sandboxes as
+// MEZMO_* env vars by the orchestrator (see internal/services/agent/env.go) so
+// the agent's 143-tools log commands query this org's Mezmo with its own key.
+func (h *IntegrationHandler) ConnectMezmo(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		APIKey  string `json:"api_key"`
+		BaseURL string `json:"base_url"`
+		Dataset string `json:"dataset"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.APIKey = strings.TrimSpace(req.APIKey)
+	req.BaseURL = strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	req.Dataset = strings.TrimSpace(req.Dataset)
+	if req.APIKey == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_API_KEY", "api_key is required")
+		return
+	}
+	if req.Dataset != "" {
+		writeError(w, r, http.StatusBadRequest, "UNSUPPORTED_DATASET", "Mezmo dataset scoping is not supported by the current export API; leave dataset blank")
+		return
+	}
+	if req.BaseURL != "" {
+		if u, err := url.Parse(req.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_URL", "base_url must be an absolute URL (e.g. https://api.mezmo.com)")
+			return
+		}
+	}
+
+	cfg := models.MezmoConfig{
+		APIKey:  req.APIKey,
+		BaseURL: req.BaseURL,
+		Dataset: req.Dataset,
+	}
+	if err := h.validateMezmoToken(r.Context(), cfg); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate Mezmo key: "+err.Error())
+		return
+	}
+
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save Mezmo credentials", err)
+		return
+	}
+
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderMezmo)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_MEZMO_FAILED", "failed to create Mezmo integration", err)
+		return
+	}
+	h.deriveIntegrationStatus(r.Context(), &integration, map[models.IntegrationProvider]bool{
+		models.IntegrationProviderMezmo: true,
+	})
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// validateMezmoToken issues a minimal export request against the Mezmo API to
+// confirm the key is accepted. It mirrors the runtime provider's documented
+// GET /v2/export path and prefers the current Authorization token auth, with a
+// fallback for legacy service keys.
+func (h *IntegrationHandler) validateMezmoToken(ctx context.Context, cfg models.MezmoConfig) error {
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = mezmoDefaultBaseURL
+	}
+	now := time.Now()
+	values := url.Values{}
+	values.Set("query", "*")
+	values.Set("from", strconv.FormatInt(now.Add(-time.Minute).Unix(), 10))
+	values.Set("to", strconv.FormatInt(now.Unix(), 10))
+	values.Set("size", "1")
+	values.Set("prefer", "tail")
+
+	statusCode, err := h.validateMezmoTokenRequest(ctx, baseURL, values, "Authorization", "Token "+cfg.APIKey)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		fallbackStatus, fallbackErr := h.validateMezmoTokenRequest(ctx, baseURL, values, "servicekey", cfg.APIKey)
+		if fallbackErr != nil {
+			return fmt.Errorf("request failed: %w", fallbackErr)
+		}
+		statusCode = fallbackStatus
+	}
+
+	// We're validating the key, not the query. Only an auth rejection is a
+	// definitive "bad key", 404/405 means the configured endpoint is wrong or
+	// no longer serves the export API, and a 5xx means Mezmo is unhealthy right
+	// now (worth surfacing so the user retries). Other 4xx responses can be
+	// query-shape/rate-limit quirks after auth, so do not block a valid key.
+	switch {
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+		return fmt.Errorf("invalid or expired key")
+	case statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed:
+		return fmt.Errorf("mezmo API endpoint not found")
+	case statusCode >= 500:
+		return fmt.Errorf("mezmo API returned %d", statusCode)
+	default:
+		return nil
+	}
+}
+
+func (h *IntegrationHandler) validateMezmoTokenRequest(ctx context.Context, baseURL string, values url.Values, authHeader, authValue string) (int, error) {
+	endpoint := strings.TrimRight(baseURL, "/") + "/v2/export"
+	if encoded := values.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set(authHeader, authValue)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return 0, err
+	}
+	return resp.StatusCode, nil
 }

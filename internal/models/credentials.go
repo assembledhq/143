@@ -289,6 +289,18 @@ type CircleCIConfig struct {
 	ProjectSlug string `json:"project_slug"`
 }
 
+// MezmoConfig stores a Mezmo service key plus optional base URL (for
+// self-hosted/enterprise endpoints, defaults to https://api.mezmo.com). Dataset
+// is retained only to parse older saved credentials; new connections reject it
+// because Mezmo's documented v2 export API does not support dataset scoping.
+// This is the persisted credential shape; the runtime provider config lives in
+// internal/services/integration.MezmoConfig, mirroring the CircleCI split.
+type MezmoConfig struct {
+	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
+	BaseURL string `json:"base_url,omitempty"`
+	Dataset string `json:"dataset,omitempty"`
+}
+
 type OpenAIChatGPTConfig struct {
 	AccessToken  string    `json:"access_token"`       // #nosec G117 -- JSON config field
 	RefreshToken string    `json:"refresh_token"`      // #nosec G117 -- JSON config field
@@ -349,6 +361,7 @@ func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAut
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
 func (c CircleCIConfig) Provider() ProviderName      { return ProviderCircleCI }
+func (c MezmoConfig) Provider() ProviderName         { return ProviderMezmo }
 func (c SlackConfig) Provider() ProviderName         { return ProviderSlack }
 func (c NotionConfig) Provider() ProviderName        { return ProviderNotion }
 func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
@@ -523,6 +536,13 @@ func (c CircleCIConfig) Validate() error {
 	return nil
 }
 
+func (c MezmoConfig) Validate() error {
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
+	}
+	return nil
+}
+
 func (c OpenAIChatGPTConfig) Validate() error {
 	if c.AccessToken == "" {
 		return errors.New("access_token is required")
@@ -655,6 +675,14 @@ func (c CircleCIConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c MezmoConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderMezmo,
+		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
+	}
+}
+
 func (c OpenAIChatGPTConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:    ProviderOpenAIChatGPT,
@@ -773,6 +801,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg CircleCIConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse circleci config: %w", err)
+		}
+		return cfg, nil
+	case ProviderMezmo:
+		var cfg MezmoConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse mezmo config: %w", err)
 		}
 		return cfg, nil
 	default:

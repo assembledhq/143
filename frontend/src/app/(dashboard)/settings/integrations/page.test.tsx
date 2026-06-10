@@ -570,4 +570,23 @@ describe("IntegrationsPage", () => {
       "Use the API project slug from CircleCI. OAuth projects usually look like gh/org/repo; GitHub App projects can use a circleci/... slug.",
     );
   });
+
+  it("helps users find Mezmo service keys while connecting", async () => {
+    integrationsListMock.mockResolvedValueOnce({ data: [], meta: {} });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Connect Mezmo" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Connect Mezmo" });
+    expect(dialog).toHaveTextContent("Open Mezmo, select the right organization, then go to Settings > Organization > API Keys. Create a service key there so agents can query production logs.");
+    expect(within(dialog).getByRole("link", { name: "Open Mezmo" })).toHaveAttribute(
+      "href",
+      "https://app.mezmo.com/",
+    );
+
+    expect(within(dialog).queryByLabelText("Dataset (optional)")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Where to find the Mezmo dataset" })).not.toBeInTheDocument();
+  });
 });

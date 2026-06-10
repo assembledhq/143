@@ -883,7 +883,7 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):
 			return nil, 0, newPreviewHTTPError(http.StatusConflict, "PREVIEW_WORKER_OWNERSHIP_REQUIRED", "live sandbox is missing worker ownership metadata; send a new message to rebuild it", nil)
 		case errors.Is(err, preview.ErrNoPreviewWorkers):
-			return nil, 0, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_NO_WORKERS", "no preview-capable workers are available", nil)
+			return nil, 0, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_NO_WORKERS", previewNoWorkersMessage(reqs), nil)
 		default:
 			return nil, 0, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to select preview worker", err)
 		}
@@ -893,6 +893,16 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 		return nil, 0, asyncErr
 	}
 	return instance, http.StatusAccepted, nil
+}
+
+func previewNoWorkersMessage(reqs preview.WorkerSelectionRequirements) string {
+	if !reqs.StaticEgressRequired {
+		return "no preview-capable workers are available"
+	}
+	if reqs.StaticEgressPublicIP == "" {
+		return "Static egress is enabled, but no public IP is configured. Disable static egress or configure STATIC_EGRESS_PUBLIC_IP."
+	}
+	return fmt.Sprintf("Static egress is enabled, but no preview workers are verified for %s. Disable static egress or provision workers.", reqs.StaticEgressPublicIP)
 }
 
 func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {

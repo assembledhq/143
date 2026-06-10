@@ -529,6 +529,22 @@ describe('SessionSidebar', () => {
     expect(screen.getByText('Other session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
   });
 
+  it('lets plain row links navigate through Next Link instead of imperative router push', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Native link session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Native link session')).closest('a');
+    expect(link).not.toBeNull();
+
+    await userEvent.click(link!);
+
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
+  });
+
   it('does not hold a target row pending when switching from one selected session to another', async () => {
     mockSelectedSegment = 's1';
     serveSessions([
@@ -633,7 +649,7 @@ describe('SessionSidebar', () => {
     });
   });
 
-  it('opens a clicked session with client navigation', async () => {
+  it('opens a clicked session through its direct link', async () => {
     const session = makeSession({
       id: 's1',
       result_summary: 'Instant open session',
@@ -650,7 +666,8 @@ describe('SessionSidebar', () => {
 
     await userEvent.click(link!);
 
-    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
   });
 
   // -----------------------------------------------------------------------

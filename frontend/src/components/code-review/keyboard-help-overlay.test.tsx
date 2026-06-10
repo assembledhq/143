@@ -29,7 +29,8 @@ describe("KeyboardHelpOverlay", () => {
     render(<KeyboardHelpOverlay open={true} onClose={vi.fn()} />);
     expect(screen.getByText("Next / previous file")).toBeInTheDocument();
     expect(screen.getByText("Toggle file tree panel")).toBeInTheDocument();
-    expect(screen.getAllByText("Back to conversation")).toHaveLength(2); // m and Esc
+    expect(screen.getByText("Back to conversation")).toBeInTheDocument(); // m
+    expect(screen.getByText("Exit full screen, then back to conversation")).toBeInTheDocument(); // Esc
   });
 
   it("calls onClose when close button is clicked", async () => {

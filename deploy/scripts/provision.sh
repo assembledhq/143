@@ -283,6 +283,16 @@ configure_tailscale_if_requested() {
       '
 }
 
+list_worker_reprovision_containers() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
+  ssh "${SSH_OPTS[@]}" root@"$HOST" \
+    "command -v docker >/dev/null 2>&1 && docker ps --filter label=com.docker.compose.service=worker --format '{{.ID}}' || true" \
+    2>/dev/null || true
+}
+
 if [ "$MODE" = "--tailscale-only" ]; then
   : "${TS_AUTH_KEY:?TS_AUTH_KEY or a role-specific TS_AUTH_KEY_* is required for Tailscale enrollment}"
 
@@ -309,14 +319,14 @@ resolve_worker_identity() {
     else
       echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
       # Enumerate every private IPv4 on a real network interface, deliberately
-      # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
+      # skipping docker/bridge/veth/WireGuard/loopback. A naive "first private IPv4"
       # filter would silently return 172.17.0.1 (docker0) on hosts where the
       # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
       # the *public* IP because the default route goes through the public NIC.
       # We collect candidates (no awk `exit`) so multi-homed hosts surface as
       # an error rather than silently picking whichever NIC enumerates first.
       WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
-        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo|wg)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
     fi
     CANDIDATE_COUNT="$(printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | grep -c . || true)"
     if [ "$CANDIDATE_COUNT" -eq 0 ]; then
@@ -375,6 +385,12 @@ resolve_worker_docker_gid() {
 
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
+if [ "$ROLE" = "worker" ]; then
+  WORKER_REPROVISION_CONTAINERS="$(list_worker_reprovision_containers)"
+  if [ -n "$WORKER_REPROVISION_CONTAINERS" ]; then
+    RUNNING="$(printf '%s\n%s\n' "$RUNNING" "$WORKER_REPROVISION_CONTAINERS" | grep -v '^$' || true)"
+  fi
+fi
 if [ -n "$RUNNING" ]; then
   if [ "$REPROVISION" != "--reprovision" ]; then
     echo "ERROR: $ROLE node at $HOST is already provisioned and running."
@@ -385,7 +401,13 @@ if [ -n "$RUNNING" ]; then
   fi
 
   echo "=== Reprovisioning $ROLE node at $HOST (tearing down existing) ==="
-  ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+  if [ "$ROLE" = "worker" ]; then
+    "$SCRIPT_DIR/spin-down-worker.sh" "$HOST" "$SSH_KEY" \
+      --timeout "${WORKER_REPROVISION_DRAIN_TIMEOUT_SECONDS:-14400}" \
+      --executor-timeout "${WORKER_REPROVISION_EXECUTOR_TIMEOUT_SECONDS:-900}"
+  else
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+  fi
 fi
 
 echo "=== Provisioning $ROLE node at $HOST ==="

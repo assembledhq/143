@@ -36,7 +36,7 @@ import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
-import { MarkdownContent } from "@/components/markdown";
+import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -111,7 +111,6 @@ import {
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
 import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
-import type { DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
@@ -135,7 +134,7 @@ import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organizatio
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -157,9 +156,12 @@ import {
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
+import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
+import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
+import { SessionDetailLoadingSkeleton, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
@@ -172,6 +174,14 @@ const ReviewDiffView = dynamic(
   {
     ssr: false,
     loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
+
+const ChangesTab = dynamic(
+  () => import("./session-changes-tab").then((m) => ({ default: m.ChangesTab })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse" />,
   },
 );
 
@@ -211,7 +221,7 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
-const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = 3000;
+const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = pollMs(3000);
 
 const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
   AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
@@ -681,7 +691,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <MarkdownContent content={session.result_summary} className="text-xs" />
+            <LazyMarkdownContent content={session.result_summary} className="text-xs" />
           </CardContent>
         </Card>
       )}
@@ -912,115 +922,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     </div>
   );
 }
-
-const ChangesTab = memo(function ChangesTab({
-  filteredFiles,
-  activeFileIndex,
-  onFileSelect,
-  onOpenReview,
-  comments,
-  onCommentClick,
-  passes,
-  passRange,
-  onPassRangeChange,
-  emptyStatusText,
-  isMobile,
-  diffLoadErrorText,
-  diffTruncationText,
-  onRetryDiffLoad,
-}: {
-  filteredFiles: DiffFile[];
-  activeFileIndex: number;
-  onFileSelect: (index: number) => void;
-  onOpenReview: (fileIndex?: number) => void;
-  comments: SessionReviewComment[];
-  onCommentClick: (filePath: string) => void;
-  passes: DiffPassEntry[];
-  passRange: PassRange | null;
-  onPassRangeChange: (range: PassRange | null) => void;
-  emptyStatusText: string;
-  isMobile: boolean;
-  diffLoadErrorText?: string;
-  diffTruncationText?: string;
-  onRetryDiffLoad?: () => void;
-}) {
-  const hasDiff = filteredFiles.length > 0;
-  const hasDiffLoadError = !!diffLoadErrorText;
-
-  const handleFileClick = useCallback(
-    (index: number) => {
-      onFileSelect(index);
-      onOpenReview(index);
-    },
-    [onFileSelect, onOpenReview]
-  );
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Pass selector */}
-      {passes.length >= 2 && (
-        <div className="px-4 py-3 border-b border-border">
-          <PassSelector
-            passes={passes}
-            selectedRange={passRange}
-            onRangeChange={onPassRangeChange}
-          />
-        </div>
-      )}
-
-      {/* Comments summary */}
-      {comments.length > 0 && (
-        <CommentsSummary
-          comments={comments}
-          onCommentClick={onCommentClick}
-        />
-      )}
-
-      {/* Main content: file tree or empty state */}
-      {hasDiff ? (
-        <div className="flex flex-col flex-1 min-h-0">
-          {diffTruncationText ? (
-            <div className="mx-4 mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">
-              <p className="font-medium">Large diff truncated</p>
-              <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
-            </div>
-          ) : null}
-          <div className="flex-1 overflow-hidden">
-            <FileTree
-              files={filteredFiles}
-              activeFileIndex={activeFileIndex}
-              onFileSelect={handleFileClick}
-              variant={isMobile ? "sheet" : "sidebar"}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center py-12">
-          <div className="text-center space-y-2 max-w-[280px]">
-            {hasDiffLoadError ? (
-              <AlertTriangle className="h-8 w-8 text-destructive/70 mx-auto" />
-            ) : (
-              <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-            )}
-            <p className="text-xs font-medium text-muted-foreground">
-              {hasDiffLoadError ? "Couldn't load changes" : "No changes yet"}
-            </p>
-            <p className="text-xs text-muted-foreground/60">
-              {diffLoadErrorText ?? emptyStatusText}
-            </p>
-            {hasDiffLoadError && onRetryDiffLoad ? (
-              <Button type="button" variant="outline" size="sm" className="mt-2" onClick={onRetryDiffLoad}>
-                Retry
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-});
-
-ChangesTab.displayName = "ChangesTab";
 
 // ---------------------------------------------------------------------------
 // Shared session composer (used in both chat and review mode)
@@ -2004,7 +1905,7 @@ function SessionComposer({
 // ---------------------------------------------------------------------------
 
 const MAX_SSE_RECONNECT_ATTEMPTS = 3;
-const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+const BASE_SSE_RECONNECT_DELAY_MS = pollMs(1000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
@@ -2104,114 +2005,6 @@ function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly u
   return [...queryKeys.sessions.threadLogs(sessionId, threadId), "live"];
 }
 
-function SessionTimelineSkeleton() {
-  const rows: { align: "left" | "right"; widths: string[] }[] = [
-    { align: "right", widths: ["w-3/5", "w-2/5"] },
-    { align: "left", widths: ["w-4/5", "w-3/4", "w-1/2"] },
-    { align: "left", widths: ["w-2/3", "w-1/3"] },
-    { align: "left", widths: ["w-3/4", "w-3/5"] },
-  ];
-
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label="Loading session activity"
-      data-testid="session-timeline-skeleton"
-      className="space-y-3 py-1"
-    >
-      {rows.map((row, i) => (
-        <div
-          key={i}
-          className={`flex ${row.align === "right" ? "justify-end" : "justify-start"}`}
-        >
-          <div
-            className={`max-w-[92%] min-w-[40%] rounded-lg px-3 py-2.5 space-y-2 animate-pulse ${
-              row.align === "right" ? "bg-primary/10" : "bg-muted"
-            }`}
-          >
-            {row.widths.map((w, j) => (
-              <div
-                key={j}
-                className={`h-3 rounded ${w} ${
-                  row.align === "right" ? "bg-primary/20" : "bg-muted-foreground/15"
-                }`}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-      <span className="sr-only">Loading session activity…</span>
-    </div>
-  );
-}
-
-function SkeletonLine({ className }: { className: string }) {
-  return <div className={cn("rounded bg-muted-foreground/15", className)} />;
-}
-
-function SessionDetailLoadingSkeleton() {
-  return (
-    <div
-      data-testid="session-detail-loading-skeleton"
-      aria-busy="true"
-      className="flex h-full min-h-0 bg-background"
-    >
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
-          <div className="min-w-0 flex-1 animate-pulse space-y-2">
-            <SkeletonLine className="h-4 w-2/5 max-w-[360px]" />
-            <SkeletonLine className="h-3 w-1/4 max-w-[220px]" />
-          </div>
-          <div className="flex shrink-0 gap-2 animate-pulse">
-            <SkeletonLine className="h-8 w-8 rounded-md" />
-            <SkeletonLine className="h-8 w-8 rounded-md" />
-          </div>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="hidden h-10 shrink-0 border-b border-border px-3 md:flex md:items-center">
-            <div className="flex gap-2 animate-pulse">
-              <SkeletonLine className="h-6 w-24 rounded-md" />
-              <SkeletonLine className="h-6 w-28 rounded-md" />
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden p-4">
-            <div className="mx-auto flex h-full max-w-3xl flex-col justify-end gap-3">
-              <SessionTimelineSkeleton />
-            </div>
-          </div>
-          <div className="shrink-0 border-t border-border p-3">
-            <div className="animate-pulse rounded-lg border border-border bg-card p-3">
-              <SkeletonLine className="h-16 w-full rounded-md" />
-              <div className="mt-3 flex items-center justify-between">
-                <div className="flex gap-2">
-                  <SkeletonLine className="h-8 w-8 rounded-md" />
-                  <SkeletonLine className="h-8 w-24 rounded-md" />
-                </div>
-                <SkeletonLine className="h-8 w-8 rounded-md" />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="hidden w-[360px] shrink-0 border-l border-border bg-background md:flex md:flex-col">
-        <div className="h-12 shrink-0 border-b border-border px-3">
-          <div className="flex h-full items-center gap-2 animate-pulse">
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-          </div>
-        </div>
-        <div className="space-y-4 p-4 animate-pulse">
-          <SkeletonLine className="h-24 w-full rounded-md" />
-          <SkeletonLine className="h-16 w-full rounded-md" />
-          <SkeletonLine className="h-32 w-full rounded-md" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 type ChatPanelProps = {
   session: Session;
   sessionId: string;
@@ -2267,7 +2060,7 @@ function ChatPanel({
     queryKey: ["session", sessionId, "timeline"],
     queryFn: () => api.sessions.getTimeline(sessionId),
     enabled: !activeThreadId,
-    refetchInterval: isActive && !activeThreadId ? 3000 : false,
+    refetchInterval: isActive && !activeThreadId ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessagesQuery = useInfiniteQuery({
@@ -2283,7 +2076,7 @@ function ChatPanel({
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
     enabled: !!activeThreadId,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessages = useMemo(() => {
@@ -2315,7 +2108,7 @@ function ChatPanel({
       visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
     enabled: !!activeThreadId && threadMessagesQuery.isFetched,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const liveLogsQuery = useQuery({
     queryKey: liveLogsQueryKey,
@@ -2328,7 +2121,7 @@ function ChatPanel({
   const humanInputQuery = useQuery({
     queryKey: queryKeys.sessions.humanInputRequests(sessionId, humanInputStatusFilter ?? null, activeThreadId ?? null),
     queryFn: () => api.sessions.getHumanInputRequests(sessionId, { status: humanInputStatusFilter, threadId: activeThreadId ?? null }),
-    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? 3000 : false,
+    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const pendingHumanInputs = useMemo(() => {
     const requests = humanInputQuery.data?.data ?? [];
@@ -3078,6 +2871,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
+  // null means "follow the saved user-settings preference"; a boolean means
+  // the user toggled full screen in this session (and we persist it).
+  const [diffFullScreenOverride, setDiffFullScreenOverride] = useState<boolean | null>(null);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
@@ -3218,6 +3014,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
+      if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
@@ -3238,7 +3035,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
       if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
-        return 2000;
+        return pollMs(2000);
       }
       return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
     },
@@ -3254,12 +3051,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
     [user],
   );
-  const session = data?.data;
+  const rawSession = data?.data;
+  const isProvisionalSession = isProvisionalSessionDetail(rawSession);
+  const session = isProvisionalSession ? undefined : rawSession;
   usePageTitle(session ? sessionTitle(session) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
-    centerMode === "review" ||
-    detailTab === "changes"
+    !isProvisionalSession &&
+    (centerMode === "review" ||
+      detailTab === "changes")
   );
   const diffRevisionKey = useMemo(() => {
     if (!session) return null;
@@ -3355,6 +3155,31 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  // Full-screen diff viewer. The preference lives on the user settings
+  // document so it sticks across sessions; mobile review already fills the
+  // viewport, so the mode is desktop-only.
+  const isDiffFullScreen =
+    !isMobileReviewViewport &&
+    (diffFullScreenOverride ?? user?.settings?.diff_viewer_full_screen ?? false);
+  const { mutate: persistDiffFullScreen } = useMutation({
+    // PATCH /auth/me/settings is a merge patch, so the flag travels alone and
+    // can't clobber settings edited concurrently elsewhere.
+    mutationFn: (fullScreen: boolean) =>
+      api.auth.updateSettings({ diff_viewer_full_screen: fullScreen }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+    },
+    onError: () => {
+      toast.error("Couldn't save full screen preference");
+    },
+  });
+  const toggleDiffFullScreen = useCallback(() => {
+    const next = !isDiffFullScreen;
+    setDiffFullScreenOverride(next);
+    persistDiffFullScreen(next);
+  }, [isDiffFullScreen, persistDiffFullScreen]);
+
   const activeThreadDelivery = activeThread?.inbox_delivery;
   const activeThreadHasRecoverableInbox =
     !!activeThreadDelivery &&
@@ -3659,6 +3484,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
@@ -3677,7 +3503,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (query) => {
       const mergeState = query.state.data?.data?.merge_state;
       const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? 5_000 : false;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? pollMs(5_000) : false;
     },
   });
   const prHealth = prHealthData?.data;
@@ -3970,14 +3796,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [session?.id, session?.status, session?.title]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
-    if (id) {
+    if (session?.id) {
       api.sessions.recordView(id).then(() => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
       }).catch((err) => {
         console.error("failed to record session view", err);
       });
     }
-  }, [id, queryClient]);
+  }, [id, queryClient, session?.id]);
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
@@ -4824,7 +4650,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: queryKeys.sessions.threadFileEvents(id),
     queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
     enabled: threads.length > 0,
-    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? pollMs(5000) : false,
     staleTime: 2_000,
   });
   useEffect(() => {
@@ -5185,7 +5011,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  if (isLoading) {
+  if (isLoading || (isProvisionalSession && !error)) {
     return <SessionDetailLoadingSkeleton />;
   }
 
@@ -5814,9 +5640,16 @@ export function SessionDetailContent({ id }: { id: string }) {
               )}
             </div>
           ) : null}
-          {/* Review diff view — mounted only when active */}
+          {/* Review diff view — mounted only when active. Full screen lifts
+              the same mounted subtree into a viewport overlay (z-40 stays
+              below dialogs/sheets at z-50) so diff state survives toggling. */}
           {centerMode === "review" && (
-            <div className="h-full animate-in fade-in duration-150 flex flex-col">
+            <div
+              className={cn(
+                "animate-in fade-in duration-150 flex flex-col",
+                isDiffFullScreen ? "fixed inset-0 z-40 bg-background" : "h-full"
+              )}
+            >
               <div className="flex-1 min-h-0">
                 {isDiffDisplayLoading ? (
                   <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />
@@ -5853,6 +5686,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                     onDeleteComment={deleteComment}
                     diffSearchQuery={diffSearchQuery}
                     onDiffSearchChange={setDiffSearchQuery}
+                    isFullScreen={isDiffFullScreen}
+                    onToggleFullScreen={toggleDiffFullScreen}
                   />
                 )}
               </div>

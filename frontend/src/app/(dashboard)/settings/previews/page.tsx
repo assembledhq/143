@@ -47,6 +47,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api, ApiError } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
+import { pollMs } from "@/lib/poll-intervals";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   ListResponse,
@@ -62,7 +63,7 @@ import type {
 const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
 
 const SECRET_FILE_KEY = "SECRET_FILE_CONTENT";
-const JSON_FILE_VALIDATION_DEBOUNCE_MS = 400;
+const JSON_FILE_VALIDATION_DEBOUNCE_MS = pollMs(400);
 const SECRET_FILE_JSON_ERROR = "Secret file contents must be valid JSON.";
 const MASKED_SECRET_PLACEHOLDER = "********";
 const MASKED_SECRET_FILE_PLACEHOLDER = `${MASKED_SECRET_PLACEHOLDER}\n${MASKED_SECRET_PLACEHOLDER}\n${MASKED_SECRET_PLACEHOLDER}`;

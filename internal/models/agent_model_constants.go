@@ -55,6 +55,7 @@ var AvailablePiModels = []string{
 }
 
 const (
+	ClaudeCodeModelFable5   = "claude-fable-5"
 	ClaudeCodeModelOpus48   = "claude-opus-4-8"
 	ClaudeCodeModelOpus47   = "claude-opus-4-7"
 	ClaudeCodeModelOpus46   = "claude-opus-4-6"
@@ -63,7 +64,7 @@ const (
 	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
 	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
