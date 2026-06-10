@@ -283,3 +283,130 @@ func TestSessionMessageStore_ListWindowByThread_Before(t *testing.T) {
 	require.Equal(t, []int64{1, 2}, []int64{window.Messages[0].ID, window.Messages[1].ID}, "older window should be returned chronologically")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestSessionMessageStore_ListWindowByThread_After(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_messages.+id > @after_id.+ORDER BY created_at ASC, id ASC").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}).
+				AddRow(int64(4), sessionID, orgID, &threadID, nil, 2, "assistant", "newer", nil, nil, nil, nil, "", now).
+				AddRow(int64(5), sessionID, orgID, &threadID, nil, 3, "user", "latest", nil, nil, nil, nil, "", now).
+				AddRow(int64(6), sessionID, orgID, &threadID, nil, 3, "assistant", "extra", nil, nil, nil, nil, "", now),
+		)
+	mock.ExpectQuery("SELECT .+ max\\(id\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"live_edge_message_id", "latest_assistant_message_id"}).
+			AddRow(int64(6), int64(6)))
+
+	window, err := store.ListWindowByThread(context.Background(), orgID, threadID, SessionMessageWindowOptions{
+		Position: SessionMessageWindowPositionNewer,
+		AfterID:  3,
+		Limit:    2,
+	})
+	require.NoError(t, err, "newer window query should not fail")
+	require.True(t, window.HasNewer, "limit plus one row should mark newer history available")
+	require.Equal(t, "5", window.NextNewerCursor, "next newer cursor should point at newest loaded message")
+	require.False(t, window.HasOlder, "newer page should not alter older availability")
+	require.Equal(t, int64(6), window.LiveEdgeMessageID, "newer window should report the thread live edge")
+	require.Equal(t, int64(6), window.LatestAssistantMessageID, "newer window should report latest assistant anchor")
+	require.Equal(t, SessionMessageWindowPositionNewer, window.Position, "window should report newer position")
+	require.Equal(t, []int64{4, 5}, []int64{window.Messages[0].ID, window.Messages[1].ID}, "newer window should be returned chronologically")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionMessageStore_ListWindowByThread_AroundAnchor(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("WITH anchor_message AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at", "window_side"}).
+				AddRow(int64(1), sessionID, orgID, &threadID, nil, 0, "assistant", "extra older", nil, nil, nil, nil, "", now.Add(-2*time.Minute), "older").
+				AddRow(int64(2), sessionID, orgID, &threadID, nil, 1, "user", "older", nil, nil, nil, nil, "", now.Add(-time.Minute), "older").
+				AddRow(int64(3), sessionID, orgID, &threadID, nil, 1, "assistant", "anchor", nil, nil, nil, nil, "", now, "anchor").
+				AddRow(int64(4), sessionID, orgID, &threadID, nil, 2, "user", "newer", nil, nil, nil, nil, "", now.Add(time.Minute), "newer").
+				AddRow(int64(5), sessionID, orgID, &threadID, nil, 2, "assistant", "extra newer", nil, nil, nil, nil, "", now.Add(2*time.Minute), "newer"),
+		)
+	mock.ExpectQuery("SELECT .+ max\\(id\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"live_edge_message_id", "latest_assistant_message_id"}).
+			AddRow(int64(7), int64(6)))
+
+	window, err := store.ListWindowByThread(context.Background(), orgID, threadID, SessionMessageWindowOptions{
+		Position:        SessionMessageWindowPositionAround,
+		AnchorMessageID: 3,
+		Limit:           3,
+	})
+	require.NoError(t, err, "around window query should not fail")
+	require.True(t, window.AnchorFound, "around window should report that the anchor was found")
+	require.Equal(t, int64(3), window.AnchorMessageID, "around window should echo the anchor message id")
+	require.True(t, window.HasOlder, "around window should report older availability")
+	require.True(t, window.HasNewer, "around window should report newer availability")
+	require.Equal(t, "2", window.NextOlderCursor, "older cursor should point at oldest loaded message")
+	require.Equal(t, "4", window.NextNewerCursor, "newer cursor should point at newest loaded message")
+	require.Equal(t, SessionMessageWindowPositionAround, window.Position, "window should report around position")
+	require.Equal(t, []int64{2, 3, 4}, []int64{window.Messages[0].ID, window.Messages[1].ID, window.Messages[2].ID}, "around window should be returned chronologically")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionMessageStore_ListWindowByThread_AroundMissingAnchorFallsBackLatest(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewSessionMessageStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("WITH anchor_message AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at", "window_side"}))
+	mock.ExpectQuery("SELECT .+ FROM session_messages.+ORDER BY created_at DESC, id DESC").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}).
+				AddRow(int64(10), sessionID, orgID, &threadID, nil, 4, "assistant", "latest", nil, nil, nil, nil, "", now),
+		)
+	mock.ExpectQuery("SELECT .+ max\\(id\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"live_edge_message_id", "latest_assistant_message_id"}).
+			AddRow(int64(10), int64(10)))
+
+	window, err := store.ListWindowByThread(context.Background(), orgID, threadID, SessionMessageWindowOptions{
+		Position:        SessionMessageWindowPositionAround,
+		AnchorMessageID: 999,
+		Limit:           3,
+	})
+	require.NoError(t, err, "missing anchor fallback should not fail")
+	require.False(t, window.AnchorFound, "fallback should report that anchor was not found")
+	require.Equal(t, int64(999), window.AnchorMessageID, "fallback should echo the requested anchor id")
+	require.Equal(t, SessionMessageWindowPositionLatest, window.Position, "missing anchor should fall back to latest window")
+	require.Equal(t, []int64{10}, []int64{window.Messages[0].ID}, "fallback should return latest messages")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

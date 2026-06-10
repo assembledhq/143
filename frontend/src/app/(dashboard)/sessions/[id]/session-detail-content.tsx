@@ -119,10 +119,13 @@ import {
 } from "@/lib/session-pr-snapshot";
 import {
   readStoredSessionActiveThread,
+  readStoredSessionAnchorPosition,
   readStoredSessionScrollPosition,
   resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  type SessionAnchorPosition,
   type SessionScrollViewerScope,
+  writeStoredSessionAnchorPosition,
   writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
@@ -1989,8 +1992,8 @@ export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: Se
   return Array.from(turns).sort((a, b) => a - b);
 }
 
-function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
-  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
+function threadMessageWindowQueryKey(sessionId: string, threadId: string, anchorMessageId?: number | null): readonly unknown[] {
+  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window", anchorMessageId ?? "latest"];
 }
 
 function threadLogsWindowQueryKey(sessionId: string, threadId: string, visibleTurnsKey: string): readonly unknown[] {
@@ -2040,9 +2043,12 @@ function ChatPanel({
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
+  const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<ThreadMessageWindowResponse[]>([]);
+  const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
+  const initialAnchorCancelledRef = useRef(false);
   const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
@@ -2055,6 +2061,10 @@ function ChatPanel({
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
+  const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
+    if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;
+    return readStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
+  }, [activeThreadId, sessionId, viewerScope]);
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
@@ -2064,24 +2074,38 @@ function ChatPanel({
   });
 
   const threadMessagesQuery = useInfiniteQuery({
-    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages", "window"],
+    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null) : ["session", sessionId, "thread", "none", "messages", "window"],
     queryFn: ({ pageParam }) =>
       api.sessions.getThreadMessageWindow(
         sessionId,
         activeThreadId!,
         pageParam
           ? { before: pageParam as string, limit: THREAD_MESSAGE_WINDOW_LIMIT }
-          : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+          : initialThreadAnchorPosition
+            ? { position: "around", anchorMessageId: initialThreadAnchorPosition.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
-    enabled: !!activeThreadId,
+    enabled: !!activeThreadId && !!viewerScope,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessages = useMemo(() => {
-    return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
-  }, [threadMessagesQuery.data?.pages]);
+    const messages = flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
+    const seen = new Set(messages.map((message) => message.id));
+    for (const page of newerThreadMessagePages) {
+      for (const message of page.data ?? []) {
+        if (seen.has(message.id)) continue;
+        messages.push(message);
+        seen.add(message.id);
+      }
+    }
+    return messages;
+  }, [newerThreadMessagePages, threadMessagesQuery.data?.pages]);
+  const newestThreadWindow = newerThreadMessagePages.at(-1) ?? threadMessagesQuery.data?.pages[0];
+  const hasNewerThreadMessages = !!activeThreadId && !!newestThreadWindow?.meta.has_newer;
+  const nextNewerThreadCursor = newestThreadWindow?.meta.next_newer_cursor;
   const visibleThreadLogTurns = useMemo(
     () => getVisibleThreadLogTurns(threadMessages, activeThread),
     [activeThread, threadMessages],
@@ -2287,15 +2311,54 @@ function ChatPanel({
     writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
   }, [activeThreadId, sessionId, viewerScope]);
 
+  const findFirstVisibleMessageAnchor = useCallback((el: HTMLDivElement) => {
+    const containerTop = el.getBoundingClientRect().top;
+    const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-session-message-id]"));
+    for (const node of nodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom < containerTop) continue;
+      const rawID = node.dataset.sessionMessageId;
+      const id = rawID ? Number(rawID) : NaN;
+      if (!Number.isInteger(id) || id <= 0) continue;
+      return {
+        anchor: { kind: "message" as const, id },
+        offsetPx: Math.max(0, containerTop - rect.top),
+        scrollTopFallback: el.scrollTop,
+      };
+    }
+    return null;
+  }, []);
+
+  const persistCurrentScrollPosition = useCallback((el: HTMLDivElement) => {
+    if (typeof window === "undefined" || !viewerScope) return;
+    const anchorPosition = activeThreadId ? findFirstVisibleMessageAnchor(el) : null;
+    if (anchorPosition) {
+      writeStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, anchorPosition, activeThreadId);
+      return;
+    }
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, el.scrollTop, activeThreadId);
+  }, [activeThreadId, findFirstVisibleMessageAnchor, sessionId, viewerScope]);
+
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
       clearTimeout(saveScrollTimerRef.current);
     }
     saveScrollTimerRef.current = setTimeout(() => {
-      persistScrollPosition(scrollTop);
+      const el = scrollRef.current;
+      if (el) {
+        persistCurrentScrollPosition(el);
+      } else {
+        persistScrollPosition(scrollTop);
+      }
       saveScrollTimerRef.current = null;
     }, SCROLL_POSITION_SAVE_DEBOUNCE_MS);
-  }, [persistScrollPosition]);
+  }, [persistCurrentScrollPosition, persistScrollPosition]);
+
+  const cancelPendingInitialAnchorRestore = useCallback(() => {
+    if (initialAnchorAppliedRef.current) return;
+    initialAnchorCancelledRef.current = true;
+    initialAnchorAppliedRef.current = true;
+  }, []);
 
   const syncScrollState = useCallback((el: HTMLDivElement) => {
     isNearBottomRef.current = isNearBottom(el);
@@ -2310,9 +2373,37 @@ function ChatPanel({
   }, []);
 
   const scrollToLiveEdge = useCallback(() => {
+    cancelPendingInitialAnchorRestore();
+    if (activeThreadId && hasNewerThreadMessages) {
+      setIsFetchingNewerThreadMessages(true);
+      void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+        position: "latest",
+        limit: THREAD_MESSAGE_WINDOW_LIMIT,
+      }).then((window) => {
+        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
+          threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null),
+          { pages: [window], pageParams: [undefined] },
+        );
+        setNewerThreadMessagePages([]);
+        requestAnimationFrame(scrollToLiveEdgePosition);
+      }).catch((error) => {
+        toast.error(error instanceof ApiError ? error.message : "Failed to load latest messages");
+      }).finally(() => {
+        setIsFetchingNewerThreadMessages(false);
+      });
+      return;
+    }
     scrollToLiveEdgePosition();
+    const el = scrollRef.current;
+    if (el) {
+      if (saveScrollTimerRef.current) {
+        clearTimeout(saveScrollTimerRef.current);
+        saveScrollTimerRef.current = null;
+      }
+      persistScrollPosition(el.scrollTop);
+    }
     setShowJumpToLatest(false);
-  }, [scrollToLiveEdgePosition]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, initialThreadAnchorPosition?.anchor.id, persistScrollPosition, queryClient, scrollToLiveEdgePosition, sessionId]);
 
   const focusTranscript = useCallback(() => {
     scrollRef.current?.focus({ preventScroll: true });
@@ -2360,6 +2451,21 @@ function ChatPanel({
     void threadMessagesQuery.fetchNextPage();
   }, [threadMessagesQuery]);
 
+  const loadNewerThreadMessages = useCallback(() => {
+    if (!activeThreadId || !nextNewerThreadCursor || isFetchingNewerThreadMessages) return;
+    setIsFetchingNewerThreadMessages(true);
+    void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+      after: nextNewerThreadCursor,
+      limit: THREAD_MESSAGE_WINDOW_LIMIT,
+    }).then((window) => {
+      setNewerThreadMessagePages((pages) => [...pages, window]);
+    }).catch((error) => {
+      toast.error(error instanceof ApiError ? error.message : "Failed to load newer messages");
+    }).finally(() => {
+      setIsFetchingNewerThreadMessages(false);
+    });
+  }, [activeThreadId, isFetchingNewerThreadMessages, nextNewerThreadCursor, sessionId]);
+
   useLayoutEffect(() => {
     const snapshot = olderMessagesPrependSnapshotRef.current;
     const el = scrollRef.current;
@@ -2374,6 +2480,7 @@ function ChatPanel({
     (_entry: TimelineEntry, index: number) =>
       ({
         "data-session-entry-index": index,
+        ...(_entry.kind === "message" ? { "data-session-message-id": _entry.data.id } : {}),
       }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>,
     [],
   );
@@ -2591,12 +2698,21 @@ function ChatPanel({
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (hasLoadedTimelineInputs) {
+      cancelPendingInitialAnchorRestore();
+    }
     syncScrollState(el);
+    if (activeThreadId && isNearBottom(el) && hasNewerThreadMessages && !isFetchingNewerThreadMessages) {
+      loadNewerThreadMessages();
+    }
     schedulePersistScrollPosition(el.scrollTop);
-  }, [schedulePersistScrollPosition, syncScrollState]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasLoadedTimelineInputs, hasNewerThreadMessages, isFetchingNewerThreadMessages, loadNewerThreadMessages, schedulePersistScrollPosition, syncScrollState]);
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
+    initialAnchorCancelledRef.current = false;
+    setNewerThreadMessagePages([]);
+    setIsFetchingNewerThreadMessages(false);
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -2612,13 +2728,37 @@ function ChatPanel({
   }, [persistScrollPosition]);
 
   useEffect(() => {
-    if (!hasLoadedTimelineInputs || initialAnchorAppliedRef.current || !viewerScope) return;
+    if (
+      !hasLoadedTimelineInputs ||
+      initialAnchorAppliedRef.current ||
+      initialAnchorCancelledRef.current ||
+      !viewerScope
+    ) return;
 
     const el = scrollRef.current;
     if (!el) return;
 
+    const firstThreadWindow = threadMessagesQuery.data?.pages[0];
+    if (
+      activeThreadId &&
+      initialThreadAnchorPosition &&
+      firstThreadWindow?.meta.anchor_found
+    ) {
+      const target = el.querySelector<HTMLElement>(`[data-session-message-id="${initialThreadAnchorPosition.anchor.id}"]`);
+      if (target) {
+        el.scrollTop = target.offsetTop + initialThreadAnchorPosition.offsetPx;
+        syncScrollState(el);
+        initialAnchorAppliedRef.current = true;
+        return;
+      }
+    }
+
+    const ignoreStoredScrollTop =
+      activeThreadId &&
+      !!initialThreadAnchorPosition &&
+      firstThreadWindow?.meta.anchor_found === false;
     const storedScrollTop =
-      typeof window === "undefined"
+      ignoreStoredScrollTop || typeof window === "undefined"
         ? null
         : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
     const anchor = resolveInitialSessionAnchor({
@@ -2656,7 +2796,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2742,6 +2882,24 @@ function ChatPanel({
               onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
               getEntryContainerProps={getEntryContainerProps}
             />
+            {activeThreadId && hasNewerThreadMessages ? (
+              <div className="flex justify-center pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadNewerThreadMessages}
+                  disabled={isFetchingNewerThreadMessages}
+                >
+                  {isFetchingNewerThreadMessages ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowDown className="h-4 w-4" />
+                  )}
+                  Load newer
+                </Button>
+              </div>
+            ) : null}
           </>
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (

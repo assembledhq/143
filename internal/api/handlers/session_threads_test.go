@@ -1651,6 +1651,7 @@ func TestSessionThreadHandler_GetThreadMessagesWindow(t *testing.T) {
 			HasOlder:                 true,
 			LatestAssistantMessageID: 21,
 			LiveEdgeMessageID:        21,
+			Position:                 db.SessionMessageWindowPositionLatest,
 		}, nil
 	}
 
@@ -1670,10 +1671,209 @@ func TestSessionThreadHandler_GetThreadMessagesWindow(t *testing.T) {
 	require.Equal(t, models.ThreadMessageWindowMeta{
 		NextOlderCursor:          "21",
 		HasOlder:                 true,
+		HasNewer:                 false,
 		LatestAssistantMessageID: 21,
 		LiveEdgeMessageID:        21,
+		WindowPosition:           "latest",
 		ThreadStatus:             string(models.ThreadStatusIdle),
 	}, resp.Meta, "response should include cursor and anchor metadata")
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow_After(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should use the route thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+		require.Equal(t, orgID, gotOrgID, "message window should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "message window should use the route thread")
+		require.Equal(t, int64(30), opts.AfterID, "message window should pass the after cursor")
+		require.Equal(t, db.SessionMessageWindowPositionNewer, opts.Position, "message window should request a newer page")
+		require.Equal(t, 25, opts.Limit, "message window should pass the requested limit")
+		return db.SessionMessageWindow{
+			Messages: []models.SessionMessage{
+				{ID: 31, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleAssistant, Content: "newer", CreatedAt: now},
+			},
+			NextNewerCursor:          "31",
+			HasNewer:                 true,
+			LatestAssistantMessageID: 40,
+			LiveEdgeMessageID:        40,
+			Position:                 db.SessionMessageWindowPositionNewer,
+		}, nil
+	}
+
+	req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?after=30&limit=25", "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+	w := httptest.NewRecorder()
+
+	handler.GetThreadMessages(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "newer window request should return success")
+	var resp models.ThreadMessageWindowResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, int64(31), resp.Data[0].ID, "response should include the newer message")
+	require.Equal(t, models.ThreadMessageWindowMeta{
+		NextNewerCursor:          "31",
+		HasOlder:                 false,
+		HasNewer:                 true,
+		LatestAssistantMessageID: 40,
+		LiveEdgeMessageID:        40,
+		WindowPosition:           "newer",
+		ThreadStatus:             string(models.ThreadStatusIdle),
+	}, resp.Meta, "response should include newer cursor metadata")
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow_AroundAnchor(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should use the route thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+		require.Equal(t, orgID, gotOrgID, "message window should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "message window should use the route thread")
+		require.Equal(t, db.SessionMessageWindowPositionAround, opts.Position, "message window should request an anchor-centered window")
+		require.Equal(t, int64(456), opts.AnchorMessageID, "message window should pass the anchor message id")
+		require.Equal(t, 25, opts.Limit, "message window should pass the requested limit")
+		return db.SessionMessageWindow{
+			Messages: []models.SessionMessage{
+				{ID: 455, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleUser, Content: "older", CreatedAt: now.Add(-time.Minute)},
+				{ID: 456, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleAssistant, Content: "anchor", CreatedAt: now},
+				{ID: 457, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleUser, Content: "newer", CreatedAt: now.Add(time.Minute)},
+			},
+			NextOlderCursor:          "455",
+			HasOlder:                 true,
+			NextNewerCursor:          "457",
+			HasNewer:                 true,
+			AnchorMessageID:          456,
+			AnchorFound:              true,
+			LatestAssistantMessageID: 456,
+			LiveEdgeMessageID:        500,
+			Position:                 db.SessionMessageWindowPositionAround,
+		}, nil
+	}
+
+	req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?position=around&anchor_message_id=456&limit=25", "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+	w := httptest.NewRecorder()
+
+	handler.GetThreadMessages(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "around window request should return success")
+	var resp models.ThreadMessageWindowResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, []int64{455, 456, 457}, []int64{resp.Data[0].ID, resp.Data[1].ID, resp.Data[2].ID}, "response should preserve chronological anchor window")
+	require.Equal(t, models.ThreadMessageWindowMeta{
+		NextOlderCursor:          "455",
+		HasOlder:                 true,
+		NextNewerCursor:          "457",
+		HasNewer:                 true,
+		LatestAssistantMessageID: 456,
+		LiveEdgeMessageID:        500,
+		AnchorMessageID:          456,
+		AnchorFound:              true,
+		WindowPosition:           "around",
+		ThreadStatus:             string(models.ThreadStatusIdle),
+	}, resp.Meta, "response should include anchor and bidirectional cursor metadata")
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow_InvalidCursorCombinations(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+
+	cases := []struct {
+		name          string
+		query         string
+		expectedCode  int
+		expectedError string
+	}{
+		{
+			name:          "position=latest with before cursor",
+			query:         "position=latest&before=10",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "position=latest with after cursor",
+			query:         "position=latest&after=10",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "before and after combined",
+			query:         "before=5&after=10",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "around without anchor",
+			query:         "position=around",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "around with before cursor",
+			query:         "position=around&anchor_message_id=5&before=3",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?"+tc.query, "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+			w := httptest.NewRecorder()
+			handler.GetThreadMessages(w, req)
+			require.Equal(t, tc.expectedCode, w.Code, "invalid cursor combination should return error")
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			require.Equal(t, tc.expectedError, body.Error.Code, "error code should match")
+		})
+	}
 }
 
 func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
