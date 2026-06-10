@@ -570,4 +570,26 @@ describe("IntegrationsPage", () => {
       "Use the API project slug from CircleCI. OAuth projects usually look like gh/org/repo; GitHub App projects can use a circleci/... slug.",
     );
   });
+
+  it("helps users find Mezmo service keys and datasets while connecting", async () => {
+    integrationsListMock.mockResolvedValueOnce({ data: [], meta: {} });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Connect Mezmo" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Connect Mezmo" });
+    expect(dialog).toHaveTextContent("Open Mezmo, select the right organization, then go to Settings > Organization > API Keys. Create a service key there so agents can query production logs.");
+    expect(within(dialog).getByRole("link", { name: "Open Mezmo" })).toHaveAttribute(
+      "href",
+      "https://app.mezmo.com/",
+    );
+
+    await user.hover(within(dialog).getByRole("button", { name: "Where to find the Mezmo dataset" }));
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "In Mezmo Log Analysis, open Search, then use the dataset selector near the top of the log viewer. Copy that selected dataset name exactly. Leave blank to query across the default Mezmo scope.",
+    );
+  });
 });
