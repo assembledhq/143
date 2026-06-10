@@ -91,3 +91,77 @@ func (h *AuthHandler) createSignupOrg(
 	}
 	return sessionToken, nil
 }
+
+// createAutoJoinUser atomically creates an OAuth signup user as a member of
+// an existing org (matched via a verified auto-join email domain), records
+// the provider's email attestation, and issues the initial session token.
+// The domain-capture sibling of createSignupOrg: instead of minting a fresh
+// org, the new user lands directly in their team's workspace.
+//
+// Callers must have already established BOTH halves of the trust chain:
+// the org has DNS-verified the domain with auto-join enabled, and the OAuth
+// provider attests the user's ownership of the email (so MarkEmailVerified
+// inside the transaction is recording a fact, not granting one).
+//
+// The caller presets user.OrgID to the target org and user.Role to the
+// auto-join role (legacy users-table columns, same sunset note as
+// createSignupOrg); the GrantAtLeast below is the authoritative membership
+// write.
+func (h *AuthHandler) createAutoJoinUser(
+	ctx context.Context,
+	user *models.User,
+	createUser signupUserCreateFunc,
+) (string, error) {
+	if h.pool == nil {
+		return "", fmt.Errorf("auth handler pool is not configured")
+	}
+	if user == nil {
+		return "", fmt.Errorf("user is required")
+	}
+	if createUser == nil {
+		return "", fmt.Errorf("createUser callback is required")
+	}
+
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin auto-join signup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txUserStore := db.NewUserStore(tx)
+	if err := createUser(ctx, txUserStore, user); err != nil {
+		return "", fmt.Errorf("create auto-join user: %w", err)
+	}
+
+	// GrantAtLeast (not Insert): the user row is an upsert for OAuth
+	// providers, so an interrupted earlier signup attempt may already hold
+	// a membership row — never downgrade it.
+	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role)
+	if err != nil {
+		return "", fmt.Errorf("grant auto-join membership: %w", err)
+	}
+	user.Role = models.Role(effectiveRole)
+
+	if err := txUserStore.SetEmailVerification(ctx, user.ID, user.Email, true); err != nil {
+		return "", fmt.Errorf("mark auto-join email verified: %w", err)
+	}
+
+	// Pin the joined org as the user's active-org preference before the
+	// session row is written (persistSessionTx reads users.last_org_id).
+	// Without this the first session would lean on the oldest-membership
+	// fallback — correct for a single-membership user, but explicit is
+	// deterministic regardless of what memberships the upsert path found.
+	if err := txUserStore.UpdateLastOrgID(ctx, user.ID, &user.OrgID); err != nil {
+		return "", fmt.Errorf("set auto-join last org: %w", err)
+	}
+
+	sessionToken, err := h.persistSessionTx(ctx, tx, user)
+	if err != nil {
+		return "", fmt.Errorf("create auto-join session: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit auto-join signup transaction: %w", err)
+	}
+	return sessionToken, nil
+}

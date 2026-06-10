@@ -177,6 +177,10 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"pm_plans_status": toStrings(
 			PMPlanStatusExecuting, PMPlanStatusCompleted, PMPlanStatusFailed,
 		),
+		// organization_domain.go
+		"organization_domains_status": toStrings(
+			OrgDomainStatusPending, OrgDomainStatusVerified,
+		),
 	}
 
 	for _, c := range constraints {

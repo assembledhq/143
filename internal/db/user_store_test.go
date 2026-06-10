@@ -18,7 +18,7 @@ var userColumns = []string{
 }
 
 var userColumnsWithSettings = []string{
-	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
 }
 
 func ptrUUID(id uuid.UUID) *uuid.UUID {
@@ -284,7 +284,7 @@ func TestUserStore_GetByIDGlobalWithSettings(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, now, settings))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, now, settings))
 
 	u, err := store.GetByIDGlobalWithSettings(context.Background(), userID)
 	require.NoError(t, err, "GetByIDGlobalWithSettings should not return an error")
@@ -312,7 +312,7 @@ func TestUserStore_GetByIDGlobalWithSettings_InvalidSettings(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, now, []byte(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`)))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, now, []byte(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`)))
 
 	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
 	require.Error(t, err, "GetByIDGlobalWithSettings should reject invalid stored settings")
@@ -354,7 +354,7 @@ func TestUserStore_GetByIDGlobalWithSettings_ScanError(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, "not-a-time", []byte(`{}`)))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, "not-a-time", []byte(`{}`)))
 
 	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
 	require.Error(t, err, "GetByIDGlobalWithSettings should surface scan failures")

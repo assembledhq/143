@@ -73,6 +73,10 @@ export const queryKeys = {
   },
   team: {
     members: ["team", "members"] as const,
+    domains: ["team", "domains"] as const,
+  },
+  organizations: {
+    joinable: ["organizations", "joinable"] as const,
   },
   auth: {
     memberships: ["auth", "memberships"] as const,

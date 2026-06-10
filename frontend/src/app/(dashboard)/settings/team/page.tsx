@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { VerifiedDomainsSection } from "@/components/settings/verified-domains-section";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { roleLabel } from "@/lib/roles";
@@ -511,6 +512,9 @@ export default function TeamSettingsPage() {
           </Card>
         </section>
       )}
+
+      {/* Verified domains (domain capture / auto-join) */}
+      {canManageTeam && <VerifiedDomainsSection />}
 
       {/* Invite Member Dialog */}
       {canManageTeam && (
