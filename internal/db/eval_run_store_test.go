@@ -15,6 +15,7 @@ import (
 
 var evalRunTestColumns = []string{
 	"id", "task_id", "org_id", "batch_id",
+	"session_id", "thread_id",
 	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
@@ -26,6 +27,7 @@ var evalRunTestColumns = []string{
 func newEvalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		runID, taskID, orgID, nil,
+		nil, nil,
 		nil, "claude-sonnet-4-6", nil, nil,
 		nil, json.RawMessage(`{}`),
 		nil, nil, nil,
@@ -33,6 +35,13 @@ func newEvalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} 
 		"pending", nil, nil,
 		nil, nil, nil, now,
 	}
+}
+
+func newSessionBackedEvalRunRow(runID, taskID, orgID, sessionID, threadID uuid.UUID, now time.Time) []interface{} {
+	row := newEvalRunRow(runID, taskID, orgID, now)
+	row[4] = &sessionID
+	row[5] = &threadID
+	return row
 }
 
 func TestEvalRunStore_Create(t *testing.T) {
@@ -63,6 +72,66 @@ func TestEvalRunStore_Create(t *testing.T) {
 	require.NoError(t, err, "Create should not return an error")
 	require.Equal(t, runID, run.ID, "Create should set the run ID")
 	require.Equal(t, models.EvalRunStatusPending, run.Status, "new run should be pending")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalRunStore_CreateWithSessionThread(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	taskID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("INSERT INTO eval_runs").
+		WithArgs(anyArgs(11)...).
+		WillReturnRows(pgxmock.NewRows(evalRunTestColumns).AddRow(newSessionBackedEvalRunRow(runID, taskID, orgID, sessionID, threadID, now)...))
+
+	store := NewEvalRunStore(mock)
+	run := &models.EvalRun{
+		TaskID:           taskID,
+		OrgID:            orgID,
+		SessionID:        &sessionID,
+		ThreadID:         &threadID,
+		Model:            "codex",
+		ContextOverrides: json.RawMessage(`{}`),
+	}
+
+	err = store.Create(context.Background(), run)
+	require.NoError(t, err, "Create should insert a session-backed eval run")
+	require.Equal(t, sessionID, *run.SessionID, "Create should preserve the linked session ID")
+	require.Equal(t, threadID, *run.ThreadID, "Create should preserve the linked thread ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalRunStore_GetBySessionID(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	taskID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(evalRunTestColumns).AddRow(newSessionBackedEvalRunRow(runID, taskID, orgID, sessionID, uuid.New(), now)...))
+
+	store := NewEvalRunStore(mock)
+	run, err := store.GetBySessionID(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetBySessionID should return the eval run linked to the session")
+	require.Equal(t, runID, run.ID, "GetBySessionID should scan the expected eval run")
+	require.Equal(t, sessionID, *run.SessionID, "GetBySessionID should preserve the lookup session ID")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -187,6 +256,29 @@ func TestEvalRunStore_UpdateResult(t *testing.T) {
 
 	err = store.UpdateResult(context.Background(), orgID, runID, result)
 	require.NoError(t, err, "UpdateResult should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalRunStore_UpdatePostSessionArtifacts(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	diff := "diff --git a/app.go b/app.go"
+	trace := json.RawMessage(`{"session_id":"s1"}`)
+	manifest := json.RawMessage(`{"base_commit_sha":"abc123"}`)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE eval_runs SET").
+		WithArgs(models.EvalRunStatusGrading, &diff, trace, manifest, runID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	store := NewEvalRunStore(mock)
+	err = store.UpdatePostSessionArtifacts(context.Background(), orgID, runID, &diff, trace, manifest)
+	require.NoError(t, err, "UpdatePostSessionArtifacts should move the run into grading with session artifacts")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -330,7 +422,7 @@ func TestEvalBatchStore_CompleteBatchIfDone(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mock.ExpectExec("UPDATE eval_batches SET status").
+	mock.ExpectExec("status IN \\('pending', 'running', 'grading'\\)").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
