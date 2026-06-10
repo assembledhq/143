@@ -38,6 +38,8 @@ interface ReviewDiffViewProps {
   /** Search query for filtering diff content */
   diffSearchQuery: string;
   onDiffSearchChange: (q: string) => void;
+  isFullScreen?: boolean;
+  onToggleFullScreen?: () => void;
 }
 
 export const ReviewDiffView = memo(function ReviewDiffView({
@@ -59,6 +61,8 @@ export const ReviewDiffView = memo(function ReviewDiffView({
   isMobile = false,
   onOpenFileList,
   onOpenComposer,
+  isFullScreen = false,
+  onToggleFullScreen,
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
   const skipNextScrollToFileRef = useRef(false);
@@ -101,12 +105,18 @@ export const ReviewDiffView = memo(function ReviewDiffView({
       }
       if (!explorerMode && !activeCommentLine && !showKeyboardHelp) {
         e.preventDefault();
-        onBack();
+        // Full screen is an extra layer on top of review mode, so Escape
+        // peels it off first; a second Escape exits review entirely.
+        if (isFullScreen && onToggleFullScreen) {
+          onToggleFullScreen();
+        } else {
+          onBack();
+        }
       }
     }
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [explorerMode, activeCommentLine, showKeyboardHelp, onBack]);
+  }, [explorerMode, activeCommentLine, showKeyboardHelp, onBack, isFullScreen, onToggleFullScreen]);
 
   const handleViewModeChange = useCallback((mode: ViewMode) => {
     if (isMobile) return;
@@ -268,6 +278,8 @@ export const ReviewDiffView = memo(function ReviewDiffView({
           onViewModeChange={handleViewModeChange}
           isMobile={isMobile}
           mobileChromeCollapsed={mobileChromeCollapsed}
+          isFullScreen={isFullScreen}
+          onToggleFullScreen={isMobile ? undefined : onToggleFullScreen}
         />
         <div className="flex-1 flex items-center justify-center py-12">
           <div className="text-center space-y-2 max-w-[280px]">
@@ -303,6 +315,8 @@ export const ReviewDiffView = memo(function ReviewDiffView({
         canGoPrev={isMobile && activeFileIndex > 0}
         canGoNext={isMobile && activeFileIndex < files.length - 1}
         mobileChromeCollapsed={mobileChromeCollapsed}
+        isFullScreen={isFullScreen}
+        onToggleFullScreen={isMobile ? undefined : onToggleFullScreen}
       />
       <DiffPane
         ref={diffPaneRef}
