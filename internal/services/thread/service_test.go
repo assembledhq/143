@@ -173,8 +173,9 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
-	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadFn            func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn       func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadLatestTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
@@ -187,6 +188,13 @@ func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UU
 func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
 	if m.listByThreadTurnsFn != nil {
 		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+	if m.listByThreadLatestTurnsFn != nil {
+		return m.listByThreadLatestTurnsFn(ctx, orgID, threadID, latestTurns)
 	}
 	return nil, nil
 }
@@ -3223,6 +3231,38 @@ func TestService_GetLogs(t *testing.T) {
 			expectLen: 1,
 		},
 		{
+			name: "success with latest turns window",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "latest-turns log lookup should preserve org scope")
+					require.Equal(t, threadID, gotThreadID, "latest-turns log lookup should preserve thread scope")
+					require.Equal(t, 50, latestTurns, "latest-turns log lookup should pass the requested window")
+					return []models.SessionLog{{ID: 9}}, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
+			name: "turn filter wins over latest turns",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadTurnsFn = func(_ context.Context, _, _ uuid.UUID, turns []int) ([]models.SessionLog, error) {
+					require.Equal(t, []int{5, 6}, turns, "explicit turns should take precedence")
+					return []models.SessionLog{{ID: 6}}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, _, _ uuid.UUID, _ int) ([]models.SessionLog, error) {
+					t.Fatal("latest-turns lookup must not run when explicit turn numbers are provided")
+					return nil, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
 			name: "thread not found",
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
@@ -3273,6 +3313,13 @@ func TestService_GetLogs(t *testing.T) {
 			opts := db.SessionLogFilterOptions{}
 			if tt.name == "success with turn filter" {
 				opts.TurnNumbers = []int{5, 6}
+			}
+			if tt.name == "success with latest turns window" {
+				opts.LatestTurns = 50
+			}
+			if tt.name == "turn filter wins over latest turns" {
+				opts.TurnNumbers = []int{5, 6}
+				opts.LatestTurns = 50
 			}
 			logs, err := svc.GetLogs(context.Background(), orgID, sessionID, threadID, opts)
 			if tt.expectErr != nil {
