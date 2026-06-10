@@ -40,12 +40,12 @@ const PROVIDER_OPTIONS = ORG_PROVIDER_OPTIONS;
 function authStatusTone(status: CodingAuth["status"]) {
   switch (status) {
     case "healthy":
-      return "text-emerald-700";
+      return "text-success";
     case "rate_limited":
-      return "text-amber-700";
+      return "text-warning";
     case "needs_reauth":
     case "invalid":
-      return "text-red-700";
+      return "text-destructive";
     default:
       return "text-slate-700";
   }

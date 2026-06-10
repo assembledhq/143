@@ -115,13 +115,13 @@ function SubscriptionRow({
     sub.status === "active"
       ? {
           label: "Active",
-          className: "border-green-600 text-green-600",
+          className: "border-success text-success",
           icon: CheckCircle2,
         }
       : sub.status === "pending_auth"
         ? {
             label: "Pending auth",
-            className: "border-amber-600 text-amber-700",
+            className: "border-warning text-warning",
             icon: Clock3,
           }
         : {

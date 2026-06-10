@@ -124,7 +124,7 @@ export default function BatchDetailPage() {
             description={`${batch.task_count} tasks × ${configLabels.length} configs = ${batch.run_count} runs`}
             action={
               isRunning ? (
-                <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400">
+                <div className="flex items-center gap-2 text-info">
                   <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                   <span className="text-xs">Running...</span>
                 </div>
@@ -147,7 +147,7 @@ export default function BatchDetailPage() {
                     <tr className="border-b border-border bg-muted/30">
                       <th className="text-left px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">Task</th>
                       {configLabels.map((label) => (
-                        <th key={label} className="text-center px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider min-w-[120px]">
+                        <th key={label} className="text-right px-4 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider min-w-[120px]">
                           {label}
                         </th>
                       ))}
@@ -164,7 +164,7 @@ export default function BatchDetailPage() {
                         {configLabels.map((label) => {
                           const run = matrix.get(`${taskId}:${label}`);
                           return (
-                            <td key={label} className="text-center px-4 py-3">
+                            <td key={label} className="text-right px-4 py-3 tabular-nums">
                               {run ? <ScoreCell run={run} /> : <span className="text-muted-foreground">-</span>}
                             </td>
                           );
@@ -181,7 +181,7 @@ export default function BatchDetailPage() {
                           .map((r) => r.final_score!);
                         const avg = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
                         return (
-                          <td key={label} className="text-center px-4 py-3">
+                          <td key={label} className="text-right px-4 py-3 tabular-nums">
                             {avg != null ? `${(avg * 100).toFixed(0)}%` : "-"}
                           </td>
                         );
@@ -196,7 +196,7 @@ export default function BatchDetailPage() {
                           .filter((r): r is EvalRun => r != null && r.passed != null);
                         const passed = runs.filter((r) => r.passed).length;
                         return (
-                          <td key={label} className="text-center px-4 py-3 text-xs">
+                          <td key={label} className="text-right px-4 py-3 text-xs tabular-nums">
                             {runs.length > 0 ? `${passed}/${runs.length}` : "-"}
                           </td>
                         );
@@ -223,14 +223,12 @@ function ScoreCell({ run }: { run: EvalRun }) {
     );
   }
   if (run.status === "failed") {
-    return <span className="text-red-600 dark:text-red-400 text-xs">Error</span>;
+    return <span className="text-destructive text-xs">Error</span>;
   }
   if (run.final_score == null) return <span className="text-muted-foreground">-</span>;
 
   const pct = (run.final_score * 100).toFixed(0);
-  const color = run.passed
-    ? "text-emerald-600 dark:text-emerald-400"
-    : "text-red-600 dark:text-red-400";
+  const color = run.passed ? "text-success" : "text-destructive";
 
   return <span className={`font-medium ${color}`}>{pct}%</span>;
 }
@@ -256,25 +254,25 @@ function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
     <div className="grid gap-4 md:grid-cols-4">
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-semibold">{completedCount}/{batch.run_count}</p>
+          <p className="text-2xl font-semibold tabular-nums">{completedCount}/{batch.run_count}</p>
           <p className="text-xs text-muted-foreground">Runs completed</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-semibold">{avgScore != null ? `${(avgScore * 100).toFixed(0)}%` : "-"}</p>
+          <p className="text-2xl font-semibold tabular-nums">{avgScore != null ? `${(avgScore * 100).toFixed(0)}%` : "-"}</p>
           <p className="text-xs text-muted-foreground">Average score</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-semibold text-emerald-600 dark:text-emerald-400">{passedCount}</p>
+          <p className="text-2xl font-semibold tabular-nums text-success">{passedCount}</p>
           <p className="text-xs text-muted-foreground">Passed</p>
         </CardContent>
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
-          <p className="text-2xl font-semibold text-red-600 dark:text-red-400">{failedCount}</p>
+          <p className="text-2xl font-semibold tabular-nums text-destructive">{failedCount}</p>
           <p className="text-xs text-muted-foreground">Errors</p>
         </CardContent>
       </Card>

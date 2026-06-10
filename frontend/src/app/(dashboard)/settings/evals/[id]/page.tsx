@@ -150,11 +150,11 @@ export default function EvalTaskDetailPage() {
 
         {/* Snapshot broken warning */}
         {task.snapshot_broken && (
-          <div className="flex items-center gap-3 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 dark:border-orange-800 dark:bg-orange-950/30">
-            <AlertTriangle className="h-4 w-4 text-orange-600 dark:text-orange-400 shrink-0" />
+          <div className="flex items-center gap-3 rounded-lg border border-attention/30 bg-attention/10 px-4 py-3">
+            <AlertTriangle className="h-4 w-4 text-attention shrink-0" />
             <div>
-              <p className="text-xs font-medium text-orange-800 dark:text-orange-300">Snapshot broken</p>
-              <p className="text-xs text-orange-700 dark:text-orange-400">
+              <p className="text-xs font-medium text-attention">Snapshot broken</p>
+              <p className="text-xs text-attention">
                 The base commit ({task.base_commit_sha.slice(0, 8)}) is no longer reachable. This usually happens after a force-push. Runs for this task will fail.
               </p>
             </div>
@@ -239,7 +239,7 @@ export default function EvalTaskDetailPage() {
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">{criterion.notes}</p>
                   </div>
-                  <span className="text-xs text-muted-foreground shrink-0 ml-4">
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0 ml-4">
                     Weight: {criterion.weight}
                   </span>
                 </div>
@@ -292,22 +292,22 @@ function EvalRunRow({ run }: { run: EvalRun }) {
         </span>
       </span>
       <span className="flex-1 text-xs font-mono">{run.model}</span>
-      <span className="w-20 text-right text-xs">
+      <span className="w-20 text-right text-xs tabular-nums">
         {run.final_score != null ? `${(run.final_score * 100).toFixed(0)}%` : "-"}
       </span>
       <span className="w-16 text-right text-xs">
         {run.passed != null ? (
           run.passed ? (
-            <span className="text-emerald-600 dark:text-emerald-400">Pass</span>
+            <span className="text-success">Pass</span>
           ) : (
-            <span className="text-red-600 dark:text-red-400">Fail</span>
+            <span className="text-destructive">Fail</span>
           )
         ) : "-"}
       </span>
-      <span className="w-24 text-right text-xs text-muted-foreground">
+      <span className="w-24 text-right text-xs text-muted-foreground tabular-nums">
         {run.duration_seconds != null ? `${run.duration_seconds}s` : "-"}
       </span>
-      <span className="w-28 text-right text-xs text-muted-foreground">
+      <span className="w-28 text-right text-xs text-muted-foreground tabular-nums">
         {run.started_at ? new Date(run.started_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "-"}
       </span>
     </div>

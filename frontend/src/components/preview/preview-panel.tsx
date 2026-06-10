@@ -119,9 +119,9 @@ function getStartupPhaseRailLayout(
 function statusColor(status: PreviewStatus): string {
   switch (status) {
     case "ready":
-      return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/20";
+      return "bg-success/15 text-success border-success/20";
     case "partially_ready":
-      return "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20";
+      return "bg-warning/15 text-warning border-warning/20";
     case "failed":
     case "unhealthy":
       return "bg-destructive/15 text-destructive border-destructive/20";
@@ -274,7 +274,7 @@ function buildStartupChecklist(
 function startupStepIcon(state: StartupChecklistStepState) {
   switch (state) {
     case "complete":
-      return <CheckCircle2 className="size-3.5 text-emerald-500" />;
+      return <CheckCircle2 className="size-3.5 text-success" />;
     case "active":
       return <Loader2 className="size-3.5 animate-spin text-primary" />;
     case "failed":
@@ -1010,7 +1010,7 @@ export function PreviewPanel({
               className={cn(
                 "flex flex-col gap-3 rounded-md border px-2.5 py-2 text-xs sm:flex-row sm:items-center sm:justify-between",
                 isPreviewOutOfDate
-                  ? "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                  ? "border-warning/25 bg-warning/10 text-warning"
                   : "border-border bg-muted/40 text-muted-foreground",
               )}
             >
@@ -1153,7 +1153,7 @@ export function PreviewPanel({
                         step.state === "active" &&
                           "border-primary/30 text-foreground shadow-sm",
                         step.state === "complete" &&
-                          "text-emerald-600 dark:text-emerald-400",
+                          "text-success",
                         step.state === "failed" &&
                           "border-destructive/30 text-destructive",
                       )}
@@ -1203,7 +1203,7 @@ export function PreviewPanel({
                   onClick={() => copyLogs("preview", visiblePreviewRuntimeLogs)}
                 >
                   {copiedLogTarget === "preview" ? (
-                    <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                    <Check className="size-3.5 text-success" aria-hidden="true" />
                   ) : (
                     <Copy className="size-3.5" aria-hidden="true" />
                   )}
@@ -1302,7 +1302,7 @@ export function PreviewPanel({
                       onClick={() => copyLogs("error", visibleStartupErrorLogs)}
                     >
                       {copiedLogTarget === "error" ? (
-                        <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                        <Check className="size-3.5 text-success" aria-hidden="true" />
                       ) : (
                         <Copy className="size-3.5" aria-hidden="true" />
                       )}

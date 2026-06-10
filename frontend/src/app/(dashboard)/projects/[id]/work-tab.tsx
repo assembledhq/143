@@ -50,9 +50,9 @@ function BoardSection({
 
   const columns: { key: string; label: string; statuses: string[]; accent: string }[] = [
     { key: "todo", label: "To do", statuses: ["pending", "blocked"], accent: "border-t-gray-400" },
-    { key: "in_progress", label: "In progress", statuses: ["running", "delegated"], accent: "border-t-blue-500" },
-    { key: "done", label: "Done", statuses: ["completed"], accent: "border-t-green-500" },
-    { key: "needs_attention", label: "Needs attention", statuses: ["failed", "skipped", "cancelled"], accent: "border-t-red-500" },
+    { key: "in_progress", label: "In progress", statuses: ["running", "delegated"], accent: "border-t-info" },
+    { key: "done", label: "Done", statuses: ["completed"], accent: "border-t-success" },
+    { key: "needs_attention", label: "Needs attention", statuses: ["failed", "skipped", "cancelled"], accent: "border-t-destructive" },
   ];
 
   return (
@@ -103,7 +103,7 @@ function BoardSection({
                       <Card key={task.id} className="shadow-sm">
                         <CardContent className="p-3">
                           <div className="flex items-start gap-2">
-                            <StatusIcon className={`h-3.5 w-3.5 mt-0.5 flex-shrink-0 ${task.status === "running" ? "animate-spin text-blue-500" : task.status === "completed" ? "text-green-500" : task.status === "failed" ? "text-red-500" : "text-gray-400"}`} />
+                            <StatusIcon className={`h-3.5 w-3.5 mt-0.5 flex-shrink-0 ${task.status === "running" ? "animate-spin text-info" : task.status === "completed" ? "text-success" : task.status === "failed" ? "text-destructive" : "text-gray-400"}`} />
                             <div className="min-w-0 flex-1">
                               <p className="text-xs font-medium truncate">{task.title}</p>
                               {task.description && (
@@ -199,8 +199,8 @@ function TimelineSection({ cycles }: { cycles: ProjectCycle[] }) {
             <p className="text-xs mt-1">{cycle.analysis}</p>
             <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
               {cycle.progress_pct != null && <span>{cycle.progress_pct}% done</span>}
-              <span className="text-green-600">{cycle.tasks_completed_this_cycle} completed</span>
-              {cycle.tasks_failed_this_cycle > 0 && <span className="text-red-600">{cycle.tasks_failed_this_cycle} failed</span>}
+              <span className="text-success">{cycle.tasks_completed_this_cycle} completed</span>
+              {cycle.tasks_failed_this_cycle > 0 && <span className="text-destructive">{cycle.tasks_failed_this_cycle} failed</span>}
               {cycle.tasks_created_this_cycle > 0 && <span>{cycle.tasks_created_this_cycle} created</span>}
             </div>
           </div>

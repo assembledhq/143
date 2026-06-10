@@ -14,6 +14,24 @@ This file applies to the entire `frontend/` tree. Follow these patterns strictly
 
 ## Design System
 
+### Surface Hierarchy
+
+The shell is the **only** tinted structural surface; every other plane is canvas-colored and separates with borders, not background color. Dark mode inverts the values, never the roles. **Feature panes must not invent their own background color** — pick the surface that matches the pane's role:
+
+| Surface | Token | Role |
+|---------|-------|------|
+| Shell | `bg-sidebar` + `border-sidebar-border` | Global navigation only: app sidebar, rails, top bars. The single tinted plane. |
+| Panel | `bg-panel` | Secondary navigation: session list, file trees, any pane that lists/filters objects. Currently equal to canvas, but always use the token so panes stay declaratively distinct. |
+| Canvas | `bg-background` | Primary content — where the user reads and works (softly tinted near-white in light mode) |
+| Card | `bg-card` | Grouped content on the canvas — pure white, lifted by border + `shadow-sm`, never by a different gray |
+
+Rules that follow from the ramp:
+
+- Rows on a panel are transparent at rest; the **selected object** is a card-colored chip (`bg-card shadow-sm border-primary/25 ring-primary/10` + a `bg-primary` left bar). Hover uses a muted wash (`hover:bg-muted/50`), since panel and card share a color.
+- Active items in the shell are card-colored chips (`bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60`); inactive shell text is `text-sidebar-foreground/70`, hover restores `text-sidebar-foreground`.
+- `bg-muted` / `bg-muted/30` / `bg-muted/50` are for elements *within* a surface (badges, table headers, row hover inside cards) — never as a pane background.
+- Never use `bg-muted/30` or `bg-background` to build a sidebar/list pane; that's what `bg-panel` is for.
+
 ### Colors: Always Use Theme Tokens
 
 **NEVER use hardcoded Tailwind colors** like `text-gray-*`, `bg-white`, `border-gray-*` in dashboard pages. These break dark mode and create visual inconsistency. Always use semantic theme tokens:
@@ -31,7 +49,23 @@ This file applies to the entire `frontend/` tree. Follow these patterns strictly
 | Primary accent | `text-primary`, `bg-primary` | Active states, links |
 | Destructive | `text-destructive` | Errors, delete actions |
 
-**Exception:** Status-specific colors (blue for active, green for success, red for error, orange for warning) may use Tailwind color classes like `bg-blue-500` since these are semantic status colors, not arbitrary grays.
+### State Colors: Semantic Tokens Only
+
+Status meaning always goes through state tokens — **never raw Tailwind palette classes** (`bg-emerald-500`, `text-amber-700 dark:text-amber-400`, …). The tokens are theme-aware, so they need no `dark:` variants:
+
+| State | Token family | Meaning |
+|-------|--------------|---------|
+| Success | `success` | Completed, passed, connected, saved |
+| Warning | `warning` (amber) | Agent awaiting input, expiring, soft warnings |
+| Attention | `attention` (orange) | Needs human guidance, stronger warnings |
+| Info | `info` (blue) | Informational, processing |
+| Error | `destructive` | Failed, errors, destructive actions |
+| Running/active | `primary` | Working sessions, active selections |
+| PR/merged | `prMergedAccent` from `@/lib/pr-status-styles` | PR-related accents (violet) |
+
+Usage recipes: dot `bg-success`; text `text-success`; tinted badge `bg-success/10 text-success`; tinted banner `border-success/30 bg-success/10`; solid fill `bg-success text-success-foreground`. Same shapes for `warning`, `attention`, `info`, `destructive`.
+
+**Exception:** diff add/remove coloring in the code-review viewer keeps its conventional green/red palette classes — that is diff semantics, not status.
 
 ### Typography Scale
 
@@ -185,7 +219,7 @@ Use `Button` components with variant toggling for filter tabs. **NEVER** use cus
     >
       {tab.label}
       {tab.value === "active" && activeCount > 0 && (
-        <span className="ml-1.5 rounded-full bg-blue-500 text-white text-xs px-1.5 py-0.5 font-normal">
+        <span className="ml-1.5 rounded-full bg-primary text-primary-foreground text-xs px-1.5 py-0.5 font-normal">
           {activeCount}
         </span>
       )}
@@ -230,15 +264,15 @@ Key rules:
 
 ### Status Dots
 
-Active/running items use animated ping dots:
+Active/running items use animated ping dots (prefer the `StatusDot` component):
 ```tsx
 <span className="relative flex h-2 w-2">
-  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/60 opacity-75" />
+  <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
 </span>
 ```
 
-Static status dots: `<span className="inline-flex rounded-full h-2 w-2 bg-{color}-500" />`
+Static status dots use state tokens: `<span className="inline-flex rounded-full h-2 w-2 bg-success" />` (or `bg-warning`, `bg-attention`, `bg-info`, `bg-destructive`)
 
 ### Status Badges
 
@@ -393,17 +427,17 @@ Always use an `AlertDialog` confirmation for destructive actions (delete, remove
 
 ```tsx
 {/* In-progress */}
-<Card className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30">
+<Card className="border-info/30 bg-info/10">
   <CardContent className="flex items-center gap-3 py-3">
-    <RefreshCw className="h-4 w-4 animate-spin text-blue-600 dark:text-blue-400" />
-    <p className="text-[13px] text-blue-800 dark:text-blue-300">Processing...</p>
+    <RefreshCw className="h-4 w-4 animate-spin text-info" />
+    <p className="text-[13px] text-info">Processing...</p>
   </CardContent>
 </Card>
 
 {/* Success */}
-<div className="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3 dark:border-green-800 dark:bg-green-950/30">
-  <Check className="h-3.5 w-3.5 text-green-700 dark:text-green-400" />
-  <p className="text-[13px] text-green-800 dark:text-green-300">Success message.</p>
+<div className="flex items-center gap-3 rounded-lg border border-success/30 bg-success/10 px-4 py-3">
+  <Check className="h-3.5 w-3.5 text-success" />
+  <p className="text-[13px] text-success">Success message.</p>
 </div>
 
 {/* Error */}
@@ -412,7 +446,7 @@ Always use an `AlertDialog` confirmation for destructive actions (delete, remove
 </div>
 ```
 
-Always include `dark:` variants for banners that use **hardcoded Tailwind color classes** (e.g., `bg-blue-50`, `border-green-200`, `text-blue-800`). Semantic theme tokens like `bg-destructive/10`, `bg-primary/10`, `text-destructive` already adapt to dark mode automatically and do **not** need explicit `dark:` overrides.
+State tokens (`success`, `warning`, `attention`, `info`, `destructive`) adapt to dark mode automatically — banners built from them must **not** carry `dark:` overrides.
 
 ## Component Reference
 
@@ -520,7 +554,7 @@ Use the `tags` parameter to add searchable context (feature name, endpoint, comp
 5. **Missing PageContainer** — Every dashboard page must be wrapped in `PageContainer`.
 6. **Inconsistent container sizes** — Use `size="default"` for most pages and `size="wide"` for data-table-heavy pages. Never use `size="narrow"` for regular dashboard pages.
 7. **Inconsistent row padding** — Always `py-3.5 px-4` for list rows.
-8. **Missing dark mode** — Banners/alerts using hardcoded Tailwind colors (e.g., `bg-blue-50`, `border-green-200`) need `dark:` variant classes. Semantic tokens (`bg-destructive/10`, `bg-primary/10`) adapt automatically.
+8. **Raw palette status colors** — Never `bg-emerald-500`, `text-amber-700 dark:text-amber-400`, `bg-blue-50` for status meaning. Use the state tokens (`success`/`warning`/`attention`/`info`/`destructive`), which adapt to dark mode automatically.
 9. **Flat cards** — Cards should always have `shadow-sm` (provided by the Card component). Don't override with `shadow-none`.
 10. **Missing transitions** — Interactive elements (radio cards, buttons, rows) need `transition-all duration-150`.
 11. **Insufficient header-to-scroll-area spacing** — Fixed header sections above scrollable content must have at least `pb-3` (12px) bottom padding. Using `pb-2` or less causes the scroll area to overlap with the last header element (e.g., filter tabs, buttons), clipping their bottom border or active indicator.
