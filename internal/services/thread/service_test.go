@@ -3123,6 +3123,7 @@ func TestService_GetMessageWindow(t *testing.T) {
 					require.Equal(t, orgID, gotOrgID, "message window should be scoped by org")
 					require.Equal(t, threadID, gotThreadID, "message window should use requested thread")
 					require.Equal(t, int64(44), opts.BeforeID, "message window should pass cursor options")
+					require.Equal(t, db.SessionMessageWindowPositionOlder, opts.Position, "message window should pass requested position")
 					return db.SessionMessageWindow{
 						Messages:                 []models.SessionMessage{{ID: 43}},
 						NextOlderCursor:          "43",
@@ -3170,7 +3171,7 @@ func TestService_GetMessageWindow(t *testing.T) {
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
 
-			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{BeforeID: 44, Limit: 10})
+			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{Position: db.SessionMessageWindowPositionOlder, BeforeID: 44, Limit: 10})
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
 				return

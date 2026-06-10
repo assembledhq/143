@@ -22,6 +22,25 @@ interface StoredSessionScrollPosition {
   scrollTop: number;
 }
 
+interface StoredSessionAnchorPosition {
+  version: 2;
+  anchor: {
+    kind: "message";
+    id: number;
+  };
+  offset_px: number;
+  scroll_top_fallback: number;
+}
+
+export interface SessionAnchorPosition {
+  anchor: {
+    kind: "message";
+    id: number;
+  };
+  offsetPx: number;
+  scrollTopFallback: number;
+}
+
 interface StoredSessionActiveThread {
   version: 1;
   threadId: string;
@@ -69,7 +88,13 @@ export function readStoredSessionScrollPosition(
 
   if (rawValue.startsWith("{")) {
     try {
-      const parsed = JSON.parse(rawValue) as Partial<StoredSessionScrollPosition>;
+      const parsed = JSON.parse(rawValue) as Partial<StoredSessionScrollPosition | StoredSessionAnchorPosition>;
+      if (parsed.version === 2) {
+        if (!Number.isFinite(parsed.scroll_top_fallback) || parsed.scroll_top_fallback! < 0) {
+          return null;
+        }
+        return parsed.scroll_top_fallback!;
+      }
       if (parsed.version !== 1 || !Number.isFinite(parsed.scrollTop) || parsed.scrollTop! < 0) {
         return null;
       }
@@ -85,6 +110,42 @@ export function readStoredSessionScrollPosition(
   }
 
   return parsed;
+}
+
+export function readStoredSessionAnchorPosition(
+  storage: Pick<Storage, "getItem"> | ScrollStorageReader,
+  sessionId: string,
+  viewerScope: SessionScrollViewerScope,
+  threadId?: string | null,
+): SessionAnchorPosition | null {
+  const key = getSessionScrollStorageKey(sessionId, viewerScope, threadId);
+  const rawValue =
+    "getItem" in storage ? storage.getItem(key) : storage.get(key) ?? null;
+
+  if (!rawValue || !rawValue.startsWith("{")) return null;
+
+  try {
+    const parsed = JSON.parse(rawValue) as Partial<StoredSessionAnchorPosition>;
+    if (
+      parsed.version !== 2 ||
+      parsed.anchor?.kind !== "message" ||
+      !Number.isInteger(parsed.anchor.id) ||
+      parsed.anchor.id <= 0 ||
+      !Number.isFinite(parsed.offset_px) ||
+      parsed.offset_px! < 0 ||
+      !Number.isFinite(parsed.scroll_top_fallback) ||
+      parsed.scroll_top_fallback! < 0
+    ) {
+      return null;
+    }
+    return {
+      anchor: { kind: "message", id: parsed.anchor.id },
+      offsetPx: parsed.offset_px!,
+      scrollTopFallback: parsed.scroll_top_fallback!,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function writeStoredSessionScrollPosition(
@@ -103,6 +164,44 @@ export function writeStoredSessionScrollPosition(
     version: 1,
     scrollTop: Math.round(scrollTop),
   } satisfies StoredSessionScrollPosition);
+
+  if ("setItem" in storage) {
+    storage.setItem(key, normalizedValue);
+    return;
+  }
+
+  storage.set(key, normalizedValue);
+}
+
+export function writeStoredSessionAnchorPosition(
+  storage: Pick<Storage, "setItem"> | ScrollStorageWriter,
+  sessionId: string,
+  viewerScope: SessionScrollViewerScope,
+  position: SessionAnchorPosition,
+  threadId?: string | null,
+): void {
+  if (
+    position.anchor.kind !== "message" ||
+    !Number.isInteger(position.anchor.id) ||
+    position.anchor.id <= 0 ||
+    !Number.isFinite(position.offsetPx) ||
+    position.offsetPx < 0 ||
+    !Number.isFinite(position.scrollTopFallback) ||
+    position.scrollTopFallback < 0
+  ) {
+    return;
+  }
+
+  const key = getSessionScrollStorageKey(sessionId, viewerScope, threadId);
+  const normalizedValue = JSON.stringify({
+    version: 2,
+    anchor: {
+      kind: "message",
+      id: position.anchor.id,
+    },
+    offset_px: Math.round(position.offsetPx),
+    scroll_top_fallback: Math.round(position.scrollTopFallback),
+  } satisfies StoredSessionAnchorPosition);
 
   if ("setItem" in storage) {
     storage.setItem(key, normalizedValue);

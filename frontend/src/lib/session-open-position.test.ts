@@ -5,10 +5,12 @@ import {
   findLatestAssistantTurnStartIndex,
   getSessionActiveThreadStorageKey,
   getSessionScrollStorageKey,
+  readStoredSessionAnchorPosition,
   readStoredSessionActiveThread,
   readStoredSessionScrollPosition,
   resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  writeStoredSessionAnchorPosition,
   writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "./session-open-position";
@@ -109,6 +111,38 @@ describe("session-open-position", () => {
     const storage = new Map<string, string>([["session-scroll-position:org-1:user-1:sess-123", JSON.stringify({ version: 1, scrollTop: 0 })]]);
 
     expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope)).toBe(0);
+  });
+
+  it("reads and writes structured anchor positions for fast restore", () => {
+    const storage = new Map<string, string>();
+
+    writeStoredSessionAnchorPosition(storage, "sess-123", viewerScope, {
+      anchor: { kind: "message", id: 456 },
+      offsetPx: 12.4,
+      scrollTopFallback: 980.7,
+    }, "thread-a");
+
+    expect(storage.get("session-scroll-position:org-1:user-1:sess-123:thread-a")).toBe(JSON.stringify({
+      version: 2,
+      anchor: { kind: "message", id: 456 },
+      offset_px: 12,
+      scroll_top_fallback: 981,
+    }));
+    expect(readStoredSessionAnchorPosition(storage, "sess-123", viewerScope, "thread-a")).toEqual({
+      anchor: { kind: "message", id: 456 },
+      offsetPx: 12,
+      scrollTopFallback: 981,
+    });
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-a")).toBe(981);
+  });
+
+  it("ignores invalid structured anchor positions", () => {
+    const storage = new Map<string, string>([[
+      "session-scroll-position:org-1:user-1:sess-123:thread-a",
+      JSON.stringify({ version: 2, anchor: { kind: "message", id: -1 }, offset_px: 0, scroll_top_fallback: 100 }),
+    ]]);
+
+    expect(readStoredSessionAnchorPosition(storage, "sess-123", viewerScope, "thread-a")).toBeNull();
   });
 
   it("stores normalized scroll positions for a session", () => {
