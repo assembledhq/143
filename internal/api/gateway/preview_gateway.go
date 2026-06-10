@@ -333,27 +333,18 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 
 	if cached.revokedAt != nil {
 		g.evictCachedSession(accessSessionID)
-		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-			return
-		}
-		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
 	if now.After(cached.expiresAt) {
 		g.evictCachedSession(accessSessionID)
-		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-			return
-		}
-		http.Error(w, "preview session has expired", http.StatusUnauthorized)
+		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
 	runtimePreviewID := sess.PreviewInstanceID
 	if runtimePreviewID != previewID && !g.accessSessionMatchesTargetHost(r, sess, previewID) {
 		g.evictCachedSession(accessSessionID)
-		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-			return
-		}
-		http.Error(w, "preview session no longer matches this preview", http.StatusForbidden)
+		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
 
@@ -364,12 +355,9 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
 			if errors.Is(err, db.ErrSessionRevoked) {
 				// Session was revoked between cache fill and extend — evict
-				// the stale cache entry and deny access immediately.
+				// the stale cache entry and stop honoring it immediately.
 				g.evictCachedSession(accessSessionID)
-				if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-					return
-				}
-				http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+				g.serveStaleSessionOverlay(w, r, previewID)
 				return
 			}
 			g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
@@ -409,14 +397,14 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	g.proxyToWorker(w, r, orgID, runtimePreviewID)
 }
 
-func (g *Gateway) handleStaleTargetSession(w http.ResponseWriter, r *http.Request, previewID uuid.UUID, sess *models.PreviewAccessSession, accessSessionID uuid.UUID) bool {
-	if sess == nil || sess.PreviewInstanceID == previewID {
-		return false
-	}
-	g.evictCachedSession(accessSessionID)
+// serveStaleSessionOverlay handles a cookie whose signature verified but whose
+// access session is no longer honorable (expired, revoked, or pointing at a
+// stale instance): clear the cookie and fall back to the control overlay so
+// the visitor can relaunch or restart the preview instead of seeing a raw
+// auth error.
+func (g *Gateway) serveStaleSessionOverlay(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
 	g.clearPreviewSessionCookie(w)
 	g.servePreviewControlOverlay(w, r, previewID)
-	return true
 }
 
 func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {

@@ -906,6 +906,7 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 	previewID := uuid.New()
+	sessionID := uuid.New()
 	accessSessionID := uuid.New()
 	now := time.Now()
 	expiresAt := now.Add(10 * time.Minute)
@@ -955,6 +956,13 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
 			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, &revokedAt, now, now),
 		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, nil, orgID, userID, models.PreviewStatusReady, now, nil)...,
+			),
+		)
 
 	secondReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
 	secondReq.Host = previewID.String() + ".preview.143.dev"
@@ -962,8 +970,114 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 	secondResp := httptest.NewRecorder()
 
 	gw.ServeHTTP(secondResp, secondReq)
-	require.Equal(t, http.StatusUnauthorized, secondResp.Code, "gateway should reject a session revoked after it was cached")
-	require.Contains(t, secondResp.Body.String(), "preview session has been revoked", "gateway should return the revoked-session error")
+	require.Equal(t, http.StatusFound, secondResp.Code, "gateway should stop honoring a session revoked after it was cached and fall back to the launch flow")
+	require.Equal(t, "https://app.143.dev/previews/"+previewID.String()+"?launch=1", secondResp.Header().Get("Location"), "revoked session should redirect through the bootstrap launch flow")
+	require.Contains(t, secondResp.Header().Values("Set-Cookie")[0], "preview_session=;", "revoked session cookie should be cleared")
+	require.Contains(t, secondResp.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_ExpiredSameInstanceCookieShowsRestart(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	stoppedAt := now.Add(-10 * time.Minute)
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	secret := []byte("test-secret")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now.Add(-time.Hour), now.Add(-time.Minute), nil, now.Add(-time.Hour), now.Add(-time.Hour)),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, nil, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:        db.NewPreviewStore(mock),
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = previewID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, previewID, accessSessionID)})
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "expired same-instance cookies should fall back to the restart overlay instead of a raw 401")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "expired preview cookie should be cleared")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
+	require.Contains(t, w.Body.String(), "Restart preview", "stopped preview overlay should expose the restart action")
+	require.Contains(t, w.Body.String(), "Status: Stopped", "stopped preview overlay should show terminal status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_ExpiredSameInstanceCookieActivePreviewRedirectsToLaunch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	secret := []byte("test-secret")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now.Add(-time.Hour), now.Add(-time.Minute), nil, now.Add(-time.Hour), now.Add(-time.Hour)),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, nil, orgID, userID, models.PreviewStatusReady, now, nil)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:        db.NewPreviewStore(mock),
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Host = previewID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, previewID, accessSessionID)})
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusFound, w.Code, "expired cookies on an active preview should redirect through launch to mint a fresh session")
+	require.Equal(t, "https://app.143.dev/previews/"+previewID.String()+"?launch=1", w.Header().Get("Location"), "expired session redirect should preserve the preview host id")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "preview_session=;", "expired preview cookie should be cleared")
+	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
