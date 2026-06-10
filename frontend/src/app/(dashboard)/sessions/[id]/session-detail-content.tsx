@@ -129,6 +129,7 @@ import {
   writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
+import { readCachedViewerScope } from "@/lib/viewer-scope-cache";
 import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
@@ -3313,6 +3314,40 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  // Warm the stored active thread's first message window in parallel with the
+  // session detail fetch. Without this, the messages request can't start
+  // until the detail payload arrives, the thread-selection effect runs, and
+  // ChatPanel mounts — a full extra round trip on every page open even
+  // though the server answers in single-digit milliseconds. The stored
+  // thread id (and, pre-auth, the cached viewer scope) is a hint: if it
+  // turns out stale, the normal resolution flow corrects the selection and
+  // this prefetch is just unused cache. ChatPanel's useInfiniteQuery shares
+  // the exact query key, so React Query dedupes against the in-flight fetch.
+  const didPrefetchThreadMessagesRef = useRef(false);
+  useEffect(() => {
+    if (didPrefetchThreadMessagesRef.current || typeof window === "undefined") return;
+    didPrefetchThreadMessagesRef.current = true;
+    const scope: SessionScrollViewerScope | null = user
+      ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id }
+      : readCachedViewerScope(window.localStorage);
+    if (!scope) return;
+    const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, scope);
+    if (!storedThreadId) return;
+    const anchor = readStoredSessionAnchorPosition(window.localStorage, id, scope, storedThreadId);
+    void queryClient.prefetchInfiniteQuery({
+      queryKey: threadMessageWindowQueryKey(id, storedThreadId, anchor?.anchor.id ?? null),
+      queryFn: () =>
+        api.sessions.getThreadMessageWindow(
+          id,
+          storedThreadId,
+          anchor
+            ? { position: "around", anchorMessageId: anchor.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+        ),
+      initialPageParam: undefined as string | undefined,
+    });
+  }, [id, queryClient, user]);
 
   // Full-screen diff viewer. The preference lives on the user settings
   // document so it sticks across sessions; mobile review already fills the
