@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1075,6 +1076,83 @@ func TestGateway_ProxyToWorker_RoutesByRuntimeEndpoint(t *testing.T) {
 	gw.proxyToWorker(rr, req, orgID, previewID)
 	require.Equal(t, http.StatusOK, rr.Code, "proxyToWorker should relay successful worker responses")
 	require.Equal(t, "ok", rr.Body.String(), "proxyToWorker should relay the worker response body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "test listener should bind a local port")
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = conn.Close()
+		}
+		close(accepted)
+	}()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+	endpointURL := "http://" + listener.Addr().String()
+	var logs bytes.Buffer
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.New(&logs),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 7, "worker-runtime",
+			endpointURL, "handle-1", 8080, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/static/js/ApplicationRoutes.chunk.js?cache=miss", nil)
+	req.Host = previewID.String() + ".preview.143.dev"
+	req.Header.Set("Sec-Fetch-Dest", "script")
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	<-accepted
+
+	require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should return a bad gateway when the worker connection drops")
+	require.NotEmpty(t, logs.String(), "proxy error should emit a structured log")
+
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "proxy error log should be valid JSON")
+	require.Equal(t, "proxy error", event["message"], "proxy error log should keep the event message")
+	require.Equal(t, previewID.String(), event["preview_id"], "proxy error log should include preview id")
+	require.Equal(t, orgID.String(), event["org_id"], "proxy error log should include org id")
+	require.Equal(t, http.MethodGet, event["request_method"], "proxy error log should include request method")
+	require.Equal(t, "/static/js/ApplicationRoutes.chunk.js", event["request_path"], "proxy error log should include request path without query string")
+	require.Equal(t, true, event["query_present"], "proxy error log should record whether a query string was present without logging it")
+	require.Equal(t, "script", event["sec_fetch_dest"], "proxy error log should include fetch destination for asset classification")
+	require.Equal(t, runtimeID.String(), event["runtime_id"], "proxy error log should include runtime id")
+	require.Equal(t, float64(7), event["runtime_epoch"], "proxy error log should include runtime epoch")
+	require.Equal(t, "worker-runtime", event["worker_node_id"], "proxy error log should include worker node id")
+	require.Equal(t, endpointURL, event["endpoint_url"], "proxy error log should include worker endpoint url")
+	require.Equal(t, "handle-1", event["preview_handle"], "proxy error log should include provider preview handle")
+	require.Equal(t, float64(8080), event["primary_port"], "proxy error log should include primary port")
+	require.Equal(t, "/internal/preview/"+previewID.String()+"/proxy/static/js/ApplicationRoutes.chunk.js", event["upstream_path"], "proxy error log should include rewritten upstream path")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
