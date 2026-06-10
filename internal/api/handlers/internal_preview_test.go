@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -747,6 +748,78 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 	handler.Proxy(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, "Proxy should relay successful HTTP responses from the preview backend")
 	require.Equal(t, "ok", rr.Body.String(), "Proxy should relay the preview backend response body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestInternalPreviewHandler_ProxyHTTP_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	requestRead := make(chan struct{})
+	go func() {
+		defer serverConn.Close()
+		_, _ = http.ReadRequest(bufio.NewReader(serverConn))
+		close(requestRead)
+	}()
+
+	store := db.NewPreviewStore(mock)
+	manager := previewsvc.NewManager(previewsvc.ManagerConfig{
+		Store:        store,
+		Provider:     internalPreviewTestProvider{dialFn: func(context.Context, string) (previewsvc.PreviewStream, error) { return clientConn, nil }},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	var logs bytes.Buffer
+	handler := NewInternalPreviewHandler(&PreviewHandler{logger: zerolog.Nop()}, manager, "worker-1", "worker-secret", zerolog.New(&logs))
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy/static/js/ApplicationRoutes.chunk.js?cache=miss", nil)
+	req = withPreviewRouteParam(req, previewID.String())
+	req.Host = "100.124.235.85:8080"
+	req.Header.Set("Sec-Fetch-Dest", "script")
+	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+		OrgID: orgID, PreviewID: &previewID, TargetNodeID: "worker-1", RuntimeID: &runtimeID, RuntimeEpoch: 3, Action: "proxy", ExpiresAt: time.Now().Add(time.Minute),
+	}))
+	rr := httptest.NewRecorder()
+
+	handler.Proxy(rr, req)
+	<-requestRead
+
+	require.Equal(t, http.StatusBadGateway, rr.Code, "Proxy should return a bad gateway when the preview backend drops the connection")
+	require.NotEmpty(t, logs.String(), "internal proxy error should emit a structured log")
+
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "internal proxy error log should be valid JSON")
+	require.Equal(t, "internal preview proxy error", event["message"], "internal proxy error log should keep the event message")
+	require.Equal(t, previewID.String(), event["preview_id"], "internal proxy error log should include preview id")
+	require.Equal(t, orgID.String(), event["org_id"], "internal proxy error log should include org id")
+	require.Equal(t, http.MethodGet, event["request_method"], "internal proxy error log should include request method")
+	require.Equal(t, "/internal/preview/"+previewID.String()+"/proxy/static/js/ApplicationRoutes.chunk.js", event["request_path"], "internal proxy error log should include internal request path without query string")
+	require.Equal(t, true, event["query_present"], "internal proxy error log should record whether a query string was present without logging it")
+	require.Equal(t, "script", event["sec_fetch_dest"], "internal proxy error log should include fetch destination")
+	require.Equal(t, "/static/js/ApplicationRoutes.chunk.js", event["backend_path"], "internal proxy error log should include trimmed backend path")
+	require.Equal(t, runtimeID.String(), event["runtime_id"], "internal proxy error log should include runtime id")
+	require.Equal(t, float64(3), event["runtime_epoch"], "internal proxy error log should include runtime epoch")
+	require.Equal(t, "worker-1", event["target_node_id"], "internal proxy error log should include token target node")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
