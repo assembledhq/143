@@ -128,10 +128,15 @@ describe('useAuth', () => {
       configurable: true,
     });
 
+    // /auth/me resolving above cached the viewer scope; logout must drop it
+    // so the next user on this browser starts without the previous identity.
+    expect(readCachedViewerScope(window.localStorage)).not.toBeNull();
+
     await result.current.logout();
 
     expect(logoutMock).toHaveBeenCalledTimes(1);
     expect(window.location.href).toBe('/');
+    expect(readCachedViewerScope(window.localStorage)).toBeNull();
 
     // Restore original location
     Object.defineProperty(window, 'location', {

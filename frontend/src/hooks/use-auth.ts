@@ -2,7 +2,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { getActiveOrgId } from "@/lib/active-org";
-import { writeCachedViewerScope } from "@/lib/viewer-scope-cache";
+import { clearCachedViewerScope, writeCachedViewerScope } from "@/lib/viewer-scope-cache";
 
 // Duck-typed 401 check. The backend's `writeError` helper is the single
 // source of truth for this contract: every 401 response carries
@@ -60,6 +60,9 @@ export function useAuth() {
   const logout = async () => {
     await api.auth.logout();
     queryClient.clear();
+    // Drop the warm-start identity hint so a different user on this browser
+    // can't trigger prefetches keyed off the previous user's stored state.
+    clearCachedViewerScope(window.localStorage);
     window.location.href = "/";
   };
 

@@ -57,3 +57,13 @@ export function writeCachedViewerScope(
     // Quota or privacy-mode errors just lose the warm-start hint.
   }
 }
+
+// Called on logout so the next user on this browser can't trigger
+// prefetches keyed off the previous user's stored state.
+export function clearCachedViewerScope(storage: Pick<Storage, "removeItem">): void {
+  try {
+    storage.removeItem(VIEWER_SCOPE_CACHE_KEY);
+  } catch {
+    // Best-effort: a stale hint only ever costs a wasted, access-checked fetch.
+  }
+}

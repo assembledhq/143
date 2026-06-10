@@ -1,13 +1,16 @@
 import { describe, it, expect } from "vitest";
-import { readCachedViewerScope, writeCachedViewerScope } from "./viewer-scope-cache";
+import { clearCachedViewerScope, readCachedViewerScope, writeCachedViewerScope } from "./viewer-scope-cache";
 
-function memoryStorage(): Pick<Storage, "getItem" | "setItem"> & { store: Map<string, string> } {
+function memoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> & { store: Map<string, string> } {
   const store = new Map<string, string>();
   return {
     store,
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
       store.set(key, value);
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
     },
   };
 }
@@ -45,5 +48,12 @@ describe("viewer-scope-cache", () => {
     const storage = memoryStorage();
     writeCachedViewerScope(storage, { userId: "", orgId: "org-1" });
     expect(storage.store.size).toBe(0);
+  });
+
+  it("clears a cached scope", () => {
+    const storage = memoryStorage();
+    writeCachedViewerScope(storage, { userId: "user-1", orgId: "org-1" });
+    clearCachedViewerScope(storage);
+    expect(readCachedViewerScope(storage)).toBeNull();
   });
 });
