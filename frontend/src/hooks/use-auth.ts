@@ -1,6 +1,8 @@
 "use client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { getActiveOrgId } from "@/lib/active-org";
+import { writeCachedViewerScope } from "@/lib/viewer-scope-cache";
 
 // Duck-typed 401 check. The backend's `writeError` helper is the single
 // source of truth for this contract: every 401 response carries
@@ -21,7 +23,21 @@ export function useAuth() {
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["auth", "me"],
-    queryFn: () => api.auth.me(),
+    queryFn: async () => {
+      const response = await api.auth.me();
+      // Persist the viewer identity so warm-start paths (prefetching
+      // user/org-scoped state before the next cold load's /auth/me resolves)
+      // can reconstruct localStorage keys. Same composition as the page-level
+      // viewerScope: per-tab active org first, then the user's home org.
+      const me = response.data;
+      if (me && typeof window !== "undefined") {
+        writeCachedViewerScope(window.localStorage, {
+          userId: me.id,
+          orgId: getActiveOrgId() ?? me.org_id ?? null,
+        });
+      }
+      return response;
+    },
     // Only treat a confirmed 401 as terminal. Network blips and 5xx
     // (e.g. during a rolling deploy) retry a few times instead of
     // instantly logging the user out.

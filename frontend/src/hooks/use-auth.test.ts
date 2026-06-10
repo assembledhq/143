@@ -26,6 +26,7 @@ vi.mock('@/lib/api', () => ({
 }));
 
 import { useAuth, useAuthProviders } from './use-auth';
+import { readCachedViewerScope } from '@/lib/viewer-scope-cache';
 
 function createWrapper() {
   const queryClient = createTestQueryClient();
@@ -161,6 +162,44 @@ describe('useAuth', () => {
     });
 
     expect(result.current.user?.settings?.coding_agent_reasoning_defaults?.codex).toBe('xhigh');
+  });
+
+  it('caches the viewer scope in localStorage when auth/me resolves', async () => {
+    window.localStorage.clear();
+    meMock.mockResolvedValue({
+      data: { id: 'user-7', org_id: 'org-9', email: 'test@test.com', name: 'Test' },
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isAuthenticated).toBe(true);
+    });
+
+    expect(readCachedViewerScope(window.localStorage)).toEqual({
+      userId: 'user-7',
+      orgId: 'org-9',
+    });
+  });
+
+  it('prefers the per-tab active org over the home org when caching the scope', async () => {
+    window.localStorage.clear();
+    window.sessionStorage.setItem('active_org_id', 'org-tab');
+    meMock.mockResolvedValue({
+      data: { id: 'user-7', org_id: 'org-9', email: 'test@test.com', name: 'Test' },
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.isAuthenticated).toBe(true);
+    });
+
+    expect(readCachedViewerScope(window.localStorage)).toEqual({
+      userId: 'user-7',
+      orgId: 'org-tab',
+    });
+    window.sessionStorage.removeItem('active_org_id');
   });
 });
 
