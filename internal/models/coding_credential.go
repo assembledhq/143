@@ -98,21 +98,24 @@ type CodingCredentialRateLimit struct {
 
 // CodingCredential is the DB row representation. Config is encrypted bytea.
 type CodingCredential struct {
-	ID                    uuid.UUID                 `db:"id"`
-	OrgID                 uuid.UUID                 `db:"org_id"`
-	UserID                *uuid.UUID                `db:"user_id"`
-	Provider              ProviderName              `db:"provider"`
-	Label                 string                    `db:"label"`
-	Config                []byte                    `db:"config"`
-	Priority              int                       `db:"priority"`
-	Status                CodingCredentialRowStatus `db:"status"`
-	CreatedBy             *uuid.UUID                `db:"created_by"`
-	LastVerifiedAt        *time.Time                `db:"last_verified_at"`
-	RateLimitedUntil      *time.Time                `db:"rate_limited_until"`
-	RateLimitedObservedAt *time.Time                `db:"rate_limited_observed_at"`
-	RateLimitMessage      *string                   `db:"rate_limit_message"`
-	CreatedAt             time.Time                 `db:"created_at"`
-	UpdatedAt             time.Time                 `db:"updated_at"`
+	ID                      uuid.UUID                 `db:"id"`
+	VersionID               uuid.UUID                 `db:"version_id"`
+	OrgID                   uuid.UUID                 `db:"org_id"`
+	UserID                  *uuid.UUID                `db:"user_id"`
+	Provider                ProviderName              `db:"provider"`
+	Label                   string                    `db:"label"`
+	Config                  []byte                    `db:"config"`
+	Priority                int                       `db:"priority"`
+	Status                  CodingCredentialRowStatus `db:"status"`
+	CreatedBy               *uuid.UUID                `db:"created_by"`
+	LastVerifiedAt          *time.Time                `db:"last_verified_at"`
+	RateLimitedUntil        *time.Time                `db:"rate_limited_until"`
+	RateLimitedObservedAt   *time.Time                `db:"rate_limited_observed_at"`
+	RateLimitMessage        *string                   `db:"rate_limit_message"`
+	TeamDefaultOriginUserID *uuid.UUID                `db:"team_default_origin_user_id"`
+	Active                  bool                      `db:"active"`
+	CreatedAt               time.Time                 `db:"created_at"`
+	UpdatedAt               time.Time                 `db:"updated_at"`
 }
 
 // DecryptedCodingCredential pairs DB metadata with the strongly-typed,
@@ -120,7 +123,12 @@ type CodingCredential struct {
 // directly — callers convert to CodingCredentialSummary before crossing
 // the API boundary.
 type DecryptedCodingCredential struct {
-	ID                    uuid.UUID                 `json:"id"`
+	ID uuid.UUID `json:"id"`
+	// VersionID identifies the physical config-version row backing this
+	// read. Internal until a credential-history API exposes versions
+	// deliberately; omitempty is a no-op on a [16]byte array, so the field
+	// is excluded outright rather than always serialising.
+	VersionID             uuid.UUID                 `json:"-"`
 	OrgID                 uuid.UUID                 `json:"org_id"`
 	UserID                *uuid.UUID                `json:"user_id,omitempty"`
 	Provider              ProviderName              `json:"provider"`
