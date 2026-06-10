@@ -876,14 +876,23 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 
 		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
 		if !ok {
+			// A corrupt config under provider=anthropic_subscription can never
+			// be used. Mark it invalid so the unified resolver stops returning
+			// it; otherwise PickRunnable keeps handing back this same
+			// top-priority row and the tried-map below breaks the loop before
+			// lower-priority healthy credentials are reached.
 			lastErr = fmt.Errorf("credential %s is not an Anthropic subscription", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "stored config is not AnthropicSubscriptionConfig")
 			continue
 		}
 
 		sub := cfg.AsAnthropicSubscription()
 
 		if sub.AccessToken == "" {
+			// An active row with no access token is unusable; same rotation
+			// hazard as the wrong-type case above.
 			lastErr = fmt.Errorf("credential %s has empty access token", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "empty access token")
 			continue
 		}
 
@@ -905,20 +914,30 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 			return &sub, &credID, nil
 		}
 
-		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
-			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
-		}
-		// Drop the per-credential refresh mutex — the credential is out of
-		// rotation now, and keeping the entry around would leak sync.Map
-		// memory across the process lifetime.
-		s.refreshMu.Delete(cred.ID.String())
+		s.markCredentialInvalid(ctx, scope, cred.ID, "token refresh failed and cached token expired")
 	}
 
 	if lastErr != nil {
 		return nil, nil, fmt.Errorf("no usable Claude subscription after %d attempts: %w", len(tried), lastErr)
 	}
 	return nil, nil, nil
+}
+
+// markCredentialInvalid durably removes a credential from the round-robin by
+// flipping its runtime status to invalid, which busts the unified resolver
+// cache so the next ClaimNextLabeledRoundRobin (PickRunnable) skips it.
+// Without this, PickRunnable re-returns the same top-priority row every
+// iteration and the caller's tried-map breaks the loop before lower-priority
+// healthy credentials are reached. Also drops the per-credential refresh mutex
+// (the credential is out of rotation now, so keeping the entry would leak
+// sync.Map memory across the process lifetime). Best-effort: a failed update
+// is logged, not fatal.
+func (s *Service) markCredentialInvalid(ctx context.Context, scope models.Scope, credID uuid.UUID, reason string) {
+	s.logger.Warn().Str("cred_id", credID.String()).Str("reason", reason).Msg("marking claude subscription credential invalid")
+	if statusErr := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); statusErr != nil {
+		s.logger.Warn().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
+	}
+	s.refreshMu.Delete(credID.String())
 }
 
 // HasActiveSubscription reports whether the org has at least one active

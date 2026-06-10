@@ -779,12 +779,21 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 
 		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
+			// A corrupt config under provider=openai_subscription can never be
+			// used. Mark it invalid so the unified resolver stops returning it;
+			// otherwise PickRunnable keeps handing back this same top-priority
+			// row and the tried-map below breaks the loop before lower-priority
+			// healthy credentials are reached.
 			lastErr = fmt.Errorf("credential %s is not OpenAISubscriptionConfig", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "stored config is not OpenAISubscriptionConfig")
 			continue
 		}
 
 		if cfg.AccessToken == "" {
+			// An active row with no access token is unusable; same rotation
+			// hazard as the wrong-type case above.
 			lastErr = fmt.Errorf("credential %s has empty access token", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "empty access token")
 			continue
 		}
 
@@ -808,16 +817,26 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		// credential invalid so it stops being claimed in the rotation,
 		// then try the next one. RefreshTokenByID may have already done
 		// this for some HTTP error paths; the second update is a no-op.
-		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
-			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
-		}
+		s.markCredentialInvalid(ctx, scope, cred.ID, "token refresh failed and cached token expired")
 	}
 
 	if lastErr != nil {
 		return nil, fmt.Errorf("no usable codex credential after %d attempts: %w", len(tried), lastErr)
 	}
 	return nil, nil
+}
+
+// markCredentialInvalid durably removes a credential from the round-robin by
+// flipping its runtime status to invalid, which busts the unified resolver
+// cache so the next ClaimNextRoundRobin (PickRunnable) skips it. Without this,
+// PickRunnable re-returns the same top-priority row every iteration and the
+// caller's tried-map breaks the loop before lower-priority healthy
+// credentials are reached. Best-effort: a failed update is logged, not fatal.
+func (s *Service) markCredentialInvalid(ctx context.Context, scope models.Scope, credID uuid.UUID, reason string) {
+	s.logger.Warn().Str("cred_id", credID.String()).Str("reason", reason).Msg("marking codex credential invalid")
+	if statusErr := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); statusErr != nil {
+		s.logger.Warn().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
+	}
 }
 
 // Disconnect removes a specific ChatGPT OAuth credential by ID at the given

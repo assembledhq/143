@@ -40,6 +40,13 @@ var ErrAnthropicSplitSentinelMissing = errors.New(
 // any anthropic row exists in the unified or legacy tables; returns wrapped
 // errors for I/O failures.
 //
+// Vestigial after the credentials cleanup migration: it deletes the legacy
+// coding rows, so the org_credentials/user_credentials anthropic counts below
+// are now always zero for any database running this release (migrations apply
+// before boot). The legacy counts are intentionally retained — harmless, and
+// removing logic from a serve-or-refuse boot gate is not worth the risk — but
+// a later release can drop them and read only the unified count.
+//
 // lint:allow-no-orgid reason="schema-level invariant; not tenant data"
 func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {
 	present, err := anthropicSplitSentinelPresent(ctx, dbtx)

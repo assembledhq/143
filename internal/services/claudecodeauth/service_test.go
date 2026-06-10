@@ -42,6 +42,12 @@ type mockCredentialStore struct {
 	hasActiveLabeledErr   error
 	getByProviderLabelErr error
 	upsertByIDCalls       int
+	// pickByPriority makes ClaimNextLabeledRoundRobin reproduce the production
+	// unified resolver (PickRunnable): it returns the lowest-Priority active
+	// labeled credential deterministically and does NOT advance LastUsedAt, so
+	// the same top-priority row keeps coming back until it is marked invalid.
+	// Default (false) keeps the legacy last_used_at LRU semantics.
+	pickByPriority bool
 }
 
 func newMockCredentialStore() *mockCredentialStore {
@@ -167,6 +173,25 @@ func (m *mockCredentialStore) ListByProvider(_ context.Context, scope models.Sco
 func (m *mockCredentialStore) ClaimNextLabeledRoundRobin(_ context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error) {
 	if m.claimErr != nil {
 		return nil, m.claimErr
+	}
+	if m.pickByPriority {
+		// Reproduce PickRunnable: return the lowest-Priority active labeled
+		// credential deterministically (ties broken by id) and do NOT touch
+		// LastUsedAt, so the same row keeps coming back until marked invalid.
+		var best *models.DecryptedCredential
+		for _, cred := range m.creds {
+			if !m.scopesMatch(cred.ID, scope) || cred.Provider != provider || cred.Status != "active" || cred.Label == "" {
+				continue
+			}
+			if best == nil || cred.Priority < best.Priority ||
+				(cred.Priority == best.Priority && cred.ID.String() < best.ID.String()) {
+				best = cred
+			}
+		}
+		if best == nil {
+			return nil, ErrCredentialNotFound
+		}
+		return best, nil
 	}
 	var oldest *models.DecryptedCredential
 	for _, cred := range m.creds {
@@ -383,6 +408,91 @@ func TestGetValidToken_ReturnsNilWhenOnlyAPIKeyPresent(t *testing.T) {
 	}
 	if sub != nil || credID != nil {
 		t.Errorf("want (nil, nil); got (%v, %v)", sub, credID)
+	}
+}
+
+// TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority is the
+// regression guard for the PR-5 round-robin change. ClaimNextLabeledRoundRobin
+// now delegates to the unified PickRunnable, which deterministically returns
+// the same highest-priority active credential until it leaves the active set —
+// unlike the old last_used_at LRU. If the top credential is unusable for a
+// reason that does NOT already mark it invalid (empty access token, or a
+// config that fails the subscription type assertion), GetValidToken must mark
+// it invalid itself so the next claim advances to the healthy lower-priority
+// credential. Without the fix, PickRunnable re-returns the bad row, the
+// tried-map breaks the loop, and the healthy priority-2 credential is stranded.
+func TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority(t *testing.T) {
+	t.Parallel()
+
+	goodCfg := models.AnthropicSubscriptionConfig{
+		AccessToken:  "access-good",
+		RefreshToken: "refresh-good",
+		ExpiresAt:    time.Now().Add(2 * time.Hour), // fresh: no refresh attempted
+		AccountType:  "pro",
+	}
+
+	cases := []struct {
+		name   string
+		badCfg models.ProviderConfig
+	}{
+		{
+			name:   "empty access token",
+			badCfg: models.AnthropicSubscriptionConfig{AccessToken: "", RefreshToken: "refresh-bad"},
+		},
+		{
+			name: "wrong config type",
+			// An AnthropicConfig stored under provider=anthropic_subscription
+			// fails the AnthropicSubscriptionConfig type assertion.
+			badCfg: models.AnthropicConfig{APIKey: "sk-ant-not-a-subscription"},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newMockCredentialStore()
+			store.pickByPriority = true // reproduce PickRunnable selection
+			svc := NewService(store, zerolog.Nop())
+
+			orgID := uuid.New()
+			badID := uuid.New()
+			goodID := uuid.New()
+
+			// Priority 1 (top of stack) is the unusable credential; priority 2
+			// is the healthy one the resolver must fall through to. Both are
+			// labeled — the subscription claim skips the label="" API-key row.
+			store.creds[badID] = &models.DecryptedCredential{
+				ID: badID, OrgID: orgID, Provider: models.ProviderAnthropicSubscription,
+				Label: "team-bad", Config: tc.badCfg, Status: "active", Priority: 1,
+			}
+			store.creds[goodID] = &models.DecryptedCredential{
+				ID: goodID, OrgID: orgID, Provider: models.ProviderAnthropicSubscription,
+				Label: "team-good", Config: goodCfg, Status: "active", Priority: 2,
+			}
+
+			sub, gotID, err := svc.GetValidToken(context.Background(), orgID)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sub == nil {
+				t.Fatal("expected the healthy priority-2 credential, got nil")
+			}
+			if sub.AccessToken != "access-good" {
+				t.Errorf("expected token from the healthy credential, got %q", sub.AccessToken)
+			}
+			if gotID == nil || *gotID != goodID {
+				t.Errorf("expected healthy cred id %v, got %v", goodID, gotID)
+			}
+
+			if store.creds[badID].Status != "invalid" {
+				t.Errorf("expected the unusable top credential to be marked invalid, got %q", store.creds[badID].Status)
+			}
+			if store.creds[goodID].Status != "active" {
+				t.Errorf("expected the healthy credential to stay active, got %q", store.creds[goodID].Status)
+			}
+		})
 	}
 }
 

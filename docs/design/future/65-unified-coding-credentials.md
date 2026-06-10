@@ -37,7 +37,22 @@
 > - Retired `coding_credentials_mirror.go`, the org coding-auth CRUD (`ListCodingAuths` & friends), the round-robin claim SQL, and the legacy `personal/team_default/org` cascade in `agent/env.go`. `ScopedCredentialStore` now routes BOTH scopes to `CodingCredentialStore`; `GetValidToken`-style runtime claims go through `PickRunnable` (priority tiers + health-cache shedding) instead of `last_used_at` round-robin.
 > - Removed `AnthropicConfig.Subscription`, renamed `OpenAIChatGPTConfig` → `OpenAISubscriptionConfig`, deleted `ProviderOpenAIChatGPT`, and deleted the `migrate-coding-credentials-anthropic-split` command (the sentinel boot gate stays; a pre-split database must upgrade through an earlier release first).
 > - 410-Gone'd `/api/v1/settings/credentials/{personal,team,resolved}` and `/api/v1/settings/coding-auths*`; `/settings/agent` and all other frontend consumers now use `/api/v1/coding-credentials` (scope=org|personal|resolved).
-> - The boot-time `anthropic_split` sentinel gate was already wired pre-PR 5 and is retained.
+> - The boot-time `anthropic_split` sentinel gate was already wired pre-PR 5 and is retained. (`EnsureAnthropicSplitSentinel`'s legacy-table counts are now vestigial — always zero post-cleanup — and intentionally left in place rather than churning the boot gate.)
+>
+> **PR 5 deploy preconditions (the cleanup is irreversible):**
+> 1. **#1269 (versioned runtime state) must be fully rolled out** to app + workers first.
+> 2. **Confirm zero mirror drift before applying the migration.** The `DELETE`s assume every legacy coding row was mirrored into `coding_credentials`; any unmirrored row is permanently lost. Run, and require `0`:
+>    ```sql
+>    SELECT count(*) FROM org_credentials o
+>    WHERE o.provider IN ('anthropic','openai','openai_chatgpt','gemini','amp','pi')
+>      AND o.status != 'disabled'
+>      AND NOT EXISTS (SELECT 1 FROM coding_credentials c WHERE c.id = o.id AND c.active);
+>    SELECT count(*) FROM user_credentials u
+>    WHERE u.provider IN ('anthropic','openai','gemini','amp','pi','openrouter')
+>      AND u.status != 'disabled'
+>      AND NOT EXISTS (SELECT 1 FROM coding_credentials c WHERE c.id = u.id AND c.active);
+>    ```
+>    A non-zero result means the mirror left a row behind — re-mirror or back it up before deploying. (The mirror's `MirrorFailureCount`/`MirrorDriftCount` should also have been flat in the lead-up.)
 >
 > **Migration runbook for tomorrow's user switch:**
 > 1. Apply migrations `000110` and `000111`. The legacy tables are untouched.
