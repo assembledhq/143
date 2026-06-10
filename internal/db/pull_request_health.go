@@ -19,7 +19,7 @@ const (
 		summary_preview_json, enrichment_status, enriched_at, created_at, updated_at`
 	prHealthSnapshotSelectColumns = `pull_request_id, org_id, version, head_sha, base_sha, summary_json,
 		conflict_payload, failing_tests_payload, payload_size_bytes, enrichment_status, enriched_at, created_at`
-	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, action_type, health_version,
+	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, thread_id, action_type, health_version,
 		workspace_mode, active, obsoleted_by_version, created_at, updated_at`
 )
 
@@ -351,9 +351,9 @@ func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.Pull
 	}
 	query := `
 		INSERT INTO pull_request_repair_runs (
-			org_id, pull_request_id, session_id, action_type, health_version, workspace_mode, active, obsoleted_by_version
+			org_id, pull_request_id, session_id, thread_id, action_type, health_version, workspace_mode, active, obsoleted_by_version
 		) VALUES (
-			@org_id, @pull_request_id, @session_id, @action_type, @health_version, @workspace_mode, @active, @obsoleted_by_version
+			@org_id, @pull_request_id, @session_id, @thread_id, @action_type, @health_version, @workspace_mode, @active, @obsoleted_by_version
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -361,6 +361,7 @@ func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.Pull
 		"org_id":               run.OrgID,
 		"pull_request_id":      run.PullRequestID,
 		"session_id":           run.SessionID,
+		"thread_id":            run.ThreadID,
 		"action_type":          run.ActionType,
 		"health_version":       run.HealthVersion,
 		"workspace_mode":       run.WorkspaceMode,

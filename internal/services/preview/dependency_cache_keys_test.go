@@ -107,6 +107,32 @@ func TestComputePreviewDependencyCacheRepoPlacementKey(t *testing.T) {
 	require.NotEqual(t, left, otherRepo, "repo placement key should shard different repos independently")
 }
 
+func TestDependencyCachePathTargetsPreviewInstallMarkers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "exact marker dir", path: ".143/cache/preview-install", want: true},
+		{name: "marker child", path: ".143/cache/preview-install/cache.done", want: true},
+		{name: "marker parent", path: ".143/cache", want: true},
+		{name: "marker child glob with install prefix", path: ".143/cache/preview-install*/*", want: true},
+		{name: "marker child glob through wildcard segment", path: ".143/cache/*/*.done", want: true},
+		{name: "neighboring install-like path", path: ".143/cache/preview-install-extra/*", want: false},
+		{name: "ordinary dependency path", path: "node_modules", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, dependencyCachePathTargetsPreviewInstallMarkers(tt.path), "marker path detection should match expected safety classification")
+		})
+	}
+}
+
 func TestBuildDependencyCacheTarValidationCommand(t *testing.T) {
 	t.Parallel()
 

@@ -66,8 +66,10 @@ Use `preview.default` to auto-select one config. If there are multiple configs a
 <ConfigField name="preview.install.clean_paths" type="string[]" description="Repo-relative paths or simple globs removed before reinstalling. 143 deletes only declared paths." />
 <ConfigField name="preview.install.verify_paths" type="string[]" description="Repo-relative paths that must exist before a cached install can be reused." />
 <ConfigField name="preview.install.cache.enabled" type="boolean" defaultValue="true" description="Set false to opt out of dependency artifact caching." />
-<ConfigField name="preview.install.cache.paths" type="string[]" description="Additive repo-relative dependency/build cache paths. Effective paths are clean_paths + cache.paths + inferred paths." />
+<ConfigField name="preview.install.cache.paths" type="string[]" description="Additive repo-relative dependency/build cache paths. Effective paths are clean_paths + cache.paths + inferred paths, excluding platform-owned install markers." />
 <ConfigField name="preview.install.timeout_seconds" type="integer" defaultValue="420" description="Maximum install duration. Max 1800." />
+
+Do not cache source directories, secret files, `.git`, `.143/cache`, `.143/cache/preview-install`, or any parent/glob path that can include preview install markers. For large repos, prefer narrow `cache.paths` or `cache.enabled: false`; use `preview.resources.limits.ephemeral-storage` for the final extracted dependency footprint, not as the primary cache correctness mechanism.
 
 Inferred dependency cache paths:
 

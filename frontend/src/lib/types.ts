@@ -40,6 +40,10 @@ export interface User {
   github_login?: string;
   avatar_url?: string;
   google_id?: string;
+  // Whether the account's current email is attested (OAuth provider claim,
+  // verification link, or emailed-invite claim). Gates the "verify your
+  // email" prompt and email-domain auto-join.
+  email_verified?: boolean;
   settings?: UserSettings;
   created_at: string;
 }
@@ -53,8 +57,13 @@ export interface UserSettings {
 export interface ThreadMessageWindowMeta {
   next_older_cursor?: string;
   has_older: boolean;
+  next_newer_cursor?: string;
+  has_newer?: boolean;
+  anchor_message_id?: number;
+  anchor_found?: boolean;
   latest_assistant_message_id?: number;
   live_edge_message_id?: number;
+  window_position?: "latest" | "older" | "newer" | "around";
   thread_status: ThreadStatus;
 }
 
@@ -892,8 +901,13 @@ export interface PullRequestCheckSummary {
 export interface PullRequestActiveRepair {
   action_type: "fix_tests" | "resolve_conflicts";
   session_id: string;
+  thread_id?: string;
   session_status: SessionStatus;
   health_version: number;
+}
+
+export interface PullRequestRepairRequest {
+  thread_id?: string;
 }
 
 export type PullRequestMergeWhenReadyState =
@@ -945,6 +959,7 @@ export interface PullRequestHealthResponse {
 
 export interface PullRequestRepairResponse {
   session_id: string;
+  thread_id?: string;
   mode: "existing" | "resumed" | "reconstructed";
   reused_in_flight: boolean;
   head_sha: string;
@@ -1054,13 +1069,41 @@ export interface OrgSettings {
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };
+  sandbox_lifecycle?: {
+    completed_session_retention_minutes?: number;
+    idle_preview_ttl_minutes?: number;
+    preview_holds_sandbox?: boolean;
+  };
+  sandbox_resources?: {
+    agent_default_tier?: SandboxResourceTier;
+    preview_default_tier?: SandboxResourceTier;
+    allow_repo_resource_requests?: boolean;
+    preview_max_tier?: SandboxResourceTier;
+  };
 }
+
+export type SandboxResourceTier = 'small' | 'standard' | 'large';
 
 export interface NetworkSettingsStatus {
   static_egress_available: boolean;
   static_egress_enabled: boolean;
   static_egress_public_ip?: string;
   static_egress_unavailable_reason?: string;
+}
+
+export interface RuntimeSettingsStatus {
+  static_egress: {
+    available: boolean;
+    enabled: boolean;
+    public_ip?: string;
+  };
+  capacity: {
+    state: 'normal' | 'limited';
+    active_agent_runs: number;
+    max_concurrent_agent_runs: number;
+    active_previews: number;
+    max_previews_per_user: number;
+  };
 }
 
 export interface ProductContext {
@@ -1332,6 +1375,50 @@ export interface PendingInvitationForUser {
   };
   expires_at: string;
   created_at: string;
+}
+
+export type OrgDomainStatus = 'pending' | 'verified';
+
+// OrganizationDomain is one verified-domain row from /api/v1/team/domains.
+// The server decorates the row with the exact DNS TXT record to publish
+// (dns_record_name / dns_record_value) so the UI never reconstructs the
+// format itself.
+export interface OrganizationDomain {
+  id: string;
+  org_id: string;
+  domain: string;
+  verification_token: string;
+  status: OrgDomainStatus;
+  auto_join_enabled: boolean;
+  created_at: string;
+  verified_at?: string | null;
+  last_checked_at?: string | null;
+  failed_checks: number;
+  dns_record_name: string;
+  dns_record_value: string;
+}
+
+// JoinableOrganization is a workspace the current user may join because
+// their provider-verified email domain matches the org's verified
+// auto-join domain.
+export interface JoinableOrganization {
+  org_id: string;
+  org_name: string;
+  domain: string;
+}
+
+// JoinableOrgsResponse wraps the joinable list with the hint that the
+// user's domain IS captured but their email isn't verified yet — the org
+// identity stays hidden until they prove the address.
+export interface JoinableOrgsResponse {
+  data: JoinableOrganization[];
+  email_verification_required: boolean;
+}
+
+// ConfirmEmailVerificationResponse is the verify-email confirm payload.
+export interface ConfirmEmailVerificationResponse {
+  verified: boolean;
+  joined_org?: JoinableOrganization | null;
 }
 
 export interface GitHubInviteStatus {

@@ -190,7 +190,17 @@ describe("Account settings page", () => {
     expect(screen.getByPlaceholderText("pi_...")).toBeInTheDocument();
   });
 
-  it("posts new personal auths against the unified API with scope=personal", async () => {
+  // This test drives the full add-auth flow through the Radix dialog (open →
+  // pick agent → pick auth type → fill label + api key → submit), the
+  // heaviest interaction sequence in the file. It runs in ~1.5s on an idle
+  // machine but scales with CPU contention: under the threads pool several
+  // files share the 2-core CI runner, and the default 5s budget is tight for
+  // this many sequential Radix interactions when they collide. The 12s budget
+  // matches the comparably-heavy flow in page-pr-creation.test.tsx. (Trimming
+  // user-event's per-keystroke delay / pointer-events check was measured and
+  // made no difference — the cost is dialog rendering and async waits, not
+  // typing — so the budget is the fix.)
+  it("posts new personal auths against the unified API with scope=personal", { timeout: 12_000 }, async () => {
     const user = userEvent.setup();
     let createBody: Record<string, unknown> | null = null;
     server.use(

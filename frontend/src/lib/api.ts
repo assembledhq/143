@@ -189,10 +189,26 @@ export const api = {
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
+    // (Re)send the email-verification link to the signed-in user's own
+    // address. Verifying unlocks email-domain auto-join for password
+    // accounts; OAuth accounts are attested by their provider already.
+    sendEmailVerification: () => post<void>('/api/v1/auth/email-verifications'),
+    confirmEmailVerification: (token: string) =>
+      post<import('./types').SingleResponse<import('./types').ConfirmEmailVerificationResponse>>(
+        '/api/v1/auth/email-verifications/confirm',
+        { token },
+      ),
   },
   organizations: {
     create: (name: string) =>
       post<import('./types').SingleResponse<import('./types').OrganizationCreated>>('/api/v1/organizations', { name }),
+    // Workspaces the current user can join because their provider-verified
+    // email domain matches an org's verified auto-join domain. User-scoped,
+    // works for zero-membership users — same family as invitations.listPending.
+    listJoinable: () =>
+      get<import('./types').JoinableOrgsResponse>('/api/v1/orgs/joinable'),
+    join: (orgId: string) =>
+      post<import('./types').SingleResponse<import('./types').MembershipSummary>>(`/api/v1/orgs/${orgId}/join`),
   },
   repositories: {
     list: (opts?: { includeDisconnected?: boolean }) => {
@@ -227,8 +243,8 @@ export const api = {
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
-    fixTests: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`),
-    resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
+    fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
+    resolveConflicts: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`, body ?? {}),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
     queueMergeWhenReady: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
     cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
@@ -491,10 +507,12 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
-    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest'; before?: string; limit?: number } = { position: 'latest' }) => {
+    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest' | 'around'; before?: string; after?: string; anchorMessageId?: number; limit?: number } = { position: 'latest' }) => {
       const searchParams = new URLSearchParams();
       if (params.position) searchParams.set('position', params.position);
       if (params.before) searchParams.set('before', params.before);
+      if (params.after) searchParams.set('after', params.after);
+      if (params.anchorMessageId) searchParams.set('anchor_message_id', String(params.anchorMessageId));
       if (params.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
       return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
@@ -594,6 +612,7 @@ export const api = {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
     getNetworkStatus: () => get<import('./types').SingleResponse<import('./types').NetworkSettingsStatus>>('/api/v1/settings/network'),
+    getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
   },
@@ -864,6 +883,15 @@ export const api = {
     createInvitation: (body: { email?: string; github_username?: string; acceptance_method?: 'email' | 'github' | 'either'; role: string }) =>
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
+    listDomains: () =>
+      get<import('./types').ListResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains'),
+    addDomain: (domain: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains', { domain }),
+    verifyDomain: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}/verify`),
+    updateDomain: (id: string, body: { auto_join_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}`, body),
+    removeDomain: (id: string) => del<void>(`/api/v1/team/domains/${id}`),
     githubInviteStatus: () =>
       get<import('./types').SingleResponse<import('./types').GitHubInviteStatus>>('/api/v1/team/github/status'),
     searchGitHubUsers: (q: string) =>

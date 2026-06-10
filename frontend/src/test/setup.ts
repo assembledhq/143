@@ -35,7 +35,57 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+// With isolate:false, vitest reuses one worker — a single module graph and a
+// single jsdom window — across every test file the worker runs. Vitest still
+// scopes the vi.mock registry per file, but it does NOT re-evaluate modules an
+// earlier file already imported, so a module evaluated under another file's
+// mocks (e.g. @/lib/notify bound to a mocked sonner) or one holding
+// module-level state would leak into later files. Likewise, globals a test
+// overrides on the shared window (matchMedia, location, ...) would leak.
+// Snapshot the commonly-overridden globals once per worker, and restore them
+// plus the module registry after each file.
+const pristineGlobals = (() => {
+  const key = Symbol.for('143-tests/pristine-globals');
+  const holder = globalThis as {
+    [key: symbol]: Array<[object, string, PropertyDescriptor | undefined]>;
+  };
+  holder[key] ??= (
+    [
+      [window, 'matchMedia'],
+      [window, 'location'],
+      [window, 'ResizeObserver'],
+      [navigator, 'clipboard'],
+      [navigator, 'vibrate'],
+    ] as Array<[object, string]>
+  ).map(([owner, prop]) => [owner, prop, Object.getOwnPropertyDescriptor(owner, prop)]);
+  return holder[key];
+})();
+
+afterAll(() => {
+  for (const [owner, prop, descriptor] of pristineGlobals) {
+    if (descriptor) {
+      Object.defineProperty(owner, prop, descriptor);
+    } else {
+      delete (owner as Record<string, unknown>)[prop];
+    }
+  }
+  document.title = '';
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  vi.resetModules();
+});
+
+// The MSW server is a per-worker singleton (see mocks/server.ts). Patch the
+// network interceptors once per worker and leave them active for its
+// lifetime — listen/close cycling per file would re-patch fetch on a window
+// that other files share.
+const mswListeningKey = Symbol.for('143-tests/msw-listening');
+beforeAll(() => {
+  const holder = globalThis as { [mswListeningKey]?: boolean };
+  if (holder[mswListeningKey]) return;
+  holder[mswListeningKey] = true;
+  server.listen({ onUnhandledRequest: 'error' });
+});
 afterEach(() => {
   cleanup();
   server.resetHandlers();
@@ -44,4 +94,3 @@ afterEach(() => {
   window.sessionStorage.clear();
   window.localStorage.clear();
 });
-afterAll(() => server.close());

@@ -34,7 +34,7 @@ func NewUserStore(db DBTX) *UserStore {
 }
 
 const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, created_at`
-const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, created_at, settings`
+const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, email_verified_at, created_at, settings`
 
 // UpsertFromGitHub creates or updates a user based on their GitHub ID.
 // On conflict, it updates the user's name, login, avatar, email, and the
@@ -143,6 +143,7 @@ func (s *UserStore) GetByIDGlobalWithSettings(ctx context.Context, userID uuid.U
 	return pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.UserWithSettings, error) {
 		var user models.UserWithSettings
 		var rawSettings json.RawMessage
+		var emailVerifiedAt *time.Time
 		if err := row.Scan(
 			&user.ID,
 			&user.OrgID,
@@ -153,11 +154,13 @@ func (s *UserStore) GetByIDGlobalWithSettings(ctx context.Context, userID uuid.U
 			&user.GitHubLogin,
 			&user.AvatarURL,
 			&user.GoogleID,
+			&emailVerifiedAt,
 			&user.CreatedAt,
 			&rawSettings,
 		); err != nil {
 			return models.UserWithSettings{}, err
 		}
+		user.EmailVerified = emailVerifiedAt != nil
 		settings, err := models.ParseUserSettings(rawSettings)
 		if err != nil {
 			return models.UserWithSettings{}, fmt.Errorf("parse user settings: %w", err)
@@ -513,6 +516,44 @@ func (s *UserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin st
 		return false, fmt.Errorf("check github login membership: %w", err)
 	}
 	return exists, nil
+}
+
+// SetEmailVerification synchronizes users.email_verified_at with the OAuth
+// provider's attestation of the given address: stamped when verified,
+// CLEARED when the provider reports the address unverified. The clearing
+// half is load-bearing — OAuth upserts overwrite users.email on every
+// login, so a user who switches their provider email to an unverified
+// address must not retain a stamp earned by the previous address (that
+// stale stamp would let an unverified email pass the domain-join gate).
+//
+// The email predicate guards against touching a stale stored address: the
+// caller passes the provider-asserted email, and the write only lands when
+// it matches what we have on file (e.g. a Google login won't clear a stamp
+// belonging to the user's differing GitHub-managed email).
+//
+// lint:allow-no-orgid reason="user-scoped identity update by globally unique user id"
+func (s *UserStore) SetEmailVerification(ctx context.Context, userID uuid.UUID, providerEmail string, verified bool) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE users SET email_verified_at = CASE WHEN @verified THEN now() ELSE NULL END
+		 WHERE id = @id AND LOWER(email) = LOWER(@email)`,
+		pgx.NamedArgs{"id": userID, "email": providerEmail, "verified": verified})
+	return err
+}
+
+// GetEmailVerifiedAt returns the provider-verification watermark for the
+// user's current email, or nil when the address has never been attested.
+//
+// lint:allow-no-orgid reason="user-scoped identity read by globally unique user id"
+func (s *UserStore) GetEmailVerifiedAt(ctx context.Context, userID uuid.UUID) (*time.Time, error) {
+	var verifiedAt *time.Time
+	err := s.db.QueryRow(ctx,
+		`SELECT email_verified_at FROM users WHERE id = @id`,
+		pgx.NamedArgs{"id": userID},
+	).Scan(&verifiedAt)
+	if err != nil {
+		return nil, err
+	}
+	return verifiedAt, nil
 }
 
 // LinkGoogleAccount attaches a Google identity to an existing user.

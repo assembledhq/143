@@ -47,6 +47,7 @@ export const queryKeys = {
   settings: {
     all: ["settings"] as const,
     network: ["settings", "network"] as const,
+    runtimeStatus: ["settings", "runtime", "status"] as const,
   },
   credentials: {
     all: ["credentials"] as const,
@@ -73,6 +74,10 @@ export const queryKeys = {
   },
   team: {
     members: ["team", "members"] as const,
+    domains: ["team", "domains"] as const,
+  },
+  organizations: {
+    joinable: ["organizations", "joinable"] as const,
   },
   auth: {
     memberships: ["auth", "memberships"] as const,

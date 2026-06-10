@@ -25,7 +25,7 @@ import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/ses
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { ListResponse, SessionCounts, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { markProvisionalSessionDetail } from "@/lib/session-detail-cache";
+import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
   workingSet,
@@ -216,15 +216,6 @@ function SessionLinearBadge({ session }: { session: SessionListItem }) {
     session.linear_identifier_hint ??
     session.linked_issues?.find((issue) => issue.issue_source === "linear")?.external_id;
   return <SharedSessionLinearBadge label={linearLabel} />;
-}
-
-function provisionalSessionDetailFromListItem(session: SessionListItem): SingleResponse<SessionDetail> {
-  return {
-    data: markProvisionalSessionDetail({
-      ...session,
-      threads: session.threads ?? [],
-    }),
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +418,11 @@ export function SessionSidebar() {
 
   const trimmedSearch = debouncedSearch;
 
+  // Pause list polling while the pointer is over the list. A poll response can
+  // reorder rows mid-click, which either swallows the click (mousedown/mouseup
+  // land on different nodes) or moves a different session under the cursor.
+  const [isListHovered, setIsListHovered] = useState(false);
+
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders — see
   // https://react.dev/reference/react/useState#storing-information-from-previous-renders.
@@ -453,7 +449,7 @@ export function SessionSidebar() {
     queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam, trimmedSearch],
     queryFn: () => api.sessions.list(listParams),
     enabled: isResolved,
-    refetchInterval: isPaginated ? false : 10000,
+    refetchInterval: isPaginated || isListHovered ? false : 10000,
   });
 
   // Tab badge counts. Search-independent so tabs reflect the scope totals, not
@@ -951,6 +947,8 @@ export function SessionSidebar() {
         }
         className="flex-1 overflow-y-auto px-2 pt-1 pb-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         onKeyDown={handleListKeyDown}
+        onPointerEnter={() => setIsListHovered(true)}
+        onPointerLeave={() => setIsListHovered(false)}
       >
         {/* Ghost "New session" entry when creating */}
         {isNewSession && (
@@ -1072,11 +1070,15 @@ export function SessionSidebar() {
                 }}
                 onMouseDown={() => seedSessionDetailCache(session)}
                 className={cn(
+                  "cursor-pointer",
                   currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-muted/40 ring-1 ring-ring/20",
-                  isSelected && "cursor-pointer border-primary/25 bg-card shadow-sm ring-1 ring-primary/10",
+                  isSelected && "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10",
                 )}
                 onClick={(event) => {
-                  if (!isSelected || event.defaultPrevented || event.target !== event.currentTarget) {
+                  // Clicks on the frame padding (outside the inner link surface)
+                  // should still open the session — a dead zone here reads as
+                  // "click did nothing".
+                  if (event.defaultPrevented || event.target !== event.currentTarget) {
                     return;
                   }
                   navigateToSession(session, sessionHref);

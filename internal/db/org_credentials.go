@@ -126,31 +126,32 @@ func (s *OrgCredentialStore) logMirrorFailure(action string, id uuid.UUID, err e
 	s.mirrorLogf("coding_credentials mirror %s id=%s err=%v", action, id, err)
 }
 
-// reflectOrgCredentialByID loads the row for `id` and asks the mirror to
-// reflect it. Used after every write whose return shape doesn't already give
-// us the full row. Failure is logged, never propagated — the caller's write
-// already succeeded against the legacy table.
-func (s *OrgCredentialStore) reflectOrgCredentialByID(ctx context.Context, id uuid.UUID) {
-	if s.codingMirror == nil {
-		return
+// reflectOrgCredentialByID loads the row for `id` and asks the versioned
+// coding-credentials mirror to reflect it. Used after every legacy write whose
+// return shape doesn't already give us the full row.
+func (s *OrgCredentialStore) reflectOrgCredentialByID(ctx context.Context, orgID, id uuid.UUID) error {
+	if s.codingMirror == nil || isNoopCodingCredentialMirror(s.codingMirror) {
+		return nil
 	}
-	row, cfg, err := s.loadOrgCredentialByID(ctx, id)
+	row, cfg, err := s.loadOrgCredentialByID(ctx, orgID, id)
 	if err != nil {
 		s.logMirrorFailure("load-by-id", id, err)
-		return
+		return fmt.Errorf("load org credential for versioned mirror: %w", err)
 	}
 	if mirrErr := s.codingMirror.MirrorOrgCredential(ctx, row, cfg); mirrErr != nil {
 		s.logMirrorFailure("upsert", id, mirrErr)
+		return fmt.Errorf("mirror org credential into versioned coding_credentials: %w", mirrErr)
 	}
+	return nil
 }
 
 // loadOrgCredentialByID is a private helper that reads a row + decrypts it
 // without going through the public Get path (which filters out disabled rows
 // and would prevent the mirror from reflecting state-flip writes).
-func (s *OrgCredentialStore) loadOrgCredentialByID(ctx context.Context, id uuid.UUID) (models.OrgCredential, models.ProviderConfig, error) {
+func (s *OrgCredentialStore) loadOrgCredentialByID(ctx context.Context, orgID, id uuid.UUID) (models.OrgCredential, models.ProviderConfig, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT `+codingCredentialColumns+` FROM org_credentials WHERE id = @id`,
-		pgx.NamedArgs{"id": id},
+		`SELECT `+codingCredentialColumns+` FROM org_credentials WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
 	)
 	if err != nil {
 		return models.OrgCredential{}, nil, fmt.Errorf("load org credential: %w", err)
@@ -196,7 +197,7 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 				INSERT INTO org_credentials (org_id, provider, label, config, status, created_by, priority)
 				VALUES (@org_id, @provider, @label, @config, 'active', @created_by, @priority)
 				ON CONFLICT (org_id, provider, label)
-				DO UPDATE SET config = EXCLUDED.config, status = 'active', updated_at = now(),
+				DO UPDATE SET config = EXCLUDED.config, status = 'active', last_verified_at = now(), updated_at = now(),
 					priority = CASE
 						WHEN org_credentials.status = 'disabled' THEN EXCLUDED.priority
 						ELSE org_credentials.priority
@@ -220,12 +221,18 @@ func (s *OrgCredentialStore) UpsertWithLabel(ctx context.Context, orgID uuid.UUI
 		if err != nil {
 			return nil, err
 		}
-		s.reflectOrgCredentialByID(ctx, id)
+		if err := s.reflectOrgCredentialByID(ctx, orgID, id); err != nil {
+			return nil, err
+		}
 		return &id, nil
 	}
 
 	// Non-coding providers (GitHub, Sentry, Linear, Notion, …) ignore priority
-	// — it's only meaningful for the coding-agent fallback stack.
+	// — it's only meaningful for the coding-agent fallback stack. They also do
+	// not stamp last_verified_at: only the coding path above treats an upsert
+	// as a verified-credential replacement (the OAuth services hand it material
+	// the upstream provider just accepted, and the mirror propagates the
+	// timestamp into the versioned runtime state).
 	query := `
 		INSERT INTO org_credentials (org_id, provider, label, config, status, created_by)
 		VALUES (@org_id, @provider, @label, @config, 'active', @created_by)
@@ -324,7 +331,9 @@ func (s *OrgCredentialStore) InsertPendingAuth(ctx context.Context, orgID uuid.U
 	if err != nil {
 		return nil, err
 	}
-	s.reflectOrgCredentialByID(ctx, id)
+	if err := s.reflectOrgCredentialByID(ctx, orgID, id); err != nil {
+		return nil, err
+	}
 	return &id, nil
 }
 
@@ -338,16 +347,22 @@ func (s *OrgCredentialStore) UpsertByID(ctx context.Context, orgID uuid.UUID, id
 		return err
 	}
 
-	query := `UPDATE org_credentials SET config = @config, status = 'active', updated_at = now() WHERE id = @id AND org_id = @org_id AND status != 'disabled'`
-	_, err = s.db.Exec(ctx, query, pgx.NamedArgs{
+	query := `UPDATE org_credentials SET config = @config, status = 'active', last_verified_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id AND status != 'disabled'`
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     id,
 		"org_id": orgID,
 		"config": encrypted,
 	})
-	if err == nil {
-		s.reflectOrgCredentialByID(ctx, id)
+	if err != nil {
+		return err
 	}
-	return err
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if mirrorErr := s.reflectOrgCredentialByID(ctx, orgID, id); mirrorErr != nil {
+		return mirrorErr
+	}
+	return nil
 }
 
 // UpdateLinearConfigIfRefreshTokenMatches updates the singleton Linear
@@ -876,7 +891,9 @@ func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, 
 		return err
 	}
 	for _, id := range mirrorIDs {
-		s.reflectOrgCredentialByID(ctx, id)
+		if err := s.reflectOrgCredentialByID(ctx, orgID, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -884,15 +901,21 @@ func (s *OrgCredentialStore) UpdateStatus(ctx context.Context, orgID uuid.UUID, 
 // UpdateStatusByID updates the status for a specific credential by ID, scoped to org.
 func (s *OrgCredentialStore) UpdateStatusByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID, status models.CredentialStatus) error {
 	query := `UPDATE org_credentials SET status = @status, last_verified_at = now(), updated_at = now() WHERE id = @id AND org_id = @org_id`
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     id,
 		"org_id": orgID,
 		"status": string(status),
 	})
-	if err == nil {
-		s.reflectOrgCredentialByID(ctx, id)
+	if err != nil {
+		return err
 	}
-	return err
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if mirrorErr := s.reflectOrgCredentialByID(ctx, orgID, id); mirrorErr != nil {
+		return mirrorErr
+	}
+	return nil
 }
 
 // collectMirrorIDs walks a pgx.Rows result of a single uuid column,
@@ -1046,7 +1069,9 @@ func (s *OrgCredentialStore) ReorderCodingAuths(ctx context.Context, orgID uuid.
 		return err
 	}
 	for _, id := range ids {
-		s.reflectOrgCredentialByID(ctx, id)
+		if err := s.reflectOrgCredentialByID(ctx, orgID, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1151,7 +1176,9 @@ func (s *OrgCredentialStore) CreateCodingAuth(ctx context.Context, orgID uuid.UU
 	if !ok {
 		return nil, fmt.Errorf("unsupported coding auth row")
 	}
-	s.reflectOrgCredentialByID(ctx, row.ID)
+	if err := s.reflectOrgCredentialByID(ctx, orgID, row.ID); err != nil {
+		return nil, err
+	}
 	return &codingAuth, nil
 }
 
@@ -1182,7 +1209,9 @@ func (s *OrgCredentialStore) UpdateCodingAuth(ctx context.Context, orgID uuid.UU
 	if !ok {
 		return nil, fmt.Errorf("unsupported coding auth row")
 	}
-	s.reflectOrgCredentialByID(ctx, id)
+	if err := s.reflectOrgCredentialByID(ctx, orgID, id); err != nil {
+		return nil, err
+	}
 	return &codingAuth, nil
 }
 

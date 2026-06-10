@@ -666,6 +666,72 @@ describe("PRHealthBanner", () => {
     expect(screen.getByRole("button", { name: "Open repair session" })).toBeInTheDocument();
   });
 
+  it("opens an active repair running in another thread of the current session", async () => {
+    const onOpenRepairSession = vi.fn();
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          can_merge: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            thread_id: "thread-repair",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        currentThreadId="thread-main"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={onOpenRepairSession}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open repair session" }));
+
+    expect(onOpenRepairSession).toHaveBeenCalledWith("session-current", "thread-repair");
+  });
+
+  it("does not show Open repair session when currentThreadId is null and repair is in the same session", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          can_merge: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            thread_id: "thread-repair",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        currentThreadId={null}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Fix tests running")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open repair session" })).toBeNull();
+  });
+
   it("suppresses both repair CTAs when resolve conflicts is already running for the current PR state", () => {
     renderWithProviders(
       <PRHealthBanner

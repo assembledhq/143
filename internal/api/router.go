@@ -32,6 +32,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -264,6 +265,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		PublicIP:          cfg.StaticEgressPublicIP,
 		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
 	})
+	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -503,6 +505,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 	teamHandler.SetRepositoryStore(repoStore)
 	teamHandler.SetCLITokenStore(userCLITokenStore)
+	orgDomainStore := db.NewOrganizationDomainStore(pool)
+	orgDomainsHandler := handlers.NewOrgDomainsHandler(orgDomainStore, membershipStore, userStore, domains.NewVerifier())
+	authHandler.SetOrgDomainStore(orgDomainStore)
+	// emailSender may still be nil here (SMTP unset) — the verification flow
+	// degrades to logged links rather than disabling itself.
+	authHandler.SetEmailVerificationDeps(db.NewEmailVerificationStore(pool), emailSender)
 	apiClientHandler := handlers.NewAPIClientHandler(apiClientStore, apiTokenStore)
 	apiClientHandler.SetLogger(logger)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
@@ -564,6 +572,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		sessionHandler.SetCanceller(canceller)
 	}
 	teamHandler.SetAuditEmitter(auditEmitter)
+	orgDomainsHandler.SetAuditEmitter(auditEmitter)
 	apiClientHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetLogger(logger)
@@ -877,6 +886,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
 			r.Post("/api/v1/auth/register", authHandler.Register)
 			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+			// Public: the verification link may be opened on a device with
+			// no session; the single-use token is the credential. Shares the
+			// claim endpoints' rate limit — same token-guessing surface.
+			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/auth/email-verifications/confirm", authHandler.ConfirmEmailVerification)
 		})
 
 		// Slack callbacks are public from the session-cookie perspective and
@@ -949,6 +962,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/invitations/pending", authHandler.ListPendingInvitations)
 			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/{id}/accept", authHandler.AcceptInvitationByID)
 			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/{id}/decline", authHandler.DeclineInvitationByID)
+
+			// Domain-based joinable-workspace surface ("Join Acme — your
+			// domain is verified"). Same placement rationale as the pending
+			// invitations routes: spans orgs and must work for users with
+			// zero memberships. Join shares the claim rate limit — it is the
+			// same shape of brute-force surface (caller names a target org,
+			// server re-validates eligibility against the session's
+			// provider-verified email domain).
+			r.Get("/api/v1/orgs/joinable", orgDomainsHandler.ListJoinable)
+			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/orgs/{id}/join", orgDomainsHandler.Join)
+
+			// Resend the email-verification link to the caller's own
+			// address. Tight limit: each call sends an email, so the
+			// budget is "user mashing resend", not bulk traffic.
+			r.With(middleware.ClaimRateLimit(3)).Post("/api/v1/auth/email-verifications", authHandler.SendEmailVerification)
 
 			// Creating a new org is zero-membership-safe for the same reason the
 			// other routes in this block are: a user whose only membership was
@@ -1042,6 +1070,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
 				r.Get("/api/v1/settings/network", settingsHandler.GetNetworkStatus)
+				r.Get("/api/v1/settings/runtime/status", settingsHandler.GetRuntimeStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 				r.Get("/api/v1/pm/current", pmHandler.Current)
@@ -1352,6 +1381,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
 				r.Get("/api/v1/team/github/status", teamHandler.GitHubInviteStatus)
 				r.Get("/api/v1/team/github/users", teamHandler.SearchGitHubUsers)
+
+				// Verified email domains for auto-join (domain capture).
+				// Admin-only: verifying a domain changes who can enter the
+				// org without an invitation.
+				r.Get("/api/v1/team/domains", orgDomainsHandler.List)
+				r.Post("/api/v1/team/domains", orgDomainsHandler.Create)
+				r.Post("/api/v1/team/domains/{id}/verify", orgDomainsHandler.Verify)
+				r.Patch("/api/v1/team/domains/{id}", orgDomainsHandler.Update)
+				r.Delete("/api/v1/team/domains/{id}", orgDomainsHandler.Delete)
 
 				// Integration management (OAuth flows + connect/disconnect/sync).
 				// Connecting an integration is an org-wide trust decision, so members

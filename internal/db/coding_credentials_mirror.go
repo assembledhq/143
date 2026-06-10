@@ -190,8 +190,8 @@ func (s *CodingCredentialStore) MirrorUserCredential(ctx context.Context, row mo
 		return err
 	}
 
-	// On a personal→team-default flip, ON CONFLICT (id) rewrites user_id to
-	// NULL. upsertMirroredRow only invalidates the new (org) scope, but the
+	// On a personal→team-default flip, the mirror inserts a new config version
+	// with user_id=NULL. upsertMirroredRow invalidates the new (org) scope, but the
 	// originating user's personal-scope cache may still hold the row's old
 	// representation as a personal entry. Wipe the personal scope too so the
 	// next resolver call re-fetches and sees the row in the org tail instead
@@ -337,19 +337,43 @@ func (s *CodingCredentialStore) deleteTeamDefaultMirror(ctx context.Context, org
 // or the pool) and returns the invalidation key the caller should apply on
 // commit. Returns nil when no row matched.
 func (s *CodingCredentialStore) deleteTeamDefaultMirrorTx(ctx context.Context, dbtx DBTX, orgID, originalUserID uuid.UUID, provider models.ProviderName) (*mirrorInvalidation, error) {
-	tag, err := dbtx.Exec(ctx,
-		`DELETE FROM coding_credentials
-		 WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider
-		   AND team_default_origin_user_id = @origin_user_id`,
+	var deletedOrgID uuid.UUID
+	var userID *uuid.UUID
+	var deletedProvider string
+	err := dbtx.QueryRow(ctx,
+		`WITH target AS (
+			SELECT DISTINCT id, org_id, user_id, provider
+			FROM coding_credentials
+			WHERE org_id = @org_id
+			  AND user_id IS NULL
+			  AND provider = @provider
+			  AND team_default_origin_user_id = @origin_user_id
+			  AND active = true
+		),
+		deactivated_runtime AS (
+			UPDATE coding_credential_runtime_state rt
+			SET active = false
+			FROM target
+			WHERE rt.credential_id = target.id AND rt.active = true
+			RETURNING rt.credential_id
+		),
+		deactivated_config AS (
+			UPDATE coding_credentials cc
+			SET active = false, updated_at = now()
+			FROM target
+			WHERE cc.id = target.id AND cc.active = true
+			RETURNING cc.id
+		)
+		SELECT org_id, user_id, provider FROM target LIMIT 1`,
 		pgx.NamedArgs{"org_id": orgID, "provider": string(provider), "origin_user_id": originalUserID},
-	)
+	).Scan(&deletedOrgID, &userID, &deletedProvider)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("delete team default mirror: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return nil, nil
-	}
-	return &mirrorInvalidation{orgID: orgID, userID: nil, provider: provider}, nil
+	return &mirrorInvalidation{orgID: deletedOrgID, userID: userID, provider: models.ProviderName(deletedProvider)}, nil
 }
 
 // teamDefaultMirrorPriority parks team-default mirrors at the bottom of the
@@ -391,12 +415,11 @@ type mirroredRow struct {
 	TeamDefaultOriginUserID *uuid.UUID
 }
 
-// upsertMirroredRow inserts or updates a coding_credentials row preserving the
-// legacy id. It uses ON CONFLICT (id) so retries are idempotent. The unique
-// (org_id, user_id, provider, label) index might still trip if a separate
-// mirror has already inserted at that natural key — when that happens we treat
-// the conflict as an update keyed by the natural key instead of by id, leaving
-// at most one row per (scope, provider, label).
+// upsertMirroredRow writes a new active config/runtime version while preserving
+// the legacy id as the logical credential id. The unique (org_id, user_id,
+// provider, label) index might already have a separate logical credential at
+// the natural key — when that happens we update that natural-key row instead of
+// the legacy-id row, leaving at most one row per (scope, provider, label).
 //
 // Provider IS included in the SET list. AnthropicConfig.Validate enforces
 // APIKey/Subscription mutual exclusion, but a row that flips between the two
@@ -405,108 +428,121 @@ type mirroredRow struct {
 // (now an AnthropicConfig) would be stored under provider='anthropic_subscription'
 // and ParseCodingProviderConfig would fail at decrypt time.
 func (s *CodingCredentialStore) upsertMirroredRow(ctx context.Context, row mirroredRow) error {
-	args := pgx.NamedArgs{
-		"id":                          row.ID,
-		"org_id":                      row.OrgID,
-		"user_id":                     row.UserID,
-		"provider":                    string(row.Provider),
-		"label":                       row.Label,
-		"config":                      row.EncryptedCfg,
-		"priority":                    row.Priority,
-		"status":                      string(row.Status),
-		"created_by":                  row.CreatedBy,
-		"last_verified_at":            row.LastVerifiedAt,
-		"created_at":                  row.CreatedAt,
-		"updated_at":                  row.UpdatedAt,
-		"team_default_origin_user_id": row.TeamDefaultOriginUserID,
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("mirror upsert: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	newScope := models.Scope{OrgID: row.OrgID, UserID: row.UserID}
+	var invalidations mirrorInvalidations
+
+	current, currentRuntime, err := s.fetchActiveConfigByIDAnyScopeTx(ctx, tx, row.OrgID, row.ID, true)
+	if err != nil && !errors.Is(err, ErrCodingCredentialNotFound) {
+		return fmt.Errorf("mirror fetch by id: %w", err)
+	}
+	if current != nil {
+		invalidations[0] = &mirrorInvalidation{orgID: current.OrgID, userID: current.UserID, provider: current.Provider}
+		if conflict, _, err := s.fetchActiveConfigByProviderLabelTx(ctx, tx, newScope, row.Provider, row.Label, true); err != nil && !errors.Is(err, ErrCodingCredentialNotFound) {
+			return fmt.Errorf("mirror fetch natural key: %w", err)
+		} else if conflict != nil && conflict.ID != current.ID {
+			s.recordMirrorNaturalKeyFallback()
+			inv, err := s.updateMirroredRowByNaturalKeyTx(ctx, tx, row)
+			if err != nil {
+				return err
+			}
+			invalidations[1] = inv
+			if _, err := s.mirrorDeleteTx(ctx, tx, current.OrgID, current.ID); err != nil {
+				return fmt.Errorf("mirror deactivate stale logical id: %w", err)
+			}
+		} else {
+			next := row.configSnapshot(current.ID, current.VersionID, current.CreatedAt)
+			if err := s.insertConfigVersionTx(ctx, tx, next); err != nil {
+				return fmt.Errorf("mirror config version: %w", err)
+			}
+			if err := s.insertRuntimeVersionTx(ctx, tx, newScope, current.ID, row.runtimeSnapshot(currentRuntime)); err != nil {
+				return fmt.Errorf("mirror runtime version: %w", err)
+			}
+			invalidations[1] = &mirrorInvalidation{orgID: row.OrgID, userID: row.UserID, provider: row.Provider}
+		}
+	} else if inv, err := s.updateMirroredRowByNaturalKeyTx(ctx, tx, row); err == nil && inv != nil {
+		s.recordMirrorNaturalKeyFallback()
+		invalidations[0] = inv
+	} else if err != nil && !errors.Is(err, ErrCodingCredentialNotFound) {
+		return err
+	} else {
+		if err := s.insertInitialConfigVersionTx(ctx, tx, row.configSnapshot(row.ID, uuid.Nil, row.createdAtOrNow(s.clock))); err != nil {
+			return fmt.Errorf("mirror insert config: %w", err)
+		}
+		if err := s.insertInitialRuntimeVersionTx(ctx, tx, newScope, row.ID, row.runtimeSnapshot(nil)); err != nil {
+			return fmt.Errorf("mirror insert runtime: %w", err)
+		}
+		invalidations[0] = &mirrorInvalidation{orgID: row.OrgID, userID: row.UserID, provider: row.Provider}
 	}
 
-	// Insert by id; on conflict, update the row in place. Scope (org_id +
-	// user_id) is immutable for a given legacy row; provider can flip during
-	// the api-key ↔ subscription split path so it is part of the refresh.
-	// `team_default_origin_user_id` is rewritten on every flip — set when a
-	// row toggles to is_team_default=true, cleared when it toggles back —
-	// keeping the marker column in lockstep with the legacy row's state.
-	_, err := s.db.Exec(ctx, `
-		INSERT INTO coding_credentials (
-			id, org_id, user_id, provider, label, config, priority, status,
-			created_by, last_verified_at, created_at, updated_at,
-			team_default_origin_user_id
-		) VALUES (
-			@id, @org_id, @user_id, @provider, @label, @config, @priority, @status,
-			@created_by, @last_verified_at, @created_at, @updated_at,
-			@team_default_origin_user_id
-		)
-		ON CONFLICT (id) DO UPDATE SET
-			user_id                     = EXCLUDED.user_id,
-			provider                    = EXCLUDED.provider,
-			label                       = EXCLUDED.label,
-			config                      = EXCLUDED.config,
-			priority                    = EXCLUDED.priority,
-			status                      = EXCLUDED.status,
-			last_verified_at            = EXCLUDED.last_verified_at,
-			updated_at                  = EXCLUDED.updated_at,
-			team_default_origin_user_id = EXCLUDED.team_default_origin_user_id`,
-		args,
-	)
-	if err == nil {
-		s.invalidate(models.Scope{OrgID: row.OrgID, UserID: row.UserID}, row.Provider)
-		return nil
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit mirror upsert: %w", err)
 	}
-	// If the natural-key index conflicts (rare — would require an out-of-band
-	// row already present at the same (scope, provider, label)), fall back to
-	// updating that row by natural key. The id divergence is acceptable
-	// during the migration window; the cleanup PR retires this fallback.
-	// Bump the counter so we can confirm the path is unused before deleting
-	// it — a non-zero MirrorNaturalKeyFallbackCount means an out-of-band
-	// writer (typically the SQL data-copy migration) landed first.
-	if isUniqueViolation(err) {
-		s.recordMirrorNaturalKeyFallback()
-		return s.updateMirroredRowByNaturalKey(ctx, row)
-	}
-	return fmt.Errorf("mirror upsert: %w", err)
+	s.applyMirrorInvalidations(invalidations)
+	return nil
 }
 
-func (s *CodingCredentialStore) updateMirroredRowByNaturalKey(ctx context.Context, row mirroredRow) error {
-	args := pgx.NamedArgs{
-		"org_id":                      row.OrgID,
-		"user_id":                     row.UserID,
-		"provider":                    string(row.Provider),
-		"label":                       row.Label,
-		"config":                      row.EncryptedCfg,
-		"priority":                    row.Priority,
-		"status":                      string(row.Status),
-		"last_verified_at":            row.LastVerifiedAt,
-		"updated_at":                  row.UpdatedAt,
-		"team_default_origin_user_id": row.TeamDefaultOriginUserID,
+func (row mirroredRow) createdAtOrNow(now func() time.Time) time.Time {
+	if row.CreatedAt.IsZero() {
+		return now()
 	}
-	var query string
-	if row.UserID != nil {
-		query = `
-			UPDATE coding_credentials SET
-				config                      = @config,
-				priority                    = @priority,
-				status                      = @status,
-				last_verified_at            = @last_verified_at,
-				updated_at                  = @updated_at,
-				team_default_origin_user_id = @team_default_origin_user_id
-			WHERE org_id = @org_id AND user_id = @user_id AND provider = @provider AND label = @label`
-	} else {
-		query = `
-			UPDATE coding_credentials SET
-				config                      = @config,
-				priority                    = @priority,
-				status                      = @status,
-				last_verified_at            = @last_verified_at,
-				updated_at                  = @updated_at,
-				team_default_origin_user_id = @team_default_origin_user_id
-			WHERE org_id = @org_id AND user_id IS NULL AND provider = @provider AND label = @label`
+	return row.CreatedAt
+}
+
+func (row mirroredRow) configSnapshot(id, versionID uuid.UUID, createdAt time.Time) codingCredentialConfigSnapshot {
+	return codingCredentialConfigSnapshot{
+		ID:                      id,
+		VersionID:               versionID,
+		OrgID:                   row.OrgID,
+		UserID:                  row.UserID,
+		Provider:                row.Provider,
+		Label:                   row.Label,
+		Config:                  row.EncryptedCfg,
+		Priority:                row.Priority,
+		Status:                  row.Status,
+		CreatedBy:               row.CreatedBy,
+		TeamDefaultOriginUserID: row.TeamDefaultOriginUserID,
+		CreatedAt:               createdAt,
 	}
-	if _, err := s.db.Exec(ctx, query, args); err != nil {
-		return fmt.Errorf("mirror update by natural key: %w", err)
+}
+
+// runtimeSnapshot builds the runtime version a legacy mirror write should
+// produce. Legacy tables own status and last_verified_at, but know nothing
+// about rate-limit health — that lives only in the unified runtime state, so
+// it is carried forward from the existing active runtime version instead of
+// being reset on every legacy write (e.g. a stack reorder must not clear a
+// credential's durable rate-limit marker).
+func (row mirroredRow) runtimeSnapshot(existing *codingCredentialRuntimeSnapshot) codingCredentialRuntimeSnapshot {
+	next := codingCredentialRuntimeSnapshot{
+		Status:         row.Status,
+		LastVerifiedAt: row.LastVerifiedAt,
 	}
-	s.invalidate(models.Scope{OrgID: row.OrgID, UserID: row.UserID}, row.Provider)
-	return nil
+	if existing != nil {
+		next.RateLimitedUntil = existing.RateLimitedUntil
+		next.RateLimitedObservedAt = existing.RateLimitedObservedAt
+		next.RateLimitMessage = existing.RateLimitMessage
+	}
+	return next
+}
+
+func (s *CodingCredentialStore) updateMirroredRowByNaturalKeyTx(ctx context.Context, tx pgx.Tx, row mirroredRow) (*mirrorInvalidation, error) {
+	scope := models.Scope{OrgID: row.OrgID, UserID: row.UserID}
+	current, currentRuntime, err := s.fetchActiveConfigByProviderLabelTx(ctx, tx, scope, row.Provider, row.Label, true)
+	if err != nil {
+		return nil, fmt.Errorf("mirror update by natural key: %w", err)
+	}
+	if err := s.insertConfigVersionTx(ctx, tx, row.configSnapshot(current.ID, current.VersionID, current.CreatedAt)); err != nil {
+		return nil, fmt.Errorf("mirror natural-key config version: %w", err)
+	}
+	if err := s.insertRuntimeVersionTx(ctx, tx, scope, current.ID, row.runtimeSnapshot(currentRuntime)); err != nil {
+		return nil, fmt.Errorf("mirror natural-key runtime version: %w", err)
+	}
+	return &mirrorInvalidation{orgID: row.OrgID, userID: row.UserID, provider: row.Provider}, nil
 }
 
 // isUniqueViolation reports a postgres unique_violation (SQLSTATE 23505).
@@ -545,9 +581,26 @@ func (s *CodingCredentialStore) mirrorDeleteTx(ctx context.Context, dbtx DBTX, s
 	var userID *uuid.UUID
 	var provider string
 	err := dbtx.QueryRow(ctx,
-		`DELETE FROM coding_credentials
-		 WHERE id = @id AND org_id = @org_id
-		 RETURNING org_id, user_id, provider`,
+		`WITH target AS (
+			SELECT DISTINCT id, org_id, user_id, provider
+			FROM coding_credentials
+			WHERE id = @id AND org_id = @org_id AND active = true
+		),
+		deactivated_runtime AS (
+			UPDATE coding_credential_runtime_state rt
+			SET active = false
+			FROM target
+			WHERE rt.credential_id = target.id AND rt.active = true
+			RETURNING rt.credential_id
+		),
+		deactivated_config AS (
+			UPDATE coding_credentials cc
+			SET active = false, updated_at = now()
+			FROM target
+			WHERE cc.id = target.id AND cc.active = true
+			RETURNING cc.id
+		)
+		SELECT org_id, user_id, provider FROM target LIMIT 1`,
 		pgx.NamedArgs{"id": id, "org_id": scopedOrgID},
 	).Scan(&orgID, &userID, &provider)
 	if err != nil {
@@ -579,9 +632,34 @@ func (s *CodingCredentialStore) mirrorDisableTx(ctx context.Context, dbtx DBTX, 
 	var userID *uuid.UUID
 	var provider string
 	err := dbtx.QueryRow(ctx,
-		`UPDATE coding_credentials SET status = 'disabled', updated_at = now()
-		 WHERE id = @id AND org_id = @org_id
-		 RETURNING org_id, user_id, provider`,
+		`WITH current AS (
+			SELECT cc.id, cc.org_id, cc.user_id, cc.provider,
+			       rt.last_verified_at, rt.rate_limited_until,
+			       rt.rate_limited_observed_at, rt.rate_limit_message
+			FROM coding_credentials cc
+			JOIN coding_credential_runtime_state rt ON rt.credential_id = cc.id AND rt.active = true
+			WHERE cc.id = @id AND cc.org_id = @org_id AND cc.active = true
+		),
+		deactivated AS (
+			UPDATE coding_credential_runtime_state rt
+			SET active = false
+			FROM current
+			WHERE rt.credential_id = current.id AND rt.active = true
+			RETURNING current.id, current.org_id, current.user_id, current.provider,
+			          current.last_verified_at, current.rate_limited_until,
+			          current.rate_limited_observed_at, current.rate_limit_message
+		),
+		inserted AS (
+			INSERT INTO coding_credential_runtime_state (
+				credential_id, org_id, user_id, status, last_verified_at,
+				rate_limited_until, rate_limited_observed_at, rate_limit_message, active
+			)
+			SELECT id, org_id, user_id, 'disabled', last_verified_at,
+			       rate_limited_until, rate_limited_observed_at, rate_limit_message, true
+			FROM deactivated
+			RETURNING credential_id
+		)
+		SELECT org_id, user_id, provider FROM deactivated LIMIT 1`,
 		pgx.NamedArgs{"id": id, "org_id": scopedOrgID},
 	).Scan(&orgID, &userID, &provider)
 	if err != nil {
@@ -667,6 +745,14 @@ func (noopMirror) MirrorUserCredentialDisable(context.Context, uuid.UUID, uuid.U
 
 // NoopMirror returns the no-op mirror.
 func NoopMirror() CodingCredentialMirror { return noopMirror{} }
+
+func isNoopCodingCredentialMirror(m CodingCredentialMirror) bool {
+	if m == nil {
+		return true
+	}
+	_, ok := m.(noopMirror)
+	return ok
+}
 
 // jsonDecodeProvider is the helper the legacy stores call to materialise a
 // typed ProviderConfig from already-decrypted JSON. Kept here so the legacy
