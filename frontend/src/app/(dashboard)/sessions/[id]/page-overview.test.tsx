@@ -6,6 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { queryKeys } from '@/lib/query-keys';
+import { markProvisionalSessionDetail } from '@/lib/session-detail-cache';
 import type {
   ReviewLoopFixMode,
   Session,
@@ -84,17 +85,24 @@ describe('SessionDetailPage overview and review loop', () => {
         },
       },
     });
+    let releaseDetail = () => {};
+    const detailBlocked = new Promise<void>((resolve) => {
+      releaseDetail = resolve;
+    });
     queryClient.setQueryData(queryKeys.sessions.detail(sessionId), {
-      data: {
+      data: markProvisionalSessionDetail({
         ...mockSessions[0],
         result_summary: 'Provisional list title',
         threads: [],
-      },
+      }),
     } satisfies SingleResponse<Session>);
     let detailRequests = 0;
+    let timelineRequests = 0;
+    let prRequests = 0;
     server.use(
-      http.get(`/api/v1/sessions/${sessionId}`, () => {
+      http.get(`/api/v1/sessions/${sessionId}`, async () => {
         detailRequests += 1;
+        await detailBlocked;
         return HttpResponse.json({
           data: {
             ...mockSessions[0],
@@ -103,6 +111,14 @@ describe('SessionDetailPage overview and review loop', () => {
           },
         } satisfies SingleResponse<Session>);
       }),
+      http.get(`/api/v1/sessions/${sessionId}/timeline`, () => {
+        timelineRequests += 1;
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get(`/api/v1/sessions/${sessionId}/pr`, () => {
+        prRequests += 1;
+        return HttpResponse.json({ data: null });
+      }),
     );
 
     renderSessionDetailWithQueryClient(sessionId, queryClient);
@@ -110,6 +126,13 @@ describe('SessionDetailPage overview and review loop', () => {
     await waitFor(() => {
       expect(detailRequests).toBe(1);
     });
+    expect(screen.getByTestId('session-detail-loading-skeleton')).toBeInTheDocument();
+    expect(screen.queryByText('Provisional list title')).not.toBeInTheDocument();
+    expect(timelineRequests).toBe(0);
+    expect(prRequests).toBe(0);
+
+    releaseDetail();
+
     expect(await screen.findAllByText('Authoritative detail title')).not.toHaveLength(0);
   });
 

@@ -156,10 +156,12 @@ import {
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
+import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
+import { SessionDetailLoadingSkeleton, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
@@ -2003,114 +2005,6 @@ function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly u
   return [...queryKeys.sessions.threadLogs(sessionId, threadId), "live"];
 }
 
-function SessionTimelineSkeleton() {
-  const rows: { align: "left" | "right"; widths: string[] }[] = [
-    { align: "right", widths: ["w-3/5", "w-2/5"] },
-    { align: "left", widths: ["w-4/5", "w-3/4", "w-1/2"] },
-    { align: "left", widths: ["w-2/3", "w-1/3"] },
-    { align: "left", widths: ["w-3/4", "w-3/5"] },
-  ];
-
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label="Loading session activity"
-      data-testid="session-timeline-skeleton"
-      className="space-y-3 py-1"
-    >
-      {rows.map((row, i) => (
-        <div
-          key={i}
-          className={`flex ${row.align === "right" ? "justify-end" : "justify-start"}`}
-        >
-          <div
-            className={`max-w-[92%] min-w-[40%] rounded-lg px-3 py-2.5 space-y-2 animate-pulse ${
-              row.align === "right" ? "bg-primary/10" : "bg-muted"
-            }`}
-          >
-            {row.widths.map((w, j) => (
-              <div
-                key={j}
-                className={`h-3 rounded ${w} ${
-                  row.align === "right" ? "bg-primary/20" : "bg-muted-foreground/15"
-                }`}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-      <span className="sr-only">Loading session activity…</span>
-    </div>
-  );
-}
-
-function SkeletonLine({ className }: { className: string }) {
-  return <div className={cn("rounded bg-muted-foreground/15", className)} />;
-}
-
-function SessionDetailLoadingSkeleton() {
-  return (
-    <div
-      data-testid="session-detail-loading-skeleton"
-      aria-busy="true"
-      className="flex h-full min-h-0 bg-background"
-    >
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="hidden h-12 shrink-0 border-b border-border px-4 md:flex md:items-center md:justify-between">
-          <div className="min-w-0 flex-1 animate-pulse space-y-2">
-            <SkeletonLine className="h-4 w-2/5 max-w-[360px]" />
-            <SkeletonLine className="h-3 w-1/4 max-w-[220px]" />
-          </div>
-          <div className="flex shrink-0 gap-2 animate-pulse">
-            <SkeletonLine className="h-8 w-8 rounded-md" />
-            <SkeletonLine className="h-8 w-8 rounded-md" />
-          </div>
-        </div>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="hidden h-10 shrink-0 border-b border-border px-3 md:flex md:items-center">
-            <div className="flex gap-2 animate-pulse">
-              <SkeletonLine className="h-6 w-24 rounded-md" />
-              <SkeletonLine className="h-6 w-28 rounded-md" />
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden p-4">
-            <div className="mx-auto flex h-full max-w-3xl flex-col justify-end gap-3">
-              <SessionTimelineSkeleton />
-            </div>
-          </div>
-          <div className="shrink-0 border-t border-border p-3">
-            <div className="animate-pulse rounded-lg border border-border bg-card p-3">
-              <SkeletonLine className="h-16 w-full rounded-md" />
-              <div className="mt-3 flex items-center justify-between">
-                <div className="flex gap-2">
-                  <SkeletonLine className="h-8 w-8 rounded-md" />
-                  <SkeletonLine className="h-8 w-24 rounded-md" />
-                </div>
-                <SkeletonLine className="h-8 w-8 rounded-md" />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="hidden w-[360px] shrink-0 border-l border-border bg-background md:flex md:flex-col">
-        <div className="h-12 shrink-0 border-b border-border px-3">
-          <div className="flex h-full items-center gap-2 animate-pulse">
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-            <SkeletonLine className="h-7 w-20 rounded-md" />
-          </div>
-        </div>
-        <div className="space-y-4 p-4 animate-pulse">
-          <SkeletonLine className="h-24 w-full rounded-md" />
-          <SkeletonLine className="h-16 w-full rounded-md" />
-          <SkeletonLine className="h-32 w-full rounded-md" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 type ChatPanelProps = {
   session: Session;
   sessionId: string;
@@ -3120,6 +3014,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
+      if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
@@ -3156,12 +3051,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
     [user],
   );
-  const session = data?.data;
+  const rawSession = data?.data;
+  const isProvisionalSession = isProvisionalSessionDetail(rawSession);
+  const session = isProvisionalSession ? undefined : rawSession;
   usePageTitle(session ? sessionTitle(session) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
-    centerMode === "review" ||
-    detailTab === "changes"
+    !!session &&
+    (centerMode === "review" ||
+      detailTab === "changes")
   );
   const diffRevisionKey = useMemo(() => {
     if (!session) return null;
@@ -3586,6 +3484,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    enabled: !!session,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
@@ -3897,14 +3796,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [session?.id, session?.status, session?.title]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
-    if (id) {
+    if (session?.id) {
       api.sessions.recordView(id).then(() => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
       }).catch((err) => {
         console.error("failed to record session view", err);
       });
     }
-  }, [id, queryClient]);
+  }, [id, queryClient, session?.id]);
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
@@ -5112,7 +5011,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
-  if (isLoading) {
+  if (isLoading || (isProvisionalSession && !error)) {
     return <SessionDetailLoadingSkeleton />;
   }
 
