@@ -209,10 +209,40 @@ func dependencyCachePathTargetsPreviewInstallMarkers(clean string) bool {
 	if !strings.Contains(clean, "*") {
 		return strings.HasPrefix(marker, clean+"/")
 	}
-	for _, candidate := range []string{".143", ".143/cache", marker} {
-		if ok, err := path.Match(clean, candidate); err == nil && ok {
-			return true
+	return dependencyCacheGlobTargetsPathOrDescendant(clean, marker)
+}
+
+func dependencyCacheGlobTargetsPathOrDescendant(pattern, target string) bool {
+	patternParts := strings.Split(pattern, "/")
+	targetParts := strings.Split(target, "/")
+	if len(patternParts) <= len(targetParts) {
+		for i, patternPart := range patternParts {
+			ok, err := path.Match(patternPart, targetParts[i])
+			if err != nil || !ok {
+				return false
+			}
+		}
+		return true
+	}
+	for i, targetPart := range targetParts {
+		ok, err := path.Match(patternParts[i], targetPart)
+		if err != nil || !ok {
+			return false
 		}
 	}
-	return false
+	for _, patternPart := range patternParts[len(targetParts):] {
+		if !dependencyCacheGlobSegmentCanMatchNonEmpty(patternPart) {
+			return false
+		}
+	}
+	return true
+}
+
+func dependencyCacheGlobSegmentCanMatchNonEmpty(pattern string) bool {
+	candidate := strings.ReplaceAll(pattern, "*", "x")
+	if candidate == "" {
+		candidate = "x"
+	}
+	ok, err := path.Match(pattern, candidate)
+	return err == nil && ok
 }

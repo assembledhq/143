@@ -1141,6 +1141,14 @@ func TestResolvePreviewInstallCachePaths(t *testing.T) {
 			enabled: true,
 		},
 		{
+			name: "excludes preview marker child clean path glob",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"Cargo.lock"},
+				CleanPaths: []string{".143/cache/preview-install*/*"},
+			},
+			enabled: false,
+		},
+		{
 			name: "explicit opt out disables paths",
 			install: &models.PreviewInstallConfig{
 				Lockfiles:  []string{"package-lock.json"},
