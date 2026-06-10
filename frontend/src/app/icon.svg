@@ -1,9 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 900" width="100%" height="100%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="150 60 700 780" width="512" height="512" role="img" aria-label="143 aircraft">
   <defs>
-    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
-      <feDropShadow dx="0" dy="15" stdDeviation="15" flood-color="#001833" flood-opacity="0.15" />
-    </filter>
-
     <linearGradient id="body-gradient" x1="20%" y1="0%" x2="80%" y2="100%">
       <stop offset="0%" stop-color="#abcbe6" />
       <stop offset="50%" stop-color="#88bce3" />
@@ -48,21 +44,18 @@
     />
   </defs>
 
-  <use href="#p80-solid" fill="url(#body-gradient)" filter="url(#shadow)" />
-  <use href="#p80-solid" fill="none" stroke="#2c4c68" stroke-width="2.5" stroke-linejoin="round" />
+  <use href="#p80-solid" fill="url(#body-gradient)" stroke="#8abde4" stroke-width="18" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke fill" />
 
   <path d="M 500 100 C 470 150, 460 300, 460 380 L 460 520 L 480 680 L 490 760 L 500 760 L 500 100 Z"
         fill="#ffffff" opacity="0.12" />
 
-  <path d="M 540 C 555 385, 555 410, 538 415 Z" fill="#142436" />
-  <path d="M 460 C 445 385, 445 410, 462 415 Z" fill="#142436" />
+  <path d="M 540 C 555 385, 555 410, 538 415 Z" fill="#142436" opacity="0.88" />
+  <path d="M 460 C 445 385, 445 410, 462 415 Z" fill="#142436" opacity="0.88" />
 
   <path d="M 500 100 C 510 120, 510 160, 500 180 C 490 160, 490 120, 500 100 Z" fill="#182c40" opacity="0.85" />
 
-  <line x1="500" y1="380" x2="500" y2="760" stroke="#1c344c" stroke-width="1" opacity="0.4" stroke-linecap="round" />
-
   <path d="M 500 180 C 520 200, 520 320, 500 350 C 480 320, 480 200, 500 180 Z"
-        fill="url(#glass-gradient)" stroke="#5d88ab" stroke-width="1.5" stroke-linejoin="round" />
+        fill="url(#glass-gradient)" />
 
   <path d="M 495 185 C 488 220, 488 300, 495 330 C 493 300, 493 220, 495 185 Z" fill="#ffffff" opacity="0.25" />
 </svg>
