@@ -1,6 +1,34 @@
 # Design: 143-tools Local Install & Team Auth
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-09
+> **Status:** Implemented | **Last reviewed:** 2026-06-09
+
+## Implementation notes (2026-06-09)
+
+All four phases shipped. Deltas from the text below:
+
+- **Migration numbers**: 000164 was taken by the Mezmo integration while this
+  doc was in review, so the Phase 2 tables landed as `000165_cli_auth` and
+  Phase 3 as `000166_org_join_tokens`.
+- **Version-skew enforcement**: `/api/v1/cli/version` + the 426
+  `CLI_UPDATE_REQUIRED` gate (`middleware.CLIVersionGate`) are implemented;
+  enforcement engages only when `CLI_MIN_SUPPORTED_VERSION` is set to an
+  orderable version. Git-SHA builds (the current default for
+  `version.BuildSHA`) are never blocked — comparing SHAs is meaningless. The
+  CLI's "newer CLI available" hint compares against `/api/v1/cli/version`
+  during `whoami`/`update` rather than reading a header off every response.
+- **Per-token join rate limiting**: no dedicated limiter was added. Join
+  validation only ever runs inside the GitHub OAuth callback (a full OAuth
+  round-trip with a state cookie per attempt) behind the global per-IP rate
+  limiter, which throttles enumeration harder than a per-token bucket would.
+- **Secret scanning**: the repo runs no secret scanner today; the `143u_`/
+  `143j_` patterns are documented in `docs/guides/cli-install.md` for teams
+  that do, and the sandbox log-redaction layer strips both shapes.
+- **Key files**: distribution `internal/api/handlers/cli_distribution.go`
+  (+ `assets/install.sh.tmpl`); login flow `internal/api/handlers/auth_cli.go`;
+  gateway `internal/api/handlers/cli_tools.go` +
+  `internal/services/mcp/org_registry.go`; laptop CLI `internal/cli/`;
+  stores `internal/db/{user_cli_tokens,cli_auth_codes,org_join_tokens}.go`;
+  UI `frontend/src/components/cli-{join-tokens,sessions}-card.tsx`.
 
 ## Goal
 

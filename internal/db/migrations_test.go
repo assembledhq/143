@@ -61,6 +61,21 @@ func TestMigrationsAllowBuilderRole(t *testing.T) {
 		"membership role constraint should validate separately to reduce lock pressure")
 }
 
+// TestOrgJoinTokensRoleCheckPinsTypedEnum pins the org_join_tokens role
+// CHECK constraint to the models.Role vocabulary, per the project standard
+// for CHECK-constraint columns: if a new role is added to the enum, this
+// test fails until a migration widens the constraint to match.
+func TestOrgJoinTokensRoleCheckPinsTypedEnum(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000166_org_join_tokens.up.sql")
+	require.NoError(t, err, "test should read the org join tokens migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "chk_org_join_tokens_role CHECK (role IN ('admin', 'member', 'builder', 'viewer'))",
+		"org_join_tokens role constraint must match models.ValidRoles; widen it in a new migration when the enum grows")
+}
+
 // TestCopyCodingCredentialsMigrationStampsTeamDefaultMarker locks the
 // step-3 INSERT to write `team_default_origin_user_id = uc.user_id`. The
 // down migration's orphan check and the dual-write mirror's cleanup both

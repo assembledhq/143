@@ -9,6 +9,7 @@ import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type Pe
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
+import { CLISessionsCard } from "@/components/cli-sessions-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { EmptyState } from "@/components/empty-state";
@@ -478,6 +479,8 @@ export default function AccountPage() {
             />
           </CardContent>
         </Card>
+
+        <CLISessionsCard />
 
         <Card>
           <CardHeader>

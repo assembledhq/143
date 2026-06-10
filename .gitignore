@@ -64,3 +64,6 @@ node_modules/
 # Claude local settings
 .claude/settings.local.json
 .claude/worktrees/
+
+# 143-tools CLI cross-compile output (make build-cli)
+dist/

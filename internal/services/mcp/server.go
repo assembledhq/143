@@ -29,7 +29,7 @@ const (
 // responses to stdout. Logging goes to a separate writer (typically stderr)
 // to keep the STDIO transport clean.
 type Server struct {
-	tools  *ToolRegistry
+	tools  ToolSource
 	logger io.Writer // stderr for diagnostic logging
 
 	mu          sync.Mutex
@@ -39,8 +39,16 @@ type Server struct {
 // NewServer creates a new MCP server backed by the given integration registry.
 // The logger should be stderr — stdout is reserved for JSON-RPC messages.
 func NewServer(reg *integration.Registry, logger io.Writer) *Server {
+	return NewServerWithSource(NewToolRegistry(reg), logger)
+}
+
+// NewServerWithSource creates an MCP server over any ToolSource — the local
+// integration registry in sandboxes, or the server-proxied source used by
+// `143-tools mcp serve` on laptops (where org credentials never exist
+// locally and every call flows through the 143 server).
+func NewServerWithSource(tools ToolSource, logger io.Writer) *Server {
 	return &Server{
-		tools:  NewToolRegistry(reg),
+		tools:  tools,
 		logger: logger,
 	}
 }
