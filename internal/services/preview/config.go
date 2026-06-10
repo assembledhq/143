@@ -56,12 +56,20 @@ const (
 	DefaultInstallTimeoutSeconds = 420
 	MaxInstallTimeoutSeconds     = 1800
 
-	DefaultPreviewDiskMiB      = 10 * 1024
-	DefaultSingleServiceMemory = 384
-	DefaultMultiServiceMemory  = 768
-	DefaultInfraServiceMemory  = 1024
+	DefaultPreviewDiskMiB = 10 * 1024
+	// Per-topology memory defaults (MiB). Large frontend dev servers (e.g. an
+	// rspack/webpack build running alongside a backend service) routinely need
+	// several GiB; the previous 384/768/1024 defaults caused the dev server to
+	// be OOM-killed mid-response, truncating bundles and serving a blank page.
+	DefaultSingleServiceMemory = 1024
+	DefaultMultiServiceMemory  = 2048
+	DefaultInfraServiceMemory  = 4096
 	MaxPreviewCPUMillis        = 2000
-	MaxPreviewMemoryMiB        = 1024
+	// MaxPreviewMemoryMiB is the ceiling a repo may request via
+	// preview.resources.{requests,limits}.memory in .143/config.json. Defaults
+	// stay modest (above) to bound per-worker capacity; repos that need more
+	// opt in explicitly up to this cap.
+	MaxPreviewMemoryMiB        = 8192
 	MaxPreviewEphemeralDiskMiB = 10 * 1024
 )
 
@@ -834,6 +842,15 @@ func pathDir(clean string) string {
 	return clean[:idx]
 }
 
+// memoryLimitLabel renders MaxPreviewMemoryMiB as a human-friendly limit string
+// for validation messages (e.g. "8Gi"), so the messages track the constant.
+func memoryLimitLabel() string {
+	if MaxPreviewMemoryMiB%1024 == 0 {
+		return fmt.Sprintf("%dGi", MaxPreviewMemoryMiB/1024)
+	}
+	return fmt.Sprintf("%dMi", MaxPreviewMemoryMiB)
+}
+
 func validatePreviewResources(resources models.PreviewResourceRequirements) []string {
 	var errs []string
 
@@ -870,10 +887,10 @@ func validatePreviewResources(resources models.PreviewResourceRequirements) []st
 		errs = append(errs, "preview.resources.limits.cpu must be at most 2 cores")
 	}
 	if reqMemorySet && reqMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, "preview.resources.requests.memory must be at most 1Gi")
+		errs = append(errs, fmt.Sprintf("preview.resources.requests.memory must be at most %s", memoryLimitLabel()))
 	}
 	if limitMemorySet && limitMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, "preview.resources.limits.memory must be at most 1Gi")
+		errs = append(errs, fmt.Sprintf("preview.resources.limits.memory must be at most %s", memoryLimitLabel()))
 	}
 	if reqDiskSet && reqDisk > MaxPreviewEphemeralDiskMiB {
 		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most 10Gi")
