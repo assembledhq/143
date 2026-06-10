@@ -550,6 +550,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		prService.SetUserCredentialStore(userCredentialStore)
 		prService.SetSessionMessageStore(sessionMessageStore)
+		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
 		prService.SetUserStore(userStore)
 		prService.SetOrgStore(orgStore)

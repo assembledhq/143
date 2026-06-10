@@ -30,6 +30,7 @@ the PR body as markdown
 
 <guidelines>
 - Keep the title under 120 characters. Use imperative mood (e.g., "Fix null pointer in auth middleware").
+- Use the code diff and files changed as the source of truth. Use the session title, issue, and session threads only as supporting context for why the code changed and how it was validated.
 - Explain the "why", not just the "what" — the diff already shows the "what".
 - Do not mention the agent, AI, or automation in the title or body.
 - If an issue is provided, reference it naturally in the summary.

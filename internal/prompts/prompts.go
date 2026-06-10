@@ -282,6 +282,7 @@ func PRContentPrompt(data PRContentPromptData) string {
 type PRContentUserPromptData struct {
 	RepoTemplate     string   // the repo's PR template (if any)
 	ResultSummary    string   // what the agent did
+	ThreadContext    string   // summaries from all visible session threads
 	SessionTitle     string   // session title (for manual sessions)
 	IssueTitle       string   // issue title
 	IssueSource      string   // issue source (e.g. "linear", "sentry")
