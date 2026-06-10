@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ func NewEvalRunStore(db DBTX) *EvalRunStore {
 }
 
 const evalRunColumns = `id, task_id, org_id, batch_id,
+	session_id, thread_id,
 	input_manifest, model, server_deploy_sha, pm_document_set_pin_id,
 	config_ref, context_overrides,
 	agent_diff, agent_trace, token_usage,
@@ -30,6 +32,7 @@ func scanEvalRun(row pgx.Row) (models.EvalRun, error) {
 	var r models.EvalRun
 	err := row.Scan(
 		&r.ID, &r.TaskID, &r.OrgID, &r.BatchID,
+		&r.SessionID, &r.ThreadID,
 		&r.InputManifest, &r.Model, &r.ServerDeploySHA, &r.PMDocumentSetPinID,
 		&r.ConfigRef, &r.ContextOverrides,
 		&r.AgentDiff, &r.AgentTrace, &r.TokenUsage,
@@ -46,6 +49,7 @@ func scanEvalRuns(rows pgx.Rows) ([]models.EvalRun, error) {
 		var r models.EvalRun
 		err := rows.Scan(
 			&r.ID, &r.TaskID, &r.OrgID, &r.BatchID,
+			&r.SessionID, &r.ThreadID,
 			&r.InputManifest, &r.Model, &r.ServerDeploySHA, &r.PMDocumentSetPinID,
 			&r.ConfigRef, &r.ContextOverrides,
 			&r.AgentDiff, &r.AgentTrace, &r.TokenUsage,
@@ -71,11 +75,23 @@ func (s *EvalRunStore) Create(ctx context.Context, run *models.EvalRun) error {
 		@input_manifest, @model, @server_deploy_sha, @pm_document_set_pin_id,
 		@config_ref, @context_overrides
 	) RETURNING %s`, evalRunColumns)
-
+	if run.SessionID != nil || run.ThreadID != nil {
+		query = fmt.Sprintf(`INSERT INTO eval_runs (
+			task_id, org_id, batch_id, session_id, thread_id,
+			input_manifest, model, server_deploy_sha, pm_document_set_pin_id,
+			config_ref, context_overrides
+		) VALUES (
+			@task_id, @org_id, @batch_id, @session_id, @thread_id,
+			@input_manifest, @model, @server_deploy_sha, @pm_document_set_pin_id,
+			@config_ref, @context_overrides
+		) RETURNING %s`, evalRunColumns)
+	}
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"task_id":                run.TaskID,
 		"org_id":                 run.OrgID,
 		"batch_id":               run.BatchID,
+		"session_id":             run.SessionID,
+		"thread_id":              run.ThreadID,
 		"input_manifest":         run.InputManifest,
 		"model":                  run.Model,
 		"server_deploy_sha":      run.ServerDeploySHA,
@@ -97,6 +113,15 @@ func (s *EvalRunStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"id":     runID,
 		"org_id": orgID,
+	})
+	return scanEvalRun(row)
+}
+
+func (s *EvalRunStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.EvalRun, error) {
+	query := fmt.Sprintf(`SELECT %s FROM eval_runs WHERE org_id = @org_id AND session_id = @session_id ORDER BY created_at DESC LIMIT 1`, evalRunColumns)
+	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
 	})
 	return scanEvalRun(row)
 }
@@ -147,6 +172,30 @@ func (s *EvalRunStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	})
 	if err != nil {
 		return fmt.Errorf("update eval run status: %w", err)
+	}
+	return nil
+}
+
+// UpdatePostSessionArtifacts persists the agent session output and moves the
+// run into grading without marking it completed.
+func (s *EvalRunStore) UpdatePostSessionArtifacts(ctx context.Context, orgID, runID uuid.UUID, agentDiff *string, agentTrace json.RawMessage, inputManifest json.RawMessage) error {
+	query := `UPDATE eval_runs SET
+		status = @status,
+		agent_diff = @agent_diff,
+		agent_trace = @agent_trace,
+		input_manifest = @input_manifest
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":             runID,
+		"org_id":         orgID,
+		"status":         models.EvalRunStatusGrading,
+		"agent_diff":     agentDiff,
+		"agent_trace":    agentTrace,
+		"input_manifest": inputManifest,
+	})
+	if err != nil {
+		return fmt.Errorf("update eval run post-session artifacts: %w", err)
 	}
 	return nil
 }
@@ -291,14 +340,15 @@ func (s *EvalBatchStore) UpdateStatus(ctx context.Context, orgID, batchID uuid.U
 }
 
 // CompleteBatchIfDone atomically marks a batch as completed if all its runs are
-// finished (not pending or running). This avoids the race condition where multiple
-// concurrent workers each check and try to complete the same batch.
+// finished (not pending, running, or grading). This avoids the race condition
+// where multiple concurrent workers each check and try to complete the same
+// batch.
 func (s *EvalBatchStore) CompleteBatchIfDone(ctx context.Context, orgID, batchID uuid.UUID) error {
 	query := `UPDATE eval_batches SET status = 'completed', completed_at = now()
 		WHERE id = @id AND org_id = @org_id AND status != 'completed'
 		AND NOT EXISTS (
 			SELECT 1 FROM eval_runs
-			WHERE batch_id = @id AND org_id = @org_id AND status IN ('pending', 'running')
+			WHERE batch_id = @id AND org_id = @org_id AND status IN ('pending', 'running', 'grading')
 		)`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     batchID,

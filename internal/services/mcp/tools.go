@@ -303,6 +303,31 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		tools = append(tools, sessionTabToolDefinitions()...)
 	}
 
+	if len(tr.integrations.EvalCandidateReporters()) > 0 {
+		tools = append(tools, Tool{
+			Name:        "eval_add",
+			Description: "Add a candidate eval task from the current eval bootstrap session. Only available to sessions launched from eval settings.",
+			InputSchema: ToolSchema{
+				Type: "object",
+				Properties: map[string]SchemaProperty{
+					"pr_number":           {Type: "number", Description: "Source pull request number"},
+					"pr_title":            {Type: "string", Description: "Source pull request title"},
+					"base_commit_sha":     {Type: "string", Description: "Commit SHA before the fix"},
+					"solution_commit_sha": {Type: "string", Description: "Commit SHA containing the fix"},
+					"solution_diff":       {Type: "string", Description: "Diff that solved the issue"},
+					"issue_description":   {Type: "string", Description: "Reproducible task prompt for the eval"},
+					"scoring_criteria":    {Type: "string", Description: "JSON array of scoring criteria"},
+					"complexity":          {Type: "string", Description: "Task complexity", Enum: []string{"trivial", "simple", "moderate", "complex"}, Default: "moderate"},
+					"fitness_score":       {Type: "number", Description: "Candidate quality score from 0 to 1"},
+					"fitness_reasoning":   {Type: "string", Description: "Why this candidate is useful for regression protection"},
+					"evidence":            {Type: "string", Description: "Optional JSON evidence gathered while selecting the candidate"},
+					"warnings":            {Type: "array", Description: "Optional warnings reviewers should consider", Items: &SchemaProperty{Type: "string"}},
+				},
+				Required: []string{"pr_number", "pr_title", "base_commit_sha", "solution_commit_sha", "solution_diff", "issue_description", "scoring_criteria", "complexity", "fitness_score", "fitness_reasoning"},
+			},
+		})
+	}
+
 	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
 		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
@@ -423,6 +448,12 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("session tab manager not registered")
 		}
 		return tr.callSessionTabs(ctx, managers[0], name, args)
+	case "eval_add":
+		reporters := tr.integrations.EvalCandidateReporters()
+		if len(reporters) == 0 {
+			return ErrorResult("eval candidate reporter not registered")
+		}
+		return tr.callEvalCandidateReporter(ctx, reporters[0], name, args)
 	}
 
 	switch name {
@@ -983,6 +1014,107 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 
 	default:
 		return ErrorResult(fmt.Sprintf("unknown pull request creator method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Eval candidate reporter dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callEvalCandidateReporter(ctx context.Context, reporter integration.EvalCandidateReporter, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "eval_add":
+		var p struct {
+			PRNumber          int             `json:"pr_number"`
+			PRTitle           string          `json:"pr_title"`
+			BaseCommitSHA     string          `json:"base_commit_sha"`
+			SolutionCommitSHA string          `json:"solution_commit_sha"`
+			SolutionDiff      string          `json:"solution_diff"`
+			IssueDescription  string          `json:"issue_description"`
+			ScoringCriteria   json.RawMessage `json:"scoring_criteria"`
+			Complexity        string          `json:"complexity"`
+			FitnessScore      float64         `json:"fitness_score"`
+			FitnessReasoning  string          `json:"fitness_reasoning"`
+			Evidence          json.RawMessage `json:"evidence"`
+			Warnings          []string        `json:"warnings"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.PRNumber <= 0 {
+			return ErrorResult("pr_number is required")
+		}
+		if strings.TrimSpace(p.PRTitle) == "" {
+			return ErrorResult("pr_title is required")
+		}
+		if strings.TrimSpace(p.BaseCommitSHA) == "" {
+			return ErrorResult("base_commit_sha is required")
+		}
+		if strings.TrimSpace(p.SolutionCommitSHA) == "" {
+			return ErrorResult("solution_commit_sha is required")
+		}
+		if strings.TrimSpace(p.SolutionDiff) == "" {
+			return ErrorResult("solution_diff is required")
+		}
+		if strings.TrimSpace(p.IssueDescription) == "" {
+			return ErrorResult("issue_description is required")
+		}
+		if strings.TrimSpace(p.Complexity) == "" {
+			return ErrorResult("complexity is required")
+		}
+		if strings.TrimSpace(p.FitnessReasoning) == "" {
+			return ErrorResult("fitness_reasoning is required")
+		}
+		criteria := p.ScoringCriteria
+		if len(criteria) == 0 {
+			return ErrorResult("scoring_criteria is required")
+		}
+		var criteriaProbe []any
+		if err := json.Unmarshal(criteria, &criteriaProbe); err != nil {
+			var criteriaString string
+			if strErr := json.Unmarshal(criteria, &criteriaString); strErr != nil {
+				return ErrorResult("scoring_criteria must be a JSON array")
+			}
+			criteria = json.RawMessage(criteriaString)
+			if err := json.Unmarshal(criteria, &criteriaProbe); err != nil {
+				return ErrorResult("scoring_criteria must be a JSON array")
+			}
+		}
+		evidence := p.Evidence
+		if len(evidence) > 0 {
+			var evidenceProbe any
+			if err := json.Unmarshal(evidence, &evidenceProbe); err != nil {
+				var evidenceString string
+				if strErr := json.Unmarshal(evidence, &evidenceString); strErr != nil {
+					return ErrorResult("evidence must be valid JSON when provided")
+				}
+				evidence = json.RawMessage(evidenceString)
+				if err := json.Unmarshal(evidence, &evidenceProbe); err != nil {
+					return ErrorResult("evidence must be valid JSON when provided")
+				}
+			}
+		}
+
+		result, err := reporter.AddCandidate(ctx, integration.AddEvalCandidateParams{
+			PRNumber:          p.PRNumber,
+			PRTitle:           p.PRTitle,
+			BaseCommitSHA:     p.BaseCommitSHA,
+			SolutionCommitSHA: p.SolutionCommitSHA,
+			SolutionDiff:      p.SolutionDiff,
+			IssueDescription:  p.IssueDescription,
+			ScoringCriteria:   criteria,
+			Complexity:        p.Complexity,
+			FitnessScore:      p.FitnessScore,
+			FitnessReasoning:  p.FitnessReasoning,
+			Evidence:          evidence,
+			Warnings:          p.Warnings,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("add eval candidate failed: %s", err))
+		}
+		return jsonResult(result)
+	default:
+		return ErrorResult(fmt.Sprintf("unknown eval candidate reporter method: %s", method))
 	}
 }
 

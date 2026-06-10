@@ -635,14 +635,14 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		INSERT INTO sessions (
 			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, reasoning_effort, triggered_by_user_id, target_branch, repository_id, automation_run_id,
+			model_override, reasoning_effort, triggered_by_user_id, target_branch, base_commit_sha, repository_id, input_manifest, automation_run_id,
 			origin, interaction_mode, validation_policy,
 			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state
 		)
 		VALUES (
 			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
+			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @base_commit_sha, @repository_id, @input_manifest, @automation_run_id,
 			@origin, @interaction_mode, @validation_policy,
 			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state
 		)
@@ -666,7 +666,9 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		"reasoning_effort":           run.ReasoningEffort,
 		"triggered_by_user_id":       run.TriggeredByUserID,
 		"target_branch":              run.TargetBranch,
+		"base_commit_sha":            run.BaseCommitSHA,
 		"repository_id":              run.RepositoryID,
+		"input_manifest":             run.InputManifest,
 		"automation_run_id":          run.AutomationRunID,
 		"origin":                     run.Origin,
 		"interaction_mode":           run.InteractionMode,
