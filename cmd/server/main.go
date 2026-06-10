@@ -39,6 +39,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -716,6 +717,11 @@ func main() {
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
 		scheduler.SetSessionStore(sessionStore)
+		scheduler.SetDomainRecheck(
+			db.NewOrganizationDomainStore(pool),
+			domains.NewVerifier(),
+			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
+		)
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 

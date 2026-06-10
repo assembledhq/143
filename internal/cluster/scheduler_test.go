@@ -821,3 +821,84 @@ func TestScheduler_ReapStrandedPendingSnapshots_StoreErrorSwallowed(t *testing.T
 	s.reapStrandedPendingSnapshots(context.Background(), time.Now())
 	require.Equal(t, 1, sessions.reapCalls)
 }
+
+// --- verified-domain recheck sweep ---
+
+type mockDomainStore struct {
+	due            []models.OrganizationDomain
+	listErr        error
+	successIDs     []uuid.UUID
+	failureIDs     []uuid.UUID
+	failureReturns []struct {
+		count    int
+		disabled bool
+	}
+}
+
+func (m *mockDomainStore) ListVerifiedDueForRecheck(ctx context.Context, checkedBefore time.Time, limit int) ([]models.OrganizationDomain, error) {
+	if len(m.due) > limit {
+		return m.due[:limit], m.listErr
+	}
+	return m.due, m.listErr
+}
+
+func (m *mockDomainStore) RecordRecheckSuccess(ctx context.Context, id uuid.UUID) error {
+	m.successIDs = append(m.successIDs, id)
+	return nil
+}
+
+func (m *mockDomainStore) RecordRecheckFailure(ctx context.Context, id uuid.UUID, maxFailures int) (int, bool, error) {
+	m.failureIDs = append(m.failureIDs, id)
+	r := m.failureReturns[len(m.failureIDs)-1]
+	return r.count, r.disabled, nil
+}
+
+type mockDomainVerifier struct {
+	results map[string]bool
+	errs    map[string]error
+}
+
+func (m *mockDomainVerifier) Verify(ctx context.Context, domain, token string) (bool, error) {
+	if err, ok := m.errs[domain]; ok {
+		return false, err
+	}
+	return m.results[domain], nil
+}
+
+func TestRecheckVerifiedDomains(t *testing.T) {
+	t.Parallel()
+
+	okID, missingID, brokenID := uuid.New(), uuid.New(), uuid.New()
+	store := &mockDomainStore{
+		due: []models.OrganizationDomain{
+			{ID: okID, OrgID: uuid.New(), Domain: "healthy.example", VerificationToken: "t1", Status: models.OrgDomainStatusVerified},
+			{ID: missingID, OrgID: uuid.New(), Domain: "lapsed.example", VerificationToken: "t2", Status: models.OrgDomainStatusVerified},
+			{ID: brokenID, OrgID: uuid.New(), Domain: "resolverdown.example", VerificationToken: "t3", Status: models.OrgDomainStatusVerified},
+		},
+		failureReturns: []struct {
+			count    int
+			disabled bool
+		}{{count: 3, disabled: true}},
+	}
+	verifier := &mockDomainVerifier{
+		results: map[string]bool{"healthy.example": true, "lapsed.example": false},
+		errs:    map[string]error{"resolverdown.example": errors.New("server misbehaving")},
+	}
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	s.SetDomainRecheck(store, verifier, nil)
+	s.recheckVerifiedDomains(context.Background(), time.Now())
+
+	require.Equal(t, []uuid.UUID{okID}, store.successIDs, "a present TXT record resets the failure streak")
+	require.Equal(t, []uuid.UUID{missingID}, store.failureIDs, "a missing record increments the streak (and can disable auto-join)")
+	// brokenID appears in neither list: resolver trouble is no information,
+	// so the row is left untouched for the next tick to retry.
+}
+
+func TestRecheckVerifiedDomains_NoopWhenUnwired(t *testing.T) {
+	t.Parallel()
+
+	s := &Scheduler{logger: zerolog.Nop()}
+	// Must not panic with nil store/verifier (e.g. worker-only deployments).
+	s.recheckVerifiedDomains(context.Background(), time.Now())
+}
