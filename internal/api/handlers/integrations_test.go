@@ -326,8 +326,7 @@ func TestIntegrationHandler_ListIntegrations_DerivesSafeCredentialMetadata(t *te
 	require.NotNil(t, circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be derived from credential metadata")
 	require.Equal(t, "gh/acme/api", *circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be exposed without token data")
 	require.NotNil(t, mezmoIntegration, "Mezmo integration should be present in response")
-	require.NotNil(t, mezmoIntegration.MezmoDataset, "Mezmo dataset should be derived from credential metadata")
-	require.Equal(t, "prod", *mezmoIntegration.MezmoDataset, "Mezmo dataset should be exposed without key data")
+	require.Nil(t, mezmoIntegration.MezmoDataset, "Mezmo dataset should not be exposed because dataset scoping is unsupported")
 	require.NotNil(t, mezmoIntegration.MezmoBaseURL, "Mezmo base URL should be derived from credential metadata")
 	require.Equal(t, "https://logs.acme.com", *mezmoIntegration.MezmoBaseURL, "Mezmo base URL should be exposed without key data")
 	require.NotContains(t, w.Body.String(), "secret-notion-token", "response should not expose Notion token")
@@ -3392,8 +3391,12 @@ func TestIntegrationHandler_ConnectMezmo_Success(t *testing.T) {
 	credentialStore := db.NewOrgCredentialStore(mock, nil)
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		require.Equal(t, "https://api.mezmo.com/v1/logs/search", req.URL.String())
-		require.Equal(t, "mezmo_key", req.Header.Get("servicekey"))
+		require.Equal(t, http.MethodGet, req.Method, "validation should use the documented Mezmo export method")
+		require.Equal(t, "https", req.URL.Scheme, "validation should use the default Mezmo API scheme")
+		require.Equal(t, "api.mezmo.com", req.URL.Host, "validation should use the default Mezmo API host")
+		require.Equal(t, "/v2/export", req.URL.Path, "validation should use the documented Mezmo export path")
+		require.Equal(t, "Token mezmo_key", req.Header.Get("Authorization"), "validation should send the documented Mezmo access-token auth header")
+		require.Equal(t, "1", req.URL.Query().Get("size"), "validation should request a minimal export")
 
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -3419,7 +3422,7 @@ func TestIntegrationHandler_ConnectMezmo_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
 
-	body := `{"api_key":"mezmo_key","dataset":"prod"}`
+	body := `{"api_key":"mezmo_key"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -3491,7 +3494,7 @@ func TestIntegrationHandler_ConnectMezmo_HonorsCustomBaseURL(t *testing.T) {
 	credentialStore := db.NewOrgCredentialStore(mock, nil)
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		require.Equal(t, "https://logs.example.com/v1/logs/search", req.URL.String(),
+		require.Equal(t, "https://logs.example.com/v2/export", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path,
 			"validation should target the operator-supplied base URL")
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -3578,9 +3581,65 @@ func TestIntegrationHandler_ConnectMezmo_InvalidJSON(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_JSON")
 }
 
-// A 4xx that isn't an auth rejection (e.g. an unknown dataset or a query-shape
-// quirk) means the key was accepted, so connect should still succeed — we
-// validate the key, not the probe query.
+func TestIntegrationHandler_ConnectMezmo_RejectsDataset(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"api_key":"mezmo_key","dataset":"production"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "ConnectMezmo should reject unsupported dataset scopes")
+	require.Contains(t, w.Body.String(), "UNSUPPORTED_DATASET", "response should identify unsupported dataset scope")
+}
+
+func TestIntegrationHandler_ConnectMezmo_RejectsNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v2/export", req.URL.Path, "validation should probe the documented Mezmo export endpoint")
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"No Resource Found"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"api_key":"mezmo_key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "missing Mezmo endpoint should reject the connection")
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN", "response should identify validation failure")
+	require.Contains(t, w.Body.String(), "mezmo API endpoint not found", "response should explain that the endpoint probe failed")
+}
+
+// A 4xx that isn't an auth rejection (e.g. a query-shape quirk) means the key
+// was accepted, so connect should still succeed — we validate the key, not the
+// probe query.
 func TestIntegrationHandler_ConnectMezmo_AcceptsNonAuth4xx(t *testing.T) {
 	t.Parallel()
 
@@ -3616,7 +3675,7 @@ func TestIntegrationHandler_ConnectMezmo_AcceptsNonAuth4xx(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
 
-	body := `{"api_key":"mezmo_key","dataset":"does-not-exist"}`
+	body := `{"api_key":"mezmo_key"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))

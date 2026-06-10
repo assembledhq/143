@@ -571,7 +571,7 @@ describe("IntegrationsPage", () => {
     );
   });
 
-  it("helps users find Mezmo service keys and datasets while connecting", async () => {
+  it("helps users find Mezmo service keys while connecting", async () => {
     integrationsListMock.mockResolvedValueOnce({ data: [], meta: {} });
 
     renderWithProviders(<IntegrationsPage />);
@@ -586,10 +586,7 @@ describe("IntegrationsPage", () => {
       "https://app.mezmo.com/",
     );
 
-    await user.hover(within(dialog).getByRole("button", { name: "Where to find the Mezmo dataset" }));
-
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "In Mezmo Log Analysis, open Search, then use the dataset selector near the top of the log viewer. Copy that selected dataset name exactly. Leave blank to query across the default Mezmo scope.",
-    );
+    expect(within(dialog).queryByLabelText("Dataset (optional)")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Where to find the Mezmo dataset" })).not.toBeInTheDocument();
   });
 });
