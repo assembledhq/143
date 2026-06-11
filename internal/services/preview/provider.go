@@ -53,6 +53,10 @@ type PreviewCapableProvider interface {
 	PreviewStatus(ctx context.Context, handle string) (*PreviewStatusSnapshot, error)
 }
 
+type PreviewCachePrewarmProvider interface {
+	PrewarmPreviewInstallCaches(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) error
+}
+
 type StartPreviewOptions struct {
 	OrgID        uuid.UUID
 	RepositoryID uuid.UUID
@@ -144,6 +148,8 @@ type ServiceObserver interface {
 type CacheObserver interface {
 	OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
 	OnDependencyCacheSave(status string, cacheKey string, sizeBytes int64, err error)
+	OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
+	OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error)
 }
 
 // InfraSnapshot is the current state of a platform infrastructure container.

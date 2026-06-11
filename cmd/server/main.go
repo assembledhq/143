@@ -221,6 +221,7 @@ func main() {
 	// gracefully degrades when Docker is not available).
 	fileReader := sandbox.FileReader(sandbox.NoOpFileReader{})
 	var pvProvider preview.PreviewCapableProvider
+	var dependencyCache preview.DependencyCache
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
 	var sandboxCapacity *agent.SandboxCapacityGate
@@ -239,7 +240,6 @@ func main() {
 				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
-			var dependencyCache preview.DependencyCache
 			if previewDependencyCacheEnabled(*cfg) {
 				dependencyS3Region := cfg.PreviewDependencyCacheS3Region
 				if dependencyS3Region == "" {
@@ -286,7 +286,13 @@ func main() {
 					}
 				}
 			}
-			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger, previewproviders.WithDependencyCache(dependencyCache))
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(
+				apiDockerCli,
+				sandboxExec,
+				logger,
+				previewproviders.WithDependencyCache(dependencyCache),
+				previewproviders.WithPackageManagerCacheEnabled(cfg.PreviewPackageManagerCacheEnabled),
+			)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
@@ -500,6 +506,10 @@ func main() {
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
+					var prewarmDependencyCache preview.PreviewPathCache
+					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
+						prewarmDependencyCache = pathCache
+					}
 					services.PreviewController = previewManager
 					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
 						Manager:         previewManager,
@@ -514,8 +524,13 @@ func main() {
 						Snapshots:       snapshotStore,
 						GitHub:          services.GitHub,
 						NodeID:          cfg.NodeID,
+						DependencyCache: prewarmDependencyCache,
+						PrewarmEnabled:  cfg.PreviewCachePrewarmEnabled,
+						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
+					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
 				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without

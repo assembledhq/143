@@ -2694,3 +2694,74 @@ func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
 	require.Equal(t, int64(7), deleted, "DeleteExpiredDependencyCacheLocations should report deleted rows")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestPreviewStore_UpsertPreviewCachePrewarmRun_PersistsJobID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	jobID := uuid.New()
+	runID := uuid.New()
+	now := time.Now().UTC()
+	run := &models.PreviewCachePrewarmRun{
+		OrgID:         orgID,
+		RepoID:        repoID,
+		Source:        "session",
+		SourceID:      "session-1",
+		CacheScopeKey: "preview_cache_prewarm:session:session-1:7",
+		JobID:         &jobID,
+		WorkerNodeID:  "worker-a",
+		Status:        "pending",
+	}
+
+	mock.ExpectQuery("INSERT INTO preview_cache_prewarm_runs").
+		WithArgs(previewAnyArgs(16)...).
+		WillReturnRows(pgxmock.NewRows(previewCachePrewarmRunTestCols).
+			AddRow(runID, orgID, repoID, "session", "session-1", run.CacheScopeKey, &jobID, "worker-a", "pending", "", "", "", "", int64(0), "", nil, nil, now, now))
+
+	got, err := NewPreviewStore(mock).UpsertPreviewCachePrewarmRun(context.Background(), run)
+
+	require.NoError(t, err, "UpsertPreviewCachePrewarmRun should persist enqueue metadata")
+	require.NotNil(t, got.JobID, "UpsertPreviewCachePrewarmRun should return the stored job id")
+	require.Equal(t, jobID, *got.JobID, "UpsertPreviewCachePrewarmRun should preserve the enqueue job id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewCachePrewarmRunStatus_UpdatesConfigDigest(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE preview_cache_prewarm_runs").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewPreviewStore(mock).UpdatePreviewCachePrewarmRunStatus(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		"preview_cache_prewarm:session:session-1:7",
+		"running",
+		"pm-key",
+		"dep-key",
+		"digest",
+		"",
+		false,
+	)
+
+	require.NoError(t, err, "UpdatePreviewCachePrewarmRunStatus should update computed prewarm metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+var previewCachePrewarmRunTestCols = []string{
+	"id", "org_id", "repo_id", "source", "source_id", "cache_scope_key",
+	"job_id", "worker_node_id", "status", "package_manager_cache_key",
+	"dependency_cache_key", "config_digest", "commit_sha", "workspace_revision",
+	"error", "started_at", "completed_at", "created_at", "updated_at",
+}

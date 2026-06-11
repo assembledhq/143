@@ -55,6 +55,11 @@ type WorkerSelectionRequirements struct {
 	StaticEgressPublicIP string
 }
 
+type WorkerCachePlacement struct {
+	Kind         models.PreviewCacheKind
+	PlacementKey string
+}
+
 type StaticEgressWorkerDiagnostics struct {
 	Available  bool                         `json:"available"`
 	Mismatches []StaticEgressWorkerMismatch `json:"mismatches,omitempty"`
@@ -226,6 +231,14 @@ func (s *WorkerSelector) SelectStartNodeWithPlacement(ctx context.Context, orgID
 }
 
 func (s *WorkerSelector) SelectStartNodeWithPlacementAndRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placementKey string, req WorkerSelectionRequirements) (WorkerNode, error) {
+	var placements []WorkerCachePlacement
+	if strings.TrimSpace(placementKey) != "" {
+		placements = []WorkerCachePlacement{{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: placementKey}}
+	}
+	return s.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, session, repoID, placements, req)
+}
+
+func (s *WorkerSelector) SelectStartNodeWithCachePlacementsAndRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placements []WorkerCachePlacement, req WorkerSelectionRequirements) (WorkerNode, error) {
 	if session == nil {
 		return WorkerNode{}, fmt.Errorf("session is required")
 	}
@@ -248,15 +261,16 @@ func (s *WorkerSelector) SelectStartNodeWithPlacementAndRequirements(ctx context
 		return s.ResolveNode(ctx, *session.WorkerNodeID)
 	}
 
-	if repoID != uuid.Nil && strings.TrimSpace(placementKey) != "" {
-		worker, ok, lookupErr := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, true, req)
+	placements = normalizeWorkerCachePlacements(placements)
+	if repoID != uuid.Nil && len(placements) > 0 {
+		worker, ok, lookupErr := s.selectCachePlacementWorker(ctx, orgID, repoID, placements, true, req)
 		if lookupErr == nil && ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "local_cache_holder")
 			return worker, nil
 		} else if lookupErr != nil {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
 		}
-		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, true, req); err != nil && !errors.Is(err, ErrNoPreviewWorkers) {
+		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, rendezvousPlacementKey(placements), rendezvousTopN, true, req); err != nil && !errors.Is(err, ErrNoPreviewWorkers) {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "rendezvous")
@@ -272,14 +286,14 @@ func (s *WorkerSelector) SelectStartNodeWithPlacementAndRequirements(ctx context
 	if !errors.Is(err, ErrNoPreviewWorkers) || s.preferredRegion == "" {
 		return WorkerNode{}, err
 	}
-	if repoID != uuid.Nil && strings.TrimSpace(placementKey) != "" {
-		if worker, ok, err := s.selectCachePlacementWorker(ctx, orgID, repoID, placementKey, false, req); err != nil {
+	if repoID != uuid.Nil && len(placements) > 0 {
+		if worker, ok, err := s.selectCachePlacementWorker(ctx, orgID, repoID, placements, false, req); err != nil {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
 			return worker, nil
 		}
-		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, placementKey, rendezvousTopN, false, req); err != nil {
+		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, rendezvousPlacementKey(placements), rendezvousTopN, false, req); err != nil {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
@@ -426,12 +440,16 @@ func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map
 	return best, nil
 }
 
-func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
+func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, repoID uuid.UUID, placements []WorkerCachePlacement, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	locations, err := s.previews.ListDependencyCacheWorkersByPlacement(lookupCtx, orgID, repoID, placementKey, 64)
-	if err != nil {
-		return WorkerNode{}, false, err
+	var locations []models.PreviewDependencyCacheLocation
+	for _, placement := range normalizeWorkerCachePlacements(placements) {
+		found, err := s.previews.ListDependencyCacheWorkersByPlacement(lookupCtx, orgID, repoID, placement.Kind, placement.PlacementKey, 64)
+		if err != nil {
+			return WorkerNode{}, false, err
+		}
+		locations = append(locations, found...)
 	}
 	if len(locations) == 0 {
 		return WorkerNode{}, false, nil
@@ -494,6 +512,40 @@ func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, 
 		return WorkerNode{}, false, nil
 	}
 	return best, true, nil
+}
+
+func normalizeWorkerCachePlacements(placements []WorkerCachePlacement) []WorkerCachePlacement {
+	normalized := make([]WorkerCachePlacement, 0, len(placements))
+	seen := make(map[string]struct{}, len(placements))
+	for _, placement := range placements {
+		key := strings.TrimSpace(placement.PlacementKey)
+		if key == "" {
+			continue
+		}
+		kind := placement.Kind
+		if kind == "" {
+			kind = models.PreviewCacheKindInstallArtifact
+		}
+		dedupe := string(kind) + "\x00" + key
+		if _, ok := seen[dedupe]; ok {
+			continue
+		}
+		seen[dedupe] = struct{}{}
+		normalized = append(normalized, WorkerCachePlacement{Kind: kind, PlacementKey: key})
+	}
+	return normalized
+}
+
+func rendezvousPlacementKey(placements []WorkerCachePlacement) string {
+	placements = normalizeWorkerCachePlacements(placements)
+	if len(placements) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(placements))
+	for _, placement := range placements {
+		parts = append(parts, string(placement.Kind)+":"+placement.PlacementKey)
+	}
+	return strings.Join(parts, "|")
 }
 
 func (s *WorkerSelector) selectRendezvousWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, topN int, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
