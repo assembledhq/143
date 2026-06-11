@@ -447,7 +447,7 @@ function RunState({ row }: { row: AutopilotQueueRow }) {
 }
 
 function RowAction({ row, onStartRun }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void }) {
-  if (row.available_action === "start_run") {
+  if (canStartSession(row)) {
     return <Button size="sm" onClick={() => onStartRun(row)}><Play className="h-3.5 w-3.5" />Start run</Button>;
   }
   if ((row.available_action === "view_run" || row.available_action === "review") && row.latest_session) {
@@ -467,6 +467,10 @@ function RowAction({ row, onStartRun }: { row: AutopilotQueueRow; onStartRun: (r
       <TooltipContent>{row.action_disabled_reason ?? "This issue cannot be started yet."}</TooltipContent>
     </Tooltip>
   );
+}
+
+function canStartSession(row: AutopilotQueueRow) {
+  return row.available_action === "start_run" || (row.available_action === "blocked" && !row.latest_session && !row.action_disabled_reason);
 }
 
 function StartRunSheet({ row, pending, error, onOpenChange, onConfirm }: { row: AutopilotQueueRow | null; pending: boolean; error: string | null; onOpenChange: (open: boolean) => void; onConfirm: () => void }) {

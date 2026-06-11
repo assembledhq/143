@@ -1,6 +1,6 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import { queryKeys } from "./query-keys";
-import type { ListResponse, SessionDetail, SessionListItem } from "./types";
+import type { ListResponse, Session, SessionDetail, SessionListItem } from "./types";
 
 function isSessionListResponse(value: unknown): value is ListResponse<SessionListItem> {
   return (
@@ -54,5 +54,26 @@ export function applySessionDetailToSessionListCaches(queryClient: QueryClient, 
     if (changed) {
       queryClient.setQueryData(key, { ...current, data: nextData });
     }
+  }
+}
+
+export function applyCreatedSessionToSessionListCaches(queryClient: QueryClient, created: Session): void {
+  const cachedLists = queryClient.getQueriesData<ListResponse<SessionListItem>>({
+    queryKey: queryKeys.sessions.all,
+  });
+
+  for (const [key, current] of cachedLists) {
+    if (!isSessionListResponse(current) || isArchivedListKey(key)) {
+      continue;
+    }
+
+    if (current.data.some((session) => session.id === created.id)) {
+      continue;
+    }
+
+    queryClient.setQueryData(key, {
+      ...current,
+      data: [created, ...current.data],
+    });
   }
 }
