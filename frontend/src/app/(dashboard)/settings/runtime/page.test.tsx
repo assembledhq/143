@@ -258,6 +258,36 @@ describe("RuntimeSettingsPage", () => {
     expect(cpuLimit).toHaveValue(2);
   });
 
+  it("does not round and save an unchanged preview CPU value on blur", async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: {
+          sandbox_resources: {
+            preview_max_cpu_millis: 333,
+          },
+        },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const user = userEvent.setup();
+    const cpuLimit = await screen.findByLabelText("Preview CPU limit");
+    await waitFor(() => {
+      expect(cpuLimit).toHaveValue(0.33);
+    });
+    settingsUpdateMock.mockClear();
+
+    await user.click(cpuLimit);
+    await user.tab();
+
+    expect(settingsUpdateMock).not.toHaveBeenCalled();
+    expect(cpuLimit).toHaveValue(0.33);
+  });
+
   it("saves lifecycle defaults", async () => {
     settingsUpdateMock
       .mockResolvedValueOnce({

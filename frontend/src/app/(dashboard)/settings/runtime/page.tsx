@@ -143,6 +143,7 @@ function usePreviewCPUField({
   const [lastSentMillis, setLastSentMillis] = useState(serverMillis);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingMillisRef = useRef<number | null>(null);
+  const hasEditedRef = useRef(false);
 
   if (serverMillis !== trackedServerMillis) {
     setTrackedServerMillis(serverMillis);
@@ -176,6 +177,7 @@ function usePreviewCPUField({
 
   const onChange = (event: ChangeEvent<HTMLInputElement>) => {
     const raw = event.target.value;
+    hasEditedRef.current = true;
     setLocal(raw);
     if (raw.trim() === "") return;
     const parsed = Number.parseFloat(raw);
@@ -196,16 +198,22 @@ function usePreviewCPUField({
       clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
+    if (!hasEditedRef.current) {
+      pendingMillisRef.current = null;
+      return;
+    }
     const parsed = Number.parseFloat(local);
     if (Number.isNaN(parsed)) {
       setLocal(formatCPUCores(serverMillis));
       setLastSentMillis(serverMillis);
       pendingMillisRef.current = null;
+      hasEditedRef.current = false;
       return;
     }
     const clampedMillis = clampMillis(parsed);
     setLocal(formatCPUCores(clampedMillis));
     pendingMillisRef.current = null;
+    hasEditedRef.current = false;
     if (clampedMillis !== lastSentMillis) dispatch(clampedMillis);
   };
 
