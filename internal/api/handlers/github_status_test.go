@@ -21,16 +21,16 @@ import (
 type stubGHCredentialStore struct {
 	cred        *models.DecryptedUserCredential
 	err         error
-	upsertFunc  func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig, bool) error
+	upsertFunc  func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig) error
 	disableFunc func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) error
 }
 
 func (s *stubGHCredentialStore) GetForUser(_ context.Context, _, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedUserCredential, error) {
 	return s.cred, s.err
 }
-func (s *stubGHCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error {
+func (s *stubGHCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig) error {
 	if s.upsertFunc != nil {
-		return s.upsertFunc(ctx, userID, orgID, cfg, isTeamDefault)
+		return s.upsertFunc(ctx, userID, orgID, cfg)
 	}
 	return nil
 }

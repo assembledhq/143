@@ -89,13 +89,25 @@ describe("NewAutomationPage", () => {
       http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
         data: { status: "completed" },
       })),
-      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
-        data: [{ provider: "openai", source: "org" }],
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [
+          {
+            id: "auth-1",
+            org_id: "org-1",
+            scope: "org",
+            agent: "codex",
+            auth_type: "api_key",
+            provider: "openai",
+            label: "Org Codex API key",
+            status: "healthy",
+            is_default: true,
+            priority: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
         meta: {},
       })),
-      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
       http.get("*/api/v1/repositories", () => HttpResponse.json({
         data: [
           {
@@ -356,22 +368,23 @@ describe("NewAutomationPage", () => {
       http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
         data: { status: "completed" },
       })),
-      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
-        data: [
-          { provider: "openai", source: "org" },
-        ],
-        meta: {},
-      })),
-      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
-        data: [],
-        meta: {},
-      })),
-      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
-        data: [],
-        meta: {},
-      })),
       http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
-        data: [],
+        data: [
+          {
+            id: "auth-1",
+            org_id: "org-1",
+            scope: "org",
+            agent: "codex",
+            auth_type: "api_key",
+            provider: "openai",
+            label: "Org Codex API key",
+            status: "healthy",
+            is_default: true,
+            priority: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
         meta: {},
       })),
       http.get("*/api/v1/repositories", () => HttpResponse.json({
@@ -445,18 +458,6 @@ describe("NewAutomationPage", () => {
           settings: { default_agent_type: "gemini_cli" },
         },
       })),
-      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
-        data: [],
-        meta: {},
-      })),
-      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({
-        data: [],
-        meta: {},
-      })),
-      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({
-        data: [],
-        meta: {},
-      })),
       http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
         data: [],
         meta: {},
@@ -514,13 +515,25 @@ describe("NewAutomationPage", () => {
       http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
         data: { status: "completed" },
       })),
-      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
-        data: [{ provider: "openai", source: "org" }],
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [
+          {
+            id: "auth-1",
+            org_id: "org-1",
+            scope: "org",
+            agent: "codex",
+            auth_type: "api_key",
+            provider: "openai",
+            label: "Org Codex API key",
+            status: "healthy",
+            is_default: true,
+            priority: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
         meta: {},
       })),
-      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
       http.get("*/api/v1/repositories", () => HttpResponse.json({
         data: [
           {
@@ -581,13 +594,25 @@ describe("NewAutomationPage", () => {
       http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
         data: { status: "completed" },
       })),
-      http.get("*/api/v1/settings/credentials/resolved", () => HttpResponse.json({
-        data: [{ provider: "openai", source: "org" }],
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [
+          {
+            id: "auth-1",
+            org_id: "org-1",
+            scope: "org",
+            agent: "codex",
+            auth_type: "api_key",
+            provider: "openai",
+            label: "Org Codex API key",
+            status: "healthy",
+            is_default: true,
+            priority: 1,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
         meta: {},
       })),
-      http.get("*/api/v1/settings/credentials/team", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("*/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({ data: [], meta: {} })),
       http.get("*/api/v1/repositories", () => HttpResponse.json({
         data: [{
           id: "repo-1",

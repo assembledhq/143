@@ -1207,10 +1207,11 @@ describe('api client', () => {
       try {
         await api.issues.list();
       } catch (err: unknown) {
-        const error = err as { name: string; code: string; message: string };
+        const error = err as { name: string; code: string; message: string; status: number };
         expect(error.name).toBe('ApiError');
         expect(error.code).toBe('BAD_REQUEST');
         expect(error.message).toBe('bad request');
+        expect(error.status).toBe(400);
       }
     });
 
@@ -1236,133 +1237,112 @@ describe('api client', () => {
     });
   });
 
-  describe('userCredentials', () => {
-    it('lists personal credentials', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/personal', () => {
-          return HttpResponse.json({
-            data: [{ provider: 'anthropic', configured: true, masked_key: 'sk-ant-...abc' }],
-            meta: {},
-          });
-        }),
-      );
-
-      const result = await api.userCredentials.listPersonal();
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].provider).toBe('anthropic');
-      expect(result.data[0].configured).toBe(true);
-    });
-
-    it('upserts personal credential', async () => {
-      let capturedBody: unknown;
-      let capturedUrl: string | undefined;
+  describe('codingCredentials', () => {
+    it('lists credentials for the requested scope', async () => {
+      let capturedScope: string | null = null;
 
       server.use(
-        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request, params }) => {
-          capturedBody = await request.json();
-          capturedUrl = params.provider as string;
-          return HttpResponse.json({ data: { provider: 'anthropic', configured: true } });
-        }),
-      );
-
-      await api.userCredentials.upsertPersonal('anthropic', { api_key: 'sk-ant-test' });
-      expect(capturedUrl).toBe('anthropic');
-      expect(capturedBody).toEqual({ config: { api_key: 'sk-ant-test' }, is_team_default: false });
-    });
-
-    it('upserts personal credential with team default flag', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({ data: { provider: 'openai', configured: true } });
-        }),
-      );
-
-      await api.userCredentials.upsertPersonal('openai', { api_key: 'sk-test' }, true);
-      expect(capturedBody).toEqual({ config: { api_key: 'sk-test' }, is_team_default: true });
-    });
-
-    it('deletes personal credential', async () => {
-      let deleteCalled = false;
-
-      server.use(
-        http.delete('/api/v1/settings/credentials/personal/:provider', ({ params }) => {
-          deleteCalled = true;
-          expect(params.provider).toBe('anthropic');
-          return new HttpResponse(null, { status: 204 });
-        }),
-      );
-
-      await api.userCredentials.deletePersonal('anthropic');
-      expect(deleteCalled).toBe(true);
-    });
-
-    it('lists team defaults', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/team', () => {
-          return HttpResponse.json({
-            data: [{ provider: 'anthropic', configured: true, is_team_default: true, set_by_user_name: 'Alice' }],
-            meta: {},
-          });
-        }),
-      );
-
-      const result = await api.userCredentials.listTeamDefaults();
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].is_team_default).toBe(true);
-    });
-
-    it('sets team default', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.put('/api/v1/settings/credentials/team/:provider', async ({ request, params }) => {
-          capturedBody = await request.json();
-          expect(params.provider).toBe('anthropic');
-          return HttpResponse.json({});
-        }),
-      );
-
-      await api.userCredentials.setTeamDefault('anthropic', 'user-1');
-      expect(capturedBody).toEqual({ user_id: 'user-1' });
-    });
-
-    it('removes team default', async () => {
-      let deleteCalled = false;
-
-      server.use(
-        http.delete('/api/v1/settings/credentials/team/:provider', ({ params }) => {
-          deleteCalled = true;
-          expect(params.provider).toBe('openai');
-          return new HttpResponse(null, { status: 204 });
-        }),
-      );
-
-      await api.userCredentials.removeTeamDefault('openai');
-      expect(deleteCalled).toBe(true);
-    });
-
-    it('lists resolved credentials', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/resolved', () => {
+        http.get('/api/v1/coding-credentials', ({ request }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
           return HttpResponse.json({
             data: [
-              { provider: 'anthropic', source: 'personal', masked_key: 'sk-ant-...abc' },
-              { provider: 'openai', source: 'team_default', masked_key: 'sk-...def' },
-              { provider: 'gemini', source: 'none' },
+              {
+                id: 'cc-1',
+                org_id: 'org-1',
+                user_id: 'user-1',
+                scope: 'personal',
+                priority: 1,
+                agent: 'claude_code',
+                auth_type: 'subscription',
+                provider: 'anthropic_subscription',
+                label: 'Personal Claude',
+                status: 'healthy',
+                is_default: true,
+                created_at: '2026-03-20T00:00:00Z',
+                updated_at: '2026-03-20T00:00:00Z',
+              },
             ],
             meta: {},
           });
         }),
       );
 
-      const result = await api.userCredentials.listResolved();
-      expect(result.data).toHaveLength(3);
-      expect(result.data[0].source).toBe('personal');
-      expect(result.data[1].source).toBe('team_default');
-      expect(result.data[2].source).toBe('none');
+      const result = await api.codingCredentials.list('resolved');
+      expect(capturedScope).toBe('resolved');
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].provider).toBe('anthropic_subscription');
+      expect(result.data[0].scope).toBe('personal');
+    });
+
+    it('creates a credential and returns the unwrapped row', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/coding-credentials', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            id: 'cc-2',
+            org_id: 'org-1',
+            scope: 'org',
+            priority: 1,
+            agent: 'codex',
+            auth_type: 'api_key',
+            provider: 'openai',
+            label: 'Codex API key',
+            status: 'healthy',
+            is_default: true,
+            created_at: '2026-03-20T00:00:00Z',
+            updated_at: '2026-03-20T00:00:00Z',
+          });
+        }),
+      );
+
+      const created = await api.codingCredentials.create({
+        scope: 'org',
+        agent: 'codex',
+        auth_type: 'api_key',
+        label: 'Codex API key',
+        api_key: 'sk-test',
+      });
+      expect(capturedBody).toEqual({
+        scope: 'org',
+        agent: 'codex',
+        auth_type: 'api_key',
+        label: 'Codex API key',
+        api_key: 'sk-test',
+      });
+      expect(created.id).toBe('cc-2');
+    });
+
+    it('deletes a credential within the requested scope', async () => {
+      let capturedScope: string | null = null;
+      let capturedId: string | undefined;
+
+      server.use(
+        http.delete('/api/v1/coding-credentials/:id', ({ request, params }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
+          capturedId = params.id as string;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await api.codingCredentials.delete('cc-1', 'org');
+      expect(capturedId).toBe('cc-1');
+      expect(capturedScope).toBe('org');
+    });
+
+    it('reorders a scope stack with ordered ids', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.patch('/api/v1/coding-credentials/reorder', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { reordered: true } });
+        }),
+      );
+
+      await api.codingCredentials.reorder('org', ['cc-2', 'cc-1']);
+      expect(capturedBody).toEqual({ scope: 'org', ordered_ids: ['cc-2', 'cc-1'] });
     });
   });
 

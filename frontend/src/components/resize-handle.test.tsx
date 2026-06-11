@@ -18,7 +18,10 @@ describe("ResizeHandle", () => {
     expect(handle.className).toContain("w-3");
     expect(handle.className).toContain("h-full");
     expect(handle.className).toContain("cursor-col-resize");
-    expect(handle.querySelector("[data-testid='resize-handle-rail']")).toBeTruthy();
+    const rail = handle.querySelector("[data-testid='resize-handle-rail']");
+    expect(rail).toBeTruthy();
+    expect(rail?.className).toContain("bg-border");
+    expect(rail?.className).not.toContain("bg-border/45");
     expect(grip).toBeTruthy();
     expect(grip?.className).toContain("opacity-0");
     expect(grip?.className).toContain("group-hover:opacity-100");

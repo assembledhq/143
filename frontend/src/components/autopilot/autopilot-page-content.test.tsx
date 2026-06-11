@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 import { AutopilotPageContent } from "./autopilot-page-content";
 import type { AutopilotQueueRow } from "@/lib/types";
 
@@ -38,6 +38,8 @@ const queueRow: AutopilotQueueRow = {
   available_action: "start_run",
 };
 
+let queueRows: AutopilotQueueRow[] = [queueRow];
+
 vi.mock("./use-autopilot-page-data", () => ({
   useAutopilotPageData: () => ({
     isLoading: false,
@@ -52,7 +54,7 @@ vi.mock("./use-autopilot-page-data", () => ({
       weightsSummary: "Default weights",
     },
     queue: {
-      data: [queueRow],
+      data: queueRows,
       meta: {
         summary: {
           top_issue_id: "issue-1",
@@ -84,6 +86,10 @@ vi.mock("@/components/autopilot-proposal-card", () => ({
 }));
 
 describe("AutopilotPageContent", () => {
+  beforeEach(() => {
+    queueRows = [queueRow];
+  });
+
   it("shows aggregate summary cards without duplicating the top opportunity", async () => {
     renderWithProviders(<AutopilotPageContent />);
 
@@ -108,5 +114,55 @@ describe("AutopilotPageContent", () => {
     const sourceHeader = await screen.findByText("Source");
     const tableHeader = sourceHeader.closest("thead");
     expect(tableHeader).toHaveClass("sticky", "top-0", "z-10", "bg-card");
+  });
+
+  it("offers to create a session for a queue issue that has no linked session yet", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: null,
+        latest_session: undefined,
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+
+    expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
+  });
+
+  it("does not offer to start a run for a blocked issue that has an explicit disabled reason", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: "No repository selected",
+        latest_session: undefined,
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Blocked" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer to start a run for a blocked issue that already has a linked session", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: null,
+        latest_session: { id: "sess-1", title: "Existing session", updated_at: "2024-01-01T00:00:00Z" },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Blocked" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
   });
 });

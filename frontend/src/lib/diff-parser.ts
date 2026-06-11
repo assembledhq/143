@@ -299,7 +299,9 @@ function parseHunks(lines: string[]): DiffHunk[] {
 
 /**
  * Extract a diff hunk context (~3 lines before and after) around a specific line.
- * Used when formatting review comments for the agent.
+ * Used when formatting review comments for the agent. The target line is marked
+ * so review messages do not leave the agent guessing which surrounding line the
+ * comment applies to.
  */
 export function getDiffHunkContext(
   files: DiffFile[],
@@ -323,7 +325,13 @@ export function getDiffHunkContext(
 
     const formatted = contextLines.map((line) => {
       const prefix = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
-      return `${prefix} ${line.content}`;
+      const reviewedLineNumber = side === "new" ? line.newLineNumber : line.oldLineNumber;
+      const fallbackLineNumber = side === "new" ? line.oldLineNumber : line.newLineNumber;
+      const displayedLineNumber = reviewedLineNumber ?? fallbackLineNumber;
+      const lineSide = reviewedLineNumber !== null ? side : side === "new" ? "old" : "new";
+      const marker = reviewedLineNumber === lineNumber ? ">>>" : "   ";
+      const lineLabel = displayedLineNumber === null ? "?" : String(displayedLineNumber);
+      return `${marker} ${lineSide} ${lineLabel} ${prefix} ${line.content}`;
     });
 
     return formatted.join("\n");

@@ -17,7 +17,7 @@ import (
 
 type stubAppUserCredentialStore struct {
 	getFunc     func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) (*models.DecryptedUserCredential, error)
-	upsertFunc  func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig, bool) error
+	upsertFunc  func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig) error
 	disableFunc func(context.Context, uuid.UUID, uuid.UUID, models.ProviderName) error
 }
 
@@ -25,9 +25,9 @@ func (s *stubAppUserCredentialStore) GetForUser(ctx context.Context, orgID, user
 	return s.getFunc(ctx, orgID, userID, provider)
 }
 
-func (s *stubAppUserCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error {
+func (s *stubAppUserCredentialStore) Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig) error {
 	if s.upsertFunc != nil {
-		return s.upsertFunc(ctx, userID, orgID, cfg, isTeamDefault)
+		return s.upsertFunc(ctx, userID, orgID, cfg)
 	}
 	return nil
 }
@@ -134,11 +134,10 @@ func TestAppUserAuthService_GetValidCredential_RefreshesExpiredToken(t *testing.
 				},
 			}, nil
 		},
-		upsertFunc: func(_ context.Context, gotUserID, gotOrgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error {
+		upsertFunc: func(_ context.Context, gotUserID, gotOrgID uuid.UUID, cfg models.ProviderConfig) error {
 			upserted = true
 			require.Equal(t, userID, gotUserID, "refresh should persist the credential for the same user")
 			require.Equal(t, orgID, gotOrgID, "refresh should persist the credential for the same org")
-			require.False(t, isTeamDefault, "refreshed PR auth credentials should not be team defaults")
 			gotCfg, ok := cfg.(models.GitHubAppUserConfig)
 			require.True(t, ok, "refresh should persist a GitHubAppUserConfig")
 			require.Equal(t, "ghu_new", gotCfg.AccessToken, "refresh should persist the refreshed access token")
@@ -417,7 +416,7 @@ func TestAppUserAuthService_RefreshStoredCredential_ErrorPaths(t *testing.T) {
 
 		svc := &AppUserAuthService{
 			credentials: &stubAppUserCredentialStore{
-				upsertFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig, bool) error {
+				upsertFunc: func(context.Context, uuid.UUID, uuid.UUID, models.ProviderConfig) error {
 					return context.DeadlineExceeded
 				},
 			},

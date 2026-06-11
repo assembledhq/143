@@ -461,11 +461,11 @@ export interface Session {
   recovery_queued_at?: string;
   recovery_started_at?: string;
   recovery_attempt_count?: number;
-  pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_creation_state?: PRCreationState;
   pr_creation_error?: string;
-  pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_push_state?: PRPushState;
   pr_push_error?: string;
-  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_state?: BranchCreationState;
   branch_creation_error?: string;
   branch_url?: string;
   has_unpushed_changes?: boolean;
@@ -1445,47 +1445,20 @@ export interface CredentialSummary {
   account_type?: string;
 }
 
-export interface UserCredentialSummary {
-  provider: string;
-  configured: boolean;
-  is_team_default: boolean;
-  masked_key?: string;
-  set_by_user_id?: string;
-  set_by_user_name?: string;
-  status?: string;
-  last_verified_at?: string;
-}
-
+// ResolvedCredential is a provider-keyed view of the caller's effective
+// credentials, derived from the unified coding-credentials resolved stack.
+// "personal" rows belong to the requesting user, "org" rows are the shared
+// fallback; "none" marks a provider with no usable credential. The legacy
+// "team_default" source is gone — org-scoped credentials fill that role.
 export interface ResolvedCredential {
   provider: string;
-  source: string;
+  source: "personal" | "org" | "none";
   masked_key?: string;
 }
 
 export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
-
-export interface CodingAuth {
-  id: string;
-  org_id: string;
-  priority: number;
-  agent: CodingAuthAgent;
-  auth_type: CodingAuthType;
-  label: string;
-  scope: string;
-  provider: string;
-  status: CodingAuthStatus;
-  is_default: boolean;
-  last_verified_at?: string;
-  rate_limited_until?: string;
-  rate_limit_message?: string;
-  last_used_at?: string;
-  usage_note?: string;
-  created_by?: string;
-  created_at: string;
-  updated_at: string;
-}
 
 // CodingCredentialScope is the scope dimension of the unified
 // coding-credentials API: "org" rows are visible to every member of the org as
@@ -2180,15 +2153,24 @@ export interface AutomationRun {
   session?: AutomationRunSession;
 }
 
-// Mirrors models.PRCreationState. Kept as a literal union so the row UI
-// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
-// pill on completed_no_pr rows).
-export type PRCreationState =
+// Mirrors the session publish lifecycle enums in internal/models/session_enums.go.
+// Kept as a literal union so UI branches get exhaustiveness checks while only
+// accepting backend-defined enum values.
+export type SessionPublishState =
   | 'idle'
   | 'queued'
   | 'pushing'
   | 'succeeded'
   | 'failed';
+
+// Mirrors models.PRCreationState.
+export type PRCreationState = SessionPublishState;
+
+// Mirrors models.PRPushState.
+export type PRPushState = SessionPublishState;
+
+// Mirrors models.BranchCreationState.
+export type BranchCreationState = SessionPublishState;
 
 export interface AutomationRunSession {
   id: string;

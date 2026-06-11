@@ -27,8 +27,8 @@ func testAdapterMap(a agent.AgentAdapter) map[models.AgentType]agent.AgentAdapte
 
 type testCodexAuthProvider struct{}
 
-func (testCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
-	return &models.OpenAIChatGPTConfig{
+func (testCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
+	return &models.OpenAISubscriptionConfig{
 		AccessToken: "test-access-token",
 		IDToken:     "test-id-token",
 	}, nil

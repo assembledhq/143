@@ -25,7 +25,6 @@ import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
 import { queryKeys } from "@/lib/query-keys";
 import type {
-  CodingAuth,
   CodingCredentialSummary,
   ListResponse,
   Organization,
@@ -33,9 +32,7 @@ import type {
   RepoSettings,
   RepoPMSettings,
   Repository,
-  ResolvedCredential,
   SingleResponse,
-  UserCredentialSummary,
 } from "@/lib/types";
 import { DEFAULT_PM_MODEL } from "@/lib/model-constants";
 
@@ -86,20 +83,12 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
-  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
-    queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.userCredentials.listResolved(),
-  });
-  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
-    queryKey: queryKeys.credentials.teamDefaults,
-    queryFn: () => api.userCredentials.listTeamDefaults(),
-  });
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
-    queryKey: ["coding-auths"],
-    queryFn: () => api.codingAuths.list(),
+  const { data: resolvedCredsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
   });
   const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "org"],
+    queryKey: queryKeys.codingCredentials.list("org"),
     queryFn: () => api.codingCredentials.list("org"),
   });
 
@@ -138,35 +127,27 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
     () => resolvedCredsResponse?.data ?? [],
     [resolvedCredsResponse],
   );
-  const codingAuths = useMemo(
-    () => codingAuthsResponse?.data ?? [],
-    [codingAuthsResponse],
-  );
   const orgCodingCredentials = useMemo(
     () => orgCodingCredentialsResponse?.data ?? [],
     [orgCodingCredentialsResponse],
   );
-  const pmCodingAuthAvailability = useMemo(
-    () => [...codingAuths, ...orgCodingCredentials],
-    [codingAuths, orgCodingCredentials],
-  );
   const pmResolvedCredentials = useMemo(
-    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
-    [resolvedCredentials, teamDefaultsResponse],
+    () => pmUsableResolvedCredentials(resolvedCredentials),
+    [resolvedCredentials],
   );
 
   const pmModelGroups = useMemo(() => {
     return availableAgentModelGroups(
       pmResolvedCredentials,
       null,
-      pmCodingAuthAvailability,
+      orgCodingCredentials,
       orgSettings.default_agent_type || "codex",
       { orgAgentConfig: orgSettings.agent_config },
     );
-  }, [pmResolvedCredentials, pmCodingAuthAvailability, orgSettings.default_agent_type, orgSettings.agent_config]);
+  }, [pmResolvedCredentials, orgCodingCredentials, orgSettings.default_agent_type, orgSettings.agent_config]);
 
   const credentialsLoaded = Boolean(
-    resolvedCredsResponse && teamDefaultsResponse && codingAuthsResponse && orgCodingCredentialsResponse,
+    resolvedCredsResponse && orgCodingCredentialsResponse,
   );
 
   const autosave = useAutosave<RepoPatch>({

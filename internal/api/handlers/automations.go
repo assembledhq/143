@@ -43,9 +43,6 @@ type AutomationHandler struct {
 	automationRunStore    *db.AutomationRunStore
 	repoStore             automationRepoLookup
 	orgStore              automationOrgLookup
-	orgCredentialStore    automationOrgCredentialLookup
-	userCredentialStore   automationUserCredentialLookup
-	codingAuthStore       automationCodingAuthLookup
 	codingCredentialStore automationCodingCredentialLookup
 	jobStore              *db.JobStore
 	audit                 *db.AuditEmitter
@@ -61,19 +58,6 @@ type automationRepoLookup interface {
 
 type automationOrgLookup interface {
 	GetByID(ctx context.Context, orgID uuid.UUID) (models.Organization, error)
-}
-
-type automationOrgCredentialLookup interface {
-	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
-	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
-}
-
-type automationUserCredentialLookup interface {
-	ListTeamDefaults(ctx context.Context, orgID uuid.UUID) ([]models.DecryptedUserCredential, error)
-}
-
-type automationCodingAuthLookup interface {
-	ListCodingAuths(ctx context.Context, orgID uuid.UUID) ([]models.CodingAuth, error)
 }
 
 type automationCodingCredentialLookup interface {
@@ -104,18 +88,6 @@ func (h *AutomationHandler) SetRepositoryStore(repoStore automationRepoLookup) {
 
 func (h *AutomationHandler) SetOrgStore(orgStore automationOrgLookup) {
 	h.orgStore = orgStore
-}
-
-func (h *AutomationHandler) SetOrgCredentialStore(store automationOrgCredentialLookup) {
-	h.orgCredentialStore = store
-}
-
-func (h *AutomationHandler) SetUserCredentialStore(store automationUserCredentialLookup) {
-	h.userCredentialStore = store
-}
-
-func (h *AutomationHandler) SetCodingAuthStore(store automationCodingAuthLookup) {
-	h.codingAuthStore = store
 }
 
 func (h *AutomationHandler) SetCodingCredentialStore(store automationCodingCredentialLookup) {

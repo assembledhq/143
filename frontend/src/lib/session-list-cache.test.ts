@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import type { ListResponse, SessionDetail, SessionListItem } from "./types";
-import { applySessionDetailToSessionListCaches } from "./session-list-cache";
+import { applyCreatedSessionToSessionListCaches, applySessionDetailToSessionListCaches } from "./session-list-cache";
 
 function makeSession(overrides: Partial<SessionListItem> = {}): SessionListItem {
   return {
@@ -83,6 +83,57 @@ describe("applySessionDetailToSessionListCaches", () => {
     expect(queryClient.getQueryData<ListResponse<SessionListItem>>(["sessions", null, "filtered", "archived", "mine", ""])?.data).toEqual([
       { ...makeSession(), archived_at: "2026-01-01T00:10:00.000Z", threads: undefined },
       other,
+    ]);
+  });
+});
+
+describe("applyCreatedSessionToSessionListCaches", () => {
+  it("prepends newly-created sessions to cached non-archived list responses", () => {
+    const queryClient = new QueryClient();
+    const created = makeSession({ id: "session-created", status: "pending" });
+    const existing = makeSession({ id: "session-existing" });
+
+    queryClient.setQueryData<ListResponse<SessionListItem>>(
+      ["sessions", null, "filtered", "all", "mine"],
+      { data: [existing], meta: {} },
+    );
+    queryClient.setQueryData<ListResponse<SessionListItem>>(
+      ["sessions", null, "filtered", "active", "mine"],
+      { data: [existing], meta: {} },
+    );
+    queryClient.setQueryData<ListResponse<SessionListItem>>(
+      ["sessions", null, "filtered", "archived", "mine"],
+      { data: [makeSession({ id: "archived-session", archived_at: "2026-01-01T00:10:00.000Z" })], meta: {} },
+    );
+
+    applyCreatedSessionToSessionListCaches(queryClient, created);
+
+    expect(queryClient.getQueryData<ListResponse<SessionListItem>>(["sessions", null, "filtered", "all", "mine"])?.data).toEqual([
+      created,
+      existing,
+    ]);
+    expect(queryClient.getQueryData<ListResponse<SessionListItem>>(["sessions", null, "filtered", "active", "mine"])?.data).toEqual([
+      created,
+      existing,
+    ]);
+    expect(queryClient.getQueryData<ListResponse<SessionListItem>>(["sessions", null, "filtered", "archived", "mine"])?.data).toEqual([
+      makeSession({ id: "archived-session", archived_at: "2026-01-01T00:10:00.000Z" }),
+    ]);
+  });
+
+  it("does not duplicate a session already present in cached list responses", () => {
+    const queryClient = new QueryClient();
+    const created = makeSession({ id: "session-created", status: "pending" });
+
+    queryClient.setQueryData<ListResponse<SessionListItem>>(
+      ["sessions", null, "filtered", "all", "mine"],
+      { data: [created], meta: {} },
+    );
+
+    applyCreatedSessionToSessionListCaches(queryClient, created);
+
+    expect(queryClient.getQueryData<ListResponse<SessionListItem>>(["sessions", null, "filtered", "all", "mine"])?.data).toEqual([
+      created,
     ]);
   });
 });

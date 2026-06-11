@@ -45,12 +45,13 @@ vi.mock('@/hooks/use-auth', () => ({
 }));
 
 const mockOptimisticSessions: { id: string; title: string; status: 'pending'; created_at: string; resolvedId?: string }[] = [];
+const mockRemoveOptimisticSession = vi.fn();
 
 vi.mock('@/contexts/optimistic-sessions', () => ({
   useOptimisticSessions: () => ({
     optimisticSessions: mockOptimisticSessions,
     addOptimisticSession: vi.fn(),
-    removeOptimisticSession: vi.fn(),
+    removeOptimisticSession: mockRemoveOptimisticSession,
     markOptimisticResolved: vi.fn(),
   }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
@@ -133,6 +134,7 @@ describe('SessionSidebar', () => {
     mockSelectedSegment = null;
     mockRouterPush.mockReset();
     mockRouterPrefetch.mockReset();
+    mockRemoveOptimisticSession.mockReset();
     mockOptimisticSessions.length = 0;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
@@ -779,6 +781,53 @@ describe('SessionSidebar', () => {
     expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
   });
 
+  it('keeps resolved optimistic ownership during the real-session handoff', async () => {
+    serveSessions([makeSession({ id: 's-real', result_summary: 'Real session', status: 'pending' })]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Optimistic placeholder',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      resolvedId: 's-real',
+    });
+
+    renderWithProviders(<SessionSidebar />);
+
+    const realSessionLink = await screen.findByRole('link', { name: /Real session/ });
+    expect(realSessionLink).toHaveAttribute('href', '/sessions/s-real');
+    expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Real session')).toHaveLength(1);
+    expect(mockRemoveOptimisticSession).not.toHaveBeenCalled();
+  });
+
+  it('shows the real session exactly once after the fallback timer removes the optimistic entry', async () => {
+    serveSessions([makeSession({ id: 's-real', result_summary: 'Real session', status: 'pending' })]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Optimistic placeholder',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      resolvedId: 's-real',
+    });
+
+    const { rerender } = renderWithProviders(<SessionSidebar />);
+
+    // Resolved row is showing the real session.
+    await screen.findByRole('link', { name: /Real session/ });
+    expect(screen.getAllByText('Real session')).toHaveLength(1);
+
+    // Simulate the fallback timer firing: the optimistic entry is removed from context.
+    mockOptimisticSessions.length = 0;
+    rerender(<SessionSidebar />);
+
+    // Real session still appears exactly once — no duplication or disappearance
+    // during the React key transition from optimistic.id → session.id.
+    await waitFor(() => {
+      expect(screen.getAllByText('Real session')).toHaveLength(1);
+    });
+    expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
+  });
+
   it('keeps a resolved optimistic row visible when the real session is not yet in the list', async () => {
     serveSessions([]);
     mockOptimisticSessions.push({
@@ -1193,6 +1242,19 @@ describe('SessionSidebar', () => {
 
     const link = screen.getByText('Member-scoped session').closest('a');
     expect(link).toHaveAttribute('href', '/sessions/s1?people=user-2%2Cuser-3');
+  });
+
+  it('shows in-flight PR creation and push statuses on session rows', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Opening a pull request', pr_creation_state: 'queued' }),
+      makeSession({ id: 's2', result_summary: 'Updating an existing pull request', pr_push_state: 'pushing' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Opening a pull request');
+    expect(screen.getByText('Creating PR')).toBeInTheDocument();
+    expect(screen.getByText('Pushing changes')).toBeInTheDocument();
   });
 
   it('only serializes the filters that are actually set', async () => {
