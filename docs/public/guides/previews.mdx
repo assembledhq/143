@@ -145,6 +145,8 @@ Use `preview.install` when preview services need dependencies installed before t
 
 Declaring `verify_paths` also lets fresh workspaces skip the install entirely: when a dependency artifact cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and skips `command` once every verify path exists. Without `verify_paths`, fresh workspaces always run `command`.
 
+Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
+
 Dependency artifact caching is enabled by default for session previews when `preview.install.lockfiles` and effective cache paths exist. Effective paths are:
 
 ```text

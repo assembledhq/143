@@ -1887,6 +1887,62 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_FindLatestCacheByBaseKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "returns newest base-compatible entry",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				mock.ExpectQuery(`SELECT .+ FROM preview_startup_cache(.|\n)+base_key = @base_key(.|\n)+commit_sha <> @exclude_commit(.|\n)+ORDER BY created_at DESC`).
+					WithArgs(previewAnyArgs(5)...).
+					WillReturnRows(
+						pgxmock.NewRows(previewStartupCacheTestCols).
+							AddRow(uuid.New(), uuid.New(), uuid.New(), "key", "base-key", "def5678",
+								"/cache/snap.tar.zst", int64(1024), "w1", now, now),
+					)
+			},
+		},
+		{
+			name: "returns error on base miss",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`SELECT .+ FROM preview_startup_cache(.|\n)+base_key = @base_key`).
+					WithArgs(previewAnyArgs(5)...).
+					WillReturnRows(pgxmock.NewRows(previewStartupCacheTestCols))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+			tt.setupMock(mock)
+
+			entry, err := store.FindLatestCacheByBaseKey(context.Background(), uuid.New(), uuid.New(), "base-key", "w1", "abc1234")
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, entry)
+			require.Equal(t, "def5678", entry.CommitSHA, "base lookup should surface the entry's commit for diff computation")
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestPreviewStore_DeleteCache(t *testing.T) {
 	t.Parallel()
 

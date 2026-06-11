@@ -601,19 +601,162 @@ func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_PartialInvalidationOnE
 	require.False(t, cache.restoreCalled, "partial invalidation owns the restore; the exact-hit restore path should not run")
 }
 
-// diffingSandboxProvider serves a canned `git diff` for partial invalidation
-// tests while inheriting lockfile reads from fakeStartRunnerSandboxProvider.
+// diffingSandboxProvider serves canned `git diff` and workspace-recovery exec
+// results for partial invalidation tests while inheriting lockfile reads from
+// fakeStartRunnerSandboxProvider.
 type diffingSandboxProvider struct {
 	fakeStartRunnerSandboxProvider
-	diff []byte
+	diff         []byte
+	diffExit     int
+	recoveryExit int
+	execCmds     *[]string
 }
 
 func (p diffingSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
-	if !strings.Contains(cmd, "git diff --binary") {
+	if p.execCmds != nil {
+		*p.execCmds = append(*p.execCmds, cmd)
+	}
+	switch {
+	case strings.Contains(cmd, "git diff --binary"):
+		_, _ = stdout.Write(p.diff)
+		return p.diffExit, nil
+	case strings.Contains(cmd, "git checkout -f HEAD"):
+		return p.recoveryExit, nil
+	default:
 		panic("unexpected exec: " + cmd)
 	}
-	_, _ = stdout.Write(p.diff)
-	return 0, nil
+}
+
+// partialInvalidationTestConfig returns the minimal install-bearing config the
+// partial invalidation tests share.
+func partialInvalidationTestConfig() *models.PreviewConfig {
+	return &models.PreviewConfig{
+		Version: "3",
+		Name:    "web",
+		Primary: "web",
+		Install: &models.PreviewInstallConfig{
+			Command:   []string{"npm", "ci"},
+			Lockfiles: []string{"package-lock.json"},
+		},
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "run", "dev"}, Port: 3000},
+		},
+	}
+}
+
+func TestStartRunnerMaybeRestoreBaseSnapshot_DiffFailureLaunchesCold(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakePreviewStartupCache{
+		hit:     nil, // exact miss
+		baseHit: &CacheHit{Entry: models.PreviewStartupCache{CommitSHA: "def5678"}},
+	}
+	runner := &StartRunner{
+		sandboxProvider: diffingSandboxProvider{
+			fakeStartRunnerSandboxProvider: fakeStartRunnerSandboxProvider{
+				files: map[string][]byte{"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`)},
+			},
+			diffExit: 128, // e.g. base commit force-pushed away
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
+
+	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), uuid.New(), uuid.New(), "abc1234", sb, partialInvalidationTestConfig())
+
+	require.NoError(t, err, "a diff failure happens before the workspace is touched and must fall back to a cold start, not fail the start")
+	require.NotEmpty(t, keys.SnapshotKey, "cache keys should still be returned so the post-launch snapshot is recorded")
+	require.False(t, cache.partialCalled, "partial invalidation must not run without a usable diff")
+}
+
+func TestStartRunnerMaybeRestoreBaseSnapshot_OversizedDiffLaunchesCold(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakePreviewStartupCache{
+		hit:     nil, // exact miss
+		baseHit: &CacheHit{Entry: models.PreviewStartupCache{CommitSHA: "def5678"}},
+	}
+	runner := &StartRunner{
+		sandboxProvider: diffingSandboxProvider{
+			fakeStartRunnerSandboxProvider: fakeStartRunnerSandboxProvider{
+				files: map[string][]byte{"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`)},
+			},
+			diff: make([]byte, maxPartialInvalidationDiffBytes+1),
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
+
+	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), uuid.New(), uuid.New(), "abc1234", sb, partialInvalidationTestConfig())
+
+	require.NoError(t, err, "an oversized diff must fall back to a cold start, not fail the start")
+	require.NotEmpty(t, keys.SnapshotKey, "cache keys should still be returned so the post-launch snapshot is recorded")
+	require.False(t, cache.partialCalled, "partial invalidation must not run when patching costs more than a cold build")
+}
+
+func TestStartRunnerMaybeRestoreBaseSnapshot_FailedPatchRecoversWorkspace(t *testing.T) {
+	t.Parallel()
+
+	var execCmds []string
+	cache := &fakePreviewStartupCache{
+		hit:        nil, // exact miss
+		baseHit:    &CacheHit{Entry: models.PreviewStartupCache{CommitSHA: "def5678"}},
+		partialErr: fmt.Errorf("git apply exited 1"),
+	}
+	runner := &StartRunner{
+		sandboxProvider: diffingSandboxProvider{
+			fakeStartRunnerSandboxProvider: fakeStartRunnerSandboxProvider{
+				files: map[string][]byte{"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`)},
+			},
+			diff:     []byte("diff --git a/main.go b/main.go\n"),
+			execCmds: &execCmds,
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
+
+	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), uuid.New(), uuid.New(), "abc1234", sb, partialInvalidationTestConfig())
+
+	require.NoError(t, err, "a failed patch followed by successful recovery should continue as a cold start")
+	require.NotEmpty(t, keys.SnapshotKey, "cache keys should still be returned so the post-launch snapshot is recorded")
+	require.True(t, cache.partialCalled, "the failed patch attempt should have run")
+	recovered := false
+	for _, cmd := range execCmds {
+		if strings.Contains(cmd, "git checkout -f HEAD") {
+			recovered = true
+		}
+	}
+	require.True(t, recovered, "a failed patch must re-checkout the workspace from git before launching")
+}
+
+func TestStartRunnerMaybeRestoreBaseSnapshot_UnrecoverableWorkspaceFailsStart(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakePreviewStartupCache{
+		hit:        nil, // exact miss
+		baseHit:    &CacheHit{Entry: models.PreviewStartupCache{CommitSHA: "def5678"}},
+		partialErr: fmt.Errorf("git apply exited 1"),
+	}
+	runner := &StartRunner{
+		sandboxProvider: diffingSandboxProvider{
+			fakeStartRunnerSandboxProvider: fakeStartRunnerSandboxProvider{
+				files: map[string][]byte{"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`)},
+			},
+			diff:         []byte("diff --git a/main.go b/main.go\n"),
+			recoveryExit: 1, // recovery checkout also fails
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
+
+	_, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), uuid.New(), uuid.New(), "abc1234", sb, partialInvalidationTestConfig())
+
+	require.Error(t, err, "an inconsistent workspace that cannot be re-checked-out must fail the start instead of serving wrong code")
+	require.Contains(t, err.Error(), "recover workspace", "the error should identify the failed recovery step")
 }
 
 func TestStartRunnerCreateBranchPreviewStartupCache_RecordsSuccessfulLaunch(t *testing.T) {
