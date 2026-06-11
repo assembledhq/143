@@ -116,23 +116,18 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
-  const { data: resolvedCredsResponse } = useQuery({
-    queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.userCredentials.listResolved(),
-  });
   const { data: resolvedCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "resolved"],
+    queryKey: queryKeys.codingCredentials.list("resolved"),
     queryFn: () => api.codingCredentials.list("resolved"),
   });
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
-  const resolvedCredentials = resolvedCredsResponse?.data ?? [];
   const resolvedCodingCredentials = resolvedCodingCredentialsResponse?.data ?? [];
 
   const selectedAgentType: AgentType = selectedAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
 
   const isSelectedAgentConnected = isAgentAvailable(
     selectedAgentType,
-    resolvedCredentials,
+    [],
     codexAuthResponse?.data,
     resolvedCodingCredentials,
   );

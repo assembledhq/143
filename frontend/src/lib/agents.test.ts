@@ -1,21 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import { agentDisplayLabel, availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
-import type { CodingAuth, CodingCredentialSummary, ResolvedCredential, UserCredentialSummary } from "./types";
+import type { CodingCredentialSummary, ResolvedCredential } from "./types";
 
 const codexCred: ResolvedCredential = {
   provider: "openai",
-  source: "user",
+  source: "personal",
   masked_key: "sk-***",
 };
 
 const claudeCred: ResolvedCredential = {
   provider: "anthropic",
-  source: "user",
+  source: "personal",
   masked_key: "sk-ant-***",
 };
 
-const ampCodingAuth: CodingAuth = {
+const ampCodingAuth: CodingCredentialSummary = {
   id: "ca-amp",
   org_id: "org-1",
   priority: 0,
@@ -29,6 +29,26 @@ const ampCodingAuth: CodingAuth = {
   created_at: "2026-03-20T00:00:00Z",
   updated_at: "2026-03-20T00:00:00Z",
 };
+
+// makeCredential builds a unified coding-credential row with sensible
+// defaults; tests override only the dimensions they exercise.
+function makeCredential(overrides: Partial<CodingCredentialSummary>): CodingCredentialSummary {
+  return {
+    id: "cc-1",
+    org_id: "org-1",
+    scope: "org",
+    priority: 1,
+    agent: "codex",
+    auth_type: "api_key",
+    provider: "openai",
+    label: "Credential",
+    status: "healthy",
+    is_default: false,
+    created_at: "2026-03-20T00:00:00Z",
+    updated_at: "2026-03-20T00:00:00Z",
+    ...overrides,
+  };
+}
 
 const personalClaudeSubscription: CodingCredentialSummary = {
   id: "cc-claude",
@@ -117,41 +137,61 @@ describe("agentDisplayLabel", () => {
 });
 
 describe("pmUsableResolvedCredentials", () => {
-  it("excludes personal-only credentials because PM runs without a user id", () => {
-    const credentials = pmUsableResolvedCredentials([claudeCred], []);
+  it("excludes personal-scoped rows because PM runs without a user id", () => {
+    const credentials = pmUsableResolvedCredentials([
+      makeCredential({ scope: "personal", user_id: "user-1", agent: "claude_code", provider: "anthropic" }),
+    ]);
     const groups = availableAgentModelGroups(credentials, null, [], "codex");
 
     expect(credentials).toEqual([]);
     expect(groups.map((g) => g.key)).toEqual(["codex"]);
   });
 
-  it("retains org and team-default resolved credentials for PM runs", () => {
-    const credentials = pmUsableResolvedCredentials(
-      [
-        { provider: "anthropic", source: "org", masked_key: "sk-ant-org-***" },
-        { provider: "gemini", source: "team_default", masked_key: "gemini-team-***" },
-      ],
-      [],
-    );
-    const groups = availableAgentModelGroups(credentials, null, [], "codex");
-
-    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code", "gemini_cli"]);
-  });
-
-  it("adds team defaults even when a personal credential shadows them in resolved credentials", () => {
-    const teamDefault: UserCredentialSummary = {
-      provider: "anthropic",
-      configured: true,
-      is_team_default: true,
-      masked_key: "sk-ant-team-***",
-    };
-
-    const credentials = pmUsableResolvedCredentials([claudeCred], [teamDefault]);
+  it("retains org-scoped rows from the resolved stack for PM runs", () => {
+    const credentials = pmUsableResolvedCredentials([
+      makeCredential({ id: "cc-anthropic", agent: "claude_code", provider: "anthropic" }),
+      makeCredential({ id: "cc-gemini", agent: "gemini_cli", provider: "gemini", priority: 2 }),
+    ]);
     const groups = availableAgentModelGroups(credentials, null, [], "codex");
 
     expect(credentials).toEqual([
-      { provider: "anthropic", source: "team_default", masked_key: "sk-ant-team-***" },
+      { provider: "anthropic", source: "org" },
+      { provider: "gemini", source: "org" },
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code", "gemini_cli"]);
+  });
+
+  it("keeps org rows even when a personal row shadows them in the resolved stack", () => {
+    const credentials = pmUsableResolvedCredentials([
+      makeCredential({ id: "cc-personal", scope: "personal", user_id: "user-1", agent: "claude_code", provider: "anthropic" }),
+      makeCredential({ id: "cc-org", agent: "claude_code", provider: "anthropic", priority: 2 }),
+    ]);
+    const groups = availableAgentModelGroups(credentials, null, [], "codex");
+
+    expect(credentials).toEqual([{ provider: "anthropic", source: "org" }]);
+    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
+  });
+
+  it("maps subscription rows onto the agent's provider key", () => {
+    const credentials = pmUsableResolvedCredentials([
+      makeCredential({ agent: "codex", auth_type: "subscription", provider: "openai_subscription" }),
+      makeCredential({ id: "cc-2", agent: "claude_code", auth_type: "subscription", provider: "anthropic_subscription", priority: 2 }),
+    ]);
+    const groups = availableAgentModelGroups(credentials, null, [], "codex");
+
+    expect(credentials).toEqual([
+      { provider: "openai", source: "org" },
+      { provider: "anthropic", source: "org" },
     ]);
     expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
+  });
+
+  it("collapses multiple org rows for the same provider into the highest-priority row", () => {
+    const credentials = pmUsableResolvedCredentials([
+      makeCredential({ id: "cc-1", agent: "codex", provider: "openai", priority: 1 }),
+      makeCredential({ id: "cc-2", agent: "codex", auth_type: "subscription", provider: "openai_subscription", priority: 2 }),
+    ]);
+
+    expect(credentials).toEqual([{ provider: "openai", source: "org" }]);
   });
 });

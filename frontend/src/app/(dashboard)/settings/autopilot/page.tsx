@@ -38,7 +38,7 @@ import {
   PM_SCHEDULE_MAX_HOURS,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { CodingAuth, CodingCredentialSummary, ListResponse, Organization, OrgSettings, RepoSettings, Repository, ResolvedCredential, SingleResponse, UserCredentialSummary } from "@/lib/types";
+import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const { user } = useAuth();
@@ -54,14 +54,9 @@ export default function AutopilotSettingsPage() {
     queryFn: () => api.repositories.list(),
     enabled: isAdmin,
   });
-  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
-    queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.userCredentials.listResolved(),
-    enabled: isAdmin,
-  });
-  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
-    queryKey: queryKeys.credentials.teamDefaults,
-    queryFn: () => api.userCredentials.listTeamDefaults(),
+  const { data: resolvedCredsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
     enabled: isAdmin,
   });
   const { data: codexAuthResponse } = useQuery({
@@ -69,13 +64,8 @@ export default function AutopilotSettingsPage() {
     queryFn: () => api.codexAuth.status(),
     enabled: isAdmin,
   });
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
-    queryKey: ["coding-auths"],
-    queryFn: () => api.codingAuths.list(),
-    enabled: isAdmin,
-  });
   const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "org"],
+    queryKey: queryKeys.codingCredentials.list("org"),
     queryFn: () => api.codingCredentials.list("org"),
     enabled: isAdmin,
   });
@@ -90,33 +80,25 @@ export default function AutopilotSettingsPage() {
     () => resolvedCredsResponse?.data ?? [],
     [resolvedCredsResponse],
   );
-  const codingAuths = useMemo(
-    () => codingAuthsResponse?.data ?? [],
-    [codingAuthsResponse],
-  );
   const orgCodingCredentials = useMemo(
     () => orgCodingCredentialsResponse?.data ?? [],
     [orgCodingCredentialsResponse],
   );
-  const pmCodingAuthAvailability = useMemo(
-    () => [...codingAuths, ...orgCodingCredentials],
-    [codingAuths, orgCodingCredentials],
-  );
   const codexAuthStatus = codexAuthResponse?.data;
   const pmResolvedCredentials = useMemo(
-    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultsResponse?.data ?? []),
-    [resolvedCredentials, teamDefaultsResponse],
+    () => pmUsableResolvedCredentials(resolvedCredentials),
+    [resolvedCredentials],
   );
 
   const pmModelGroups = useMemo(() => {
     return availableAgentModelGroups(
       pmResolvedCredentials,
       codexAuthStatus,
-      pmCodingAuthAvailability,
+      orgCodingCredentials,
       settings.default_agent_type || "codex",
       { orgAgentConfig: settings.agent_config },
     );
-  }, [pmResolvedCredentials, codexAuthStatus, pmCodingAuthAvailability, settings.default_agent_type, settings.agent_config]);
+  }, [pmResolvedCredentials, codexAuthStatus, orgCodingCredentials, settings.default_agent_type, settings.agent_config]);
 
   const scheduleHoursServer = settings.pm_schedule_hours ?? 24;
   const pmModel = settings.pm_model ?? DEFAULT_PM_MODEL;

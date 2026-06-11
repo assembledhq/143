@@ -14,12 +14,13 @@
 //     active.
 //
 // Design notes:
-//   - Subscription credentials live under ProviderAnthropic with a non-empty
-//     label. An Anthropic API-key credential (if any) uses label="" and is
-//     stored in the same provider; the two are mutually exclusive per row, so
-//     one org can hold an API key alongside N labeled subscriptions.
-//   - Round-robin selection uses ClaimNextLabeledRoundRobin which filters
-//     `label != ”`, so the API-key row is never claimed for subscription use.
+//   - Subscription credentials live under ProviderAnthropicSubscription with
+//     a non-empty label. Anthropic API-key credentials live in a separate
+//     provider partition (ProviderAnthropic), so this service never sees
+//     them; one org can hold an API key alongside N labeled subscriptions.
+//   - Round-robin selection uses ClaimNextLabeledRoundRobin scoped to the
+//     subscription provider, so API-key rows are never claimed for
+//     subscription use.
 //   - The OAuth endpoints, client ID, and redirect URI below are Anthropic's
 //     public Claude Code CLI values. If Anthropic changes these, update
 //     only these constants — the service shape is stable.
@@ -128,10 +129,9 @@ var defaultScopes = []string{
 // drive both org-scoped (admin) and personal-scoped (per-user) subscription
 // flows. Production wires *db.ScopedCredentialStore.
 //
-// Subscription credentials live under ProviderAnthropic with a non-empty
-// label. An Anthropic API-key credential uses label="" and shares the same
-// provider; the two are mutually exclusive per row, so one scope can hold
-// an API key alongside N labeled subscriptions.
+// Subscription credentials live under ProviderAnthropicSubscription with a
+// non-empty label. Anthropic API-key credentials live in a separate provider
+// partition (ProviderAnthropic) and are never touched by this service.
 type CredentialStore interface {
 	UpsertWithLabel(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
 	InsertPendingAuth(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
@@ -147,10 +147,9 @@ type CredentialStore interface {
 	// exists for (scope, provider). Backs HasActiveSubscription with a cheap
 	// EXISTS probe instead of listing every row.
 	HasActiveLabeled(ctx context.Context, scope models.Scope, provider models.ProviderName) (bool, error)
-	// DisableLabeled disables all subscription rows (label != '') at (scope,
-	// provider) while leaving the API-key row (label='') intact. Used by
-	// DisconnectAll so the caller doesn't lose their Anthropic API key when
-	// disconnecting every Claude subscription.
+	// DisableLabeled disables all labeled rows (label != '') at (scope,
+	// provider). Used by DisconnectAll; API-key credentials live under a
+	// different provider (ProviderAnthropic) and are untouched.
 	DisableLabeled(ctx context.Context, scope models.Scope, provider models.ProviderName) error
 }
 
@@ -337,12 +336,10 @@ func (s *Service) InitiateOAuth(ctx context.Context, scope models.Scope, created
 	challenge := codeChallenge(verifier)
 	authURL := s.buildAuthorizeURL(challenge, state)
 
-	pendingCfg := models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			State:        state,
-			CodeVerifier: verifier,
-			AuthorizeURL: authURL,
-		},
+	pendingCfg := models.AnthropicSubscriptionConfig{
+		State:        state,
+		CodeVerifier: verifier,
+		AuthorizeURL: authURL,
 	}
 
 	if s.credentials != nil {
@@ -390,7 +387,7 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 	if s.credentials == nil {
 		return nil, fmt.Errorf("credential store not configured")
 	}
-	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderAnthropic, label)
+	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderAnthropicSubscription, label)
 	if err != nil {
 		// Only "no row" should surface as ErrPendingAuthNotFound (→ 404).
 		// Transient DB errors must bubble up as 500s so operators can see them.
@@ -399,11 +396,11 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 		}
 		return nil, fmt.Errorf("lookup pending subscription: %w", err)
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok || cfg.Subscription == nil {
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok {
 		return nil, fmt.Errorf("pending row has unexpected config")
 	}
-	if cfg.Subscription.State == "" || cfg.Subscription.CodeVerifier == "" {
+	if cfg.State == "" || cfg.CodeVerifier == "" {
 		return nil, ErrPendingAuthNotFound
 	}
 	// Only pending_auth rows should be completable. If the row is already
@@ -421,11 +418,11 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 	}
 	// Constant-time compare on the CSRF state to avoid leaking it via timing
 	// side channels. ConstantTimeCompare also returns 0 for length mismatches.
-	if subtle.ConstantTimeCompare([]byte(returnedState), []byte(cfg.Subscription.State)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(returnedState), []byte(cfg.State)) != 1 {
 		return nil, ErrInvalidPaste
 	}
 
-	tokens, err := s.exchangeAuthCode(ctx, code, returnedState, cfg.Subscription.CodeVerifier)
+	tokens, err := s.exchangeAuthCode(ctx, code, returnedState, cfg.CodeVerifier)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +446,7 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 		sub.RateLimitTier = profile.Organization.RateLimitTier
 	}
 
-	if err := s.credentials.UpsertByID(ctx, scope, cred.ID, models.AnthropicConfig{Subscription: sub}); err != nil {
+	if err := s.credentials.UpsertByID(ctx, scope, cred.ID, models.FromAnthropicSubscription(*sub)); err != nil {
 		return nil, fmt.Errorf("store credential: %w", err)
 	}
 
@@ -633,12 +630,12 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		return nil, fmt.Errorf("get credential: %w", err)
 	}
 
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok || cfg.Subscription == nil {
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok {
 		return nil, fmt.Errorf("credential is not an Anthropic subscription")
 	}
 
-	sub := *cfg.Subscription
+	sub := cfg.AsAnthropicSubscription()
 
 	// After acquiring the lock, check if another goroutine already refreshed.
 	if !sub.NeedsRefresh(refreshWindow) && sub.AccessToken != "" {
@@ -723,7 +720,7 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 		newSub.RefreshToken = sub.RefreshToken
 	}
 
-	if err := s.credentials.UpsertByID(ctx, scope, credID, models.AnthropicConfig{Subscription: newSub}); err != nil {
+	if err := s.credentials.UpsertByID(ctx, scope, credID, models.FromAnthropicSubscription(*newSub)); err != nil {
 		return nil, fmt.Errorf("store refreshed credential: %w", err)
 	}
 
@@ -764,12 +761,11 @@ func (s *Service) StoreTokenByID(ctx context.Context, scope models.Scope, credID
 	if err != nil {
 		return false, fmt.Errorf("get credential: %w", err)
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok || cfg.Subscription == nil {
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok {
 		return false, fmt.Errorf("credential is not an Anthropic subscription")
 	}
-	current := cfg.Subscription
-	if !harvestedSubscriptionIsNewer(*current, sub) {
+	if !harvestedSubscriptionIsNewer(cfg.AsAnthropicSubscription(), sub) {
 		return false, nil
 	}
 
@@ -789,7 +785,7 @@ func (s *Service) StoreTokenByID(ctx context.Context, scope models.Scope, credID
 		}
 	}
 
-	if err := s.credentials.UpsertByID(ctx, scope, credID, models.AnthropicConfig{Subscription: &sub}); err != nil {
+	if err := s.credentials.UpsertByID(ctx, scope, credID, models.FromAnthropicSubscription(sub)); err != nil {
 		return false, fmt.Errorf("store claude subscription credential: %w", err)
 	}
 	return true, nil
@@ -854,7 +850,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 	var lastErr error
 
 	for attempt := 0; attempt < maxRoundRobinAttempts; attempt++ {
-		cred, err := s.credentials.ClaimNextLabeledRoundRobin(ctx, scope, models.ProviderAnthropic)
+		cred, err := s.credentials.ClaimNextLabeledRoundRobin(ctx, scope, models.ProviderAnthropicSubscription)
 		if err != nil {
 			if isNotFoundError(err) {
 				if lastErr != nil {
@@ -878,16 +874,25 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		}
 		tried[cred.ID] = struct{}{}
 
-		cfg, ok := cred.Config.(models.AnthropicConfig)
-		if !ok || cfg.Subscription == nil {
+		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+		if !ok {
+			// A corrupt config under provider=anthropic_subscription can never
+			// be used. Mark it invalid so the unified resolver stops returning
+			// it; otherwise PickRunnable keeps handing back this same
+			// top-priority row and the tried-map below breaks the loop before
+			// lower-priority healthy credentials are reached.
 			lastErr = fmt.Errorf("credential %s is not an Anthropic subscription", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "stored config is not AnthropicSubscriptionConfig")
 			continue
 		}
 
-		sub := *cfg.Subscription
+		sub := cfg.AsAnthropicSubscription()
 
 		if sub.AccessToken == "" {
+			// An active row with no access token is unusable; same rotation
+			// hazard as the wrong-type case above.
 			lastErr = fmt.Errorf("credential %s has empty access token", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "empty access token")
 			continue
 		}
 
@@ -909,20 +914,30 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 			return &sub, &credID, nil
 		}
 
-		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
-			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
-		}
-		// Drop the per-credential refresh mutex — the credential is out of
-		// rotation now, and keeping the entry around would leak sync.Map
-		// memory across the process lifetime.
-		s.refreshMu.Delete(cred.ID.String())
+		s.markCredentialInvalid(ctx, scope, cred.ID, "token refresh failed and cached token expired")
 	}
 
 	if lastErr != nil {
 		return nil, nil, fmt.Errorf("no usable Claude subscription after %d attempts: %w", len(tried), lastErr)
 	}
 	return nil, nil, nil
+}
+
+// markCredentialInvalid durably removes a credential from the round-robin by
+// flipping its runtime status to invalid, which busts the unified resolver
+// cache so the next ClaimNextLabeledRoundRobin (PickRunnable) skips it.
+// Without this, PickRunnable re-returns the same top-priority row every
+// iteration and the caller's tried-map breaks the loop before lower-priority
+// healthy credentials are reached. Also drops the per-credential refresh mutex
+// (the credential is out of rotation now, so keeping the entry would leak
+// sync.Map memory across the process lifetime). Best-effort: a failed update
+// is logged, not fatal.
+func (s *Service) markCredentialInvalid(ctx context.Context, scope models.Scope, credID uuid.UUID, reason string) {
+	s.logger.Warn().Str("cred_id", credID.String()).Str("reason", reason).Msg("marking claude subscription credential invalid")
+	if statusErr := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); statusErr != nil {
+		s.logger.Warn().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
+	}
+	s.refreshMu.Delete(credID.String())
 }
 
 // HasActiveSubscription reports whether the org has at least one active
@@ -935,7 +950,7 @@ func (s *Service) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (b
 	if s.credentials == nil {
 		return false, nil
 	}
-	exists, err := s.credentials.HasActiveLabeled(ctx, orgScope(orgID), models.ProviderAnthropic)
+	exists, err := s.credentials.HasActiveLabeled(ctx, orgScope(orgID), models.ProviderAnthropicSubscription)
 	if err != nil {
 		return false, fmt.Errorf("check anthropic subscription: %w", err)
 	}
@@ -972,15 +987,16 @@ func (s *Service) DisconnectForOrg(ctx context.Context, scope models.Scope, cred
 		}
 		return fmt.Errorf("get credential: %w", err)
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if cred.Provider != models.ProviderAnthropic || cred.Label == "" || !ok || cfg.Subscription == nil {
+	_, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if cred.Provider != models.ProviderAnthropicSubscription || cred.Label == "" || !ok {
 		return ErrCredentialNotFound
 	}
 	return s.Disconnect(ctx, scope, credID)
 }
 
-// DisconnectAll removes every Claude subscription at the given scope,
-// leaving any Anthropic API-key row (label="") in place. Ordering matches
+// DisconnectAll removes every Claude subscription at the given scope.
+// Anthropic API-key rows live under a separate provider partition
+// (ProviderAnthropic) and are untouched. Ordering matches
 // Disconnect: the DB rows are disabled first so a concurrent refresh cannot
 // resurrect a credential after we've dropped its mutex; only then do we
 // clean up the in-memory maps.
@@ -996,18 +1012,18 @@ func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	// refresh mutexes afterwards. ListByProvider errors are non-fatal here:
 	// the DisableLabeled call below is the source of truth, but log the miss
 	// so operators can correlate any leaked refresh mutexes.
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropic)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropicSubscription)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("org_id", scope.OrgID.String()).Msg("failed to list claude subscriptions before disconnect cleanup")
 	}
 
-	if err := s.credentials.DisableLabeled(ctx, scope, models.ProviderAnthropic); err != nil {
+	if err := s.credentials.DisableLabeled(ctx, scope, models.ProviderAnthropicSubscription); err != nil {
 		return err
 	}
 
 	for _, cred := range creds {
 		if cred.Label == "" {
-			continue // leave the API-key row alone
+			continue // unlabeled rows are never disabled by DisableLabeled
 		}
 		s.refreshMu.Delete(cred.ID.String())
 	}
@@ -1037,15 +1053,14 @@ func (s *Service) clearInitMutexesForScope(scope models.Scope) {
 }
 
 // ListSubscriptions returns all connected Claude subscriptions at the given
-// scope. Skips the label="" row (which is the Anthropic API-key credential,
-// not a subscription) so the subscriptions list doesn't leak an API key
-// summary.
+// scope. Skips any label="" row defensively — subscription rows always carry
+// a label, so an unlabeled row is malformed and not worth surfacing.
 func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]SubscriptionInfo, error) {
 	if s.credentials == nil {
 		return nil, nil
 	}
 
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropic)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropicSubscription)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
@@ -1055,14 +1070,14 @@ func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]
 		if cred.Label == "" {
 			continue
 		}
-		cfg, ok := cred.Config.(models.AnthropicConfig)
-		if !ok || cfg.Subscription == nil {
+		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+		if !ok {
 			continue
 		}
 		subs = append(subs, SubscriptionInfo{
 			ID:          cred.ID,
 			Label:       cred.Label,
-			AccountType: cfg.Subscription.AccountType,
+			AccountType: cfg.AccountType,
 			Status:      SubscriptionStatus(cred.Status),
 			LastUsedAt:  cred.LastUsedAt,
 			CreatedBy:   cred.CreatedBy,

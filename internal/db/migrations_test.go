@@ -315,9 +315,26 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 		strayID, orgID)
 	require.NoError(t, err, "pre-versioning code should still be able to insert config rows")
 
-	healed, err := ReconcileCodingCredentialRuntimeState(ctx, conn)
+	// The boot-time reconciler was removed with the credentials cleanup
+	// migration (the legacy columns it copied are gone); the equivalent SQL is
+	// inlined here because this test exercises the 000167-era schema where
+	// those columns still exist.
+	reconcileSQL := `INSERT INTO coding_credential_runtime_state (
+			credential_id, org_id, user_id, status, last_verified_at,
+			rate_limited_until, rate_limited_observed_at, rate_limit_message, active
+		)
+		SELECT cc.id, cc.org_id, cc.user_id, cc.status, cc.last_verified_at,
+		       cc.rate_limited_until, cc.rate_limited_observed_at, cc.rate_limit_message, true
+		FROM coding_credentials cc
+		WHERE cc.active = true
+		  AND NOT EXISTS (
+			SELECT 1 FROM coding_credential_runtime_state rt
+			WHERE rt.credential_id = cc.id AND rt.active = true
+		  )
+		ON CONFLICT (credential_id) WHERE active = true DO NOTHING`
+	tag, err := conn.Exec(ctx, reconcileSQL)
 	require.NoError(t, err, "reconciliation should heal config rows missing runtime state")
-	require.Equal(t, int64(1), healed, "reconciliation should backfill exactly the orphaned credential")
+	require.Equal(t, int64(1), tag.RowsAffected(), "reconciliation should backfill exactly the orphaned credential")
 	var strayStatus string
 	err = conn.QueryRow(ctx,
 		`SELECT status FROM coding_credential_runtime_state WHERE credential_id = $1 AND active = true`, strayID,
@@ -325,9 +342,9 @@ func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	require.NoError(t, err, "healed credential should have an active runtime row")
 	require.Equal(t, "active", strayStatus, "healed runtime state should copy the legacy status column")
 
-	healed, err = ReconcileCodingCredentialRuntimeState(ctx, conn)
+	tag, err = conn.Exec(ctx, reconcileSQL)
 	require.NoError(t, err, "reconciliation should be idempotent")
-	require.Zero(t, healed, "second reconciliation pass should be a no-op")
+	require.Zero(t, tag.RowsAffected(), "second reconciliation pass should be a no-op")
 
 	downBody, err := os.ReadFile("../../migrations/000167_coding_credentials_insert_only_versioning.down.sql")
 	require.NoError(t, err, "test should read the versioning down migration")

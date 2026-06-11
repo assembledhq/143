@@ -21,7 +21,7 @@ const (
 // githubStatusCredentialStore is the interface for checking GitHub credential status.
 type githubStatusCredentialStore interface {
 	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
-	Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig, isTeamDefault bool) error
+	Upsert(ctx context.Context, userID, orgID uuid.UUID, cfg models.ProviderConfig) error
 	Disable(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) error
 }
 
@@ -221,7 +221,7 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		return
 	}
 
-	if err := h.credentials.Upsert(r.Context(), user.ID, orgID, cfg, false); err != nil {
+	if err := h.credentials.Upsert(r.Context(), user.ID, orgID, cfg); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SAVE_CREDENTIAL_FAILED", "failed to store credential", err)
 		return
 	}

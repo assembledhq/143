@@ -230,10 +230,9 @@ func TestParseCodingProviderConfig(t *testing.T) {
 			ProviderLinear,
 			ProviderSlack,
 			ProviderNotion,
-			// ProviderOpenAIChatGPT is renamed to ProviderOpenAISubscription
-			// by the SQL data-copy migration, so it must never appear in a
-			// coding_credentials row either.
-			ProviderOpenAIChatGPT,
+			// The retired legacy provider spelling must never round-trip
+			// through the coding store either.
+			ProviderName("openai_chatgpt"),
 		}
 		for _, p := range nonCoding {
 			_, err := ParseCodingProviderConfig(p, []byte("{}"))
@@ -271,17 +270,27 @@ func TestFromAnthropicSubscription(t *testing.T) {
 	}
 }
 
-func TestOpenAISubscriptionConfigRoundTrip(t *testing.T) {
+func TestAnthropicSubscriptionConfigRoundTrip(t *testing.T) {
 	t.Parallel()
-	src := OpenAIChatGPTConfig{
-		AccessToken:  "a",
-		RefreshToken: "r",
-		IDToken:      "id",
-		ExpiresAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		AccountType:  "pro",
+	src := AnthropicSubscription{
+		AccessToken:   "a",
+		RefreshToken:  "r",
+		ExpiresAt:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		AccountType:   "claude_max",
+		RateLimitTier: "default_claude_max_20x",
+		State:         "st",
+		CodeVerifier:  "cv",
+		AuthorizeURL:  "https://example",
 	}
-	round := FromOpenAIChatGPTConfig(src).AsOpenAIChatGPTConfig()
-	if round != src {
+	round := FromAnthropicSubscription(src).AsAnthropicSubscription()
+	if round.AccessToken != src.AccessToken ||
+		round.RefreshToken != src.RefreshToken ||
+		!round.ExpiresAt.Equal(src.ExpiresAt) ||
+		round.AccountType != src.AccountType ||
+		round.RateLimitTier != src.RateLimitTier ||
+		round.State != src.State ||
+		round.CodeVerifier != src.CodeVerifier ||
+		round.AuthorizeURL != src.AuthorizeURL {
 		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", round, src)
 	}
 }

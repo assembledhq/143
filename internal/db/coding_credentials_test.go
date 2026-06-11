@@ -16,11 +16,11 @@ import (
 )
 
 var codingCredentialTestColumns = []string{
-	"id", "version_id", "org_id", "user_id", "provider", "label", "config", "priority", "status", "created_by", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message", "team_default_origin_user_id", "active", "created_at", "updated_at",
+	"id", "version_id", "org_id", "user_id", "provider", "label", "config", "priority", "status", "created_by", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message", "active", "created_at", "updated_at",
 }
 
 var codingCredentialSnapshotColumns = []string{
-	"id", "version_id", "org_id", "user_id", "provider", "label", "config", "priority", "config_status", "created_by", "team_default_origin_user_id", "created_at", "runtime_status", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message",
+	"id", "version_id", "org_id", "user_id", "provider", "label", "config", "priority", "created_by", "created_at", "runtime_status", "last_verified_at", "rate_limited_until", "rate_limited_observed_at", "rate_limit_message",
 }
 
 func TestCodingCredentialsColumnsProjectsRuntimeUpdatedAt(t *testing.T) {
@@ -53,7 +53,6 @@ func codingCredentialRow(t *testing.T, store *CodingCredentialStore, orgID uuid.
 		encryptedCodingConfig(t, store, cfg),
 		priority,
 		status,
-		nil,
 		nil,
 		nil,
 		nil,
@@ -111,8 +110,6 @@ func codingCredentialSnapshotRow(t *testing.T, store *CodingCredentialStore, sco
 		"Test credential",
 		encryptedCodingConfig(t, store, models.OpenAIConfig{APIKey: "sk-openai-123456"}),
 		1,
-		status,
-		nil,
 		nil,
 		now,
 		status,
@@ -824,15 +821,6 @@ func TestCodingCredentialStoreConfigurationHelpers(t *testing.T) {
 	store, mock := newMockCodingCredentialStore(t)
 	defer mock.Close()
 
-	called := false
-	store.SetMirrorLogger(func(format string, args ...any) {
-		called = true
-		require.Equal(t, "hello %s", format, "mirror logger should receive the format string")
-		require.Equal(t, []any{"world"}, args, "mirror logger should receive arguments")
-	})
-	store.mirrorWarn("hello %s", "world")
-	require.True(t, called, "mirrorWarn should call the configured logger")
-
 	store.SetRNG(rand.New(rand.NewPCG(1, 2)))
 	store.SetClock(func() time.Time { return time.Unix(10, 0) })
 	id := uuid.New()
@@ -867,7 +855,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 					WithArgs(codingAnyArgs(4)...).
 					WillReturnRows(pgxmock.NewRows(codingCredentialSnapshotColumns))
 				mock.ExpectExec(`INSERT INTO coding_credentials`).
-					WithArgs(codingAnyArgs(11)...).
+					WithArgs(codingAnyArgs(9)...).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectExec(`INSERT INTO coding_credential_runtime_state`).
 					WithArgs(codingAnyArgs(8)...).
@@ -887,7 +875,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectExec(`INSERT INTO coding_credentials`).
-					WithArgs(codingAnyArgs(11)...).
+					WithArgs(codingAnyArgs(9)...).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
 					WithArgs(codingAnyArgs(1)...).
@@ -909,7 +897,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectExec(`INSERT INTO coding_credentials`).
-					WithArgs(codingAnyArgs(11)...).
+					WithArgs(codingAnyArgs(9)...).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectExec(`UPDATE coding_credential_runtime_state\s+SET active = false`).
 					WithArgs(codingAnyArgs(1)...).
@@ -931,7 +919,7 @@ func TestCodingCredentialStoreMutations(t *testing.T) {
 					WithArgs(codingAnyArgs(2)...).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				mock.ExpectExec(`INSERT INTO coding_credentials`).
-					WithArgs(codingAnyArgs(11)...).
+					WithArgs(codingAnyArgs(9)...).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				mock.ExpectCommit()
 			},
@@ -1108,7 +1096,7 @@ func TestCodingCredentialStoreRenameLabelTaken(t *testing.T) {
 		WithArgs(codingAnyArgs(2)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec(`INSERT INTO coding_credentials`).
-		WithArgs(codingAnyArgs(11)...).
+		WithArgs(codingAnyArgs(9)...).
 		WillReturnError(&pgconn.PgError{Code: "23505"})
 	mock.ExpectRollback()
 
@@ -1147,7 +1135,7 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 						WithArgs(codingAnyArgs(2)...).
 						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 					mock.ExpectExec(`INSERT INTO coding_credentials`).
-						WithArgs(codingAnyArgs(11)...).
+						WithArgs(codingAnyArgs(9)...).
 						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 				}
 				mock.ExpectCommit()
@@ -1179,7 +1167,7 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 						WithArgs(codingAnyArgs(2)...).
 						WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 					mock.ExpectExec(`INSERT INTO coding_credentials`).
-						WithArgs(codingAnyArgs(11)...).
+						WithArgs(codingAnyArgs(9)...).
 						WillReturnResult(pgxmock.NewResult("INSERT", 1))
 				}
 				mock.ExpectCommit()
@@ -1263,27 +1251,6 @@ func TestCodingCredentialStoreReorderMoveAndJanitor(t *testing.T) {
 		require.Equal(t, int64(2), n, "janitor sweep should return deactivated logical credential count")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
-}
-
-// TestReconcileCodingCredentialRuntimeState pins the boot-time self-healing
-// sweep: it inserts runtime rows only for active config rows with no active
-// runtime row (pre-versioning writers during the rolling deploy window) and
-// guards concurrent boots with ON CONFLICT against the partial unique index.
-func TestReconcileCodingCredentialRuntimeState(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "creating mock pool should not error")
-	defer mock.Close()
-
-	mock.ExpectExec(`(?s)INSERT INTO coding_credential_runtime_state.*NOT EXISTS.*ON CONFLICT \(credential_id\) WHERE active = true DO NOTHING`).
-		WillReturnResult(pgxmock.NewResult("INSERT", 2))
-
-	healed, err := ReconcileCodingCredentialRuntimeState(context.Background(), mock)
-
-	require.NoError(t, err, "reconciliation should not return an error")
-	require.Equal(t, int64(2), healed, "reconciliation should report the number of healed credentials")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestCodingCredentialStoreReorderRejectsPartialStack(t *testing.T) {

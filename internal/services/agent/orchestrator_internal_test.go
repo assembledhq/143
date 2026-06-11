@@ -417,19 +417,24 @@ func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the selected unified credential is an API key")
 }
 
-func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
+func TestSetupFreshSandbox_CodexOrgAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.MustParse("10101010-1111-2222-3333-444444444444")
 	userID := uuid.MustParse("55555555-6666-7777-8888-999999999999")
 	provider := &testInternalSandboxProvider{}
 	env := NewAgentEnv(AgentEnvDeps{
-		Credentials: &envCredentialProvider{
-			creds: map[models.ProviderName]*models.DecryptedCredential{
+		CodingCredentials: testInternalCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
 				models.ProviderOpenAI: {
-					OrgID:  orgID,
-					Status: models.CredentialStatusActive,
-					Config: models.OpenAIConfig{APIKey: "sk-legacy-openai"},
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderOpenAI,
+						Priority: 1,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   models.OpenAIConfig{APIKey: "sk-org-openai"},
+					},
 				},
 			},
 		},
@@ -451,9 +456,9 @@ func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T
 
 	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-legacy", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars, nil)
 
-	require.NoError(t, err, "setupFreshSandbox should continue to honor the documented legacy OpenAI API-key fallback")
-	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the legacy OpenAI credential as an API-key billing mode")
-	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the legacy fallback resolved an OpenAI API key")
+	require.NoError(t, err, "setupFreshSandbox should honor the org-scoped OpenAI API-key fallback")
+	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the org OpenAI credential as an API-key billing mode")
+	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the resolved unified credential is an API key")
 }
 
 func TestBuildTokenUsageHint_PreservesExplicitClaudeSubscriptionBillingMode(t *testing.T) {

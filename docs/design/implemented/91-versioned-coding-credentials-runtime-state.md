@@ -47,3 +47,5 @@ The cutover migration backfills a config `version_id`, marks existing config row
 - Old replicas have no `active = true` filter, so once new code writes a second version they see duplicate rows per credential, and new-code deactivations stay visible to them. Same mitigation: keep the window short.
 
 The Postgres-backed behavior test (`TestCodingCredentialsVersioningMigrationPostgresBehavior`, driven by `TEST_DATABASE_URL` in CI) exercises the up migration's invariants, the deploy-window reconciliation, and the down migration round-trip.
+
+**Cleanup (PR 5, 2026-06-10).** The `credentials_cleanup` migration dropped the temporary legacy runtime columns and `team_default_origin_user_id` from `coding_credentials`, reduced the runtime-state trigger to a pure orphan guard (no more legacy-column sync), and removed the boot-time `ReconcileCodingCredentialRuntimeState` sweep — with the whole fleet on versioned code, no writer can create a config row without its runtime row. The versioned pair is now the only credential storage for coding agents; see [future/65-unified-coding-credentials.md](../future/65-unified-coding-credentials.md) PR 5 notes.

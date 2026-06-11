@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -61,4 +62,17 @@ func NewPoolWithOptions(ctx context.Context, databaseURL string, opts PoolOption
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 	return pool, nil
+}
+
+// isUniqueViolation reports a postgres unique_violation (SQLSTATE 23505).
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	type sqlStateErr interface{ SQLState() string }
+	var s sqlStateErr
+	if errors.As(err, &s) {
+		return s.SQLState() == "23505"
+	}
+	return false
 }
