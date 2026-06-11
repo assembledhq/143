@@ -63,6 +63,15 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("Assistant replied")).toBeInTheDocument();
   });
 
+  it("scopes user message bubbles for readable text selection", () => {
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: makeMessage({ id: 1, content: "Selectable user prompt", role: "user" }) },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    expect(screen.getByText("Selectable user prompt").closest(".chat-user-bubble")).toBeInTheDocument();
+  });
+
   it("renders tool group collapsed by default, expands on click", async () => {
     const entries: TimelineEntry[] = [
       {
