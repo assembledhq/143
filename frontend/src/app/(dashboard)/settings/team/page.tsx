@@ -891,6 +891,11 @@ export default function TeamSettingsPage() {
             <AlertDialogTitle>Remove member</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to remove {removingMember?.name} ({removingMember?.email}) from the organization? This action cannot be undone.
+              {removingMember?.captured_github_org_login ? (
+                <span className="mt-2 block">
+                  They&apos;re a member of {removingMember.captured_github_org_login} on GitHub and will rejoin on their next sign-in. Remove them from the GitHub organization too, or turn off auto-join.
+                </span>
+              ) : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
