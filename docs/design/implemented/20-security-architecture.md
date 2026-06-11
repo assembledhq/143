@@ -31,9 +31,9 @@ The worker runtime treats the sandbox as the main security boundary for agent ex
 
 This is the implemented baseline. The code is the source of truth in:
 
-- [internal/services/agent/providers/docker.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/services/agent/providers/docker.go)
-- [docker-compose.worker.yml](/Users/wangjohn/.codex/worktrees/9735/143/docker-compose.worker.yml)
-- [deploy/scripts/sandbox-firewall.sh](/Users/wangjohn/.codex/worktrees/9735/143/deploy/scripts/sandbox-firewall.sh)
+- [internal/services/agent/providers/docker.go](../../../internal/services/agent/providers/docker.go)
+- [docker-compose.worker.yml](../../../docker-compose.worker.yml)
+- [deploy/scripts/sandbox-firewall.sh](../../../deploy/scripts/sandbox-firewall.sh)
 
 ### 2. Prompt Injection Defense
 
@@ -45,8 +45,8 @@ Untrusted text is sanitized before it is embedded into prompts.
 
 Primary implementation:
 
-- [internal/sanitize/sanitize.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/sanitize/sanitize.go)
-- [internal/services/validation/service.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/services/validation/service.go)
+- [internal/sanitize/sanitize.go](../../../internal/sanitize/sanitize.go)
+- [internal/services/validation/service.go](../../../internal/services/validation/service.go)
 
 ### 3. Authentication, Authorization, and Request Guards
 
@@ -60,12 +60,12 @@ The application enforces the main app-layer controls expected for a multi-tenant
 
 Primary implementation:
 
-- [internal/api/router.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/api/router.go)
-- [internal/api/middleware/rbac.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/api/middleware/rbac.go)
-- [internal/api/middleware/ratelimit.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/api/middleware/ratelimit.go)
-- [internal/api/middleware/body_limit.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/api/middleware/body_limit.go)
-- [internal/api/handlers/webhooks.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/api/handlers/webhooks.go)
-- [internal/api/handlers/ingestion_webhooks.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/api/handlers/ingestion_webhooks.go)
+- [internal/api/router.go](../../../internal/api/router.go)
+- [internal/api/middleware/rbac.go](../../../internal/api/middleware/rbac.go)
+- [internal/api/middleware/ratelimit.go](../../../internal/api/middleware/ratelimit.go)
+- [internal/api/middleware/body_limit.go](../../../internal/api/middleware/body_limit.go)
+- [internal/api/handlers/webhooks.go](../../../internal/api/handlers/webhooks.go)
+- [internal/api/handlers/ingestion_webhooks.go](../../../internal/api/handlers/ingestion_webhooks.go)
 
 ### 4. Secrets and Credential Storage
 
@@ -77,8 +77,8 @@ Stored credentials are encrypted at rest using envelope encryption.
 
 Primary implementation:
 
-- [internal/crypto/encryption.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/crypto/encryption.go)
-- [internal/config/config.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/config/config.go)
+- [internal/crypto/encryption.go](../../../internal/crypto/encryption.go)
+- [internal/config/config.go](../../../internal/config/config.go)
 
 ### 5. Audit and Retention
 
@@ -90,8 +90,8 @@ Security-sensitive metadata is protected and old raw data is cleaned up.
 
 Primary implementation:
 
-- [migrations/000001_init.up.sql](/Users/wangjohn/.codex/worktrees/9735/143/migrations/000001_init.up.sql)
-- [internal/worker/handlers.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/worker/handlers.go)
+- [migrations/000001_init.up.sql](../../../migrations/000001_init.up.sql)
+- [internal/worker/handlers.go](../../../internal/worker/handlers.go)
 
 ## Future Hardening
 

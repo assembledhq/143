@@ -31,9 +31,9 @@ Failure analysis runs as background work after a session ends in a failed state.
 
 Primary implementation:
 
-- [internal/services/agent/failure.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/services/agent/failure.go)
-- [internal/worker/handlers.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/worker/handlers.go)
-- [internal/db/session_store.go](/Users/wangjohn/.codex/worktrees/9735/143/internal/db/session_store.go)
+- [internal/services/agent/failure.go](../../../internal/services/agent/failure.go)
+- [internal/worker/handlers.go](../../../internal/worker/handlers.go)
+- [internal/db/session_store.go](../../../internal/db/session_store.go)
 
 ### Implemented Categories
 
@@ -58,9 +58,9 @@ Failure summaries are rendered in the session detail and session list/sidebar su
 
 Primary implementation:
 
-- [frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx](/Users/wangjohn/.codex/worktrees/9735/143/frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx)
-- [frontend/src/app/(dashboard)/sessions/sessions-page-content.tsx](/Users/wangjohn/.codex/worktrees/9735/143/frontend/src/app/(dashboard)/sessions/sessions-page-content.tsx)
-- [frontend/src/app/(dashboard)/sessions/session-sidebar.tsx](/Users/wangjohn/.codex/worktrees/9735/143/frontend/src/app/(dashboard)/sessions/session-sidebar.tsx)
+- [frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx](../../../frontend/src/app/(dashboard)/sessions/[id]/session-detail-content.tsx)
+- [frontend/src/app/(dashboard)/sessions/sessions-page-content.tsx](../../../frontend/src/app/(dashboard)/sessions/sessions-page-content.tsx)
+- [frontend/src/app/(dashboard)/sessions/session-sidebar.tsx](../../../frontend/src/app/(dashboard)/sessions/session-sidebar.tsx)
 
 ## Future Work
 
