@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	defaultMaxConcurrent    = 10
+	defaultMaxConcurrent = 10
 	// mentionIndexWarmTimeout bounds the proactive mention-index build at
 	// turn-complete. The build walks the whole workspace through a Docker
 	// exec and takes several seconds on large repos; the warm always runs
