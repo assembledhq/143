@@ -11,7 +11,7 @@ import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_48 } from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
-import type { CodingAuth, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
 import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
@@ -37,7 +37,7 @@ type InsertionMode = "make_default" | "next_fallback";
 
 const PROVIDER_OPTIONS = ORG_PROVIDER_OPTIONS;
 
-function authStatusTone(status: CodingAuth["status"]) {
+function authStatusTone(status: CodingCredentialSummary["status"]) {
   switch (status) {
     case "healthy":
       return "text-success";
@@ -51,7 +51,7 @@ function authStatusTone(status: CodingAuth["status"]) {
   }
 }
 
-function moveRows(rows: CodingAuth[], id: string, direction: "up" | "down") {
+function moveRows(rows: CodingCredentialSummary[], id: string, direction: "up" | "down") {
   const index = rows.findIndex((row) => row.id === id);
   if (index === -1) return rows;
   const targetIndex = direction === "up" ? Math.max(0, index - 1) : Math.min(rows.length - 1, index + 1);
@@ -62,7 +62,7 @@ function moveRows(rows: CodingAuth[], id: string, direction: "up" | "down") {
   return next;
 }
 
-function moveRowToTop(rows: CodingAuth[], id: string) {
+function moveRowToTop(rows: CodingCredentialSummary[], id: string) {
   const index = rows.findIndex((row) => row.id === id);
   if (index <= 0) return rows;
   const next = [...rows];
@@ -72,7 +72,7 @@ function moveRowToTop(rows: CodingAuth[], id: string) {
 }
 
 export function reorderRows(
-  rows: CodingAuth[],
+  rows: CodingCredentialSummary[],
   sourceId: string,
   targetId: string,
   position: "before" | "after",
@@ -126,11 +126,11 @@ export default function AgentPage() {
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
   const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
 
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
-    queryKey: ["coding-auths"],
-    queryFn: () => api.codingAuths.list(),
+  const { data: codingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("org"),
+    queryFn: () => api.codingCredentials.list("org"),
   });
-  const rows = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse?.data]);
+  const rows = useMemo(() => codingCredentialsResponse?.data ?? [], [codingCredentialsResponse?.data]);
   const selected = rows.find((row) => row.id === selectedId) ?? null;
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -141,15 +141,15 @@ export default function AgentPage() {
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
 
   const reorderMutation = useMutation({
-    mutationFn: async (nextRows: CodingAuth[]) => {
-      await api.codingAuths.reorder(nextRows.map((row) => row.id));
+    mutationFn: async (nextRows: CodingCredentialSummary[]) => {
+      await api.codingCredentials.reorder("org", nextRows.map((row) => row.id));
       const nextDefault = nextRows.find((row) => row.status === "healthy") ?? nextRows[0];
       if (nextDefault && settings.default_agent_type !== nextDefault.agent) {
         await api.settings.update({ settings: { default_agent_type: nextDefault.agent } });
       }
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
     },
     onError: (error) => {
@@ -161,7 +161,10 @@ export default function AgentPage() {
   const stackCreateMutation = useMutation({
     mutationFn: async () => {
       const nextLabel = label.trim() || defaultLabel(provider, authType);
-      const created = await api.codingAuths.create({
+      // The unified create endpoint returns the new row unwrapped (no
+      // SingleResponse envelope).
+      return api.codingCredentials.create({
+        scope: "org",
         agent: provider,
         auth_type: "api_key",
         label: nextLabel,
@@ -172,12 +175,10 @@ export default function AgentPage() {
             ? { agent_defaults: { PI_MODEL: piModel } }
             : {}),
       });
-      return created.data;
     },
     onSuccess: async (created) => {
-      await queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
       closeAddModal();
       if (insertionMode === "make_default") {
         const nextRows = moveRowToTop([created, ...rows], created.id);
@@ -192,9 +193,9 @@ export default function AgentPage() {
   });
 
   const renameMutation = useMutation({
-    mutationFn: (nextLabel: string) => api.codingAuths.update(selectedId ?? "", { label: nextLabel }),
+    mutationFn: (nextLabel: string) => api.codingCredentials.update(selectedId ?? "", { scope: "org", label: nextLabel }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       toast.success("Auth renamed");
     },
     onError: (error) => {
@@ -204,10 +205,9 @@ export default function AgentPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => api.codingAuths.delete(id),
+    mutationFn: (id: string) => api.codingCredentials.delete(id, "org"),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       setSelectedId(null);
       setRenameValue("");
       toast.success("Auth removed");
@@ -592,6 +592,7 @@ export default function AgentPage() {
         {showCodexModal ? (
           <CodexDeviceCodeModal
             label={generatedLabel}
+            scope="org"
             onClose={() => {
               setShowCodexModal(false);
               closeAddModal();
@@ -599,7 +600,7 @@ export default function AgentPage() {
             onConnected={() => {
               setShowCodexModal(false);
               closeAddModal();
-              void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+              void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
             }}
           />
         ) : null}
@@ -607,6 +608,7 @@ export default function AgentPage() {
         {showClaudeModal ? (
           <ClaudeCodeAuthModal
             label={generatedLabel}
+            scope="org"
             onClose={() => {
               setShowClaudeModal(false);
               closeAddModal();
@@ -614,7 +616,7 @@ export default function AgentPage() {
             onConnected={() => {
               setShowClaudeModal(false);
               closeAddModal();
-              void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+              void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
             }}
           />
         ) : null}

@@ -198,47 +198,13 @@ func main() {
 	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
 		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; server refusing to start")
 	}
-	// Heal credentials written by pre-versioning code during the rolling
-	// deploy window (config row without a runtime-state row); no-op once the
-	// fleet is on versioned code.
-	if healed, err := db.ReconcileCodingCredentialRuntimeState(ctx, pool); err != nil {
-		logger.Fatal().Err(err).Msg("coding-credentials runtime-state reconciliation failed; server refusing to start")
-	} else if healed > 0 {
-		logger.Warn().Int64("credentials", healed).Msg("backfilled runtime state for credentials written by pre-versioning code")
-	}
 
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
-	// Wire the unified coding-credentials mirror into both legacy stores so
-	// every existing write path (OAuth services, /settings/coding-auths,
-	// /settings/credentials/personal, /settings/credentials/team) lands in
-	// `coding_credentials` as well as the legacy table. Reads come from the
-	// unified store via AgentEnv.CodingCredentials. The mirror is removed in
-	// the unified-credentials cleanup PR.
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	// Pipe mirror failures into the application logger so a drift between
-	// the legacy and unified tables is visible in production telemetry.
-	mirrorLog := func(format string, args ...any) {
-		logger.Warn().Msgf(format, args...)
-	}
-	credentialStore.SetMirrorLogger(mirrorLog)
-	userCredentialStore.SetMirrorLogger(mirrorLog)
-	codingCredentialStore.SetMirrorLogger(mirrorLog)
-	// Expose the mirror's drift / failure counters through OTel so the
-	// dual-write rollout has a dashboard signal when the unified table is
-	// drifting from the legacy stores. Cleaned up alongside the mirror itself.
-	if _, err := metrics.NewMirrorMetrics(func() (uint64, uint64) {
-		return codingCredentialStore.MirrorDriftCount(), codingCredentialStore.MirrorFailureCount()
-	}); err != nil {
-		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
-	}
-	// Both OAuth services depend on a scope-aware credential surface. The
-	// adapter routes org-scope traffic to the legacy OrgCredentialStore
-	// (mirrored to coding_credentials) and personal-scope traffic to the
-	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
-	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	// Both OAuth services depend on a scope-aware credential surface backed
+	// by the unified store — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(codingCredentialStore)
 	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
@@ -301,7 +267,7 @@ func main() {
 						Logger:        logger,
 						WorkerNodeID:  cfg.NodeID,
 						Prefix:        cfg.PreviewDependencyCachePrefix,
-						LocalDir:      cfg.PreviewDependencyCacheLocalDir,
+						LocalDir:      config.ResolvePreviewDependencyCacheLocalDir(cfg.PreviewDependencyCacheLocalDir),
 						LocalMaxBytes: cfg.PreviewDependencyCacheLocalMaxBytes,
 					})
 					if cacheErr != nil {
@@ -422,6 +388,7 @@ func main() {
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	var jobStore *db.JobStore
+	var evalBootstrapStore *db.EvalBootstrapStore
 	var workerPreviewStore *db.PreviewStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
@@ -444,6 +411,7 @@ func main() {
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
 		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
+		evalBootstrapStore = db.NewEvalBootstrapStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -495,7 +463,8 @@ func main() {
 			EvalTasks:           db.NewEvalTaskStore(pool),
 			EvalRuns:            db.NewEvalRunStore(pool),
 			EvalBatches:         db.NewEvalBatchStore(pool),
-			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+			EvalBootstraps:      evalBootstrapStore,
+			EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 			Repositories:        repoStore,
 			GitHubInstallations: db.NewGitHubInstallationStore(pool),
 			SessionMessages:     sessionMessageStore,
@@ -528,7 +497,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
+				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
@@ -1180,6 +1149,7 @@ func buildServices(
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	automationRunStore *db.AutomationRunStore,
+	evalBootstrapStore *db.EvalBootstrapStore,
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
@@ -1284,7 +1254,6 @@ func buildServices(
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
 		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
 		CodingCredentials: codingCredentialStore,
 		Orgs:              orgStore,
 		OrgSettingsCache:  orgSettingsCache,
@@ -1369,7 +1338,6 @@ func buildServices(
 		CodexAuth:          codexAuthSvc,
 		ClaudeCodeAuth:     claudeCodeAuthSvc,
 		Credentials:        credentialStore,
-		UserCredentials:    userCredentialStore,
 		CodingCredentials:  codingCredentialStore,
 		Snapshots:          snapshotStore,
 		Uploads:            uploadStore,
@@ -1387,6 +1355,7 @@ func buildServices(
 		IdentityResolver:   identityResolver,
 		SandboxAuth:        sandboxAuthServer,
 		Users:              userStore,
+		EvalBootstraps:     evalBootstrapStore,
 		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
 		InternalAPISecret:  cfg.SessionSecret,
 		NodeID:             cfg.NodeID,
@@ -1576,6 +1545,7 @@ func buildServices(
 		LLM:             llmClient,
 		GitHub:          ghSvc,
 		GitHubOrgRoster: ghSvc,
+		Snapshots:       snapshotStore,
 		TitleService:    titleService,
 		Linear:          linearService,
 		SlackbotMetrics: workerSlackbotMetrics,

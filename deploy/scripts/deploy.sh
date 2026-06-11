@@ -1997,8 +1997,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
-    echo "Running coding-credentials Anthropic split post-step..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate-coding-credentials-anthropic-split --allow-dual-set < /dev/null
   fi
 
   # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.

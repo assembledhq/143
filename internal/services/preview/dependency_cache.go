@@ -69,6 +69,7 @@ type DependencyCacheConfig struct {
 	WorkerNodeID  string
 	Prefix        string
 	LocalDir      string
+	StagingDir    string
 	LocalMaxBytes int64
 }
 
@@ -80,6 +81,7 @@ type SharedDependencyCache struct {
 	workerNodeID  string
 	prefix        string
 	localDir      string
+	stagingDir    string
 	localMaxBytes int64
 }
 
@@ -125,6 +127,15 @@ func NewDependencyCache(cfg DependencyCacheConfig) (*SharedDependencyCache, erro
 			return nil, fmt.Errorf("dependency cache: create local dir: %w", err)
 		}
 	}
+	stagingDir := strings.TrimSpace(cfg.StagingDir)
+	if stagingDir == "" && cfg.LocalDir != "" {
+		stagingDir = filepath.Join(cfg.LocalDir, ".staging")
+	}
+	if stagingDir != "" {
+		if err := os.MkdirAll(stagingDir, 0o750); err != nil {
+			return nil, fmt.Errorf("dependency cache: create staging dir: %w", err)
+		}
+	}
 	return &SharedDependencyCache{
 		store:         cfg.Store,
 		executor:      cfg.Executor,
@@ -133,6 +144,7 @@ func NewDependencyCache(cfg DependencyCacheConfig) (*SharedDependencyCache, erro
 		workerNodeID:  cfg.WorkerNodeID,
 		prefix:        prefix,
 		localDir:      cfg.LocalDir,
+		stagingDir:    stagingDir,
 		localMaxBytes: cfg.LocalMaxBytes,
 	}, nil
 }
@@ -322,6 +334,13 @@ func (c *SharedDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cac
 	return DependencyCacheSaveResult{SizeBytes: staged.sizeBytes}, nil
 }
 
+func (c *SharedDependencyCache) makeStagingDir(pattern string) (string, error) {
+	if c.stagingDir == "" {
+		return os.MkdirTemp("", pattern)
+	}
+	return os.MkdirTemp(c.stagingDir, pattern)
+}
+
 func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCacheHit) (*dependencyCacheStagedBlob, error) {
 	if c.localDir != "" {
 		localPath := c.localBlobPath(hit.Entry.CacheKey)
@@ -334,7 +353,7 @@ func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCa
 			c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to read dependency cache local blob; falling back to object storage")
 		}
 	}
-	dir, err := os.MkdirTemp("", "preview-dependency-cache-*")
+	dir, err := c.makeStagingDir("preview-dependency-cache-*")
 	if err != nil {
 		return nil, fmt.Errorf("dependency cache restore: temp dir: %w", err)
 	}
@@ -418,7 +437,7 @@ func (c *SharedDependencyCache) stageLocalBlob(path string) (*dependencyCacheSta
 }
 
 func (c *SharedDependencyCache) stageSandboxArchive(ctx context.Context, sb *agent.Sandbox, archiveCmd string, stderr io.Writer) (*dependencyCacheStagedBlob, error) {
-	dir, err := os.MkdirTemp("", "preview-dependency-cache-save-*")
+	dir, err := c.makeStagingDir("preview-dependency-cache-save-*")
 	if err != nil {
 		return nil, fmt.Errorf("dependency cache save: temp dir: %w", err)
 	}
@@ -498,6 +517,9 @@ func validateDependencyCacheArchiveReader(reader io.Reader, paths []string) (dep
 		}
 		if dependencyCachePathTargetsPreviewInstallMarkers(name) {
 			return dependencyCacheArchiveStats{}, fmt.Errorf("archive entry %q must not target preview install markers", header.Name)
+		}
+		if dependencyCachePathTargetsPlatformCache(name) {
+			return dependencyCacheArchiveStats{}, fmt.Errorf("archive entry %q must not target platform preview cache", header.Name)
 		}
 		if !dependencyCacheArchiveNameAllowed(name, allowed) {
 			return dependencyCacheArchiveStats{}, fmt.Errorf("archive entry %q is outside effective cache paths", header.Name)
@@ -706,6 +728,11 @@ func (c *SharedDependencyCache) localBlobEntries() ([]dependencyCacheLocalEntry,
 		if err != nil {
 			return err
 		}
+		if d.IsDir() && c.stagingDir != "" {
+			if samePath, pathErr := sameFilepath(path, c.stagingDir); pathErr == nil && samePath {
+				return filepath.SkipDir
+			}
+		}
 		if d.IsDir() || !strings.HasSuffix(d.Name(), ".tar.gz") {
 			return nil
 		}
@@ -724,6 +751,18 @@ func (c *SharedDependencyCache) localBlobEntries() ([]dependencyCacheLocalEntry,
 		return nil
 	})
 	return entries, total, err
+}
+
+func sameFilepath(a, b string) (bool, error) {
+	cleanA, err := filepath.Abs(a)
+	if err != nil {
+		return false, err
+	}
+	cleanB, err := filepath.Abs(b)
+	if err != nil {
+		return false, err
+	}
+	return cleanA == cleanB, nil
 }
 
 func buildDependencyCacheExtractCommand(workDir, tmpPath string, paths []string) string {

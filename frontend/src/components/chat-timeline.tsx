@@ -398,7 +398,7 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words`}>
+        <div className={`chat-user-bubble ${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words`}>
           {isPlanModeUser && (
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />

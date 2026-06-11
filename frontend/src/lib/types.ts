@@ -1080,6 +1080,9 @@ export interface OrgSettings {
     preview_default_tier?: SandboxResourceTier;
     allow_repo_resource_requests?: boolean;
     preview_max_tier?: SandboxResourceTier;
+    preview_max_cpu_millis?: number;
+    preview_max_memory_mib?: number;
+    preview_max_ephemeral_disk_mib?: number;
   };
 }
 
@@ -1460,47 +1463,20 @@ export interface CredentialSummary {
   account_type?: string;
 }
 
-export interface UserCredentialSummary {
-  provider: string;
-  configured: boolean;
-  is_team_default: boolean;
-  masked_key?: string;
-  set_by_user_id?: string;
-  set_by_user_name?: string;
-  status?: string;
-  last_verified_at?: string;
-}
-
+// ResolvedCredential is a provider-keyed view of the caller's effective
+// credentials, derived from the unified coding-credentials resolved stack.
+// "personal" rows belong to the requesting user, "org" rows are the shared
+// fallback; "none" marks a provider with no usable credential. The legacy
+// "team_default" source is gone — org-scoped credentials fill that role.
 export interface ResolvedCredential {
   provider: string;
-  source: string;
+  source: "personal" | "org" | "none";
   masked_key?: string;
 }
 
 export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
-
-export interface CodingAuth {
-  id: string;
-  org_id: string;
-  priority: number;
-  agent: CodingAuthAgent;
-  auth_type: CodingAuthType;
-  label: string;
-  scope: string;
-  provider: string;
-  status: CodingAuthStatus;
-  is_default: boolean;
-  last_verified_at?: string;
-  rate_limited_until?: string;
-  rate_limit_message?: string;
-  last_used_at?: string;
-  usage_note?: string;
-  created_by?: string;
-  created_at: string;
-  updated_at: string;
-}
 
 // CodingCredentialScope is the scope dimension of the unified
 // coding-credentials API: "org" rows are visible to every member of the org as
@@ -1829,9 +1805,10 @@ export interface FileContextResponse {
 export type EvalTaskSource = 'manual' | 'pr_bootstrap' | 'failure_derived';
 export type EvalComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
 export type GraderType = 'code_check' | 'llm_judge';
-export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type EvalRunStatus = 'pending' | 'running' | 'grading' | 'completed' | 'failed';
 export type EvalBatchStatus = 'pending' | 'running' | 'completed' | 'failed';
 export type EvalBootstrapStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type EvalBootstrapCandidateStatus = 'proposed' | 'accepted' | 'rejected' | 'needs_revision';
 
 export interface ScoringCriterion {
   name: string;
@@ -1844,6 +1821,7 @@ export interface ScoringCriterion {
 
 export interface CriterionResult {
   name: string;
+  grader_type?: GraderType;
   score: number;
   pass: boolean;
   details?: string;
@@ -1885,6 +1863,8 @@ export interface EvalRun {
   task_id: string;
   org_id: string;
   batch_id?: string;
+  session_id?: string;
+  thread_id?: string;
   input_manifest?: Record<string, unknown>;
   model: string;
   server_deploy_sha?: string;
@@ -1920,9 +1900,11 @@ export interface EvalBatch {
 
 export interface EvalBatchDetail extends EvalBatch {
   runs: EvalRun[];
+  gate_decisions?: EvalReleaseGateDecision[];
 }
 
 export interface EvalBootstrapCandidate {
+  id?: string;
   pr_number: number;
   pr_title: string;
   base_commit_sha: string;
@@ -1933,6 +1915,21 @@ export interface EvalBootstrapCandidate {
   complexity: EvalComplexity;
   fitness_score: number;
   fitness_reasoning: string;
+  status?: EvalBootstrapCandidateStatus;
+  rejection_reason?: string;
+  evidence?: Record<string, unknown>;
+  warnings?: string[];
+  validation_warnings?: EvalValidationWarning[];
+  accepted_task_id?: string;
+  created_task_id?: string;
+}
+
+export interface EvalValidationWarning {
+  code: string;
+  severity: 'info' | 'warning' | 'error';
+  message: string;
+  suggestion?: string;
+  blocking: boolean;
 }
 
 export interface EvalBootstrapRun {
@@ -1942,10 +1939,66 @@ export interface EvalBootstrapRun {
   status: EvalBootstrapStatus;
   candidates?: EvalBootstrapCandidate[];
   session_id?: string;
+  thread_id?: string;
   created_by?: string;
   created_at: string;
   completed_at?: string;
   error_message?: string;
+}
+
+export type EvalDatasetType = 'golden' | 'shadow' | 'adversarial';
+export type EvalDatasetStatus = 'active' | 'archived';
+
+export interface EvalDataset {
+  id: string;
+  org_id: string;
+  repository_id?: string;
+  name: string;
+  dataset_type: EvalDatasetType;
+  status: EvalDatasetStatus;
+  description: string;
+  source_summary: string;
+  created_by_user_id?: string;
+  created_at: string;
+  updated_at: string;
+  task_count: number;
+}
+
+export interface EvalDatasetTask {
+  id: string;
+  org_id: string;
+  dataset_id: string;
+  task_id: string;
+  slice_key: string;
+  created_at: string;
+}
+
+export interface EvalReleaseGate {
+  id: string;
+  org_id: string;
+  gate_name: string;
+  enabled: boolean;
+  dataset_id?: string;
+  min_pass_at_1: number;
+  min_pass_at_k: number;
+  max_policy_violations: number;
+  max_regression_delta: number;
+  canary_stages?: unknown;
+  rollback_rules?: unknown;
+  updated_by_user_id?: string;
+  active: boolean;
+  created_at: string;
+}
+
+export interface EvalReleaseGateDecision {
+  id: string;
+  org_id: string;
+  batch_id: string;
+  gate_id: string;
+  status: 'passed' | 'failed' | 'no_data';
+  reason: string;
+  metrics?: Record<string, unknown>;
+  created_at: string;
 }
 
 // Lightweight signal arriving over the per-batch SSE stream. Mirrors
@@ -1979,6 +2032,7 @@ export const evalComplexityConfig: Record<EvalComplexity, { color: string; label
 export const evalRunStatusConfig: Record<EvalRunStatus, { color: string; label: string }> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-info/10 text-info", label: "Running" },
+  grading: { color: "bg-violet-500/10 text-violet-700 dark:text-violet-400", label: "Grading" },
   completed: { color: "bg-success/10 text-success", label: "Completed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
 };

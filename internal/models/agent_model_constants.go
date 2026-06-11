@@ -480,6 +480,21 @@ func ValidateSettingsModels(settings OrgSettings) error {
 	if err := settings.SandboxResources.PreviewMaxTier.Validate(); err != nil {
 		return fmt.Errorf("sandbox_resources.preview_max_tier: %w", err)
 	}
+	if settings.SandboxResources.PreviewMaxCPUMillis != 0 &&
+		(settings.SandboxResources.PreviewMaxCPUMillis < MinPreviewMaxCPUMillis ||
+			settings.SandboxResources.PreviewMaxCPUMillis > MaxPreviewMaxCPUMillis) {
+		return fmt.Errorf("sandbox_resources.preview_max_cpu_millis must be between %d and %d", MinPreviewMaxCPUMillis, MaxPreviewMaxCPUMillis)
+	}
+	if settings.SandboxResources.PreviewMaxMemoryMiB != 0 &&
+		(settings.SandboxResources.PreviewMaxMemoryMiB < MinPreviewMaxMemoryMiB ||
+			settings.SandboxResources.PreviewMaxMemoryMiB > MaxPreviewMaxMemoryMiB) {
+		return fmt.Errorf("sandbox_resources.preview_max_memory_mib must be between %d and %d", MinPreviewMaxMemoryMiB, MaxPreviewMaxMemoryMiB)
+	}
+	if settings.SandboxResources.PreviewMaxEphemeralDiskMiB != 0 &&
+		(settings.SandboxResources.PreviewMaxEphemeralDiskMiB < MinPreviewMaxEphemeralDiskMiB ||
+			settings.SandboxResources.PreviewMaxEphemeralDiskMiB > MaxPreviewMaxEphemeralDiskMiB) {
+		return fmt.Errorf("sandbox_resources.preview_max_ephemeral_disk_mib must be between %d and %d", MinPreviewMaxEphemeralDiskMiB, MaxPreviewMaxEphemeralDiskMiB)
+	}
 	if settings.LLMModel != "" && !IsSupportedLLMModel(settings.LLMModel) {
 		return fmt.Errorf("llm_model must be one of: %v", AvailableLLMModels)
 	}

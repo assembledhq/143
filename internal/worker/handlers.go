@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -24,7 +23,6 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
-	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
@@ -36,7 +34,7 @@ import (
 	"github.com/assembledhq/143/internal/services/prioritization"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
-	"github.com/assembledhq/143/internal/version"
+	"github.com/assembledhq/143/internal/services/storage"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
@@ -360,6 +358,13 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
 		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
 	}
+	if stores != nil && stores.EvalRuns != nil && stores.EvalTasks != nil {
+		w.Register("run_eval_grader", newEvalGraderHandler(stores, services, logger))
+		w.Register("run_eval", newLegacyRunEvalCompatHandler(stores, logger))
+	}
+	if stores != nil && stores.EvalBootstraps != nil {
+		w.Register("run_eval_bootstrap", newLegacyRunEvalBootstrapCompatHandler(stores, logger))
+	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
 		w.Register("update_memories", newUpdateMemoriesHandler(services, logger))
@@ -389,12 +394,6 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 			}
 		}
 	}
-	if stores.EvalRuns != nil && stores.EvalTasks != nil {
-		w.Register("run_eval", newRunEvalHandler(stores, services, logger))
-	}
-	if stores.EvalBootstraps != nil && services != nil && services.SandboxProvider != nil {
-		w.Register("run_eval_bootstrap", newRunEvalBootstrapHandler(stores, services, logger))
-	}
 }
 
 func hasServiceHandlersDependencies(services *Services) bool {
@@ -418,20 +417,21 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore       // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore   // nil-safe
-	Credentials         *db.OrgCredentialStore // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore      // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore  // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore    // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore      // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore       // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore     // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore    // nil-safe: needed for eval repo lookup
+	Projects            *db.ProjectStore         // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore     // nil-safe
+	Credentials         *db.OrgCredentialStore   // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore        // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore    // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore      // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore        // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore         // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore       // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
+	EvalReleaseGates    *db.EvalReleaseGateStore // nil-safe: eval release gates
+	Repositories        *db.RepositoryStore      // nil-safe: needed for eval repo lookup
 	GitHubInstallations *db.GitHubInstallationStore
-	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
+	SessionMessages     *db.SessionMessageStore  // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore   // nil-safe: needed for thread-scoped continuation status
 	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
@@ -511,6 +511,7 @@ type Services struct {
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
 	GitHubOrgRoster githubOrgRosterService        // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots       storage.SnapshotStore         // nil-safe: needed for eval code_check grading
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
@@ -4486,6 +4487,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
+		defer finalizeSessionBackedEvalArtifacts(ctx, stores, services, logger, orgID, runID)
 		if input.ThreadID != "" {
 			threadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -4550,6 +4552,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
 			Msg("starting run_agent job")
+		markSessionBackedEvalRunning(ctx, stores, services, logger, run)
 		enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "running", "143 is working on this", "I will post the result back in this thread.", false)
 
 		var runErr error
@@ -4687,6 +4690,774 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
 		return nil
 	}
+}
+
+func newLegacyRunEvalCompatHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			EvalRunID string `json:"eval_run_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal legacy run_eval payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		runID, err := uuid.Parse(input.EvalRunID)
+		if err != nil {
+			return fmt.Errorf("parse eval run ID: %w", err)
+		}
+		if stores == nil || stores.EvalRuns == nil || stores.EvalTasks == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("legacy run_eval compatibility requires eval, session, and job stores")
+		}
+		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval run: %w", err)
+		}
+		if run.SessionID != nil && *run.SessionID != uuid.Nil {
+			session, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load converted eval session: %w", err)
+			}
+			if !sessionStatusNeedsRunAgent(session.Status) {
+				return nil
+			}
+			return enqueueCompatRunAgent(ctx, stores, orgID, session)
+		}
+		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval task: %w", err)
+		}
+		session := legacyEvalRunSessionFromTask(orgID, task, run.Model, run.ConfigRef)
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			return fmt.Errorf("create session for legacy eval run: %w", err)
+		}
+		if err := stores.EvalRuns.AttachSession(ctx, orgID, run.ID, session.ID, session.PrimaryThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				logger.Info().Str("eval_run_id", run.ID.String()).Msg("legacy eval run was already converted by another worker")
+				return nil
+			}
+			return fmt.Errorf("attach legacy eval run session: %w", err)
+		}
+		return enqueueCompatRunAgent(ctx, stores, orgID, *session)
+	}
+}
+
+func newLegacyRunEvalBootstrapCompatHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			BootstrapRunID string `json:"bootstrap_run_id"`
+			OrgID          string `json:"org_id"`
+			RepoID         string `json:"repo_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal legacy run_eval_bootstrap payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		bootstrapRunID, err := uuid.Parse(input.BootstrapRunID)
+		if err != nil {
+			return fmt.Errorf("parse bootstrap run ID: %w", err)
+		}
+		if stores == nil || stores.EvalBootstraps == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("legacy run_eval_bootstrap compatibility requires bootstrap, session, and job stores")
+		}
+		run, err := stores.EvalBootstraps.GetByID(ctx, orgID, bootstrapRunID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval bootstrap run: %w", err)
+		}
+		if run.SessionID != nil && *run.SessionID != uuid.Nil {
+			session, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load converted eval bootstrap session: %w", err)
+			}
+			if !sessionStatusNeedsRunAgent(session.Status) {
+				return nil
+			}
+			return enqueueCompatRunAgent(ctx, stores, orgID, session)
+		}
+		repoID := run.RepoID
+		if repoID == uuid.Nil && input.RepoID != "" {
+			parsed, err := uuid.Parse(input.RepoID)
+			if err != nil {
+				return fmt.Errorf("parse repo ID: %w", err)
+			}
+			repoID = parsed
+		}
+		session := legacyEvalBootstrapSession(orgID, repoID, run.CreatedBy)
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			return fmt.Errorf("create session for legacy eval bootstrap: %w", err)
+		}
+		if err := stores.EvalBootstraps.AttachSessionThread(ctx, orgID, run.ID, session.ID, session.PrimaryThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				logger.Info().Str("bootstrap_run_id", run.ID.String()).Msg("legacy eval bootstrap was already converted by another worker")
+				return nil
+			}
+			return fmt.Errorf("attach legacy eval bootstrap session: %w", err)
+		}
+		return enqueueCompatRunAgent(ctx, stores, orgID, *session)
+	}
+}
+
+func enqueueCompatRunAgent(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session) error {
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+		return fmt.Errorf("enqueue converted eval session: %w", err)
+	}
+	return nil
+}
+
+func sessionStatusNeedsRunAgent(status models.SessionStatus) bool {
+	switch status {
+	case models.SessionStatusPending, models.SessionStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyEvalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model string, configRef *string) *models.Session {
+	title := "Eval: " + task.Name
+	agentType := legacyEvalRunAgentType(model)
+	baseCommitSHA := task.BaseCommitSHA
+	var modelOverride *string
+	if model != "codex" && model != "gemini-cli" {
+		modelOverride = &model
+	}
+	configLine := "Use the repository's default runtime configuration."
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		configLine = fmt.Sprintf("Use eval config ref %s. Apply that configuration before starting the task.", strings.TrimSpace(*configRef))
+	}
+	inputManifestMap := map[string]any{
+		"eval_task_id":    task.ID.String(),
+		"base_commit_sha": task.BaseCommitSHA,
+		"model":           model,
+	}
+	if task.SolutionCommitSHA != nil && *task.SolutionCommitSHA != "" {
+		inputManifestMap["solution_commit_sha"] = *task.SolutionCommitSHA
+	}
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		inputManifestMap["config_ref"] = strings.TrimSpace(*configRef)
+	}
+	inputManifest, err := json.Marshal(inputManifestMap)
+	if err != nil {
+		inputManifest = json.RawMessage(`{}`)
+	}
+	prompt := fmt.Sprintf(`Run this coding-agent eval exactly as specified.
+
+Repository setup:
+- Start from base commit %s before changing code.
+- %s
+- Do not inspect or apply the known solution diff.
+
+Task:
+%s
+
+When finished, leave the working tree with only the changes needed to solve the task.`, task.BaseCommitSHA, configLine, task.IssueDescription)
+	return &models.Session{
+		OrgID:            orgID,
+		Origin:           models.SessionOriginEvalRun,
+		InteractionMode:  models.SessionInteractionModeSingleRun,
+		ValidationPolicy: models.SessionValidationPolicyOnSessionEnd,
+		AgentType:        agentType,
+		Status:           models.SessionStatusPending,
+		AutonomyLevel:    models.DefaultSessionAutonomy,
+		TokenMode:        models.SessionTokenModeHigh,
+		ModelOverride:    modelOverride,
+		Title:            &title,
+		PMApproach:       &prompt,
+		RepositoryID:     &task.RepoID,
+		BaseCommitSHA:    &baseCommitSHA,
+		InputManifest:    inputManifest,
+	}
+}
+
+func legacyEvalBootstrapSession(orgID, repoID uuid.UUID, createdBy *uuid.UUID) *models.Session {
+	title := "Bootstrap eval tasks"
+	prompt := "Analyze this repository's pull request history and add high-quality candidate eval tasks with `143-tools eval add`."
+	return &models.Session{
+		OrgID:             orgID,
+		Origin:            models.SessionOriginEvalBootstrap,
+		InteractionMode:   models.SessionInteractionModeSingleRun,
+		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
+		AgentType:         models.AgentTypeCodex,
+		Status:            models.SessionStatusPending,
+		AutonomyLevel:     models.DefaultSessionAutonomy,
+		TokenMode:         models.SessionTokenModeLow,
+		TriggeredByUserID: createdBy,
+		Title:             &title,
+		PMApproach:        &prompt,
+		RepositoryID:      &repoID,
+	}
+}
+
+func legacyEvalRunAgentType(model string) models.AgentType {
+	switch model {
+	case "gemini-cli":
+		return models.AgentTypeGeminiCLI
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		return models.AgentTypeClaudeCode
+	default:
+		return models.AgentTypeCodex
+	}
+}
+
+func markSessionBackedEvalRunning(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	switch session.Origin {
+	case models.SessionOriginEvalRun:
+		if stores == nil || stores.EvalRuns == nil {
+			return
+		}
+		run, err := stores.EvalRuns.GetBySessionID(ctx, session.OrgID, session.ID)
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load eval run linked to session")
+			return
+		}
+		if err := stores.EvalRuns.UpdateStatus(ctx, session.OrgID, run.ID, models.EvalRunStatusRunning); err != nil {
+			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to mark session-backed eval run running")
+			return
+		}
+		if run.BatchID != nil {
+			publishEvalBatchSignal(ctx, services, session.OrgID, *run.BatchID, models.EvalBatchStatusRunning, logger)
+		}
+	case models.SessionOriginEvalBootstrap:
+		if stores == nil || stores.EvalBootstraps == nil {
+			return
+		}
+		threadID, err := primaryThreadIDForSession(ctx, stores, session)
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to resolve eval bootstrap session thread")
+			return
+		}
+		run, err := stores.EvalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, threadID)
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load eval bootstrap linked to session")
+			return
+		}
+		if err := stores.EvalBootstraps.UpdateStatus(ctx, session.OrgID, run.ID, models.EvalBootstrapStatusRunning, &session.ID); err != nil {
+			logger.Warn().Err(err).Str("bootstrap_run_id", run.ID.String()).Msg("failed to mark session-backed eval bootstrap running")
+		}
+		publishEvalBootstrapSignal(ctx, services, session.OrgID, run.ID, models.EvalBootstrapStatusRunning, &session.ID, logger)
+	}
+}
+
+func finalizeSessionBackedEvalArtifacts(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to reload session for eval finalization")
+		return
+	}
+	switch session.Origin {
+	case models.SessionOriginEvalRun:
+		finalizeSessionBackedEvalRun(ctx, stores, services, logger, session)
+	case models.SessionOriginEvalBootstrap:
+		finalizeSessionBackedEvalBootstrap(ctx, stores, services, logger, session)
+	}
+}
+
+func finalizeSessionBackedEvalBootstrap(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	if stores.EvalBootstraps == nil {
+		return
+	}
+	status, errMsg, terminal := evalBootstrapStatusForSession(session)
+	if !terminal {
+		return
+	}
+	threadID, err := primaryThreadIDForSession(ctx, stores, session)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to resolve session-backed eval bootstrap thread")
+		return
+	}
+	run, err := stores.EvalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, threadID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load session-backed eval bootstrap")
+		return
+	}
+	if err := stores.EvalBootstraps.UpdateResult(ctx, session.OrgID, run.ID, status, nil, errMsg); err != nil {
+		logger.Warn().Err(err).Str("bootstrap_run_id", run.ID.String()).Msg("failed to finalize session-backed eval bootstrap")
+		return
+	}
+	publishEvalBootstrapSignal(ctx, services, session.OrgID, run.ID, status, &session.ID, logger)
+}
+
+func finalizeSessionBackedEvalRun(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	if stores.EvalRuns == nil {
+		return
+	}
+	status, errMsg, terminal := evalRunStatusForSession(session)
+	if !terminal {
+		return
+	}
+	run, err := stores.EvalRuns.GetBySessionID(ctx, session.OrgID, session.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load session-backed eval run")
+		return
+	}
+	threadID, threadErr := primaryThreadIDForSession(ctx, stores, session)
+	if threadErr != nil {
+		logger.Warn().Err(threadErr).Str("session_id", session.ID.String()).Msg("failed to resolve session-backed eval run thread")
+	}
+	var traceThreadID *uuid.UUID
+	if threadErr == nil {
+		traceThreadID = &threadID
+	}
+	diff, diffErr := stores.Sessions.GetDiffByID(ctx, session.OrgID, session.ID)
+	if diffErr != nil {
+		logger.Warn().Err(diffErr).Str("session_id", session.ID.String()).Msg("failed to load session diff for eval run")
+	}
+	agentTrace, _ := json.Marshal(map[string]any{
+		"session_id": session.ID.String(),
+		"thread_id":  stringPtrUUID(traceThreadID),
+		"status":     string(session.Status),
+	})
+	inputManifest, manifestErr := evalRunInputManifest(run, session, traceThreadID)
+	if manifestErr != nil {
+		logger.Warn().Err(manifestErr).Str("eval_run_id", run.ID.String()).Msg("failed to build eval run input manifest")
+		inputManifest = run.InputManifest
+	}
+	if status == models.EvalRunStatusGrading {
+		if diffErr != nil {
+			errStr := fmt.Sprintf("failed to load session diff for grading: %s", diffErr)
+			result := &models.EvalRunResult{
+				Status:        models.EvalRunStatusFailed,
+				ErrorMessage:  &errStr,
+				InputManifest: inputManifest,
+			}
+			if err := stores.EvalRuns.UpdateResult(ctx, session.OrgID, run.ID, result); err != nil {
+				logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to mark eval run failed after diff load error")
+			}
+			return
+		}
+		if err := stores.EvalRuns.UpdatePostSessionArtifacts(ctx, session.OrgID, run.ID, diff.Diff, agentTrace, inputManifest); err != nil {
+			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to persist session-backed eval run artifacts")
+			return
+		}
+		if stores.Jobs != nil {
+			dedupeKey := "run_eval_grader:" + run.ID.String()
+			if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "eval", "run_eval_grader", map[string]string{
+				"eval_run_id": run.ID.String(),
+				"org_id":      session.OrgID.String(),
+			}, 5, &dedupeKey); err != nil {
+				logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to enqueue eval grader")
+			}
+		}
+		publishEvalRunBatchUpdate(ctx, stores, services, logger, session.OrgID, run)
+		return
+	}
+	result := &models.EvalRunResult{
+		Status:        status,
+		AgentDiff:     diff.Diff,
+		AgentTrace:    agentTrace,
+		ErrorMessage:  errMsg,
+		InputManifest: inputManifest,
+	}
+	if err := stores.EvalRuns.UpdateResult(ctx, session.OrgID, run.ID, result); err != nil {
+		logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to finalize session-backed eval run")
+		return
+	}
+	publishEvalRunBatchUpdate(ctx, stores, services, logger, session.OrgID, run)
+}
+
+func newEvalGraderHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			EvalRunID string `json:"eval_run_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal run_eval_grader payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		runID, err := uuid.Parse(input.EvalRunID)
+		if err != nil {
+			return fmt.Errorf("parse eval run ID: %w", err)
+		}
+		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("load eval run for grading: %w", err)
+		}
+		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
+		if err != nil {
+			return fmt.Errorf("load eval task for grading: %w", err)
+		}
+		var session *models.Session
+		if run.SessionID != nil && stores.Sessions != nil {
+			loaded, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load eval run session for grading: %w", err)
+			}
+			session = &loaded
+		}
+		var provider agent.SandboxProvider
+		var snapshots storage.SnapshotStore
+		var llm llmClient
+		if services != nil {
+			provider = services.SandboxProvider
+			snapshots = services.Snapshots
+			llm = services.LLM
+		}
+		result, err := gradeEvalRunArtifacts(ctx, run, task, evalGraderDeps{
+			session:   session,
+			provider:  provider,
+			snapshots: snapshots,
+			llm:       llm,
+		})
+		if err != nil {
+			return fmt.Errorf("grade eval run artifacts: %w", err)
+		}
+		if err := stores.EvalRuns.UpdateResult(ctx, orgID, run.ID, result); err != nil {
+			return fmt.Errorf("update eval grader result: %w", err)
+		}
+		publishEvalRunBatchUpdate(ctx, stores, services, logger, orgID, run)
+		return nil
+	}
+}
+
+type evalGraderDeps struct {
+	session   *models.Session
+	provider  agent.SandboxProvider
+	snapshots storage.SnapshotStore
+	llm       llmClient
+}
+
+func gradeEvalRunArtifacts(ctx context.Context, run models.EvalRun, task models.EvalTask, deps evalGraderDeps) (*models.EvalRunResult, error) {
+	var criteria []models.ScoringCriterion
+	if len(task.ScoringCriteria) > 0 {
+		if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {
+			return nil, fmt.Errorf("parse scoring criteria: %w", err)
+		}
+	}
+	if len(criteria) == 0 {
+		return nil, errors.New("scoring criteria are required")
+	}
+	hasDiff := run.AgentDiff != nil && strings.TrimSpace(*run.AgentDiff) != ""
+	sandbox, sandboxCleanup, sandboxErr := prepareEvalGraderSandbox(ctx, deps)
+	defer sandboxCleanup()
+	results := make([]models.CriterionResult, 0, len(criteria))
+	totalWeight := 0.0
+	weightedScore := 0.0
+	requiredFailed := false
+	for _, criterion := range criteria {
+		weight := criterion.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		totalWeight += weight
+		result := models.CriterionResult{
+			Name:       criterion.Name,
+			GraderType: criterion.GraderType,
+			Score:      0,
+			Pass:       false,
+			Details:    "No agent diff was produced by the session.",
+			Reasoning:  criterion.Notes,
+		}
+		if hasDiff {
+			switch criterion.GraderType {
+			case models.GraderTypeCodeCheck:
+				result = gradeCodeCheckCriterion(ctx, sandbox, sandboxErr, deps, criterion)
+			case models.GraderTypeLLMJudge:
+				result = gradeLLMJudgeCriterion(ctx, deps.llm, run, task, criterion)
+			default:
+				result.Details = "Unsupported grader type."
+			}
+		}
+		if criterion.Required && !result.Pass {
+			requiredFailed = true
+		}
+		weightedScore += result.Score * weight
+		results = append(results, result)
+	}
+	if totalWeight == 0 {
+		totalWeight = float64(len(results))
+	}
+	finalScore := weightedScore / totalWeight
+	passed := finalScore >= task.PassThreshold && !requiredFailed
+	status := models.EvalRunStatusCompleted
+	errMsg := (*string)(nil)
+	if !passed {
+		msg := "eval run did not meet pass threshold"
+		errMsg = &msg
+	}
+	criterionResults, err := json.Marshal(results)
+	if err != nil {
+		return nil, fmt.Errorf("marshal criterion results: %w", err)
+	}
+	return &models.EvalRunResult{
+		Status:           status,
+		AgentDiff:        run.AgentDiff,
+		AgentTrace:       run.AgentTrace,
+		CriterionResults: criterionResults,
+		FinalScore:       &finalScore,
+		Passed:           &passed,
+		ErrorMessage:     errMsg,
+		InputManifest:    run.InputManifest,
+	}, nil
+}
+
+func prepareEvalGraderSandbox(ctx context.Context, deps evalGraderDeps) (*agent.Sandbox, func(), error) {
+	noop := func() {}
+	if deps.provider == nil || deps.snapshots == nil || deps.session == nil || deps.session.SnapshotKey == nil || strings.TrimSpace(*deps.session.SnapshotKey) == "" {
+		return nil, noop, errors.New("completed session snapshot is required for code_check grading")
+	}
+	cfg := agent.DefaultSandboxConfig()
+	cfg.SessionID = deps.session.ID.String()
+	cfg.OrgID = deps.session.OrgID.String()
+	cfg.Purpose = "eval_grader"
+	cfg.Timeout = 10 * time.Minute
+	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, deps.provider, deps.snapshots, *deps.session.SnapshotKey, cfg)
+	if err != nil {
+		return nil, noop, fmt.Errorf("hydrate eval grader sandbox: %w", err)
+	}
+	cleanup := func() {
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = deps.provider.Destroy(destroyCtx, sandbox)
+	}
+	return sandbox, cleanup, nil
+}
+
+func gradeCodeCheckCriterion(ctx context.Context, sandbox *agent.Sandbox, sandboxErr error, deps evalGraderDeps, criterion models.ScoringCriterion) models.CriterionResult {
+	result := models.CriterionResult{Name: criterion.Name, GraderType: criterion.GraderType, Reasoning: criterion.Notes}
+	if sandboxErr != nil {
+		result.Details = sandboxErr.Error()
+		return result
+	}
+	if deps.provider == nil || sandbox == nil {
+		result.Details = "Sandbox provider is not configured for code_check grading."
+		return result
+	}
+	var cfg models.CodeCheckConfig
+	if len(criterion.GraderConfig) > 0 {
+		if err := json.Unmarshal(criterion.GraderConfig, &cfg); err != nil {
+			result.Details = "Invalid code_check grader_config: " + err.Error()
+			return result
+		}
+	}
+	cfg.Command = strings.TrimSpace(cfg.Command)
+	if cfg.Command == "" {
+		result.Details = "code_check grader_config.command is required."
+		return result
+	}
+	execCtx := ctx
+	cancel := func() {}
+	if cfg.TimeoutSeconds > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
+	}
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	exitCode, err := deps.provider.Exec(execCtx, sandbox, cfg.Command, &stdout, &stderr)
+	result.Pass = err == nil && exitCode == 0
+	if result.Pass {
+		result.Score = 1
+	}
+	result.Details = formatEvalCommandDetails(cfg.Command, exitCode, stdout.String(), stderr.String(), err)
+	return result
+}
+
+func gradeLLMJudgeCriterion(ctx context.Context, llm llmClient, run models.EvalRun, task models.EvalTask, criterion models.ScoringCriterion) models.CriterionResult {
+	result := models.CriterionResult{Name: criterion.Name, GraderType: criterion.GraderType, Reasoning: criterion.Notes}
+	if llm == nil {
+		result.Details = "LLM client is not configured for llm_judge grading."
+		return result
+	}
+	systemPrompt := "You are grading one coding-agent eval criterion. Return compact JSON with fields pass, score, reasoning, and details."
+	diff := ""
+	if run.AgentDiff != nil {
+		diff = *run.AgentDiff
+	}
+	userPrompt := fmt.Sprintf("Criterion: %s\nNotes: %s\nIssue:\n%s\nAgent diff:\n%s", criterion.Name, criterion.Notes, task.IssueDescription, diff)
+	response, err := llm.Complete(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		result.Details = "LLM judge failed: " + err.Error()
+		return result
+	}
+	score, pass, reasoning, details := parseEvalLLMJudgeResponse(response)
+	result.Score = score
+	result.Pass = pass
+	result.Reasoning = reasoning
+	result.Details = details
+	return result
+}
+
+func parseEvalLLMJudgeResponse(response string) (float64, bool, string, string) {
+	type judgeResponse struct {
+		Score     *float64 `json:"score"`
+		Pass      *bool    `json:"pass"`
+		Reasoning string   `json:"reasoning"`
+		Details   string   `json:"details"`
+	}
+	var parsed judgeResponse
+	trimmed := strings.TrimSpace(response)
+	if start := strings.Index(trimmed, "{"); start >= 0 {
+		if end := strings.LastIndex(trimmed, "}"); end >= start {
+			_ = json.Unmarshal([]byte(trimmed[start:end+1]), &parsed)
+		}
+	}
+	score := 0.0
+	if parsed.Score != nil {
+		score = *parsed.Score
+		if score < 0 {
+			score = 0
+		}
+		if score > 1 {
+			score = 1
+		}
+	}
+	pass := false
+	if parsed.Pass != nil {
+		pass = *parsed.Pass
+	} else if parsed.Score != nil {
+		pass = score >= 0.5
+	} else {
+		pass = strings.Contains(strings.ToLower(response), "pass")
+		if pass {
+			score = 1
+		}
+	}
+	if parsed.Score == nil && parsed.Pass != nil && *parsed.Pass {
+		score = 1
+	}
+	reasoning := strings.TrimSpace(parsed.Reasoning)
+	if reasoning == "" {
+		reasoning = strings.TrimSpace(response)
+	}
+	details := strings.TrimSpace(parsed.Details)
+	if details == "" {
+		details = "LLM judge completed."
+	}
+	return score, pass, reasoning, details
+}
+
+func formatEvalCommandDetails(command string, exitCode int, stdout, stderr string, execErr error) string {
+	const maxOutput = 4000
+	if len(stdout) > maxOutput {
+		stdout = stdout[:maxOutput] + "\n[truncated]"
+	}
+	if len(stderr) > maxOutput {
+		stderr = stderr[:maxOutput] + "\n[truncated]"
+	}
+	details := fmt.Sprintf("Command: %s\nExit code: %d", command, exitCode)
+	if execErr != nil {
+		details += "\nError: " + execErr.Error()
+	}
+	if strings.TrimSpace(stdout) != "" {
+		details += "\nStdout:\n" + stdout
+	}
+	if strings.TrimSpace(stderr) != "" {
+		details += "\nStderr:\n" + stderr
+	}
+	return details
+}
+
+func primaryThreadIDForSession(ctx context.Context, stores *Stores, session models.Session) (uuid.UUID, error) {
+	if session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+		return *session.PrimaryThreadID, nil
+	}
+	if stores == nil || stores.SessionThreads == nil {
+		return uuid.Nil, fmt.Errorf("session thread store not configured")
+	}
+	threads, err := stores.SessionThreads.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("list session threads: %w", err)
+	}
+	if len(threads) == 0 {
+		return uuid.Nil, fmt.Errorf("session has no threads")
+	}
+	return threads[0].ID, nil
+}
+
+func evalBootstrapStatusForSession(session models.Session) (models.EvalBootstrapStatus, *string, bool) {
+	switch session.Status {
+	case models.SessionStatusCompleted, models.SessionStatusPRCreated:
+		return models.EvalBootstrapStatusCompleted, nil, true
+	case models.SessionStatusSkipped:
+		msg := "bootstrap session was skipped before producing candidates"
+		return models.EvalBootstrapStatusFailed, &msg, true
+	case models.SessionStatusFailed, models.SessionStatusCancelled:
+		return models.EvalBootstrapStatusFailed, sessionTerminalError(session), true
+	default:
+		return "", nil, false
+	}
+}
+
+func evalRunStatusForSession(session models.Session) (models.EvalRunStatus, *string, bool) {
+	switch session.Status {
+	case models.SessionStatusCompleted, models.SessionStatusPRCreated:
+		return models.EvalRunStatusGrading, nil, true
+	case models.SessionStatusSkipped:
+		msg := "eval run session was skipped before producing a diff"
+		return models.EvalRunStatusFailed, &msg, true
+	case models.SessionStatusFailed, models.SessionStatusCancelled:
+		return models.EvalRunStatusFailed, sessionTerminalError(session), true
+	default:
+		return "", nil, false
+	}
+}
+
+func evalRunInputManifest(run models.EvalRun, session models.Session, threadID *uuid.UUID) (json.RawMessage, error) {
+	manifest := map[string]any{
+		"session_id": session.ID.String(),
+		"status":     string(session.Status),
+		"model":      run.Model,
+	}
+	if threadID != nil && *threadID != uuid.Nil {
+		manifest["thread_id"] = threadID.String()
+	}
+	if session.BaseCommitSHA != nil && *session.BaseCommitSHA != "" {
+		manifest["base_commit_sha"] = *session.BaseCommitSHA
+	}
+	if run.ConfigRef != nil && *run.ConfigRef != "" {
+		manifest["config_ref"] = *run.ConfigRef
+	}
+	return json.Marshal(manifest)
+}
+
+func publishEvalRunBatchUpdate(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID uuid.UUID, run models.EvalRun) {
+	if run.BatchID == nil || stores.EvalBatches == nil {
+		return
+	}
+	if err := stores.EvalBatches.CompleteBatchIfDone(ctx, orgID, *run.BatchID); err != nil {
+		logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to complete eval batch after run update")
+	}
+	batchStatus := models.EvalBatchStatusRunning
+	if batch, err := stores.EvalBatches.GetByID(ctx, orgID, *run.BatchID); err == nil {
+		batchStatus = batch.Status
+		if batch.Status == models.EvalBatchStatusCompleted && stores.EvalReleaseGates != nil {
+			if _, err := stores.EvalReleaseGates.EvaluateBatch(ctx, orgID, *run.BatchID); err != nil {
+				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to evaluate eval release gates")
+			}
+		}
+	}
+	publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, batchStatus, logger)
+}
+
+func sessionTerminalError(session models.Session) *string {
+	if session.Error != nil && strings.TrimSpace(*session.Error) != "" {
+		return session.Error
+	}
+	if session.FailureExplanation != nil && strings.TrimSpace(*session.FailureExplanation) != "" {
+		return session.FailureExplanation
+	}
+	msg := "session ended without a successful result"
+	return &msg
+}
+
+func stringPtrUUID(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	value := id.String()
+	return &value
 }
 
 func enqueueSlackRunUpdateIfLinked(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, updateKind, title, summary string, terminal bool) {
@@ -6247,839 +7018,6 @@ func publishEvalBootstrapSignal(ctx context.Context, services *Services, orgID, 
 	}); err != nil {
 		logger.Warn().Err(err).Str("bootstrap_run_id", bootstrapRunID.String()).Msg("failed to publish eval bootstrap update event")
 	}
-}
-
-// run_eval handler executes a single eval run: clones repo, runs agent, scores output.
-func newRunEvalHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			EvalRunID string `json:"eval_run_id"`
-			OrgID     string `json:"org_id"`
-			BatchID   string `json:"batch_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal run_eval payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		runID, err := uuid.Parse(input.EvalRunID)
-		if err != nil {
-			return fmt.Errorf("parse eval run ID: %w", err)
-		}
-
-		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
-		if err != nil {
-			return fmt.Errorf("fetch eval run: %w", err)
-		}
-
-		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
-		if err != nil {
-			return fmt.Errorf("fetch eval task: %w", err)
-		}
-
-		logger.Info().
-			Str("eval_run_id", runID.String()).
-			Str("eval_task_id", task.ID.String()).
-			Str("model", run.Model).
-			Str("org_id", orgID.String()).
-			Msg("starting run_eval job")
-
-		// Mark run as running
-		if err := stores.EvalRuns.UpdateStatus(ctx, orgID, runID, models.EvalRunStatusRunning); err != nil {
-			return fmt.Errorf("update eval run status to running: %w", err)
-		}
-		// Wake any batch detail SSE subscribers so the matrix flips this
-		// run's tile to "running" without a polling round-trip. Batch
-		// itself stays "running"; we surface the parent batch's status
-		// rather than the run's so subscribers can ignore stale runs.
-		if run.BatchID != nil {
-			publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, models.EvalBatchStatusRunning, logger)
-		}
-
-		startTime := time.Now()
-
-		// Execute the eval. This is the core eval execution flow:
-		// 1. Create sandbox
-		// 2. Clone repo at base_commit_sha
-		// 3. Optionally overlay config from config_ref
-		// 4. Run the coding agent with the issue_description
-		// 5. Collect the agent's diff
-		// 6. Score using each criterion
-		// 7. Compute final weighted score
-		//
-		// For now, the orchestrator integration is wired up as a placeholder.
-		// The full implementation will use the sandbox and agent adapter infrastructure
-		// once the eval-specific orchestrator flow is built.
-
-		result := executeEvalRun(ctx, stores, services, &run, &task, logger)
-		duration := int(time.Since(startTime).Seconds())
-		result.DurationSeconds = &duration
-
-		if err := stores.EvalRuns.UpdateResult(ctx, orgID, runID, result); err != nil {
-			return fmt.Errorf("update eval run result: %w", err)
-		}
-
-		// If this run is part of a batch, atomically complete the batch if all runs are done
-		if run.BatchID != nil && stores.EvalBatches != nil {
-			if err := stores.EvalBatches.CompleteBatchIfDone(ctx, orgID, *run.BatchID); err != nil {
-				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to check/complete batch")
-			}
-			// Re-fetch so the published event carries the post-CompleteBatchIfDone
-			// status. CompleteBatchIfDone only flips the batch when all runs are
-			// terminal, so most signals here will still be `running` — that's
-			// fine: the event is a "something changed" wake, the client fetches
-			// the full detail to see which run completed.
-			//
-			// Concurrency note: Redis pub/sub is at-most-once and unordered.
-			// Two runs in the same batch finishing nearly simultaneously can
-			// publish their "running" / "completed" events out of order — A
-			// re-reads `running`, B then flips to `completed` and publishes,
-			// A's earlier `running` arrives last. Subscribers must NOT read
-			// the Status field from the event; the event is a wake signal
-			// and the canonical state lives in Postgres. The frontend
-			// invalidate-and-refetch pattern in batch/[id]/page.tsx is what
-			// makes this self-healing — every event triggers a fresh GET on
-			// /evals/batch/{id}, so the worst case is one extra round-trip
-			// before the UI converges.
-			batchStatus := models.EvalBatchStatusRunning
-			if batch, err := stores.EvalBatches.GetByID(ctx, orgID, *run.BatchID); err == nil {
-				batchStatus = batch.Status
-			} else {
-				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to re-read batch after run completion; publishing with running status")
-			}
-			publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, batchStatus, logger)
-		}
-
-		logger.Info().
-			Str("eval_run_id", runID.String()).
-			Str("status", string(result.Status)).
-			Msg("completed run_eval job")
-
-		return nil
-	}
-}
-
-// executeEvalRun performs the actual eval execution. Returns the result to store.
-// This is separated from the handler for testability and to keep the handler focused on job lifecycle.
-//
-// Flow:
-//  1. Resolve repository (clone URL + GitHub token)
-//  2. Create sandbox, clone repo at base_commit_sha
-//  3. Apply config overlay from run.ConfigRef if set
-//  4. Run the coding agent with the issue description
-//  5. Collect the agent's diff
-//  6. Grade each criterion (code_check or llm_judge)
-//  7. Compute weighted final score
-func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run *models.EvalRun, task *models.EvalTask, logger zerolog.Logger) *models.EvalRunResult {
-	// Parse scoring criteria
-	var criteria []models.ScoringCriterion
-	if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {
-		return evalFailed("failed to parse scoring criteria: %v", err)
-	}
-
-	// 1. Resolve repository
-	if stores.Repositories == nil {
-		return evalFailed("repository store not configured")
-	}
-	repo, err := stores.Repositories.GetByID(ctx, task.OrgID, task.RepoID)
-	if err != nil {
-		return evalFailed("fetch repository: %v", err)
-	}
-
-	if services == nil || services.SandboxProvider == nil {
-		return evalFailed("sandbox provider not configured")
-	}
-	if services.GitHub == nil {
-		return evalFailed("github token provider not configured")
-	}
-
-	ghToken, err := services.GitHub.GetInstallationToken(ctx, repo.InstallationID)
-	if err != nil {
-		return evalFailed("get installation token: %v", err)
-	}
-
-	// 2. Create sandbox
-	sandboxCfg := agent.DefaultSandboxConfig()
-	sandboxCfg.Timeout = 10 * time.Minute // evals may take longer than default 5min
-	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
-	if err != nil {
-		return evalFailed("create sandbox: %v", err)
-	}
-	defer func() {
-		if destroyErr := services.SandboxProvider.Destroy(ctx, sb); destroyErr != nil {
-			logger.Warn().Err(destroyErr).Msg("failed to destroy eval sandbox")
-		}
-	}()
-
-	// Clone repo and checkout base commit
-	if err := services.SandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, ghToken); err != nil {
-		return evalFailed("clone repo: %v", err)
-	}
-
-	// Validate BaseCommitSHA as defense-in-depth (API layer also validates)
-	if !validGitSHA.MatchString(task.BaseCommitSHA) {
-		return evalFailed("invalid base commit SHA format: %s", task.BaseCommitSHA)
-	}
-
-	var stderr bytes.Buffer
-	exitCode, err := services.SandboxProvider.Exec(ctx, sb, fmt.Sprintf("git checkout %s", task.BaseCommitSHA), io.Discard, &stderr)
-	if err != nil || exitCode != 0 {
-		// Mark the task as snapshot_broken so the UI can surface it
-		if stores.EvalTasks != nil {
-			if markErr := stores.EvalTasks.MarkSnapshotBroken(ctx, task.OrgID, task.ID, true); markErr != nil {
-				logger.Warn().Err(markErr).Msg("failed to mark eval task as snapshot_broken")
-			}
-		}
-		return evalFailed("checkout base commit %s: exit=%d err=%v stderr=%s", task.BaseCommitSHA, exitCode, err, stderr.String())
-	}
-
-	// 3. Apply config overlay from run.ConfigRef if set
-	if run.ConfigRef != nil && *run.ConfigRef != "" {
-		applyConfigOverlay(ctx, services.SandboxProvider, sb, *run.ConfigRef, logger)
-	}
-
-	// 4. Run the coding agent
-	agentDiff, agentTrace, tokenUsage := runCodingAgent(ctx, services, sb, run.Model, task.IssueDescription, logger)
-
-	// 5. If agent produced no diff, collect it explicitly
-	if agentDiff == "" {
-		var diffBuf bytes.Buffer
-		_, _ = services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
-		agentDiff = diffBuf.String()
-	}
-
-	// 6. Grade each criterion
-	criterionResults := make([]models.CriterionResult, 0, len(criteria))
-	for _, c := range criteria {
-		var result models.CriterionResult
-		switch c.GraderType {
-		case models.GraderTypeCodeCheck:
-			result = gradeCodeCheck(ctx, services.SandboxProvider, sb, c, logger)
-		case models.GraderTypeLLMJudge:
-			result = gradeLLMJudge(ctx, services.LLM, c, agentDiff, task, logger)
-		default:
-			result = models.CriterionResult{
-				Name:    c.Name,
-				Score:   0,
-				Pass:    false,
-				Details: fmt.Sprintf("unknown grader type: %s", c.GraderType),
-			}
-		}
-		criterionResults = append(criterionResults, result)
-	}
-
-	// 7. Compute weighted final score
-	finalScore, passed := computeWeightedScore(criteria, criterionResults, task.PassThreshold)
-
-	// Build input manifest
-	manifest := buildEvalManifest(task, run)
-	manifestJSON, _ := json.Marshal(manifest)
-
-	criterionJSON, _ := json.Marshal(criterionResults)
-	traceJSON, _ := json.Marshal(agentTrace)
-	usageJSON, _ := json.Marshal(tokenUsage)
-	sandboxID := sb.ID
-
-	return &models.EvalRunResult{
-		Status:           models.EvalRunStatusCompleted,
-		AgentDiff:        &agentDiff,
-		AgentTrace:       traceJSON,
-		TokenUsage:       usageJSON,
-		CriterionResults: criterionJSON,
-		FinalScore:       &finalScore,
-		Passed:           &passed,
-		SandboxID:        &sandboxID,
-		InputManifest:    manifestJSON,
-	}
-}
-
-// evalFailed returns an EvalRunResult with failed status and a formatted error message.
-func evalFailed(format string, args ...any) *models.EvalRunResult {
-	errMsg := fmt.Sprintf(format, args...)
-	return &models.EvalRunResult{
-		Status:       models.EvalRunStatusFailed,
-		ErrorMessage: &errMsg,
-	}
-}
-
-// validGitSHA matches short and full hex SHA hashes.
-var validGitSHA = regexp.MustCompile(`^[0-9a-fA-F]{4,40}$`)
-
-// validConfigRef matches branch names, tags, and SHAs safe for shell use.
-var validConfigRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
-
-// applyConfigOverlay overlays repo config files from a branch/SHA onto the sandbox.
-// Config paths: AGENTS.md, CLAUDE.md, .claude/, .143/
-func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, configRef string, logger zerolog.Logger) {
-	// Validate configRef to prevent shell injection
-	if !validConfigRef.MatchString(configRef) {
-		logger.Warn().Str("config_ref", configRef).Msg("invalid config_ref, skipping overlay")
-		return
-	}
-
-	// Fetch the config ref first
-	var stderr bytes.Buffer
-	if _, err := provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr); err != nil {
-		logger.Debug().Err(err).Str("config_ref", configRef).Msg("git fetch for config overlay failed (non-fatal)")
-	}
-
-	// Overlay individual config files — failures are non-fatal (file may not exist on branch)
-	configFiles := []string{"AGENTS.md", "CLAUDE.md"}
-	for _, f := range configFiles {
-		cmd := fmt.Sprintf("git show %s:%s > %s 2>/dev/null || true", configRef, f, f)
-		if _, err := provider.Exec(ctx, sb, cmd, io.Discard, io.Discard); err != nil {
-			logger.Debug().Err(err).Str("config_file", f).Msg("config file overlay failed (non-fatal)")
-		}
-	}
-
-	// Overlay config directories
-	configDirs := []string{".claude", ".143"}
-	for _, d := range configDirs {
-		// Remove existing dir and recreate from config ref
-		cmd := fmt.Sprintf("rm -rf %s && git checkout %s -- %s 2>/dev/null || true", d, configRef, d)
-		if _, err := provider.Exec(ctx, sb, cmd, io.Discard, io.Discard); err != nil {
-			logger.Debug().Err(err).Str("config_dir", d).Msg("config dir overlay failed (non-fatal)")
-		}
-	}
-
-	logger.Debug().Str("config_ref", configRef).Msg("applied config overlay")
-}
-
-// validModelName matches alphanumeric model identifiers with dashes and dots (no shell metacharacters).
-var validModelName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-
-// runCodingAgent executes the coding agent CLI in the sandbox and returns the diff, trace, and token usage.
-func runCodingAgent(ctx context.Context, services *Services, sb *agent.Sandbox, model, issueDescription string, logger zerolog.Logger) (diff string, trace map[string]any, tokenUsage map[string]any) {
-	// Validate model name to prevent shell injection
-	if !validModelName.MatchString(model) {
-		return "", map[string]any{"error": "invalid model name"}, nil
-	}
-
-	// Write issue description to a temp file to avoid shell injection via interpolation
-	var writeStderr bytes.Buffer
-	writeCmd := fmt.Sprintf("cat > /tmp/issue_description.txt << 'ISSUE_EOF'\n%s\nISSUE_EOF", strings.ReplaceAll(issueDescription, "'", "'\\''"))
-	if _, writeErr := services.SandboxProvider.Exec(ctx, sb, writeCmd, io.Discard, &writeStderr); writeErr != nil {
-		return "", map[string]any{"error": fmt.Sprintf("write issue description: %v", writeErr)}, nil
-	}
-
-	// Run Claude Code CLI with --print flag, reading issue from file
-	cmd := fmt.Sprintf("claude --model %s --print \"$(cat /tmp/issue_description.txt)\" 2>&1", model)
-
-	var stdout, stderr bytes.Buffer
-	exitCode, err := services.SandboxProvider.Exec(ctx, sb, cmd, &stdout, &stderr)
-
-	trace = map[string]any{
-		"agent_stdout": truncateString(stdout.String(), 50000),
-		"agent_stderr": truncateString(stderr.String(), 10000),
-		"exit_code":    exitCode,
-	}
-	if err != nil {
-		trace["exec_error"] = err.Error()
-	}
-
-	logger.Info().
-		Int("exit_code", exitCode).
-		Int("stdout_len", stdout.Len()).
-		Msg("agent execution completed")
-
-	// Collect the diff produced by the agent
-	var diffBuf bytes.Buffer
-	_, _ = services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
-
-	return diffBuf.String(), trace, nil
-}
-
-// gradeCodeCheck runs a code_check criterion command in the sandbox.
-// Exit code 0 = pass (score 1.0), non-zero = fail (score 0.0).
-// If stdout contains valid JSON with a "score" field, that numeric score is used instead.
-func gradeCodeCheck(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, criterion models.ScoringCriterion, logger zerolog.Logger) models.CriterionResult {
-	var config models.CodeCheckConfig
-	if err := json.Unmarshal(criterion.GraderConfig, &config); err != nil {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: fmt.Sprintf("invalid code_check config: %v", err),
-		}
-	}
-	if config.Command == "" {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: "code_check config is missing required 'command' field",
-		}
-	}
-
-	timeout := time.Duration(config.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-
-	gradeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	var stdout, stderr bytes.Buffer
-	exitCode, execErr := provider.Exec(gradeCtx, sb, config.Command, &stdout, &stderr)
-
-	pass := exitCode == 0 && execErr == nil
-	score := 0.0
-	if pass {
-		score = 1.0
-	}
-
-	// Try to parse optional JSON score from stdout
-	var jsonResult struct {
-		Score *float64 `json:"score"`
-	}
-	if json.Unmarshal(stdout.Bytes(), &jsonResult) == nil && jsonResult.Score != nil {
-		score = *jsonResult.Score
-		pass = score >= 0.5
-	}
-
-	details := fmt.Sprintf("exit_code=%d\nstdout:\n%s\nstderr:\n%s",
-		exitCode, truncateString(stdout.String(), 5000), truncateString(stderr.String(), 5000))
-
-	if execErr != nil {
-		details += fmt.Sprintf("\nexec_error: %v", execErr)
-	}
-
-	logger.Debug().
-		Str("criterion", criterion.Name).
-		Int("exit_code", exitCode).
-		Float64("score", score).
-		Bool("pass", pass).
-		Msg("code_check graded")
-
-	return models.CriterionResult{
-		Name:    criterion.Name,
-		Score:   score,
-		Pass:    pass,
-		Details: details,
-	}
-}
-
-// gradeLLMJudge evaluates a criterion using an LLM judge.
-// The criterion's Notes field is the rubric. The judge returns pass/fail + reasoning.
-func gradeLLMJudge(ctx context.Context, llm llmClient, criterion models.ScoringCriterion, agentDiff string, task *models.EvalTask, logger zerolog.Logger) models.CriterionResult {
-	if llm == nil {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: "LLM client not configured — cannot run llm_judge grader",
-		}
-	}
-
-	var config models.LLMJudgeConfig
-	if err := json.Unmarshal(criterion.GraderConfig, &config); err != nil {
-		// Default config is fine — just use pass_fail output mode
-		config.Output = "pass_fail"
-	}
-	if config.Output == "" {
-		config.Output = "pass_fail"
-	}
-
-	systemPrompt := prompts.EvalJudgePrompt(prompts.EvalJudgePromptData{
-		OutputMode: config.Output,
-	})
-
-	var solutionDiff string
-	if task.SolutionDiff != nil {
-		solutionDiff = *task.SolutionDiff
-	}
-
-	userPrompt := prompts.EvalJudgeUserPrompt(prompts.EvalJudgeUserPromptData{
-		IssueDescription: task.IssueDescription,
-		AgentDiff:        agentDiff,
-		CriterionName:    criterion.Name,
-		CriterionNotes:   criterion.Notes,
-		SolutionDiff:     solutionDiff,
-	})
-
-	judgeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
-	response, err := llm.Complete(judgeCtx, systemPrompt, userPrompt)
-	if err != nil {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: fmt.Sprintf("LLM judge call failed: %v", err),
-		}
-	}
-
-	// Parse structured response
-	var judgment struct {
-		Pass      bool    `json:"pass"`
-		Score     float64 `json:"score"`
-		Reasoning string  `json:"reasoning"`
-	}
-	if err := json.Unmarshal([]byte(response), &judgment); err != nil {
-		// Try to extract JSON from markdown-fenced response
-		cleaned := extractJSON(response)
-		if err2 := json.Unmarshal([]byte(cleaned), &judgment); err2 != nil {
-			return models.CriterionResult{
-				Name:      criterion.Name,
-				Score:     0,
-				Pass:      false,
-				Details:   fmt.Sprintf("failed to parse judge response: %v", err),
-				Reasoning: truncateString(response, 5000),
-			}
-		}
-	}
-
-	// For pass_fail mode, score is binary
-	if config.Output != "score" {
-		if judgment.Pass {
-			judgment.Score = 1.0
-		} else {
-			judgment.Score = 0.0
-		}
-	}
-
-	logger.Debug().
-		Str("criterion", criterion.Name).
-		Float64("score", judgment.Score).
-		Bool("pass", judgment.Pass).
-		Msg("llm_judge graded")
-
-	return models.CriterionResult{
-		Name:      criterion.Name,
-		Score:     judgment.Score,
-		Pass:      judgment.Pass,
-		Reasoning: judgment.Reasoning,
-	}
-}
-
-// computeWeightedScore calculates the final weighted score and pass/fail status.
-// If any required criterion fails, the eval fails regardless of score.
-func computeWeightedScore(criteria []models.ScoringCriterion, results []models.CriterionResult, passThreshold float64) (float64, bool) {
-	if len(results) == 0 {
-		return 0, false
-	}
-
-	// Build a lookup from criterion name to result
-	resultMap := make(map[string]models.CriterionResult, len(results))
-	for _, r := range results {
-		resultMap[r.Name] = r
-	}
-
-	// Check required criteria first
-	for _, c := range criteria {
-		if c.Required {
-			if r, ok := resultMap[c.Name]; ok && !r.Pass {
-				// Required criterion failed — compute score but force fail
-				score := weightedAverage(criteria, resultMap)
-				return score, false
-			}
-		}
-	}
-
-	score := weightedAverage(criteria, resultMap)
-	passed := score >= passThreshold
-	return score, passed
-}
-
-// weightedAverage computes a normalized weighted average score.
-func weightedAverage(criteria []models.ScoringCriterion, results map[string]models.CriterionResult) float64 {
-	var totalWeight, weightedSum float64
-	for _, c := range criteria {
-		w := c.Weight
-		if w <= 0 {
-			w = 1.0 // default weight
-		}
-		totalWeight += w
-		if r, ok := results[c.Name]; ok {
-			weightedSum += w * r.Score
-		}
-	}
-	if totalWeight == 0 {
-		return 0
-	}
-	return weightedSum / totalWeight
-}
-
-// buildEvalManifest constructs the input manifest for an eval run.
-func buildEvalManifest(task *models.EvalTask, run *models.EvalRun) *models.InputManifest {
-	manifest := &models.InputManifest{
-		ServerDeploySHA:   version.BuildSHA,
-		RepoBaseCommitSHA: task.BaseCommitSHA,
-		Model:             run.Model,
-	}
-	if task.PMDocumentSetPinID != nil {
-		manifest.PMDocumentSetPinID = task.PMDocumentSetPinID
-	}
-	if task.OrgSettingsVersionID != nil {
-		manifest.OrgSettingsVersionID = task.OrgSettingsVersionID
-	}
-	if task.SandboxImageDigest != nil {
-		manifest.SandboxImageDigest = *task.SandboxImageDigest
-	}
-	if task.MemorySnapshot != nil {
-		var memSnap models.MemorySnapshot
-		if json.Unmarshal(task.MemorySnapshot, &memSnap) == nil {
-			manifest.MemorySnapshot = &memSnap
-		}
-	}
-	return manifest
-}
-
-// extractJSON attempts to extract a JSON object from a string that may contain
-// markdown code fences or other wrapper text.
-func extractJSON(s string) string {
-	// Find the first { and last }
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start >= 0 && end > start {
-		return s[start : end+1]
-	}
-	return s
-}
-
-// truncateString shortens a string to maxLen characters.
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "...(truncated)"
-}
-
-// bootstrapLogWriter is a helper that writes session log entries for a bootstrap run.
-type bootstrapLogWriter struct {
-	store     *db.SessionLogStore
-	sessionID uuid.UUID
-	orgID     uuid.UUID
-}
-
-func (w *bootstrapLogWriter) log(ctx context.Context, level, message string) {
-	if w.store == nil || w.sessionID == uuid.Nil {
-		return
-	}
-	entry := &models.SessionLog{
-		SessionID:  w.sessionID,
-		OrgID:      w.orgID,
-		Level:      models.SessionLogLevel(level),
-		Message:    message,
-		TurnNumber: 0,
-	}
-	// Best-effort: don't fail the bootstrap if logging fails.
-	_ = w.store.Create(ctx, entry)
-}
-
-// run_eval_bootstrap handler scans PR history to discover eval task candidates.
-func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			BootstrapRunID string `json:"bootstrap_run_id"`
-			OrgID          string `json:"org_id"`
-			RepoID         string `json:"repo_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal bootstrap payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		bootstrapRunID, err := uuid.Parse(input.BootstrapRunID)
-		if err != nil {
-			return fmt.Errorf("parse bootstrap run ID: %w", err)
-		}
-		repoID, err := uuid.Parse(input.RepoID)
-		if err != nil {
-			return fmt.Errorf("parse repo ID: %w", err)
-		}
-
-		logger.Info().
-			Str("bootstrap_run_id", bootstrapRunID.String()).
-			Str("repo_id", repoID.String()).
-			Msg("starting eval bootstrap scan")
-
-		// Create a lightweight session to store bootstrap logs.
-		title := "Bootstrap: scanning PR history"
-		session := &models.Session{
-			OrgID:         orgID,
-			AgentType:     models.AgentTypeClaudeCode,
-			Status:        models.SessionStatusRunning,
-			AutonomyLevel: models.SessionAutonomyFull,
-			TokenMode:     models.SessionTokenModeLow,
-			Title:         &title,
-			RepositoryID:  &repoID,
-		}
-		if err := stores.Sessions.Create(ctx, session); err != nil {
-			logger.Warn().Err(err).Msg("failed to create bootstrap session for logging, continuing without logs")
-		}
-
-		// Mark as running and link the session.
-		var sessionIDPtr *uuid.UUID
-		if session.ID != uuid.Nil {
-			sessionIDPtr = &session.ID
-		}
-		if err := stores.EvalBootstraps.UpdateStatus(ctx, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr); err != nil {
-			return fmt.Errorf("update bootstrap status to running: %w", err)
-		}
-		publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr, logger)
-
-		logWriter := &bootstrapLogWriter{
-			store:     stores.SessionLogs,
-			sessionID: session.ID,
-			orgID:     orgID,
-		}
-
-		candidates, scanErr := executeBootstrapScan(ctx, stores, services, orgID, repoID, logWriter, logger)
-
-		if scanErr != nil {
-			errMsg := scanErr.Error()
-			logWriter.log(ctx, "error", fmt.Sprintf("Bootstrap scan failed: %s", errMsg))
-			if session.ID != uuid.Nil {
-				_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusFailed)
-			}
-			if updateErr := stores.EvalBootstraps.UpdateResult(ctx, orgID, bootstrapRunID,
-				models.EvalBootstrapStatusFailed, nil, &errMsg); updateErr != nil {
-				logger.Warn().Err(updateErr).Msg("failed to update bootstrap run with error")
-			}
-			publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusFailed, sessionIDPtr, logger)
-			return fmt.Errorf("bootstrap scan failed: %w", scanErr)
-		}
-
-		candidatesJSON, _ := json.Marshal(candidates)
-		if err := stores.EvalBootstraps.UpdateResult(ctx, orgID, bootstrapRunID,
-			models.EvalBootstrapStatusCompleted, candidatesJSON, nil); err != nil {
-			return fmt.Errorf("update bootstrap result: %w", err)
-		}
-		publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusCompleted, sessionIDPtr, logger)
-
-		logWriter.log(ctx, "info", fmt.Sprintf("Bootstrap scan completed successfully. Found %d candidates.", len(candidates)))
-		if session.ID != uuid.Nil {
-			_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusCompleted)
-		}
-
-		logger.Info().
-			Int("candidates", len(candidates)).
-			Msg("eval bootstrap scan completed")
-
-		return nil
-	}
-}
-
-// executeBootstrapScan runs the PR history scan using an agent in a sandbox.
-func executeBootstrapScan(ctx context.Context, stores *Stores, services *Services, orgID, repoID uuid.UUID, logWriter *bootstrapLogWriter, logger zerolog.Logger) ([]models.EvalBootstrapCandidate, error) {
-	if stores.Repositories == nil {
-		return nil, fmt.Errorf("repository store not configured")
-	}
-	logWriter.log(ctx, "info", "Fetching repository details...")
-	repo, err := stores.Repositories.GetByID(ctx, orgID, repoID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch repository: %w", err)
-	}
-	logWriter.log(ctx, "info", fmt.Sprintf("Repository: %s", repo.FullName))
-
-	if services.GitHub == nil {
-		return nil, fmt.Errorf("github token provider not configured")
-	}
-	logWriter.log(ctx, "info", "Obtaining GitHub access token...")
-	ghToken, err := services.GitHub.GetInstallationToken(ctx, repo.InstallationID)
-	if err != nil {
-		return nil, fmt.Errorf("get installation token: %w", err)
-	}
-
-	// Create sandbox with longer timeout for bootstrap
-	logWriter.log(ctx, "info", "Creating sandbox environment...")
-	sandboxCfg := agent.DefaultSandboxConfig()
-	sandboxCfg.Timeout = 15 * time.Minute
-	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer func() {
-		if destroyErr := services.SandboxProvider.Destroy(ctx, sb); destroyErr != nil {
-			logger.Warn().Err(destroyErr).Msg("failed to destroy bootstrap sandbox")
-		}
-	}()
-
-	// Clone repo at HEAD (need full history for git log analysis)
-	logWriter.log(ctx, "info", fmt.Sprintf("Cloning repository %s (full history for git log analysis)...", repo.FullName))
-	if err := services.SandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, ghToken); err != nil {
-		return nil, fmt.Errorf("clone repo: %w", err)
-	}
-	logWriter.log(ctx, "info", "Repository cloned successfully.")
-
-	// Run the bootstrap agent using Claude Code CLI
-	logWriter.log(ctx, "info", "Starting bootstrap analysis — scanning merged PRs for eval candidates...")
-	bootstrapPrompt := prompts.EvalBootstrapPrompt(prompts.EvalBootstrapPromptData{
-		RepoFullName: repo.FullName,
-	})
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd := bootstrapAgentCommand(bootstrapPrompt)
-	exitCode, execErr := services.SandboxProvider.ExecStream(ctx, sb, cmd, func(line []byte) {
-		trimmed := strings.TrimSpace(string(line))
-		if trimmed == "" {
-			return
-		}
-		// Write each output line as a log entry so the user can follow along.
-		logWriter.log(ctx, "assistant", trimmed)
-		// Also accumulate the full output for JSON parsing.
-		stdout.Write(line)
-		stdout.WriteByte('\n')
-	}, &stderr)
-	if execErr != nil {
-		return nil, fmt.Errorf("execute bootstrap agent: %w", execErr)
-	}
-	if exitCode != 0 {
-		return nil, fmt.Errorf("bootstrap agent failed with exit code %d, stderr: %s", exitCode, truncateString(stderr.String(), 1000))
-	}
-
-	logger.Info().
-		Int("exit_code", exitCode).
-		Int("stdout_len", stdout.Len()).
-		Msg("bootstrap agent execution completed")
-
-	logWriter.log(ctx, "info", "Analysis complete. Parsing candidates...")
-
-	// Parse the agent's structured output
-	var candidates []models.EvalBootstrapCandidate
-	output := stdout.String()
-
-	// Try to extract JSON array from agent output
-	jsonStr := extractJSON(output)
-	// Try array first
-	if err := json.Unmarshal([]byte(jsonStr), &candidates); err != nil {
-		// Try to find a JSON array within the output
-		start := strings.Index(output, "[")
-		end := strings.LastIndex(output, "]")
-		if start >= 0 && end > start {
-			if err2 := json.Unmarshal([]byte(output[start:end+1]), &candidates); err2 != nil {
-				return nil, fmt.Errorf("failed to parse bootstrap output as candidate array: %w (raw output: %s)", err2, truncateString(output, 1000))
-			}
-		} else {
-			return nil, fmt.Errorf("no JSON array found in bootstrap output: %s", truncateString(output, 1000))
-		}
-	}
-
-	return candidates, nil
-}
-
-// shellSingleQuote wraps s in single quotes so the shell treats it as a
-// literal. Embedded single quotes are closed, escaped, and reopened
-// ('\”). This is safe for strings containing backticks, $, backslashes,
-// or other shell metacharacters.
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// bootstrapAgentCommand builds the sh command that runs Claude Code with
-// the bootstrap prompt. The prompt is single-quoted so the triple-backtick
-// JSON fence in the template is not interpreted as command substitution.
-func bootstrapAgentCommand(prompt string) string {
-	return fmt.Sprintf("claude --print %s 2>&1", shellSingleQuote(prompt))
 }
 
 // prepare_linear_primary handler resolves the primary Linear issue for a

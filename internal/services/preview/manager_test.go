@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -2372,6 +2373,41 @@ func TestLaunchPreview_InvalidConfig(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid preview config")
 }
 
+func TestReservePreview_UsesOrgPreviewResourcePolicy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store: store,
+		OrgSettingsStore: staticOrgSettingsStore{
+			settings: json.RawMessage(`{"sandbox_resources":{"preview_max_memory_mib":4096}}`),
+		},
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+
+	cfg := validPreviewConfig()
+	cfg.Resources = models.PreviewResourceRequirements{
+		Limits: models.PreviewResourceList{Memory: "8Gi"},
+	}
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		Config:    cfg,
+	})
+
+	require.Error(t, err, "ReservePreview should reject repo resource limits above the org max")
+	require.Contains(t, err.Error(), "preview.resources.limits.memory must be at most 4Gi", "error should explain the effective org memory cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestLaunchPreview_Success(t *testing.T) {
 	t.Parallel()
 
@@ -3325,6 +3361,57 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	tail := []string{"npm warn tar TAR_ENTRY_ERROR ENOENT", "npm error enoent"}
 	obs.OnInstallFailed("exited with code 1", tail)
 	require.NoError(t, mock.ExpectationsWereMet(), "install failure observer should persist an install preview log without touching service rows")
+}
+
+func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    string
+		cacheKey  string
+		sizeBytes int64
+	}{
+		{
+			name:     "miss",
+			status:   "miss",
+			cacheKey: strings.Repeat("a", 64),
+		},
+		{
+			name:   "disabled",
+			status: "disabled",
+		},
+		{
+			name:     "skipped marker missing",
+			status:   "skipped_marker_missing",
+			cacheKey: strings.Repeat("b", 64),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+			orgID := uuid.New()
+			previewID := uuid.New()
+			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+			logID := uuid.New()
+			mock.ExpectQuery("INSERT INTO preview_logs").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+				}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+			obs.OnDependencyCacheRestore(tt.status, tt.cacheKey, tt.sizeBytes, nil)
+			require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist non-failure restore statuses")
+		})
+	}
 }
 
 func TestManagerServiceObserver_OnServiceOutput_PersistsStartupLog(t *testing.T) {

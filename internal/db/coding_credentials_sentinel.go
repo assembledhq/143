@@ -8,18 +8,24 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// AnthropicSplitSentinel is the sentinel name written to
-// coding_credentials_migrations by the migrate-coding-credentials-anthropic-split
-// command on completion. The server's startup gate refuses to serve traffic
-// until this row exists (or a fresh-install fallback determines no split work
-// is needed).
+// AnthropicSplitSentinel is the sentinel name that the (now removed)
+// migrate-coding-credentials-anthropic-split command wrote to
+// coding_credentials_migrations on completion. The server's startup gate
+// refuses to serve traffic until this row exists (or a fresh-install fallback
+// determines no split work is needed).
+//
+// The split command itself was deleted once every deployment had run it; a
+// pre-split database can no longer be migrated by this release. Operators
+// upgrading such a database must first deploy an earlier release that still
+// ships the split post-step, let it run, and only then upgrade further.
 const AnthropicSplitSentinel = "anthropic_split"
 
-// ErrAnthropicSplitSentinelMissing indicates the unified-credentials post-step
-// has not run on this database. Operators should run
-// `make migrate-coding-credentials-anthropic-split` before the server boots.
+// ErrAnthropicSplitSentinelMissing indicates the unified-credentials Anthropic
+// split post-step never ran on this database. The split command has been
+// removed from this release — upgrade through an earlier release that still
+// ships `migrate-coding-credentials-anthropic-split` before deploying this one.
 var ErrAnthropicSplitSentinelMissing = errors.New(
-	"anthropic_split sentinel missing — run `make migrate-coding-credentials-anthropic-split` before serving",
+	"anthropic_split sentinel missing — this database predates the Anthropic credential split; upgrade through a release that still ships migrate-coding-credentials-anthropic-split before deploying this version",
 )
 
 // EnsureAnthropicSplitSentinel verifies the post-step migration has run, or
@@ -33,6 +39,13 @@ var ErrAnthropicSplitSentinelMissing = errors.New(
 // Returns ErrAnthropicSplitSentinelMissing when the sentinel is absent and
 // any anthropic row exists in the unified or legacy tables; returns wrapped
 // errors for I/O failures.
+//
+// Vestigial after the credentials cleanup migration: it deletes the legacy
+// coding rows, so the org_credentials/user_credentials anthropic counts below
+// are now always zero for any database running this release (migrations apply
+// before boot). The legacy counts are intentionally retained — harmless, and
+// removing logic from a serve-or-refuse boot gate is not worth the risk — but
+// a later release can drop them and read only the unified count.
 //
 // lint:allow-no-orgid reason="schema-level invariant; not tenant data"
 func EnsureAnthropicSplitSentinel(ctx context.Context, dbtx DBTX) error {

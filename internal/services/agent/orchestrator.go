@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	defaultMaxConcurrent    = 10
+	defaultMaxConcurrent = 10
 	// mentionIndexWarmTimeout bounds the proactive mention-index build at
 	// turn-complete. The build walks the whole workspace through a Docker
 	// exec and takes several seconds on large repos; the warm always runs
@@ -271,7 +271,7 @@ type GitHubTokenProvider interface {
 
 // CodexAuthProvider abstracts retrieving valid ChatGPT OAuth tokens for Codex.
 type CodexAuthProvider interface {
-	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAISubscriptionConfig, error)
 }
 
 // ClaudeCodeAuthProvider abstracts Claude Code subscription OAuth: the
@@ -304,12 +304,6 @@ type ClaudeCodeAuthTokenStore interface {
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
-}
-
-// UserCredentialProvider abstracts retrieving user-scoped provider credentials.
-type UserCredentialProvider interface {
-	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
-	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 }
 
 // CodingCredentialProvider abstracts the unified coding-credentials resolver.
@@ -533,6 +527,10 @@ type AutomationRunUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
+type EvalBootstrapLookup interface {
+	GetBySessionThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.EvalBootstrapRun, error)
+}
+
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
@@ -572,6 +570,7 @@ type Orchestrator struct {
 	identityResolver    *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
 	sandboxAuth         SandboxAuthServer  // can be nil — paired with identityResolver
 	users               UserLookup         // can be nil — needed for App-token Co-authored-by trailer
+	evalBootstraps      EvalBootstrapLookup
 	internalAPIURL      string
 	internalAPISecret   string
 	logger              zerolog.Logger
@@ -797,7 +796,6 @@ type OrchestratorConfig struct {
 	ClaudeCodeAuth     ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
 	Credentials        CredentialProvider
 	Memory             MemoryService            // optional — injects learned memories into agent prompts
-	UserCredentials    UserCredentialProvider   // optional — enables legacy personal/team credential resolution
 	CodingCredentials  CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
 	Snapshots          storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
 	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
@@ -830,6 +828,7 @@ type OrchestratorConfig struct {
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
 	Users             UserLookup
+	EvalBootstraps    EvalBootstrapLookup
 	InternalAPIURL    string
 	InternalAPISecret string
 	NodeID            string
@@ -857,7 +856,6 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	if env == nil {
 		env = NewAgentEnv(AgentEnvDeps{
 			Credentials:       cfg.Credentials,
-			UserCredentials:   cfg.UserCredentials,
 			CodingCredentials: cfg.CodingCredentials,
 			Orgs:              cfg.Orgs,
 			OrgSettingsCache:  cfg.OrgSettingsCache,
@@ -904,6 +902,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		identityResolver:   cfg.IdentityResolver,
 		sandboxAuth:        cfg.SandboxAuth,
 		users:              cfg.Users,
+		evalBootstraps:     cfg.EvalBootstraps,
 		internalAPIURL:     cfg.InternalAPIURL,
 		internalAPISecret:  cfg.InternalAPISecret,
 		cancels:            cfg.Cancels,
@@ -1124,7 +1123,20 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		sandboxCfg.Env = make(map[string]string)
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
-	internalToken, err := auth.GenerateSessionThreadToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, tokenTTL)
+	var scopes []string
+	sessionOrigin := string(session.Origin)
+	var evalBootstrapRunID *uuid.UUID
+	if session.Origin == models.SessionOriginEvalBootstrap {
+		if o.evalBootstraps != nil && threadID != nil && *threadID != uuid.Nil {
+			if run, err := o.evalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, *threadID); err == nil {
+				evalBootstrapRunID = &run.ID
+				scopes = []string{"eval:add"}
+			} else {
+				log.Warn().Err(err).Str("session_id", session.ID.String()).Str("thread_id", threadID.String()).Msg("failed to resolve eval bootstrap run for internal token claim; eval:add tool will be unavailable")
+			}
+		}
+	}
+	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
 		return
@@ -1132,6 +1144,10 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
 	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
+	if evalBootstrapRunID != nil {
+		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
+		sandboxCfg.Env["EVAL_BOOTSTRAP_RUN_ID"] = evalBootstrapRunID.String()
+	}
 }
 
 func (o *Orchestrator) closeSandboxAuth(sessionID uuid.UUID, log zerolog.Logger) {
@@ -2474,17 +2490,35 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("clone repo: %w", err)
 		}
 
-		baseCommitSHA, err := o.captureBaseCommitSHA(ctx, sandbox)
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to capture base commit sha")
-		} else if baseCommitSHA != "" {
+		if run.Origin == models.SessionOriginEvalRun && run.BaseCommitSHA != nil && strings.TrimSpace(*run.BaseCommitSHA) != "" {
 			if sandbox.Metadata == nil {
 				sandbox.Metadata = make(map[string]string)
 			}
+			baseCommitSHA := strings.TrimSpace(*run.BaseCommitSHA)
+			if err := o.checkoutEvalBaseCommit(ctx, sandbox, baseCommitSHA); err != nil {
+				o.failRun(ctx, run, fmt.Sprintf("checkout eval base commit: %s", err))
+				return fmt.Errorf("checkout eval base commit %s: %w", baseCommitSHA, err)
+			}
+			if configRef := evalConfigRefFromSession(run); configRef != "" {
+				if err := o.applyEvalConfigOverlay(ctx, sandbox, configRef); err != nil {
+					o.failRun(ctx, run, fmt.Sprintf("apply eval config overlay: %s", err))
+					return fmt.Errorf("apply eval config overlay %s: %w", configRef, err)
+				}
+			}
 			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
-			run.BaseCommitSHA = &baseCommitSHA
-			if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
-				log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
+		} else {
+			baseCommitSHA, err := o.captureBaseCommitSHA(ctx, sandbox)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to capture base commit sha")
+			} else if baseCommitSHA != "" {
+				if sandbox.Metadata == nil {
+					sandbox.Metadata = make(map[string]string)
+				}
+				sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
+				run.BaseCommitSHA = &baseCommitSHA
+				if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
+					log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
+				}
 			}
 		}
 
@@ -5547,6 +5581,66 @@ func (o *Orchestrator) captureBaseCommitSHA(ctx context.Context, sandbox *Sandbo
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+func (o *Orchestrator) checkoutEvalBaseCommit(ctx context.Context, sandbox *Sandbox, baseCommitSHA string) error {
+	baseCommitSHA = strings.TrimSpace(baseCommitSHA)
+	if baseCommitSHA == "" {
+		return fmt.Errorf("base commit sha is required")
+	}
+	escapedSHA := shellEscapeSingleQuote(baseCommitSHA)
+	ensureCmd := fmt.Sprintf("git cat-file -e '%s^{commit}' || git fetch --depth=1 origin '%s'", escapedSHA, escapedSHA)
+	var ensureErr bytes.Buffer
+	if exitCode, execErr := o.provider.Exec(ctx, sandbox, ensureCmd, io.Discard, &ensureErr); execErr != nil {
+		return fmt.Errorf("ensure base commit: %w", execErr)
+	} else if exitCode != 0 {
+		return fmt.Errorf("ensure base commit: exit=%d stderr=%s", exitCode, ensureErr.String())
+	}
+	checkoutCmd := fmt.Sprintf("git checkout --detach '%s'", escapedSHA)
+	var checkoutErr bytes.Buffer
+	if exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, io.Discard, &checkoutErr); execErr != nil {
+		return fmt.Errorf("checkout base commit: %w", execErr)
+	} else if exitCode != 0 {
+		return fmt.Errorf("checkout base commit: exit=%d stderr=%s", exitCode, checkoutErr.String())
+	}
+	return nil
+}
+
+func evalConfigRefFromSession(session *models.Session) string {
+	if session == nil || len(session.InputManifest) == 0 {
+		return ""
+	}
+	var manifest struct {
+		ConfigRef string `json:"config_ref"`
+	}
+	if err := json.Unmarshal(session.InputManifest, &manifest); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(manifest.ConfigRef)
+}
+
+func (o *Orchestrator) applyEvalConfigOverlay(ctx context.Context, sandbox *Sandbox, configRef string) error {
+	configRef = strings.TrimSpace(configRef)
+	if configRef == "" {
+		return nil
+	}
+	escapedRef := shellEscapeSingleQuote(configRef)
+	cmd := fmt.Sprintf(`set -eu
+if ! git cat-file -e '%s^{commit}' 2>/dev/null; then
+  git fetch --depth=1 origin '%s'
+fi
+for path in AGENTS.md CLAUDE.md .claude .143 .codex; do
+  if git cat-file -e '%s:'"$path" 2>/dev/null; then
+    git checkout '%s' -- "$path"
+  fi
+done`, escapedRef, escapedRef, escapedRef, escapedRef)
+	var stderr bytes.Buffer
+	if exitCode, execErr := o.provider.Exec(ctx, sandbox, cmd, io.Discard, &stderr); execErr != nil {
+		return fmt.Errorf("apply config overlay: %w", execErr)
+	} else if exitCode != 0 {
+		return fmt.Errorf("apply config overlay: exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	return nil
+}
+
 // enqueueJob is a helper that enqueues a job and logs errors without failing the caller.
 func (o *Orchestrator) enqueueJob(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload map[string]interface{}) {
 	_, err := o.jobs.Enqueue(ctx, orgID, queue, jobType, payload, 0, nil)
@@ -5895,7 +5989,20 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
 	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
-		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, claudeCodeVersion))
+		// prepareClaudeCodeAPIKeyFallback also removes any stale
+		// ~/.claude/.credentials.json left behind by a previous
+		// subscription-billed turn on a reused container — the CLI prefers
+		// the credentials file over the env var, so leaving it in place
+		// would silently bill a revoked/stale subscription token.
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr != nil {
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("claude API-key auth could not be prepared: %s", fallbackErr),
+				FailureCategoryClaudeCodeAuth,
+				"The Anthropic API key is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
+				[]string{"Retry the session after verifying sandbox access"},
+			)
+			return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr)
+		}
 		return TokenBillingModeAPIKey, nil
 	}
 

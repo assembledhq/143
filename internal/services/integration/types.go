@@ -518,6 +518,39 @@ func (s *StubPullRequestCreator) CreatePullRequest(_ context.Context, _ CreatePu
 }
 
 // --------------------------------------------------------------------------
+// EvalCandidateReporter — eval bootstrap candidate creation
+// --------------------------------------------------------------------------
+
+// EvalCandidateReporter allows a session-backed eval bootstrap agent to add
+// candidate eval tasks discovered during repository history analysis.
+type EvalCandidateReporter interface {
+	Name() string
+	AddCandidate(ctx context.Context, params AddEvalCandidateParams) (*AddEvalCandidateResult, error)
+}
+
+type AddEvalCandidateParams struct {
+	PRNumber          int             `json:"pr_number"`
+	PRTitle           string          `json:"pr_title"`
+	BaseCommitSHA     string          `json:"base_commit_sha"`
+	SolutionCommitSHA string          `json:"solution_commit_sha"`
+	SolutionDiff      string          `json:"solution_diff"`
+	IssueDescription  string          `json:"issue_description"`
+	ScoringCriteria   json.RawMessage `json:"scoring_criteria"`
+	Complexity        string          `json:"complexity"`
+	FitnessScore      float64         `json:"fitness_score"`
+	FitnessReasoning  string          `json:"fitness_reasoning"`
+	Evidence          json.RawMessage `json:"evidence,omitempty"`
+	Warnings          []string        `json:"warnings,omitempty"`
+}
+
+type AddEvalCandidateResult struct {
+	CandidateID    string `json:"candidate_id"`
+	CandidateIndex int    `json:"candidate_index"`
+	BootstrapRunID string `json:"bootstrap_run_id"`
+	Status         string `json:"status"`
+}
+
+// --------------------------------------------------------------------------
 // ProjectProposer — internal 143 project proposal creation
 // --------------------------------------------------------------------------
 

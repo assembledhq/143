@@ -708,6 +708,47 @@ func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testi
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestWorkerSelector_SelectCachePlacementWorkerChoosesLeastLoadedHolder(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now().UTC()
+	metadata, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://worker.internal:8080",
+	})
+	require.NoError(t, err, "worker metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, "cache-key", "placement", "worker-busy", int64(10), now, now).
+			AddRow(uuid.New(), orgID, repoID, "cache-key", "placement", "worker-idle", int64(10), now.Add(-time.Minute), now))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("worker-busy", "worker", "worker-busy.internal", "active", metadata, now, now).
+			AddRow("worker-idle", "worker", "worker-idle.internal", "active", metadata, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("worker-busy", 4).
+			AddRow("worker-idle", 1))
+
+	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 10)
+	worker, ok, err := selector.selectCachePlacementWorker(context.Background(), orgID, repoID, "placement", true, WorkerSelectionRequirements{})
+	require.NoError(t, err, "cache placement worker lookup should not fail")
+	require.True(t, ok, "cache placement worker lookup should find a candidate")
+	require.Equal(t, "worker-idle", worker.ID, "cache placement should prefer the least-loaded holder instead of the newest hint when both have the blob")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestWorkerSelector_SelectLeastLoadedNodeInPreferredRegionIgnoresUnknownRegion(t *testing.T) {
 	t.Parallel()
 

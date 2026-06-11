@@ -629,33 +629,9 @@ export const api = {
       }),
     delete: (provider: string) => del(`/api/v1/settings/credentials/${provider}`),
   },
-  userCredentials: {
-    listPersonal: () =>
-      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/personal'),
-    upsertPersonal: (provider: string, config: Record<string, unknown>, isTeamDefault?: boolean) =>
-      request<import('./types').SingleResponse<import('./types').UserCredentialSummary>>(`/api/v1/settings/credentials/personal/${provider}`, {
-        method: 'PUT',
-        body: JSON.stringify({ config, is_team_default: isTeamDefault ?? false }),
-      }),
-    deletePersonal: (provider: string) =>
-      del(`/api/v1/settings/credentials/personal/${provider}`),
-    listTeamDefaults: () =>
-      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/team'),
-    setTeamDefault: (provider: string, userId: string) =>
-      request(`/api/v1/settings/credentials/team/${provider}`, {
-        method: 'PUT',
-        body: JSON.stringify({ user_id: userId }),
-      }),
-    removeTeamDefault: (provider: string) =>
-      del(`/api/v1/settings/credentials/team/${provider}`),
-    listResolved: () =>
-      get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
-  },
-  // Unified coding-credentials API — replaces the split userCredentials +
-  // codingAuths surface. See docs/design/future/65-unified-coding-credentials.md.
-  // The legacy `codingAuths` and `userCredentials` clients below still work
-  // (their writes are mirrored into coding_credentials by the backend) and
-  // remain in use by /settings/agent until the cleanup PR.
+  // Unified coding-credentials API — replaces the legacy split
+  // userCredentials + codingAuths surface, whose endpoints now return
+  // 410 Gone. See docs/design/future/65-unified-coding-credentials.md.
   codingCredentials: {
     list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
       get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
@@ -689,31 +665,6 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify({ scope, ordered_ids: orderedIDs }),
       }),
-  },
-  codingAuths: {
-    list: () =>
-      get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
-    create: (body: {
-      agent: string;
-      auth_type: string;
-      label?: string;
-      api_key?: string;
-      api_type?: string;
-      base_url?: string;
-      agent_defaults?: Record<string, string>;
-    }) =>
-      post<import('./types').SingleResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths', body),
-    reorder: (ids: string[]) =>
-      request('/api/v1/settings/coding-auths/reorder', {
-        method: 'PATCH',
-        body: JSON.stringify({ ids }),
-      }),
-    update: (id: string, body: { label?: string }) =>
-      request<import('./types').SingleResponse<import('./types').CodingAuth>>(`/api/v1/settings/coding-auths/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      }),
-    delete: (id: string) => del(`/api/v1/settings/coding-auths/${id}`),
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
@@ -1118,6 +1069,12 @@ export const api = {
     },
     startBatch: (body: { name: string; task_ids: string[]; configs: Array<{ model: string; config_ref?: string }> }) =>
       post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/batch', body),
+    compare: (body: {
+      name?: string;
+      task_ids: string[];
+      baseline_config: { model: string; config_ref?: string };
+      candidate_configs: Array<{ model: string; config_ref?: string }>;
+    }) => post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/compare', body),
     getBatch: (id: string) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`),
     // Bootstrap
     bootstrap: (body: { repo_id: string }) =>
@@ -1129,8 +1086,33 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`);
     },
-    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
+    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices?: number[]; candidate_ids?: string[] }) =>
       post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
+    reviewBootstrapCandidate: (candidateId: string, body: { status: import('./types').EvalBootstrapCandidateStatus; rejection_reason?: string }) =>
+      patch<import('./types').SingleResponse<{ candidate_id: string; status: import('./types').EvalBootstrapCandidateStatus; rejection_reason?: string }>>(`/api/v1/evals/bootstrap/candidates/${candidateId}`, body),
+    listDatasets: (params?: { repository_id?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalDataset>>(`/api/v1/evals/datasets${qs ? `?${qs}` : ''}`);
+    },
+    createDataset: (body: { name: string; dataset_type: import('./types').EvalDatasetType; repository_id?: string; description?: string; source_summary?: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalDataset>>('/api/v1/evals/datasets', body),
+    addDatasetTask: (datasetId: string, body: { task_id: string; slice_key?: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalDatasetTask>>(`/api/v1/evals/datasets/${datasetId}/tasks`, body),
+    listReleaseGates: () =>
+      get<import('./types').ListResponse<import('./types').EvalReleaseGate>>('/api/v1/evals/release-gates'),
+    upsertReleaseGate: (body: {
+      gate_name: string;
+      enabled?: boolean;
+      dataset_id?: string;
+      min_pass_at_1?: number;
+      min_pass_at_k?: number;
+      max_policy_violations?: number;
+      max_regression_delta?: number;
+      canary_stages?: unknown;
+      rollback_rules?: unknown;
+    }) => post<import('./types').SingleResponse<import('./types').EvalReleaseGate>>('/api/v1/evals/release-gates', body),
   },
   usage: {
     getSummary: (params?: { start?: string; end?: string }) => {

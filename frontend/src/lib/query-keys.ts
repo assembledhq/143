@@ -49,10 +49,12 @@ export const queryKeys = {
     network: ["settings", "network"] as const,
     runtimeStatus: ["settings", "runtime", "status"] as const,
   },
-  credentials: {
-    all: ["credentials"] as const,
-    resolved: ["credentials", "resolved"] as const,
-    teamDefaults: ["credentials", "team-defaults"] as const,
+  // Unified coding-credentials caches. The scope segment matches the API's
+  // scope param ("org" | "personal" | "resolved"); invalidating
+  // codingCredentials.all sweeps every scope at once.
+  codingCredentials: {
+    all: ["coding-credentials"] as const,
+    list: (scope: "org" | "personal" | "resolved") => ["coding-credentials", scope] as const,
   },
   codexAuth: {
     status: ["codex-auth-status"] as const,

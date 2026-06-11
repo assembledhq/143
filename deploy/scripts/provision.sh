@@ -564,6 +564,9 @@ wait_for_docker_daemon
 configure_tailscale_if_requested
 resolve_worker_identity
 resolve_worker_docker_gid
+if [ "$ROLE" = "worker" ]; then
+  ssh "${SSH_OPTS[@]}" root@"$HOST" 'mkdir -p /var/cache/143/preview-dependency-cache && chown 1000:1000 /var/cache/143/preview-dependency-cache && chmod 0750 /var/cache/143/preview-dependency-cache'
+fi
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.

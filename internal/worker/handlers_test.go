@@ -948,6 +948,7 @@ var workerSessionThreadColumns = []string{
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
+	"created_by_source", "created_by_thread_id",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
@@ -967,6 +968,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil,
 		nowPtr, nil, now,
+		models.ThreadCreatedBySourceUser, nil,
 		nil, nil, float64(0), 0, nil,
 		"", nil, "", "", []byte("[]"),
 	}
@@ -3964,6 +3966,26 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
 }
 
+func TestRegisterHandlers_LegacyEvalJobsRemainRegisteredDuringRollout(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.EvalTasks = db.NewEvalTaskStore(mock)
+	stores.EvalRuns = db.NewEvalRunStore(mock)
+	stores.EvalBootstraps = db.NewEvalBootstrapStore(mock)
+
+	logger := zerolog.Nop()
+	w := New(nil, logger, "test-node")
+
+	RegisterHandlers(w, stores, &Services{}, DataRetentionConfig{}, logger)
+
+	_, ok := w.handlers["run_eval"]
+	require.True(t, ok, "legacy run_eval jobs should remain registered so pending jobs do not dead-letter during rollout")
+	_, ok = w.handlers["run_eval_bootstrap"]
+	require.True(t, ok, "legacy run_eval_bootstrap jobs should remain registered so pending jobs do not dead-letter during rollout")
+}
+
 type mockPreviewStarter struct {
 	called        bool
 	payload       previewsvc.StartPreviewJobPayload
@@ -4451,7 +4473,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedReasoning, pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -4720,7 +4742,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &creatorID,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -4793,7 +4815,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -4872,7 +4894,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &creatorID,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -5271,6 +5293,81 @@ func (s *stubSandboxProvider) Restore(ctx context.Context, sb *agent.Sandbox, re
 }
 func (s *stubSandboxProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 	return 0, nil
+}
+
+type recordingEvalSandboxProvider struct {
+	commands []string
+	exitCode int
+	stdout   string
+	stderr   string
+	execErr  error
+}
+
+func (p *recordingEvalSandboxProvider) Name() string { return "recording" }
+func (p *recordingEvalSandboxProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	return &agent.Sandbox{ID: "sandbox-eval", Provider: "recording", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+}
+func (p *recordingEvalSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, string, string, string) error {
+	return nil
+}
+func (p *recordingEvalSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	p.commands = append(p.commands, cmd)
+	if p.stdout != "" {
+		_, _ = stdout.Write([]byte(p.stdout))
+	}
+	if p.stderr != "" {
+		_, _ = stderr.Write([]byte(p.stderr))
+	}
+	return p.exitCode, p.execErr
+}
+func (p *recordingEvalSandboxProvider) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+func (p *recordingEvalSandboxProvider) WriteFile(context.Context, *agent.Sandbox, string, []byte) error {
+	return nil
+}
+func (p *recordingEvalSandboxProvider) Destroy(context.Context, *agent.Sandbox) error {
+	return nil
+}
+func (p *recordingEvalSandboxProvider) IsAlive(context.Context, *agent.Sandbox) (bool, error) {
+	return true, nil
+}
+func (p *recordingEvalSandboxProvider) ConnectionInfo(context.Context, *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+	return nil, nil
+}
+func (p *recordingEvalSandboxProvider) Snapshot(context.Context, *agent.Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+func (p *recordingEvalSandboxProvider) Restore(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+	_, err := io.Copy(io.Discard, reader)
+	return err
+}
+func (p *recordingEvalSandboxProvider) ExecStream(context.Context, *agent.Sandbox, string, func([]byte), io.Writer) (int, error) {
+	return 0, nil
+}
+
+type fakeSnapshotStore struct {
+	load func(context.Context, string, io.Writer) error
+}
+
+func (s fakeSnapshotStore) Save(context.Context, string, io.Reader) error { return nil }
+func (s fakeSnapshotStore) Load(ctx context.Context, key string, writer io.Writer) error {
+	if s.load != nil {
+		return s.load(ctx, key, writer)
+	}
+	return nil
+}
+func (s fakeSnapshotStore) Delete(context.Context, string) error { return nil }
+
+type fakeEvalLLM struct {
+	response   string
+	err        error
+	userPrompt string
+}
+
+func (l *fakeEvalLLM) Complete(_ context.Context, _, userPrompt string) (string, error) {
+	l.userPrompt = userPrompt
+	return l.response, l.err
 }
 
 // ---------------------------------------------------------------------------
@@ -7569,6 +7666,7 @@ func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
 
 var evalRunTestCols = []string{
 	"id", "task_id", "org_id", "batch_id",
+	"session_id", "thread_id",
 	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
@@ -7577,34 +7675,18 @@ var evalRunTestCols = []string{
 	"started_at", "completed_at", "error_message", "created_at",
 }
 
-var evalTaskTestCols = []string{
-	"id", "org_id", "repo_id", "name", "description",
-	"base_commit_sha", "solution_commit_sha", "solution_diff",
-	"issue_description", "issue_context",
-	"server_deploy_sha", "pm_document_set_pin_id", "org_settings_version_id",
-	"memory_snapshot", "sandbox_image_digest", "context_overrides",
-	"scoring_criteria", "pass_threshold",
-	"source", "source_pr_number", "complexity", "tags",
-	"snapshot_broken",
-	"created_by", "created_at", "updated_at", "archived_at",
-}
-
-func newEvalTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
-	t.Helper()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	return &Stores{
-		EvalTasks:      db.NewEvalTaskStore(mock),
-		EvalRuns:       db.NewEvalRunStore(mock),
-		EvalBatches:    db.NewEvalBatchStore(mock),
-		EvalBootstraps: db.NewEvalBootstrapStore(mock),
-		Repositories:   db.NewRepositoryStore(mock),
-	}, mock
+func anyArgs(n int) []interface{} {
+	args := make([]interface{}, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
 }
 
 func evalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		runID, taskID, orgID, nil,
+		nil, nil,
 		nil, "claude-sonnet-4-6", nil, nil,
 		nil, json.RawMessage(`{}`),
 		nil, nil, nil,
@@ -7614,1163 +7696,229 @@ func evalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
 	}
 }
 
-func evalTaskRow(taskID, orgID uuid.UUID, now time.Time, criteria json.RawMessage) []interface{} {
-	return []interface{}{
-		taskID, orgID, uuid.New(), "Test Task", "desc",
-		"abc123", nil, nil,
-		"Fix the bug", json.RawMessage(`{}`),
-		nil, nil, nil,
-		nil, nil, json.RawMessage(`{}`),
-		criteria, 0.7,
-		"manual", nil, "moderate", []string{"test"},
-		false,
-		nil, now, now, nil,
-	}
-}
-
-func TestExecuteEvalRun(t *testing.T) {
+func TestFinalizeSessionBackedEvalRun(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns failed with placeholder message for valid criteria", func(t *testing.T) {
-		t.Parallel()
-
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			ScoringCriteria: json.RawMessage(`[{"name":"tests_pass","grader_type":"code_check","weight":1.0}]`),
-		}
-		logger := zerolog.Nop()
-
-		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "repository store not configured")
-	})
-
-	t.Run("returns failed on invalid scoring criteria JSON", func(t *testing.T) {
-		t.Parallel()
-
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			ScoringCriteria: json.RawMessage(`not valid json`),
-		}
-		logger := zerolog.Nop()
-
-		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "failed to parse scoring criteria")
-	})
-
-	t.Run("returns failed when repository store is nil", func(t *testing.T) {
-		t.Parallel()
-
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			ScoringCriteria: json.RawMessage(`[]`),
-		}
-		logger := zerolog.Nop()
-
-		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "repository store not configured")
-	})
-
-	t.Run("returns failed when sandbox provider is nil", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		repoID := uuid.New()
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			OrgID:           orgID,
-			RepoID:          repoID,
-			ScoringCriteria: json.RawMessage(`[]`),
-		}
-		logger := zerolog.Nop()
-
-		// Mock repository lookup
-		mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}).
-				AddRow(repoID, orgID, uuid.New(), int64(123), "org/repo", "main", false, nil, nil, "https://github.com/org/repo.git", int64(456), "active", nil, nil, json.RawMessage(`{}`), time.Now(), time.Now()))
-
-		result := executeEvalRun(context.Background(), stores, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "sandbox provider not configured")
-	})
-}
-
-func TestRunEvalHandler(t *testing.T) {
-	t.Parallel()
-
-	t.Run("invalid JSON payload returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", json.RawMessage(`{invalid`))
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "unmarshal run_eval payload")
-	})
-
-	t.Run("missing org ID returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		payload := json.RawMessage(`{"eval_run_id":"` + uuid.New().String() + `"}`)
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "parse org ID")
-	})
-
-	t.Run("invalid eval run ID returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		payload := json.RawMessage(`{"eval_run_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`)
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "parse eval run ID")
-	})
-
-	t.Run("successful run executes full lifecycle", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-		taskID := uuid.New()
-		now := time.Now()
-
-		// GetByID for run
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
-
-		// GetByID for task
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
-				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
-
-		// UpdateStatus to running
-		mock.ExpectExec("UPDATE eval_runs SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		// UpdateResult
-		mock.ExpectExec("UPDATE eval_runs SET").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("batch run completes batch when all runs done", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-		taskID := uuid.New()
-		batchID := uuid.New()
-		now := time.Now()
-
-		// GetByID for run — this time with a batch_id set
-		runRow := evalRunRow(runID, taskID, orgID, now)
-		runRow[3] = &batchID // batch_id field
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(runRow...))
-
-		// GetByID for task
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
-				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
-
-		// UpdateStatus to running
-		mock.ExpectExec("UPDATE eval_runs SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		// UpdateResult
-		mock.ExpectExec("UPDATE eval_runs SET").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		// CompleteBatchIfDone
-		mock.ExpectExec("UPDATE eval_batches SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-			"batch_id":    batchID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("fetch run failure returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "fetch eval run")
-	})
-
-	t.Run("update status failure returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-		taskID := uuid.New()
-		now := time.Now()
-
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
-
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
-				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
-
-		mock.ExpectExec("UPDATE eval_runs SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("db connection lost"))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "update eval run status to running")
-	})
-}
-
-func TestComputeWeightedScore(t *testing.T) {
-	t.Parallel()
-
-	t.Run("simple pass", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 1.0, Required: false},
-			{Name: "quality", Weight: 1.0, Required: false},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 1.0, Pass: true},
-			{Name: "quality", Score: 0.8, Pass: true},
-		}
-		score, passed := computeWeightedScore(criteria, results, 0.7)
-		require.InDelta(t, 0.9, score, 0.01)
-		require.True(t, passed)
-	})
-
-	t.Run("required criterion fails overall", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 1.0, Required: true},
-			{Name: "quality", Weight: 1.0, Required: false},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 0.0, Pass: false},
-			{Name: "quality", Score: 1.0, Pass: true},
-		}
-		score, passed := computeWeightedScore(criteria, results, 0.3)
-		require.InDelta(t, 0.5, score, 0.01) // weighted avg is 0.5
-		require.False(t, passed)             // but fails due to required criterion
-	})
-
-	t.Run("below threshold fails", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 1.0},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 0.5, Pass: true},
-		}
-		_, passed := computeWeightedScore(criteria, results, 0.7)
-		require.False(t, passed)
-	})
-
-	t.Run("empty results return zero", func(t *testing.T) {
-		t.Parallel()
-		score, passed := computeWeightedScore(nil, nil, 0.5)
-		require.Equal(t, 0.0, score)
-		require.False(t, passed)
-	})
-
-	t.Run("unequal weights", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 3.0},
-			{Name: "quality", Weight: 1.0},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 1.0, Pass: true},
-			{Name: "quality", Score: 0.0, Pass: false},
-		}
-		score, _ := computeWeightedScore(criteria, results, 0.5)
-		require.InDelta(t, 0.75, score, 0.01) // (3*1.0 + 1*0.0) / 4
-	})
-}
-
-func TestExtractJSON(t *testing.T) {
-	t.Parallel()
-
-	t.Run("extracts from markdown fences", func(t *testing.T) {
-		t.Parallel()
-		input := "Here is the result:\n```json\n{\"pass\": true}\n```"
-		result := extractJSON(input)
-		require.Equal(t, "{\"pass\": true}", result)
-	})
-
-	t.Run("plain JSON passthrough", func(t *testing.T) {
-		t.Parallel()
-		input := `{"pass": false, "reasoning": "bad"}`
-		result := extractJSON(input)
-		require.Equal(t, input, result)
-	})
-
-	t.Run("no JSON returns input", func(t *testing.T) {
-		t.Parallel()
-		input := "no json here"
-		result := extractJSON(input)
-		require.Equal(t, input, result)
-	})
-}
-
-func TestTruncateString(t *testing.T) {
-	t.Parallel()
-
-	t.Run("short string unchanged", func(t *testing.T) {
-		t.Parallel()
-		require.Equal(t, "hello", truncateString("hello", 10))
-	})
-
-	t.Run("long string truncated", func(t *testing.T) {
-		t.Parallel()
-		result := truncateString("hello world", 5)
-		require.Equal(t, "hello...(truncated)", result)
-	})
-}
-
-func TestEvalFailed(t *testing.T) {
-	t.Parallel()
-
-	result := evalFailed("test error: %v", "details")
-	require.Equal(t, models.EvalRunStatusFailed, result.Status)
-	require.NotNil(t, result.ErrorMessage)
-	require.Equal(t, "test error: details", *result.ErrorMessage)
-}
-
-func TestBuildEvalManifest(t *testing.T) {
-	t.Parallel()
-
-	pinID := uuid.New()
-	settingsID := uuid.New()
-	digest := "sha256:abc123"
-	task := &models.EvalTask{
-		BaseCommitSHA:        "abc123",
-		PMDocumentSetPinID:   &pinID,
-		OrgSettingsVersionID: &settingsID,
-		SandboxImageDigest:   &digest,
-	}
-	run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-
-	manifest := buildEvalManifest(task, run)
-	require.Equal(t, "abc123", manifest.RepoBaseCommitSHA)
-	require.Equal(t, "claude-sonnet-4-6", manifest.Model)
-	require.Equal(t, &pinID, manifest.PMDocumentSetPinID)
-	require.Equal(t, &settingsID, manifest.OrgSettingsVersionID)
-	require.Equal(t, "sha256:abc123", manifest.SandboxImageDigest)
-}
-
-// ---------------------------------------------------------------------------
-// configurable sandbox provider for grading tests
-// ---------------------------------------------------------------------------
-
-// execFunc allows per-test control of sandbox Exec behavior.
-type execFunc func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
-
-// configurableSandboxProvider embeds stubSandboxProvider but overrides Exec.
-type configurableSandboxProvider struct {
-	stubSandboxProvider
-	execFn execFunc
-}
-
-func (c *configurableSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	if c.execFn != nil {
-		return c.execFn(ctx, sb, cmd, stdout, stderr)
-	}
-	return 0, nil
-}
-
-// ---------------------------------------------------------------------------
-// mock LLM client for gradeLLMJudge tests
-// ---------------------------------------------------------------------------
-
-type mockLLMClient struct {
-	response string
-	err      error
-}
-
-func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
-	return m.response, m.err
-}
-
-// ---------------------------------------------------------------------------
-// gradeCodeCheck tests
-// ---------------------------------------------------------------------------
-
-func TestGradeCodeCheck(t *testing.T) {
-	t.Parallel()
-
-	t.Run("passing command returns score 1", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, "build", result.Name)
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-		require.Contains(t, result.Details, "exit_code=0")
-	})
-
-	t.Run("failing command returns score 0", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, stderr io.Writer) (int, error) {
-				_, _ = stderr.Write([]byte("build failed"))
-				return 1, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, "build", result.Name)
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "exit_code=1")
-	})
-
-	t.Run("exec error returns score 0", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return -1, errors.New("sandbox unreachable")
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "exec_error")
-	})
-
-	t.Run("invalid grader config returns score 0", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{invalid`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "invalid code_check config")
-	})
-
-	t.Run("JSON stdout with custom score overrides exit code", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
-				_, _ = stdout.Write([]byte(`{"score": 0.75}`))
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "quality",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.InDelta(t, 0.75, result.Score, 0.001)
-		require.True(t, result.Pass) // 0.75 >= 0.5
-	})
-
-	t.Run("JSON stdout score below 0.5 fails", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
-				_, _ = stdout.Write([]byte(`{"score": 0.3}`))
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "quality",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.InDelta(t, 0.3, result.Score, 0.001)
-		require.False(t, result.Pass) // 0.3 < 0.5
-	})
-
-	t.Run("custom timeout from config is respected", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test","timeout_seconds":10}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-	})
-}
-
-// ---------------------------------------------------------------------------
-// gradeLLMJudge tests
-// ---------------------------------------------------------------------------
-
-func TestGradeLLMJudge(t *testing.T) {
-	t.Parallel()
-
-	solutionDiff := "diff --git a/main.go b/main.go\n+fixed"
-	task := &models.EvalTask{
-		IssueDescription: "Fix the bug in main.go",
-		SolutionDiff:     &solutionDiff,
-	}
-
-	t.Run("nil LLM client returns error result", func(t *testing.T) {
-		t.Parallel()
-
-		criterion := models.ScoringCriterion{
-			Name:       "correctness",
-			GraderType: "llm_judge",
-		}
-		result := gradeLLMJudge(context.Background(), nil, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, "correctness", result.Name)
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "LLM client not configured")
-	})
-
-	t.Run("pass_fail mode with passing judgment", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": true, "reasoning": "The diff correctly fixes the bug."}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, "correctness", result.Name)
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-		require.Equal(t, "The diff correctly fixes the bug.", result.Reasoning)
-	})
-
-	t.Run("pass_fail mode with failing judgment", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": false, "reasoning": "The fix is incorrect."}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-	})
-
-	t.Run("score mode uses numeric score", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": true, "score": 0.85, "reasoning": "Mostly correct."}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "quality",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"score"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.InDelta(t, 0.85, result.Score, 0.001)
-		require.True(t, result.Pass)
-	})
-
-	t.Run("LLM error returns failure result", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			err: errors.New("rate limited"),
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "LLM judge call failed")
-	})
-
-	t.Run("unparseable LLM response returns failure", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: "I'm not sure what to say here",
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "failed to parse judge response")
-	})
-
-	t.Run("markdown-fenced JSON is extracted", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: "Here is my judgment:\n```json\n{\"pass\": true, \"reasoning\": \"Good fix.\"}\n```",
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-	})
-
-	t.Run("nil solution diff handled gracefully", func(t *testing.T) {
-		t.Parallel()
-
-		taskNoSolution := &models.EvalTask{
-			IssueDescription: "Fix the bug",
-		}
-		llm := &mockLLMClient{
-			response: `{"pass": true, "reasoning": "ok"}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", taskNoSolution, zerolog.Nop())
-
-		require.True(t, result.Pass)
-	})
-
-	t.Run("invalid grader config defaults to pass_fail", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": true, "reasoning": "ok"}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{invalid`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", task, zerolog.Nop())
-
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-	})
-}
-
-// ---------------------------------------------------------------------------
-// applyConfigOverlay tests
-// ---------------------------------------------------------------------------
-
-func TestApplyConfigOverlay(t *testing.T) {
-	t.Parallel()
-
-	t.Run("calls exec for fetch and each config file and dir", func(t *testing.T) {
-		t.Parallel()
-
-		var commands []string
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
-				commands = append(commands, cmd)
-				return 0, nil
-			},
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/my-branch", zerolog.Nop())
-
-		// Should have: 1 fetch + 2 config files + 2 config dirs = 5 commands
-		require.Len(t, commands, 5)
-		require.Contains(t, commands[0], "git fetch origin refs/heads/my-branch")
-		// Config files: AGENTS.md and CLAUDE.md
-		require.Contains(t, commands[1], "AGENTS.md")
-		require.Contains(t, commands[2], "CLAUDE.md")
-		// Config dirs: .claude and .143
-		require.Contains(t, commands[3], ".claude")
-		require.Contains(t, commands[4], ".143")
-	})
-
-	t.Run("exec failures are non-fatal", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return 1, errors.New("command failed")
-			},
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-
-		// Should not panic
-		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/broken", zerolog.Nop())
-	})
-}
-
-// ---------------------------------------------------------------------------
-// weightedAverage tests
-// ---------------------------------------------------------------------------
-
-func TestWeightedAverage(t *testing.T) {
-	t.Parallel()
-
-	t.Run("equal weights", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 1.0},
-			{Name: "b", Weight: 1.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-			"b": {Name: "b", Score: 0.5},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.75, avg, 0.001)
-	})
-
-	t.Run("unequal weights", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 3.0},
-			{Name: "b", Weight: 1.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-			"b": {Name: "b", Score: 0.0},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.75, avg, 0.001)
-	})
-
-	t.Run("zero weight defaults to 1", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 0},
-			{Name: "b", Weight: 0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-			"b": {Name: "b", Score: 0.0},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.5, avg, 0.001)
-	})
-
-	t.Run("missing result treated as zero", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 1.0},
-			{Name: "b", Weight: 1.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.5, avg, 0.001)
-	})
-
-	t.Run("empty criteria returns zero", func(t *testing.T) {
-		t.Parallel()
-
-		avg := weightedAverage(nil, nil)
-		require.Equal(t, 0.0, avg)
-	})
-
-	t.Run("negative weight defaults to 1", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: -5.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 0.8},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.8, avg, 0.001)
-	})
-}
-
-// ---------------------------------------------------------------------------
-// runCodingAgent tests
-// ---------------------------------------------------------------------------
-
-func TestRunCodingAgent(t *testing.T) {
-	t.Parallel()
-
-	t.Run("successful agent execution returns diff", func(t *testing.T) {
-		t.Parallel()
-
-		callCount := 0
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
-				callCount++
-				if callCount == 1 {
-					// Write issue description to temp file
-					return 0, nil
-				}
-				if callCount == 2 {
-					// The claude CLI call
-					_, _ = stdout.Write([]byte("agent output"))
-					return 0, nil
-				}
-				// The git diff call
-				_, _ = stdout.Write([]byte("diff --git a/file.go b/file.go\n+new line"))
-				return 0, nil
-			},
-		}
-		services := &Services{
-			SandboxProvider: provider,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		diff, trace, tokenUsage := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix the bug", zerolog.Nop())
-
-		require.Contains(t, diff, "diff --git")
-		require.NotNil(t, trace)
-		require.Equal(t, 0, trace["exit_code"])
-		require.Nil(t, tokenUsage)
-	})
-
-	t.Run("agent exec error is captured in trace", func(t *testing.T) {
-		t.Parallel()
-
-		callCount := 0
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				callCount++
-				if callCount == 1 {
-					// Write issue description to temp file succeeds
-					return 0, nil
-				}
-				// CLI call fails
-				return 1, errors.New("sandbox crashed")
-			},
-		}
-		services := &Services{
-			SandboxProvider: provider,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		_, trace, _ := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix", zerolog.Nop())
-
-		require.Equal(t, 1, trace["exit_code"])
-		require.Equal(t, "sandbox crashed", trace["exec_error"])
-	})
-}
-
-// ---------------------------------------------------------------------------
-// bootstrapLogWriter tests
-// ---------------------------------------------------------------------------
-
-func TestBootstrapLogWriter_NilStore(t *testing.T) {
-	t.Parallel()
-	w := &bootstrapLogWriter{store: nil, sessionID: uuid.New(), orgID: uuid.New()}
-	// Should not panic with nil store.
-	w.log(context.Background(), "info", "test message")
-}
-
-func TestBootstrapLogWriter_NilSessionID(t *testing.T) {
-	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	store := db.NewSessionLogStore(mock)
-	w := &bootstrapLogWriter{store: store, sessionID: uuid.Nil, orgID: uuid.New()}
-	// Should skip writing when sessionID is nil.
-	w.log(context.Background(), "info", "test message")
-
-	// No expectations set on mock — if it tried to write, mock would fail.
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestBootstrapLogWriter_WritesLog(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
+	orgID := uuid.New()
 	sessionID := uuid.New()
-	orgID := uuid.New()
-	store := db.NewSessionLogStore(mock)
-	w := &bootstrapLogWriter{store: store, sessionID: sessionID, orgID: orgID}
+	threadID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
+	now := time.Now()
+	diff := "diff --git a/app.go b/app.go"
 
-	mock.ExpectQuery(`INSERT INTO session_logs`).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(1), time.Now()))
+	mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+	mock.ExpectQuery("SELECT").
+		WithArgs(anyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"diff", "diff_stats", "diff_history", "diff_truncated", "diff_history_truncated",
+			"diff_chars", "diff_history_bytes", "diff_max_chars", "diff_history_max_bytes",
+		}).AddRow(&diff, nil, nil, false, false, int64(len(diff)), int64(0), int64(1_000_000), int64(1_000_000)))
+	mock.ExpectExec("UPDATE eval_runs SET").
+		WithArgs(anyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "eval", "run_eval_grader", pgxmock.AnyArg(), 5, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
-	// Call log — errors are silently swallowed, so verify via mock expectations.
-	w.log(context.Background(), "info", "Fetching repository details...")
-
-	err = mock.ExpectationsWereMet()
-	if err != nil {
-		// If pgxmock didn't match (e.g. due to named args), at least verify the
-		// method doesn't panic and the nil/zero-ID guards work correctly.
-		// The nil-store and nil-sessionID tests above cover the guard paths.
-		t.Skipf("pgxmock did not match QueryRow with named args (known limitation): %v", err)
+	stores := &Stores{
+		Sessions: db.NewSessionStore(mock),
+		EvalRuns: db.NewEvalRunStore(mock),
+		Jobs:     db.NewJobStore(mock),
 	}
+	finalizeSessionBackedEvalRun(context.Background(), stores, &Services{}, zerolog.Nop(), models.Session{
+		ID:              sessionID,
+		PrimaryThreadID: &threadID,
+		OrgID:           orgID,
+		Origin:          models.SessionOriginEvalRun,
+		Status:          models.SessionStatusCompleted,
+	})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "finalizer should capture the diff and enqueue post-session grading")
 }
 
-func TestShellSingleQuote(t *testing.T) {
+func TestFinalizeSessionBackedEvalRun_DiffLoadError(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"plain", "hello", `'hello'`},
-		{"backticks", "a `cmd` b", "'a `cmd` b'"},
-		{"dollar", "$VAR", `'$VAR'`},
-		{"backslash_n", "line1\\nline2", `'line1\nline2'`},
-		{"embedded_quote", "it's", `'it'\''s'`},
-		{"triple_backtick_json", "```\n{\n  \"x\": 1\n}\n```", "'```\n{\n  \"x\": 1\n}\n```'"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := shellSingleQuote(tc.in)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
 
-func TestBootstrapAgentCommand(t *testing.T) {
-	t.Parallel()
-	// The prompt deliberately contains the characters that broke the
-	// previous %q-based implementation: triple-backtick fences, embedded
-	// $VAR, and a literal single quote.
-	prompt := "scan ```\n{\n  \"x\": $VAR\n}\n``` for it's candidates"
-	cmd := bootstrapAgentCommand(prompt)
-
-	require.Equal(
-		t,
-		"claude --print 'scan ```\n{\n  \"x\": $VAR\n}\n``` for it'\\''s candidates' 2>&1",
-		cmd,
-	)
-}
-
-// stubGitHubTokenProvider implements agent.GitHubTokenProvider.
-type stubGitHubTokenProvider struct{ token string }
-
-func (s *stubGitHubTokenProvider) GetInstallationToken(_ context.Context, _ int64) (string, error) {
-	return s.token, nil
-}
-
-// captureExecSandbox records the cmd passed to ExecStream so tests can
-// assert how the bootstrap command is assembled. The sandbox returns
-// exit code 0 with empty stdout, which causes executeBootstrapScan to
-// fail at JSON parsing — that's fine for our purposes because line 2001
-// (the cmd assignment) has already run.
-type captureExecSandbox struct {
-	stubSandboxProvider
-	lastCmd string
-}
-
-func (c *captureExecSandbox) ExecStream(_ context.Context, _ *agent.Sandbox, cmd string, _ func(line []byte), _ io.Writer) (int, error) {
-	c.lastCmd = cmd
-	return 0, nil
-}
-
-func TestExecuteBootstrapScan_ShellEscapesPrompt(t *testing.T) {
-	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
 
 	orgID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
 	now := time.Now()
 
-	repoMock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer repoMock.Close()
+	mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+	// GetDiffByID returns an error
+	mock.ExpectQuery("SELECT").
+		WithArgs(anyArgs(4)...).
+		WillReturnError(fmt.Errorf("connection reset"))
+	// Should immediately mark the run failed — no grader job enqueued.
+	// UpdateResult sets 13 named args: id, org_id, status, agent_diff, agent_trace,
+	// token_usage, criterion_results, final_score, passed, duration_seconds, sandbox_id,
+	// error_message, input_manifest.
+	mock.ExpectExec("UPDATE eval_runs SET").
+		WithArgs(anyArgs(13)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
-				"private", "language", "description", "clone_url", "installation_id", "status",
-				"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
-			}).AddRow(
-				repoID, orgID, integrationID, int64(12345), "assembledhq/143", "main",
-				false, nil, nil, "https://github.com/assembledhq/143.git", int64(99),
-				"active", nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
-
-	stores := &Stores{Repositories: db.NewRepositoryStore(repoMock)}
-	capSB := &captureExecSandbox{}
-	services := &Services{
-		SandboxProvider: capSB,
-		GitHub:          &stubGitHubTokenProvider{token: "ghp_test"},
+	stores := &Stores{
+		Sessions: db.NewSessionStore(mock),
+		EvalRuns: db.NewEvalRunStore(mock),
 	}
-	logWriter := &bootstrapLogWriter{}
+	finalizeSessionBackedEvalRun(context.Background(), stores, &Services{}, zerolog.Nop(), models.Session{
+		ID:              sessionID,
+		PrimaryThreadID: &threadID,
+		OrgID:           orgID,
+		Origin:          models.SessionOriginEvalRun,
+		Status:          models.SessionStatusCompleted,
+	})
 
-	// The scan will ultimately fail on JSON parsing (stdout is empty), but
-	// it must reach line 2001 first — that's the line diff-cover was
-	// flagging.
-	_, scanErr := executeBootstrapScan(context.Background(), stores, services, orgID, repoID, logWriter, zerolog.Nop())
-	require.Error(t, scanErr)
+	require.NoError(t, mock.ExpectationsWereMet(), "diff load failure should mark run failed without enqueuing grader")
+}
 
-	require.True(t, strings.HasPrefix(capSB.lastCmd, "claude --print '"), "cmd should single-quote the prompt, got: %s", capSB.lastCmd)
-	require.Contains(t, capSB.lastCmd, "assembledhq/143", "prompt should include repo full name")
-	// The template contains triple-backtick fences; they must survive
-	// intact inside single quotes rather than being escaped or stripped.
-	require.Contains(t, capSB.lastCmd, "```", "triple-backtick JSON fences should remain in cmd")
+func TestEvalRunStatusForSession_Skipped(t *testing.T) {
+	t.Parallel()
+
+	session := models.Session{Status: models.SessionStatusSkipped}
+	status, errMsg, terminal := evalRunStatusForSession(session)
+	require.True(t, terminal, "Skipped should be a terminal session status for eval runs")
+	require.Equal(t, models.EvalRunStatusFailed, status, "Skipped session should map to Failed eval run status, not Grading")
+	require.NotNil(t, errMsg, "Skipped session should produce a non-nil error message")
+}
+
+func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
+	t.Parallel()
+
+	diff := "diff --git a/app.go b/app.go"
+	criteria := json.RawMessage(`[
+		{"name":"tests","grader_type":"code_check","weight":2,"required":true,"notes":"unit tests pass","grader_config":{"command":"make test"}}
+	]`)
+	run := models.EvalRun{
+		AgentDiff:     &diff,
+		AgentTrace:    json.RawMessage(`{"session_id":"s1"}`),
+		InputManifest: json.RawMessage(`{"base_commit_sha":"abc123"}`),
+	}
+	task := models.EvalTask{
+		ScoringCriteria: criteria,
+		PassThreshold:   0.75,
+	}
+
+	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{})
+
+	require.NoError(t, err, "gradeEvalRunArtifacts should record non-executable code checks as criterion failures")
+	require.Equal(t, models.EvalRunStatusCompleted, result.Status, "graded eval run should be completed")
+	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
+	require.False(t, *result.Passed, "required code checks without a snapshot should fail the run")
+	require.NotNil(t, result.FinalScore, "graded eval run should persist final score")
+	require.Equal(t, 0.0, *result.FinalScore, "failed required code check should score zero")
+	require.Contains(t, string(result.CriterionResults), "completed session snapshot is required", "criterion result should explain missing snapshot dependency")
+	require.Equal(t, run.InputManifest, result.InputManifest, "grader should preserve the pinned input manifest")
+}
+
+func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
+	t.Parallel()
+
+	diff := "diff --git a/app.go b/app.go"
+	snapshotKey := "snapshots/eval/run.tar.zst"
+	criteria := json.RawMessage(`[
+		{"name":"tests","grader_type":"code_check","weight":1,"required":true,"notes":"unit tests pass","grader_config":{"command":"make test","timeout_seconds":30}}
+	]`)
+	provider := &recordingEvalSandboxProvider{exitCode: 0, stdout: "ok"}
+	run := models.EvalRun{AgentDiff: &diff}
+	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 1}
+	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: &snapshotKey}
+
+	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{
+		session:  &session,
+		provider: provider,
+		snapshots: fakeSnapshotStore{
+			load: func(_ context.Context, key string, writer io.Writer) error {
+				require.Equal(t, snapshotKey, key, "grader should hydrate the completed session snapshot")
+				_, err := writer.Write([]byte("snapshot"))
+				return err
+			},
+		},
+	})
+
+	require.NoError(t, err, "gradeEvalRunArtifacts should run configured code checks")
+	require.Equal(t, []string{"make test"}, provider.commands, "grader should execute the configured deterministic command")
+	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
+	require.True(t, *result.Passed, "successful required code check should pass")
+	require.Contains(t, string(result.CriterionResults), `"tests"`, "criterion results should include the code check")
+	require.Contains(t, string(result.CriterionResults), "ok", "criterion details should include command output")
+}
+
+func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
+	t.Parallel()
+
+	diff := "diff --git a/app.go b/app.go"
+	criteria := json.RawMessage(`[
+		{"name":"quality","grader_type":"llm_judge","weight":1,"required":true,"notes":"solution is focused","grader_config":{"output":"score"}}
+	]`)
+	llm := &fakeEvalLLM{response: `{"score":0.8,"pass":true,"reasoning":"focused fix","details":"looks good"}`}
+	run := models.EvalRun{AgentDiff: &diff}
+	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 0.75, IssueDescription: "Fix the bug"}
+
+	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{llm: llm})
+
+	require.NoError(t, err, "gradeEvalRunArtifacts should run LLM judge criteria")
+	require.NotEmpty(t, llm.userPrompt, "LLM judge should receive the eval prompt and diff")
+	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
+	require.True(t, *result.Passed, "passing LLM judge should pass")
+	require.NotNil(t, result.FinalScore, "LLM judge should contribute to final score")
+	require.Equal(t, 0.8, *result.FinalScore, "LLM judge score should be used in weighted scoring")
+	require.Contains(t, string(result.CriterionResults), "focused fix", "criterion result should include judge reasoning")
+}
+
+func TestFinalizeSessionBackedEvalBootstrapLoadsPrimaryThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).
+			AddRow(workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusCompleted)...))
+	mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE org_id = @org_id AND session_id = @session_id AND thread_id = @thread_id").
+		WithArgs(anyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "status", "candidates", "session_id",
+			"thread_id", "created_by", "created_at", "completed_at", "error_message",
+		}).AddRow(runID, orgID, repoID, string(models.EvalBootstrapStatusRunning), nil, &sessionID, &threadID, nil, now, nil, nil))
+	mock.ExpectExec("UPDATE eval_bootstrap_runs").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	stores := &Stores{
+		SessionThreads: db.NewSessionThreadStore(mock),
+		EvalBootstraps: db.NewEvalBootstrapStore(mock),
+	}
+	finalizeSessionBackedEvalBootstrap(context.Background(), stores, &Services{}, zerolog.Nop(), models.Session{
+		ID:     sessionID,
+		OrgID:  orgID,
+		Origin: models.SessionOriginEvalBootstrap,
+		Status: models.SessionStatusCompleted,
+	})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "bootstrap finalizer should resolve the primary thread and update the bootstrap run")
 }
