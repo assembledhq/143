@@ -17,12 +17,12 @@ fi
 has_go=0
 has_migration=0
 has_store=0
-has_prod_env=0
+has_env_enc=0
 
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   case "$f" in
-    .env.production.enc)         has_prod_env=1 ;;
+    .env*.enc)                   has_env_enc=1 ;;
     *.go)                        has_go=1 ;;
   esac
   case "$f" in
@@ -85,16 +85,11 @@ run_check() {
   fi
 }
 
-case "${COMMIT_PROD_ENV:-}" in
-  1|true|TRUE|True) commit_prod_env=1 ;;
-  *)                commit_prod_env=0 ;;
-esac
-
-if [[ $has_prod_env -eq 1 && "$commit_prod_env" != "1" ]]; then
-  echo "  [pre-commit] production env guard ... FAIL"
-  echo "    .env.production.enc is staged." >&2
-  echo "    This file is protected production configuration and is often dirtied accidentally by stale worktrees or secret rotation." >&2
-  echo "    If this is intentional, re-run commit with: COMMIT_PROD_ENV=true git commit ..." >&2
+if [[ $has_env_enc -eq 1 ]]; then
+  echo "  [pre-commit] encrypted env guard ... FAIL"
+  echo "    An .env*.enc file is staged. Encrypted env bundles live in the" >&2
+  echo "    private secrets repo (see docs/secrets/README.md), never in this" >&2
+  echo "    public repo — even encrypted, published ciphertext can't be unpublished." >&2
   fail=1
 fi
 

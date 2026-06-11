@@ -2,7 +2,7 @@ Use docs/design/overall.md as the overall design of the system, think of it as a
 
 ## Debugging Production
 
-When investigating bugs or unexpected behavior, three Make targets give read-only access to prod. All require `SSH_KEY` (defaults to `~/.ssh/143-deploy`) and resolve hosts/credentials from `.env.production.enc` via sops.
+When investigating bugs or unexpected behavior, three Make targets give read-only access to prod. All require `SSH_KEY` (defaults to `~/.ssh/143-deploy`) and resolve hosts/credentials via sops from `.env.production.enc` in the private secrets checkout (`SECRETS_DIR`, default `../143-infra` — see docs/secrets/README.md).
 
 ### Querying the database
 
@@ -371,4 +371,4 @@ The `trg_project_task_counts_update` trigger (migration 000047) fires on ALL col
 
 ## Production Secrets Guardrail
 
-Treat `.env.production.enc` as protected production configuration. Do not edit, regenerate, stage, or commit it unless the user explicitly asks for a production secret/config change. Read-only decrypts through the Make targets above are fine. Before finishing any work that involved prod debugging, check `git status --short -- .env.production.enc` and leave it clean unless the requested task was specifically to update production env.
+Encrypted env bundles (`.env*.enc`) and `.sops.yaml` live in the private secrets repo (`SECRETS_DIR`, default `../143-infra`), never in this public repo — the pre-commit hook and `.gitignore` both block them here. Treat `.env.production.enc` in that checkout as protected production configuration: do not edit, regenerate, or commit changes to it unless the user explicitly asks for a production secret/config change. Read-only decrypts through the Make targets above are fine. Before finishing any work that involved prod debugging, check `git -C ../143-infra status --short` and leave it clean unless the requested task was specifically to update production env.

@@ -120,6 +120,17 @@ jobs:
       - uses: actions/checkout@v6
         if: steps.deploy_latest.outputs.should_deploy == 'true'
 
+      # Encrypted env bundles live in the private 143-infra repo, not here.
+      # INFRA_REPO_TOKEN is a fine-grained PAT with contents:read on that
+      # repo only. .infra is gitignored so it can never leak into builds.
+      - name: Check out private secrets repo
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: assembledhq/143-infra
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          path: .infra
+
       - name: Install sops and age
         if: steps.deploy_latest.outputs.should_deploy == 'true'
         run: |
@@ -144,10 +155,10 @@ jobs:
         run: |
           set -euo pipefail
           fleet_hosts="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
-            sops --decrypt --input-type dotenv --output-type dotenv .env.production.enc \
+            sops --decrypt --input-type dotenv --output-type dotenv .infra/.env.production.enc \
             | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
           if [ -z "$fleet_hosts" ]; then
-            echo "ERROR: FLEET_HOSTS not present in .env.production.enc"
+            echo "ERROR: FLEET_HOSTS not present in .infra/.env.production.enc"
             exit 1
           fi
           echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
@@ -170,6 +181,7 @@ jobs:
           # Stable path (instead of mktemp) so the upload step below can
           # capture every per-host log when any deploy fails.
           DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs
+          SECRETS_DIR: ${{ github.workspace }}/.infra
         run: |
           chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
           ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"

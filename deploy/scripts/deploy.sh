@@ -378,7 +378,11 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
   fi
 fi
 
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+# The encrypted bundle lives in the private secrets checkout, not this
+# (public) repo. SECRETS_DIR comes from the Makefile or CI; the default
+# assumes a sibling clone of the private repo.
+SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Refreshing secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")

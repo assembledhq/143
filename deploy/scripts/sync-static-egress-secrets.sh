@@ -8,7 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$PROJECT_DIR/.env.production.enc}"
+SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$SECRETS_DIR/.env.production.enc}"
 APPLY=0
 PROVISION_WORKER_HOST="${PROVISION_WORKER_HOST:-}"
 TUNNEL_PREFIX="${STATIC_EGRESS_TUNNEL_PREFIX:-10.143.0}"

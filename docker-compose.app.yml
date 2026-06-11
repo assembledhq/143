@@ -42,7 +42,9 @@ services:
     env_file:
       - .env
     volumes:
-      - .env.production.enc:/.env.production.enc:ro
+      # Mounted at /app (the workdir) — docker-entrypoint.sh resolves the
+      # bundle relative to the workdir; the image itself carries no secrets.
+      - .env.production.enc:/app/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
       interval: 10s

@@ -10,7 +10,8 @@ SSH_KEY="${2:-${SSH_KEY:-}}"
 EGRESS_SSH_USER="${EGRESS_SSH_USER:-${SSH_USER:-}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$PROJECT_DIR/.env.production.enc}"
+SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$SECRETS_DIR/.env.production.enc}"
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 
 load_env_key() {
