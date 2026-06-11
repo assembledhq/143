@@ -274,6 +274,7 @@ Layout rules:
 - Use `space-y-6` or `space-y-8` at the page level, matching existing settings pages.
 - Keep card content compact.
 - Use stacked mobile rows; do not rely on desktop-only table layouts.
+- In Resource defaults, keep the repository resource request policy as its own row below the tier and numeric resource limit grid.
 - Keep all copy operational and short.
 - Put field explanations in question-mark tooltips; keep visible helper text only for max values.
 - Avoid nested cards.
