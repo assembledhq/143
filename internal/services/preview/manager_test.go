@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -3360,6 +3361,52 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	tail := []string{"npm warn tar TAR_ENTRY_ERROR ENOENT", "npm error enoent"}
 	obs.OnInstallFailed("exited with code 1", tail)
 	require.NoError(t, mock.ExpectationsWereMet(), "install failure observer should persist an install preview log without touching service rows")
+}
+
+func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    string
+		cacheKey  string
+		sizeBytes int64
+	}{
+		{
+			name:     "miss",
+			status:   "miss",
+			cacheKey: strings.Repeat("a", 64),
+		},
+		{
+			name:   "disabled",
+			status: "disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+			orgID := uuid.New()
+			previewID := uuid.New()
+			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+			logID := uuid.New()
+			mock.ExpectQuery("INSERT INTO preview_logs").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+				}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+			obs.OnDependencyCacheRestore(tt.status, tt.cacheKey, tt.sizeBytes, nil)
+			require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist non-failure restore statuses")
+		})
+	}
 }
 
 func TestManagerServiceObserver_OnServiceOutput_PersistsStartupLog(t *testing.T) {

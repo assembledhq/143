@@ -301,7 +301,7 @@ func main() {
 						Logger:        logger,
 						WorkerNodeID:  cfg.NodeID,
 						Prefix:        cfg.PreviewDependencyCachePrefix,
-						LocalDir:      cfg.PreviewDependencyCacheLocalDir,
+						LocalDir:      config.ResolvePreviewDependencyCacheLocalDir(cfg.PreviewDependencyCacheLocalDir),
 						LocalMaxBytes: cfg.PreviewDependencyCacheLocalMaxBytes,
 					})
 					if cacheErr != nil {
