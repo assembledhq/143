@@ -69,6 +69,7 @@ import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-sl
 import { useFileDropzone } from "@/hooks/use-file-dropzone";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/session-draft";
 import { queryKeys } from "@/lib/query-keys";
+import { applyCreatedSessionToSessionListCaches } from "@/lib/session-list-cache";
 import { cn } from "@/lib/utils";
 import {
   agentTypeForModel,
@@ -744,6 +745,7 @@ export function ManualSessionComposer({
       // Keep the optimistic row visible — the sidebar swaps it for the real
       // session once the refetch lands. See OptimisticSession.resolvedId.
       markOptimisticResolved(context.optimisticId, response.data.id);
+      applyCreatedSessionToSessionListCaches(queryClient, response.data);
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       setIsNavigatingAfterCreate(true);
       onCreated(response.data.id);
