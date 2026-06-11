@@ -238,11 +238,16 @@ type PreviewAccessSession struct {
 }
 
 // PreviewStartupCache tracks filesystem snapshot metadata for fast startup.
+// SnapshotKey is the exact (lockfiles, commit, config) hash; BaseKey drops the
+// commit so a start at a new commit can find a base snapshot to restore and
+// patch with a git diff. CommitSHA records which commit the blob was built at.
 type PreviewStartupCache struct {
 	ID           uuid.UUID `db:"id" json:"id"`
 	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
 	RepoID       uuid.UUID `db:"repo_id" json:"repo_id"`
 	SnapshotKey  string    `db:"snapshot_key" json:"snapshot_key"`
+	BaseKey      string    `db:"base_key" json:"base_key"`
+	CommitSHA    string    `db:"commit_sha" json:"commit_sha"`
 	BlobPath     string    `db:"blob_path" json:"blob_path"`
 	SizeBytes    int64     `db:"size_bytes" json:"size_bytes"`
 	WorkerNodeID string    `db:"worker_node_id" json:"worker_node_id"`

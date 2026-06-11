@@ -200,6 +200,10 @@ Use `preview.install` when a preview needs dependencies before services can boot
 
 143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
 
+Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
+
+Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
+
 Session previews also use dependency artifact and package-manager global caches when object storage is configured. The dependency artifact path set is WorkDir-relative:
 
 ```text

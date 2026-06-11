@@ -2334,12 +2334,27 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
+	// The handler retries the acquire against the winner before giving up:
+	// each retry re-reads the session row, and the pre-hydrate peek then
+	// short-circuits on the published winner without another hydrate.
+	for range [3]struct{}{} {
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionRowColumns).
+					AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+			)
+		mock.ExpectQuery("SELECT COALESCE\\(container_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	}
 	// Handler passes hydratedID="" to Abort because acquireSandbox already
 	// destroyed the local container on the race-loss branch.
 	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.sandboxBusyRetryDelay = time.Millisecond
 	sp := testutil.NewMockSandboxProvider()
 	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
 		_, _ = io.Copy(io.Discard, r)
@@ -2394,11 +2409,25 @@ func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
 	mock.ExpectQuery("SELECT COALESCE\\(container_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	// The handler retries the acquire before giving up: each retry re-reads
+	// the session row and short-circuits on the same peek.
+	for range [3]struct{}{} {
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionRowColumns).
+					AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+			)
+		mock.ExpectQuery("SELECT COALESCE\\(container_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	}
 	// hydratedID="" because we never created a container.
 	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.sandboxBusyRetryDelay = time.Millisecond
 	counter := &previewFakeLiveSandboxCounter{count: 99}
 	h.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 		Counter:   counter,

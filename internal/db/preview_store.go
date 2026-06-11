@@ -96,7 +96,7 @@ const previewLogColumns = `id, preview_instance_id, org_id, level, step, message
 const previewAccessSessionColumns = `id, org_id, user_id, preview_instance_id,
 	session_token_hash, issued_at, expires_at, revoked_at, last_accessed_at, created_at`
 
-const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, blob_path,
+const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, base_key, commit_sha, blob_path,
 	size_bytes, worker_node_id, last_used_at, created_at`
 
 const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
@@ -2371,12 +2371,13 @@ func (s *PreviewStore) ExtendAccessSessionExpiry(ctx context.Context, orgID, id 
 func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.PreviewStartupCache) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_startup_cache (
-			org_id, repo_id, snapshot_key, blob_path, size_bytes, worker_node_id
+			org_id, repo_id, snapshot_key, base_key, commit_sha, blob_path, size_bytes, worker_node_id
 		) VALUES (
-			@org_id, @repo_id, @snapshot_key, @blob_path, @size_bytes, @worker_node_id
+			@org_id, @repo_id, @snapshot_key, @base_key, @commit_sha, @blob_path, @size_bytes, @worker_node_id
 		)
 		ON CONFLICT (org_id, repo_id, snapshot_key, worker_node_id)
-		DO UPDATE SET blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
+		DO UPDATE SET base_key = EXCLUDED.base_key, commit_sha = EXCLUDED.commit_sha,
+			blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
 			last_used_at = now()
 		RETURNING %s`, previewStartupCacheColumns)
 
@@ -2384,6 +2385,8 @@ func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.Pre
 		"org_id":         entry.OrgID,
 		"repo_id":        entry.RepoID,
 		"snapshot_key":   entry.SnapshotKey,
+		"base_key":       entry.BaseKey,
+		"commit_sha":     entry.CommitSHA,
 		"blob_path":      entry.BlobPath,
 		"size_bytes":     entry.SizeBytes,
 		"worker_node_id": entry.WorkerNodeID,
@@ -2413,6 +2416,31 @@ func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewStartupCache])
 	if err != nil {
 		return nil, fmt.Errorf("get startup cache: %w", err)
+	}
+	return &row, nil
+}
+
+// FindLatestCacheByBaseKey returns the newest startup cache entry on a worker
+// whose base key (lockfiles + config digest, commit-independent) matches but
+// whose commit differs from excludeCommitSHA. Used for partial invalidation:
+// restore the base snapshot, then apply the git diff up to the new commit.
+func (s *PreviewStore) FindLatestCacheByBaseKey(ctx context.Context, orgID, repoID uuid.UUID, baseKey, workerNodeID, excludeCommitSHA string) (*models.PreviewStartupCache, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
+		WHERE org_id = @org_id AND repo_id = @repo_id AND base_key = @base_key
+			AND worker_node_id = @worker_node_id AND base_key <> '' AND commit_sha <> @exclude_commit
+		ORDER BY created_at DESC
+		LIMIT 1`, previewStartupCacheColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "repo_id": repoID, "base_key": baseKey,
+		"worker_node_id": workerNodeID, "exclude_commit": excludeCommitSHA,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query startup cache by base key: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewStartupCache])
+	if err != nil {
+		return nil, fmt.Errorf("get startup cache by base key: %w", err)
 	}
 	return &row, nil
 }

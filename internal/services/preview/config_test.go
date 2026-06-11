@@ -1997,14 +1997,18 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
 			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
 			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
-			require.Contains(t, string(raw), "package-lock.json", "dogfood Next preview should key dependency install reuse to the lockfile")
-			require.Contains(t, string(raw), ".143-npm-ci-lock", "dogfood Next preview should only skip npm ci after a successful lockfile-matched install marker")
-			require.Contains(t, string(raw), "node_modules/.bin/next", "dogfood Next preview should verify the expected Next binary exists before reusing installed deps")
-			require.Contains(t, string(raw), "rm -rf node_modules", "dogfood Next preview should clean partial dependency installs before retrying npm ci")
+			require.Contains(t, string(raw), "sh .143/preview-install-frontend.sh", "dogfood Next preview should run the shared install script as a fallback when the platform install phase did not run")
 			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
 			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
+
+			installScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-install-frontend.sh"))
+			require.NoError(t, err, "test should read committed dogfood frontend install script")
+			require.Contains(t, string(installScript), "package-lock.json", "dogfood install script should key dependency install reuse to the lockfile")
+			require.Contains(t, string(installScript), ".143-npm-ci-lock", "dogfood install script should only skip npm ci after a successful lockfile-matched install marker")
+			require.Contains(t, string(installScript), "node_modules/.bin/next", "dogfood install script should verify the expected Next binary exists before reusing installed deps")
+			require.Contains(t, string(installScript), "rm -rf node_modules", "dogfood install script should clean partial dependency installs before retrying npm ci")
 			return
 		}
 		parent := filepath.Dir(dir)
