@@ -90,7 +90,14 @@ fi
 echo "Reading fleet from FLEET_HOSTS..."
 echo "Deploying roles: $REQUESTED_ROLES"
 echo "Deploying up to $DEPLOY_JOBS node(s) concurrently. Set DEPLOY_JOBS=1 for serial deploys."
-LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"
+# DEPLOY_FLEET_LOG_DIR pins per-host logs to a stable path so CI can upload
+# them as an artifact; ephemeral runners lose /tmp the moment the job ends.
+if [ -n "${DEPLOY_FLEET_LOG_DIR:-}" ]; then
+  LOG_DIR="$DEPLOY_FLEET_LOG_DIR"
+  mkdir -p "$LOG_DIR"
+else
+  LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"
+fi
 HOSTS=()
 HOST_GROUP_FILES=()
 TARGET_COUNT=0
@@ -139,8 +146,49 @@ deploy_one() {
   if "$SCRIPT_DIR/deploy.sh" "$role" "$ip" "$SSH_KEY" "$TAG" >"$log" 2>&1; then
     echo "--- OK: $role@$ip ---"
   else
-    echo "--- FAILED: $role@$ip (log: $log) ---" >&2
+    echo "--- FAILED: $role@$ip (log tail printed after all deploys finish) ---" >&2
+    touch "$log.failed"
     return 1
+  fi
+}
+
+# Print the tail of every failed host's log after the parallel fan-out
+# finishes. Dumping from the parent (not deploy_one) keeps concurrent
+# failures from interleaving their logs. On GitHub Actions each log is
+# wrapped in a collapsible ::group:: and also appended to the job summary.
+DEPLOY_FAIL_LOG_LINES="${DEPLOY_FAIL_LOG_LINES:-200}"
+dump_failed_logs() {
+  local marker failed_log name
+  for marker in "$LOG_DIR"/*.log.failed; do
+    [ -e "$marker" ] || continue
+    failed_log="${marker%.failed}"
+    name="$(basename "$failed_log" .log)"
+    echo ""
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "::group::FAILED $name — last $DEPLOY_FAIL_LOG_LINES log lines"
+    else
+      echo "===== FAILED $name — last $DEPLOY_FAIL_LOG_LINES log lines (full log: $failed_log) ====="
+    fi
+    tail -n "$DEPLOY_FAIL_LOG_LINES" "$failed_log"
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      echo "::endgroup::"
+    fi
+  done
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "## Deploy failures"
+      for marker in "$LOG_DIR"/*.log.failed; do
+        [ -e "$marker" ] || continue
+        failed_log="${marker%.failed}"
+        name="$(basename "$failed_log" .log)"
+        echo "<details><summary><code>$name</code> — last $DEPLOY_FAIL_LOG_LINES log lines</summary>"
+        echo ""
+        echo '```'
+        tail -n "$DEPLOY_FAIL_LOG_LINES" "$failed_log"
+        echo '```'
+        echo "</details>"
+      done
+    } >> "$GITHUB_STEP_SUMMARY"
   fi
 }
 
@@ -161,6 +209,7 @@ echo "Deploying ${#HOST_GROUP_FILES[@]} node(s), $DEPLOY_JOBS at a time (logs: $
 if printf '%s\n' "${HOST_GROUP_FILES[@]}" | xargs -n1 -P "$DEPLOY_JOBS" bash -c 'deploy_group "$1"' deploy-group; then
   echo "Fleet deployment complete."
 else
+  dump_failed_logs
   echo "FAILED: one or more deploys failed; see logs in $LOG_DIR." >&2
   exit 1
 fi

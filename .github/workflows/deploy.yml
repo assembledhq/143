@@ -167,9 +167,21 @@ jobs:
           WORKER_DEPLOY_DETACH: "1"
           WORKER_BLUE_GREEN_PORT_START: "8080"
           WORKER_BLUE_GREEN_PORT_END: "8087"
+          # Stable path (instead of mktemp) so the upload step below can
+          # capture every per-host log when any deploy fails.
+          DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs
         run: |
           chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
           ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"
+
+      - name: Upload per-host deploy logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-fleet-logs
+          path: /tmp/deploy-fleet-logs/
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Verify worker rollover
         if: steps.deploy_latest.outputs.should_deploy == 'true'
