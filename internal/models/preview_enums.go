@@ -52,6 +52,52 @@ func (s PreviewStatus) IsTerminal() bool {
 	}
 }
 
+// PreviewAutoMode controls repository-level automatic PR preview behavior.
+type PreviewAutoMode string
+
+const (
+	PreviewAutoModeOff  PreviewAutoMode = "off"
+	PreviewAutoModeWarm PreviewAutoMode = "warm"
+	PreviewAutoModeOn   PreviewAutoMode = "on"
+)
+
+func (m PreviewAutoMode) Validate() error {
+	switch m {
+	case PreviewAutoModeOff, PreviewAutoModeWarm, PreviewAutoModeOn:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewAutoMode: %q", m)
+	}
+}
+
+// PreviewStoppedReason records why a preview instance entered a terminal stop.
+type PreviewStoppedReason string
+
+const (
+	PreviewStoppedReasonNone       PreviewStoppedReason = ""
+	PreviewStoppedReasonUser       PreviewStoppedReason = "user"
+	PreviewStoppedReasonExpired    PreviewStoppedReason = "expired"
+	PreviewStoppedReasonWarmPolicy PreviewStoppedReason = "warm_policy"
+	PreviewStoppedReasonPRClosed   PreviewStoppedReason = "pr_closed"
+	PreviewStoppedReasonDrain      PreviewStoppedReason = "drain"
+	PreviewStoppedReasonError      PreviewStoppedReason = "error"
+)
+
+func (r PreviewStoppedReason) Validate() error {
+	switch r {
+	case PreviewStoppedReasonNone,
+		PreviewStoppedReasonUser,
+		PreviewStoppedReasonExpired,
+		PreviewStoppedReasonWarmPolicy,
+		PreviewStoppedReasonPRClosed,
+		PreviewStoppedReasonDrain,
+		PreviewStoppedReasonError:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewStoppedReason: %q", r)
+	}
+}
+
 // PreviewFreshnessState describes whether a session preview was launched from
 // the latest durable workspace revision.
 type PreviewFreshnessState string

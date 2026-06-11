@@ -265,7 +265,20 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
-	r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKey, sb, cfg)
+	if r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKey, sb, cfg) {
+		if err := r.previews.UpdatePreviewTargetSnapshotKey(ctx, payload.OrgID, payload.PreviewTargetID, startupCacheKey); err != nil {
+			r.logger.Warn().Err(err).
+				Str("preview_target_id", payload.PreviewTargetID.String()).
+				Str("snapshot_key", startupCacheKey).
+				Msg("failed to persist branch preview startup snapshot key")
+		} else if payload.StopAfterReady {
+			if err := r.manager.StopPreviewWithReason(ctx, payload.OrgID, payload.PreviewID, models.PreviewStoppedReasonWarmPolicy); err != nil {
+				r.logger.Warn().Err(err).
+					Str("preview_id", payload.PreviewID.String()).
+					Msg("failed to stop warm-policy branch preview after startup snapshot")
+			}
+		}
+	}
 	return nil
 }
 
@@ -759,9 +772,9 @@ func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context,
 	return snapshotKey
 }
 
-func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string, sb *agent.Sandbox, cfg *models.PreviewConfig) {
+func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string, sb *agent.Sandbox, cfg *models.PreviewConfig) bool {
 	if r == nil || r.snapshotCache == nil || sb == nil || snapshotKey == "" {
-		return
+		return false
 	}
 	if previewConfigHasRuntimeSecretFiles(cfg) {
 		// See maybeRestoreBranchPreviewStartupCache for why secret-file
@@ -770,7 +783,7 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 			Str("repository_id", repoID.String()).
 			Str("snapshot_key", snapshotKey).
 			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
-		return
+		return false
 	}
 	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()
@@ -779,7 +792,9 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 			Str("repository_id", repoID.String()).
 			Str("snapshot_key", snapshotKey).
 			Msg("failed to create branch preview startup cache")
+		return false
 	}
+	return true
 }
 
 func (r *StartRunner) computeBranchPreviewStartupCacheKey(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, commitSHA string) (string, error) {

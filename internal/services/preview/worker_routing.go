@@ -210,6 +210,19 @@ func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (Worker
 	return parseRoutableWorkerNode(*node)
 }
 
+// ResolveNodeWithRequirements returns a routable worker by ID only if its
+// metadata satisfies current cold-start requirements.
+func (s *WorkerSelector) ResolveNodeWithRequirements(ctx context.Context, nodeID string, req WorkerSelectionRequirements) (WorkerNode, error) {
+	node, err := s.nodes.GetByID(ctx, nodeID)
+	if err != nil {
+		return WorkerNode{}, err
+	}
+	if !isResolvableNodeStatus(node.Status) {
+		return WorkerNode{}, fmt.Errorf("node %s is not routable", nodeID)
+	}
+	return parseWorkerNodeWithRequirements(*node, req)
+}
+
 // SelectStartNode picks the worker that should handle Start Preview for the session.
 func (s *WorkerSelector) SelectStartNode(ctx context.Context, orgID uuid.UUID, session *models.Session) (WorkerNode, error) {
 	return s.SelectStartNodeWithRequirements(ctx, orgID, session, WorkerSelectionRequirements{})

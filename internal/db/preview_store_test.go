@@ -536,6 +536,81 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_ListBranchPreviewIndex_ResumableUsesWarmCachePredicate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now()
+	estimate := 30
+
+	rows := pgxmock.NewRows([]string{
+		"target_id", "preview_id", "repository_id", "repository_full_name", "branch", "commit_sha", "preview_config_name",
+		"source_type", "source_id", "source_url", "status", "created_at", "expires_at", "stopped_at", "stopped_reason",
+		"current_phase", "error", "resumable", "resume_estimate_seconds",
+	}).AddRow(
+		targetID, nil, repoID, "acme/app", "feature", "abc123", "",
+		models.PreviewSourceTypePullRequest, "acme/app#42@abc123", "https://github.com/acme/app/pull/42",
+		string(models.PreviewStatusStopped), now, nil, &now, string(models.PreviewStoppedReasonWarmPolicy),
+		"stopped", "", true, &estimate,
+	)
+
+	mock.ExpectQuery("preview_startup_cache[\\s\\S]+JOIN nodes[\\s\\S]+n\\.status = 'active'").
+		WithArgs(previewAnyArgs(8)...).
+		WillReturnRows(rows)
+
+	summaries, err := store.ListBranchPreviewIndex(context.Background(), orgID, BranchPreviewIndexFilters{
+		Scope: "resumable",
+		Limit: 20,
+	})
+	require.NoError(t, err, "ListBranchPreviewIndex should return resumable previews")
+	require.Equal(t, []models.BranchPreviewSummary{
+		{
+			TargetID:              targetID,
+			RepositoryID:          repoID,
+			RepositoryFullName:    "acme/app",
+			Branch:                "feature",
+			CommitSHA:             "abc123",
+			SourceType:            models.PreviewSourceTypePullRequest,
+			SourceID:              "acme/app#42@abc123",
+			SourceURL:             "https://github.com/acme/app/pull/42",
+			Status:                string(models.PreviewStatusStopped),
+			CreatedAt:             now,
+			StoppedAt:             &now,
+			StoppedReason:         models.PreviewStoppedReasonWarmPolicy,
+			CurrentPhase:          "stopped",
+			Resumable:             true,
+			ResumeEstimateSeconds: &estimate,
+		},
+	}, summaries, "ListBranchPreviewIndex should hydrate resumability metadata from the SQL result")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CountBranchPreviewIndexScopes_ResumableUsesWarmCachePredicate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("preview_startup_cache[\\s\\S]+JOIN nodes[\\s\\S]+resumable").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "recent"}).AddRow(2, 1, 3))
+
+	counts, err := store.CountBranchPreviewIndexScopes(context.Background(), uuid.New(), BranchPreviewIndexFilters{})
+	require.NoError(t, err, "CountBranchPreviewIndexScopes should return scope counts")
+	require.Equal(t, map[string]int{"running": 2, "resumable": 1, "recent": 3}, counts, "scope counts should include real resumable rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpdatePreviewStatus_TerminalBeginError(t *testing.T) {
 	t.Parallel()
 
@@ -1884,6 +1959,29 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_FindWarmResumeStartupCacheForTarget_RequiresActiveWorker(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+
+	mock.ExpectQuery("JOIN preview_targets target[\\s\\S]+JOIN nodes n[\\s\\S]+n\\.status = 'active'").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewStartupCacheTestCols).
+				AddRow(uuid.New(), uuid.New(), uuid.New(), "key", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
+		)
+
+	cache, err := store.FindWarmResumeStartupCacheForTarget(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "FindWarmResumeStartupCacheForTarget should return active-worker cache entries")
+	require.Equal(t, "worker-1", cache.WorkerNodeID, "warm resume cache should identify the worker holding the snapshot")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_DeleteCache(t *testing.T) {
 	t.Parallel()
 
@@ -2012,6 +2110,56 @@ func TestPreviewStore_StopPreviewWithRevocation(t *testing.T) {
 	err = store.StopPreviewWithRevocation(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_StopPreviewWithRevocationAndReason(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_reason.+stopped_at.+updated_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_services SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_infrastructure SET").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectCommit()
+
+	err = store.StopPreviewWithRevocationAndReason(context.Background(), uuid.New(), uuid.New(), models.PreviewStoppedReasonUser)
+	require.NoError(t, err, "StopPreviewWithRevocationAndReason should stop and revoke atomically")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewStoppedReason(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET stopped_reason").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdatePreviewStoppedReason(context.Background(), uuid.New(), uuid.New(), models.PreviewStoppedReasonPRClosed)
+	require.NoError(t, err, "UpdatePreviewStoppedReason should persist the supplied reason")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_StopPreviewWithRevocation_RollbackOnError(t *testing.T) {

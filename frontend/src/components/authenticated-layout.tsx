@@ -14,6 +14,7 @@ import {
   Menu,
   X,
   Settings,
+  MonitorPlay,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -45,7 +46,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -57,6 +58,7 @@ import { CreateSessionDialog } from "@/components/create-session-dialog";
 import { ResizeHandle } from "@/components/resize-handle";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 import { Kbd } from "@/components/ui/kbd";
+import { pollMs } from "@/lib/poll-intervals";
 
 type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
 
@@ -124,6 +126,7 @@ const navItems: NavItem[] = [
   { label: "Sessions", icon: Play, href: "/sessions" },
   { label: "Automations", icon: RefreshCw, href: "/automations" },
   { label: "Autopilot", icon: Zap, href: "/autopilot" },
+  { label: "Previews", icon: MonitorPlay, href: "/previews" },
 ];
 
 type SidebarBodyProps = {
@@ -152,6 +155,12 @@ function SidebarBody({
     : "py-[7px] text-xs";
   const iconBtnClasses = isMobile ? "h-11 w-11" : "h-7 w-7";
   const iconSize = isMobile ? "h-5 w-5" : "h-4 w-4";
+  const previewsBadgeQuery = useQuery({
+    queryKey: ["previews", "nav-running-count"],
+    queryFn: () => api.previews.list({ scope: "running", limit: 1 }),
+    refetchInterval: pollMs(60000),
+  });
+  const runningPreviewCount = previewsBadgeQuery.data?.meta?.counts?.running ?? 0;
 
   return (
     <>
@@ -239,7 +248,12 @@ function SidebarBody({
               )}
             >
               <item.icon className="h-4 w-4 shrink-0" />
-              {item.label}
+              <span className="flex-1">{item.label}</span>
+              {item.href === "/previews" && runningPreviewCount > 0 ? (
+                <span className="rounded-full bg-primary px-1.5 py-0.5 text-xs font-semibold leading-none text-primary-foreground">
+                  {runningPreviewCount}
+                </span>
+              ) : null}
             </Link>
           );
         })}
@@ -320,6 +334,13 @@ function CompactSidebarRail({
   onCreateSession,
   onLogout,
 }: CompactSidebarRailProps) {
+  const previewsBadgeQuery = useQuery({
+    queryKey: ["previews", "nav-running-count"],
+    queryFn: () => api.previews.list({ scope: "running", limit: 1 }),
+    refetchInterval: pollMs(60000),
+  });
+  const runningPreviewCount = previewsBadgeQuery.data?.meta?.counts?.running ?? 0;
+
   return (
     <TooltipProvider>
       <aside
@@ -375,11 +396,14 @@ function CompactSidebarRail({
                       isActive
                         ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
                         : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
-                    )}
-                  >
-                    <item.icon className="h-4 w-4" />
-                  </Link>
-                </TooltipTrigger>
+                  )}
+                >
+                  <item.icon className="h-4 w-4" />
+                  {item.href === "/previews" && runningPreviewCount > 0 ? (
+                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />
+                  ) : null}
+                </Link>
+              </TooltipTrigger>
                 <TooltipContent side="right" sideOffset={8}>{item.label}</TooltipContent>
               </Tooltip>
             );

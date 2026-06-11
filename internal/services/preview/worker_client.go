@@ -76,6 +76,8 @@ type StartBranchPreviewJobPayload struct {
 	PreviewConfigName string                `json:"preview_config_name,omitempty"`
 	Config            *models.PreviewConfig `json:"config,omitempty"`
 	ProfileName       string                `json:"profile_name,omitempty"`
+	Initiator         string                `json:"initiator,omitempty"`
+	StopAfterReady    bool                  `json:"stop_after_ready,omitempty"`
 }
 
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.

@@ -47,6 +47,7 @@ type BranchPreviewHandler struct {
 	selector              *preview.WorkerSelector
 	stopper               *preview.WorkerStopper
 	orgStore              agent.OrgSettingsReader
+	audit                 *db.AuditEmitter
 	staticEgressPublicIP  string
 	baseURL               string
 	previewOriginTemplate string
@@ -89,6 +90,10 @@ func (h *BranchPreviewHandler) SetAPITokenStore(store *db.PreviewAPITokenStore) 
 	h.apiTokens = store
 }
 
+func (h *BranchPreviewHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
+}
+
 // Validate checks that all required dependencies are wired up. Call this at
 // server startup to catch misconfiguration before the first request arrives.
 func (h *BranchPreviewHandler) Validate() error {
@@ -123,35 +128,56 @@ type createBranchPreviewSource struct {
 	URL        string                   `json:"url"`
 }
 
+type branchPreviewStartOptions struct {
+	Initiator      string
+	StopAfterReady bool
+}
+
 type branchPreviewResponse struct {
-	TargetID            uuid.UUID                      `json:"target_id"`
-	PreviewID           *uuid.UUID                     `json:"preview_id"`
-	RepositoryID        uuid.UUID                      `json:"repository_id,omitempty"`
-	RepositoryFullName  string                         `json:"repository_full_name,omitempty"`
-	Branch              string                         `json:"branch,omitempty"`
-	CommitSHA           string                         `json:"commit_sha,omitempty"`
-	PreviewConfigName   string                         `json:"preview_config_name,omitempty"`
-	SourceType          models.PreviewSourceType       `json:"source_type,omitempty"`
-	SourceURL           string                         `json:"source_url,omitempty"`
-	Status              string                         `json:"status"`
-	Error               string                         `json:"error,omitempty"`
-	CurrentPhase        string                         `json:"current_phase,omitempty"`
-	PhaseSteps          []branchPreviewPhaseStep       `json:"phase_steps,omitempty"`
-	CreatedByUserID     *uuid.UUID                     `json:"created_by_user_id,omitempty"`
-	CreatedAt           *time.Time                     `json:"created_at,omitempty"`
-	SourceID            string                         `json:"source_id,omitempty"`
-	RequestID           string                         `json:"request_id,omitempty"`
-	NewCommitsAvailable bool                           `json:"new_commits_available,omitempty"`
-	LatestCommitSHA     string                         `json:"latest_commit_sha,omitempty"`
-	GitHubBranchURL     string                         `json:"github_branch_url,omitempty"`
-	PullRequestURL      string                         `json:"pull_request_url,omitempty"`
-	StableURL           string                         `json:"stable_url"`
-	PreviewURL          *string                        `json:"preview_url"`
-	ExpiresAt           *time.Time                     `json:"expires_at"`
-	StoppedAt           *time.Time                     `json:"stopped_at,omitempty"`
-	Services            []models.PreviewService        `json:"services,omitempty"`
-	Infrastructure      []models.PreviewInfrastructure `json:"infrastructure,omitempty"`
-	Logs                []models.PreviewLog            `json:"logs,omitempty"`
+	TargetID              uuid.UUID                      `json:"target_id"`
+	PreviewID             *uuid.UUID                     `json:"preview_id"`
+	RepositoryID          uuid.UUID                      `json:"repository_id,omitempty"`
+	RepositoryFullName    string                         `json:"repository_full_name,omitempty"`
+	Branch                string                         `json:"branch,omitempty"`
+	CommitSHA             string                         `json:"commit_sha,omitempty"`
+	PreviewConfigName     string                         `json:"preview_config_name,omitempty"`
+	SourceType            models.PreviewSourceType       `json:"source_type,omitempty"`
+	SourceURL             string                         `json:"source_url,omitempty"`
+	Status                string                         `json:"status"`
+	Error                 string                         `json:"error,omitempty"`
+	CurrentPhase          string                         `json:"current_phase,omitempty"`
+	PhaseSteps            []branchPreviewPhaseStep       `json:"phase_steps,omitempty"`
+	CreatedByUserID       *uuid.UUID                     `json:"created_by_user_id,omitempty"`
+	CreatedAt             *time.Time                     `json:"created_at,omitempty"`
+	SourceID              string                         `json:"source_id,omitempty"`
+	RequestID             string                         `json:"request_id,omitempty"`
+	NewCommitsAvailable   bool                           `json:"new_commits_available,omitempty"`
+	LatestCommitSHA       string                         `json:"latest_commit_sha,omitempty"`
+	GitHubBranchURL       string                         `json:"github_branch_url,omitempty"`
+	PullRequestURL        string                         `json:"pull_request_url,omitempty"`
+	StableURL             string                         `json:"stable_url"`
+	PreviewURL            *string                        `json:"preview_url"`
+	ExpiresAt             *time.Time                     `json:"expires_at"`
+	StoppedAt             *time.Time                     `json:"stopped_at,omitempty"`
+	StoppedReason         models.PreviewStoppedReason    `json:"stopped_reason,omitempty"`
+	Resumable             bool                           `json:"resumable"`
+	ResumeEstimateSeconds *int                           `json:"resume_estimate_seconds,omitempty"`
+	Services              []models.PreviewService        `json:"services,omitempty"`
+	Infrastructure        []models.PreviewInfrastructure `json:"infrastructure,omitempty"`
+	Logs                  []models.PreviewLog            `json:"logs,omitempty"`
+}
+
+type previewIndexCounts struct {
+	Running   int `json:"running"`
+	Resumable int `json:"resumable"`
+	Recent    int `json:"recent"`
+}
+
+type previewIndexPoolMeta struct {
+	AutoActive int `json:"auto_active"`
+	AutoMax    int `json:"auto_max"`
+	UserActive int `json:"user_active"`
+	UserMax    int `json:"user_max"`
 }
 
 type branchPreviewPhaseStep struct {
@@ -185,6 +211,10 @@ type createPreviewAPITokenRequest struct {
 type createPreviewAPITokenResponse struct {
 	models.PreviewAPIToken
 	Token string `json:"token"`
+}
+
+type updatePreviewPolicyRequest struct {
+	AutoMode models.PreviewAutoMode `json:"auto_mode"`
 }
 
 func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -716,6 +746,10 @@ func (h *BranchPreviewHandler) ResolveLink(w http.ResponseWriter, r *http.Reques
 // the worker. Pass nil when the config is not available at the call site —
 // the worker will fall back to reading it from the checked-out sandbox.
 func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, target *models.PreviewTarget, ttlSeconds *int64, restart bool, cfg *models.PreviewConfig) (branchPreviewResponse, *previewHTTPError) {
+	return h.startTargetRuntimeWithOptions(ctx, orgID, userID, repo, target, ttlSeconds, restart, cfg, branchPreviewStartOptions{})
+}
+
+func (h *BranchPreviewHandler) startTargetRuntimeWithOptions(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, target *models.PreviewTarget, ttlSeconds *int64, restart bool, cfg *models.PreviewConfig, opts branchPreviewStartOptions) (branchPreviewResponse, *previewHTTPError) {
 	link := &models.PreviewLink{
 		OrgID:           orgID,
 		PreviewTargetID: target.ID,
@@ -740,6 +774,9 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 		if h.stopper != nil {
 			if err := h.stopper.StopPreview(ctx, orgID, active.ID); err != nil {
 				return branchPreviewResponse{}, newPreviewHTTPError(http.StatusUnprocessableEntity, "PREVIEW_STOP_FAILED", "failed to stop existing preview", err)
+			}
+			if err := h.previews.UpdatePreviewStoppedReason(ctx, orgID, active.ID, models.PreviewStoppedReasonUser); err != nil {
+				return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_STOP_REASON_FAILED", "failed to record preview stop reason", err)
 			}
 		}
 	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
@@ -785,7 +822,7 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 		return resp, nil
 	}
 
-	worker, err := h.selector.SelectLeastLoadedNodeWithRequirements(ctx, reqs)
+	worker, err := h.selectBranchPreviewWorker(ctx, orgID, target.ID, restart, reqs)
 	if err != nil {
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusServiceUnavailable, preview.PreviewCapacityCode, "no preview worker is available", err)
 	}
@@ -832,8 +869,10 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 			CommitSHA:         target.CommitSHA,
 			PreviewConfigName: target.PreviewConfigName,
 			Config:            cfg,
+			Initiator:         opts.Initiator,
+			StopAfterReady:    opts.StopAfterReady,
 		},
-		Priority:     5,
+		Priority:     branchPreviewJobPriority(opts),
 		DedupeKey:    &dedupeKey,
 		TargetNodeID: &targetNodeID,
 	})
@@ -845,6 +884,162 @@ func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, us
 	}
 	h.jobs.Notify(ctx, jobID)
 	return h.responseForPreview(link.Slug, target, reservation), nil
+}
+
+func branchPreviewJobPriority(opts branchPreviewStartOptions) int {
+	if opts.Initiator == "auto_preview" {
+		return 4
+	}
+	return 5
+}
+
+func (h *BranchPreviewHandler) selectBranchPreviewWorker(ctx context.Context, orgID, targetID uuid.UUID, restart bool, reqs preview.WorkerSelectionRequirements) (preview.WorkerNode, error) {
+	if restart {
+		cache, err := h.previews.FindWarmResumeStartupCacheForTarget(ctx, orgID, targetID)
+		if err == nil && cache != nil {
+			if worker, resolveErr := h.selector.ResolveNodeWithRequirements(ctx, cache.WorkerNodeID, reqs); resolveErr == nil {
+				metrics.RecordPreviewResume(ctx, orgID.String(), "snapshot_hit")
+				return worker, nil
+			}
+			metrics.RecordPreviewResume(ctx, orgID.String(), "cold_degraded")
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return preview.WorkerNode{}, err
+		} else {
+			metrics.RecordPreviewResume(ctx, orgID.String(), "cold_degraded")
+		}
+	}
+	return h.selector.SelectLeastLoadedNodeWithRequirements(ctx, reqs)
+}
+
+func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error {
+	if h == nil || h.previews == nil {
+		return fmt.Errorf("preview handler is not configured")
+	}
+	if mode == models.PreviewAutoModeOff {
+		return nil
+	}
+	if h.autoPreviewPoolFull(ctx, orgID) {
+		metrics.RecordPreviewAutoPoolSaturation(ctx, orgID.String())
+		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "pool_full")
+		return nil
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		return fmt.Errorf("repository full name is invalid")
+	}
+	if err := h.stopPreviousAutoPullRequestPreview(ctx, orgID, repo, headRef, headSHA); err != nil {
+		return err
+	}
+	sourceID := fmt.Sprintf("%s#%d@%s", repo.FullName, prNumber, headSHA)
+	target, err := h.previews.GetPreviewTargetBySource(ctx, orgID, models.PreviewSourceTypePullRequest, sourceID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load auto preview target: %w", err)
+		}
+		target = &models.PreviewTarget{
+			OrgID:           orgID,
+			RepositoryID:    repo.ID,
+			Branch:          headRef,
+			CommitSHA:       headSHA,
+			SourceType:      models.PreviewSourceTypePullRequest,
+			SourceID:        sourceID,
+			SourceURL:       htmlURL,
+			CreatedByUserID: userID,
+		}
+		if err := h.previews.CreatePreviewTarget(ctx, target); err != nil {
+			return fmt.Errorf("create auto preview target: %w", err)
+		}
+	}
+	link := &models.PreviewLink{
+		OrgID:           orgID,
+		PreviewTargetID: target.ID,
+		LinkType:        models.PreviewLinkTypePullRequest,
+		Slug:            fmt.Sprintf("github/%s/%s/pull/%d", owner, repoName, prNumber),
+		RepositoryID:    &repo.ID,
+		PRNumber:        &prNumber,
+	}
+	if err := h.previews.UpsertPreviewLink(ctx, link); err != nil {
+		return fmt.Errorf("upsert auto preview link: %w", err)
+	}
+	_, startErr := h.startTargetRuntimeWithOptions(ctx, orgID, userID, repo, target, nil, false, nil, branchPreviewStartOptions{
+		Initiator:      "auto_preview",
+		StopAfterReady: mode == models.PreviewAutoModeWarm,
+	})
+	if startErr != nil {
+		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "error")
+		return startErr
+	}
+	metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "started")
+	return h.upsertAutoPRPreviewState(ctx, orgID, repo.ID, prNumber, target.ID)
+}
+
+func (h *BranchPreviewHandler) stopPreviousAutoPullRequestPreview(ctx context.Context, orgID uuid.UUID, repo models.Repository, headRef, headSHA string) error {
+	previous, err := h.previews.GetLatestPreviewTargetForBranch(ctx, orgID, repo.ID, headRef, "")
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("load previous auto preview target: %w", err)
+	}
+	if previous == nil || previous.CommitSHA == headSHA || previous.SourceType != models.PreviewSourceTypePullRequest {
+		return nil
+	}
+	active, err := h.previews.GetActivePreviewForTarget(ctx, orgID, previous.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("load previous auto preview runtime: %w", err)
+	}
+	if h.stopper != nil {
+		if err := h.stopper.StopPreview(ctx, orgID, active.ID); err != nil {
+			return fmt.Errorf("stop previous auto preview: %w", err)
+		}
+		if err := h.previews.UpdatePreviewStoppedReason(ctx, orgID, active.ID, models.PreviewStoppedReasonWarmPolicy); err != nil {
+			return fmt.Errorf("record previous auto preview stop reason: %w", err)
+		}
+		return nil
+	}
+	if h.manager != nil {
+		if err := h.manager.StopPreviewWithReason(ctx, orgID, active.ID, models.PreviewStoppedReasonWarmPolicy); err != nil {
+			return fmt.Errorf("stop previous auto preview: %w", err)
+		}
+	}
+	return nil
+}
+
+func (h *BranchPreviewHandler) autoPreviewPoolFull(ctx context.Context, orgID uuid.UUID) bool {
+	maxActive := models.DefaultPreviewAutoPoolMaxActive
+	if h.orgStore != nil {
+		if org, err := h.orgStore.GetByID(ctx, orgID); err == nil {
+			if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil && settings.PreviewAutoPoolMaxActive > 0 {
+				maxActive = settings.PreviewAutoPoolMaxActive
+			}
+		}
+	}
+	count, err := h.previews.CountActiveAutoPreviews(ctx, orgID)
+	return err == nil && count >= maxActive
+}
+
+func (h *BranchPreviewHandler) upsertAutoPRPreviewState(ctx context.Context, orgID, repoID uuid.UUID, prNumber int, targetID uuid.UUID) error {
+	instance, err := h.previews.GetActivePreviewForTarget(ctx, orgID, targetID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("load active auto preview: %w", err)
+	}
+	state := &models.PRPreviewState{
+		OrgID:                 orgID,
+		RepoID:                repoID,
+		PRNumber:              prNumber,
+		LastPreviewInstanceID: &instance.ID,
+		Status:                models.PRPreviewStatusRunning,
+	}
+	if err := h.previews.UpsertPRPreviewState(ctx, state); err != nil {
+		return fmt.Errorf("upsert auto preview state: %w", err)
+	}
+	return nil
 }
 
 // Get resolves a preview by ID. The {preview_id} path parameter is dual-purpose:
@@ -973,20 +1168,55 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	const defaultPreviewListLimit = 50
 	const maxPreviewListLimit = 100
 	limit := clampListLimit(queryInt(r, "limit", defaultPreviewListLimit), defaultPreviewListLimit, maxPreviewListLimit)
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	switch scope {
+	case "", "running", "resumable", "recent":
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "scope must be running, resumable, or recent")
+		return
+	}
+	var cursorTime *time.Time
+	var cursorID *uuid.UUID
+	if cursor := strings.TrimSpace(r.URL.Query().Get("cursor")); cursor != "" {
+		t, rawID, err := decodeCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		id, err := uuid.Parse(rawID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor id")
+			return
+		}
+		cursorTime = &t
+		cursorID = &id
+	}
+	filters := db.BranchPreviewIndexFilters{
+		RepositoryID: repoID,
+		Branch:       strings.TrimSpace(r.URL.Query().Get("branch")),
+		Status:       strings.TrimSpace(r.URL.Query().Get("status")),
+		Scope:        scope,
+		Query:        strings.TrimSpace(r.URL.Query().Get("q")),
+		CursorTime:   cursorTime,
+		CursorID:     cursorID,
+		Limit:        limit + 1,
+	}
 	// Fetch one extra to detect whether a next page exists without a second
 	// COUNT query. The extra row is never returned to the caller.
-	summaries, err := h.previews.ListBranchPreviewSummaries(
-		r.Context(),
-		orgID,
-		repoID,
-		strings.TrimSpace(r.URL.Query().Get("branch")),
-		strings.TrimSpace(r.URL.Query().Get("status")),
-		limit+1,
-	)
+	listStarted := time.Now()
+	summaries, err := h.previews.ListBranchPreviewIndex(r.Context(), orgID, filters)
+	metrics.RecordPreviewIndexListDuration(r.Context(), orgID.String(), scope, time.Since(listStarted))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LIST_FAILED", "failed to list previews", err)
 		return
 	}
+	filters.Limit = 0
+	counts, err := h.previews.CountBranchPreviewIndexScopes(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LIST_FAILED", "failed to count previews", err)
+		return
+	}
+	pool := h.previewIndexPool(r.Context(), orgID)
 	var nextCursor string
 	if len(summaries) > limit {
 		last := summaries[limit-1]
@@ -996,18 +1226,24 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	responses := make([]branchPreviewResponse, 0, len(summaries))
 	for _, item := range summaries {
 		resp := branchPreviewResponse{
-			TargetID:           item.TargetID,
-			PreviewID:          item.PreviewID,
-			RepositoryID:       item.RepositoryID,
-			RepositoryFullName: item.RepositoryFullName,
-			Branch:             item.Branch,
-			CommitSHA:          item.CommitSHA,
-			PreviewConfigName:  item.PreviewConfigName,
-			SourceType:         item.SourceType,
-			SourceURL:          item.SourceURL,
-			Status:             item.Status,
-			StableURL:          h.stableURL(item.TargetID.String()),
-			ExpiresAt:          item.ExpiresAt,
+			TargetID:              item.TargetID,
+			PreviewID:             item.PreviewID,
+			RepositoryID:          item.RepositoryID,
+			RepositoryFullName:    item.RepositoryFullName,
+			Branch:                item.Branch,
+			CommitSHA:             item.CommitSHA,
+			PreviewConfigName:     item.PreviewConfigName,
+			SourceType:            item.SourceType,
+			SourceURL:             item.SourceURL,
+			Status:                item.Status,
+			Error:                 item.Error,
+			CurrentPhase:          item.CurrentPhase,
+			StableURL:             h.stableURL(item.TargetID.String()),
+			ExpiresAt:             item.ExpiresAt,
+			StoppedAt:             item.StoppedAt,
+			StoppedReason:         item.StoppedReason,
+			Resumable:             item.Resumable,
+			ResumeEstimateSeconds: item.ResumeEstimateSeconds,
 		}
 		if url := h.previewURL(item.TargetID); url != "" {
 			resp.PreviewURL = &url
@@ -1016,8 +1252,51 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, models.ListResponse[branchPreviewResponse]{
 		Data: responses,
-		Meta: models.PaginationMeta{NextCursor: nextCursor},
+		Meta: models.PaginationMeta{
+			NextCursor: nextCursor,
+			Counts: previewIndexCounts{
+				Running:   counts["running"],
+				Resumable: counts["resumable"],
+				Recent:    counts["recent"],
+			},
+			Pool: pool,
+		},
 	})
+}
+
+func (h *BranchPreviewHandler) previewIndexPool(ctx context.Context, orgID uuid.UUID) previewIndexPoolMeta {
+	settings := models.OrgSettings{}
+	if h.orgStore != nil {
+		if org, err := h.orgStore.GetByID(ctx, orgID); err == nil {
+			if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+				settings = parsed
+			}
+		}
+	}
+	if settings.PreviewAutoPoolMaxActive == 0 {
+		settings.PreviewAutoPoolMaxActive = models.DefaultPreviewAutoPoolMaxActive
+	}
+	if settings.PreviewMaxPreviewsPerUser == 0 {
+		settings.PreviewMaxPreviewsPerUser = models.DefaultPreviewMaxPreviewsPerUser
+	}
+	userActive := 0
+	if user := middleware.UserFromContext(ctx); user != nil && h.previews != nil {
+		if count, err := h.previews.CountActivePreviewsByUser(ctx, orgID, user.ID); err == nil {
+			userActive = count
+		}
+	}
+	autoActive := 0
+	if h.previews != nil {
+		if count, err := h.previews.CountActiveAutoPreviews(ctx, orgID); err == nil {
+			autoActive = count
+		}
+	}
+	return previewIndexPoolMeta{
+		AutoActive: autoActive,
+		AutoMax:    settings.PreviewAutoPoolMaxActive,
+		UserActive: userActive,
+		UserMax:    settings.PreviewMaxPreviewsPerUser,
+	}
 }
 
 func (h *BranchPreviewHandler) ListAPITokens(w http.ResponseWriter, r *http.Request) {
@@ -1031,6 +1310,74 @@ func (h *BranchPreviewHandler) ListAPITokens(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.PreviewAPIToken]{Data: tokens})
+}
+
+func (h *BranchPreviewHandler) ListPolicies(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	policies, err := h.previews.ListRepositoryPreviewPolicies(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICIES_LIST_FAILED", "failed to list preview policies", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.RepositoryPreviewPolicySummary]{Data: policies})
+}
+
+func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	repoID, err := uuid.Parse(chi.URLParam(r, "repository_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+		return
+	}
+	var req updatePreviewPolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if err := req.AutoMode.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_AUTO_MODE", "auto_mode must be off, warm, or on")
+		return
+	}
+	if h.repos != nil {
+		if _, err := h.repos.GetByID(r.Context(), orgID, repoID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to load repository", err)
+			return
+		}
+	}
+	beforeMode := models.PreviewAutoModeOff
+	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
+		beforeMode = existing.AutoMode
+	} else if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_LOOKUP_FAILED", "failed to load preview policy", existingErr)
+		return
+	}
+	policy, err := h.previews.UpsertRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, req.AutoMode)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_UPDATE_FAILED", "failed to update preview policy", err)
+		return
+	}
+	if h.audit != nil {
+		details, marshalErr := json.Marshal(map[string]any{
+			"repository_id": repoID.String(),
+			"changes": map[string]any{
+				"auto_mode": map[string]any{"before": beforeMode, "after": policy.AutoMode},
+			},
+		})
+		if marshalErr == nil {
+			resourceID := repoID.String()
+			emitUserAudit(h.audit, r, models.AuditActionPreviewPolicyUpdated, models.AuditResourcePreviewPolicy, &resourceID, details)
+		}
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.RepositoryPreviewPolicy]{Data: policy})
 }
 
 func (h *BranchPreviewHandler) CreateAPIToken(w http.ResponseWriter, r *http.Request) {
@@ -1211,8 +1558,12 @@ func (h *BranchPreviewHandler) Stop(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
 			return
 		}
+		if err := h.previews.UpdatePreviewStoppedReason(r.Context(), orgID, previewID, models.PreviewStoppedReasonUser); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_REASON_FAILED", "failed to record preview stop reason", err)
+			return
+		}
 	} else if h.manager != nil {
-		if err := h.manager.StopPreview(r.Context(), orgID, previewID); err != nil {
+		if err := h.manager.StopPreviewWithReason(r.Context(), orgID, previewID, models.PreviewStoppedReasonUser); err != nil {
 			writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
 			return
 		}

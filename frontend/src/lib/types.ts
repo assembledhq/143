@@ -210,9 +210,26 @@ export interface BranchPreviewResponse {
   preview_url?: string;
   expires_at?: string;
   stopped_at?: string;
+  stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  resumable?: boolean;
+  resume_estimate_seconds?: number;
   services?: import('./preview-types').PreviewService[];
   infrastructure?: import('./preview-types').PreviewInfrastructure[];
   logs?: import('./preview-types').PreviewLog[];
+}
+
+export interface PreviewListMeta {
+  next_cursor?: string;
+  counts?: { running: number; resumable: number; recent: number };
+  pool?: { auto_active: number; auto_max: number; user_active: number; user_max: number };
+}
+
+export interface PreviewPolicySummary {
+  repository_id: string;
+  repository_full_name: string;
+  auto_mode: "off" | "warm" | "on";
+  open_pr_count: number;
+  updated_at?: string;
 }
 
 export interface BranchPreviewConfigOptions {
@@ -1044,6 +1061,7 @@ export interface OrgSettings {
   max_concurrent_runs?: number;
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
+  preview_auto_pool_max_active?: number;
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {

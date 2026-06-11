@@ -250,13 +250,17 @@ export const api = {
     cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
   },
   previews: {
-    list: (params?: { repository_id?: string; branch?: string; status?: string }) => {
+    list: (params?: { repository_id?: string; branch?: string; status?: string; scope?: 'running' | 'resumable' | 'recent'; q?: string; limit?: number; cursor?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.branch) searchParams.set('branch', params.branch);
       if (params?.status) searchParams.set('status', params.status);
+      if (params?.scope) searchParams.set('scope', params.scope);
+      if (params?.q) searchParams.set('q', params.q);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
       const query = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews${query ? `?${query}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').BranchPreviewResponse> & { meta: import('./types').PreviewListMeta }>(`/api/v1/previews${query ? `?${query}` : ''}`);
     },
     create: (body: import('./types').BranchPreviewCreateRequest) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>('/api/v1/previews', body),
@@ -287,6 +291,14 @@ export const api = {
         post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
       revoke: (id: string) =>
         del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
+    },
+    policies: {
+      list: () => get<import('./types').ListResponse<import('./types').PreviewPolicySummary>>('/api/v1/previews/policies'),
+      update: (repositoryId: string, body: { auto_mode: 'off' | 'warm' | 'on' }) =>
+        request<import('./types').SingleResponse<unknown>>(`/api/v1/repositories/${repositoryId}/preview-policy`, {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        }),
     },
   },
   sessionComposer: {

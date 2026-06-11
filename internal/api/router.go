@@ -738,6 +738,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 	previewHandler.SetAuditEmitter(auditEmitter)
+	branchPreviewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
@@ -752,6 +753,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	branchPreviewHandler.SetStopper(previewStopper)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
+		prService.SetAutoPreviewStarter(branchPreviewHandler)
 		prService.SetPreviewOriginTemplate(cfg.PreviewOriginTemplate)
 	}
 
@@ -1306,6 +1308,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
 				r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
+				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
+				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
 				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
 				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)

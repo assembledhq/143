@@ -1,6 +1,10 @@
 package models
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestPreviewStatus_Validate(t *testing.T) {
 	t.Parallel()
@@ -76,6 +80,67 @@ func TestPreviewStatus_IsTerminal(t *testing.T) {
 			if got := tt.status.IsTerminal(); got != tt.want {
 				t.Errorf("IsTerminal() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func TestPreviewAutoMode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    PreviewAutoMode
+		wantErr bool
+	}{
+		{name: "off is valid", mode: PreviewAutoModeOff},
+		{name: "warm is valid", mode: PreviewAutoModeWarm},
+		{name: "on is valid", mode: PreviewAutoModeOn},
+		{name: "empty is invalid", mode: "", wantErr: true},
+		{name: "bogus is invalid", mode: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.mode.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewAutoMode should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewAutoMode should accept known policy modes")
+		})
+	}
+}
+
+func TestPreviewStoppedReason_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		reason  PreviewStoppedReason
+		wantErr bool
+	}{
+		{name: "none is valid", reason: PreviewStoppedReasonNone},
+		{name: "user is valid", reason: PreviewStoppedReasonUser},
+		{name: "expired is valid", reason: PreviewStoppedReasonExpired},
+		{name: "warm policy is valid", reason: PreviewStoppedReasonWarmPolicy},
+		{name: "pr closed is valid", reason: PreviewStoppedReasonPRClosed},
+		{name: "drain is valid", reason: PreviewStoppedReasonDrain},
+		{name: "error is valid", reason: PreviewStoppedReasonError},
+		{name: "bogus is invalid", reason: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.reason.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewStoppedReason should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewStoppedReason should accept migration check values")
 		})
 	}
 }
