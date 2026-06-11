@@ -25,6 +25,7 @@ import { SessionLinearBadge as SharedSessionLinearBadge } from "@/components/ses
 import { NoReposWarning } from "@/components/no-repos-warning";
 import type { ListResponse, SessionCounts, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { deriveSessionDisplayStatus } from "@/lib/session-display-status";
 import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
@@ -268,8 +269,8 @@ function CurrentSessionContextRow({
   ariaSelected: boolean;
   optionRef?: (node: HTMLDivElement | null) => void;
 }) {
-  const cfg = statusConfig[session.status] || statusConfig.pending;
-  const isWorkingSession = workingSet.has(session.status);
+  const displayStatus = deriveSessionDisplayStatus(session);
+  const isWorkingSession = displayStatus.animated;
   const ts = session.completed_at || session.started_at || session.created_at;
   const title = sessionTitle(session);
 
@@ -309,8 +310,8 @@ function CurrentSessionContextRow({
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
               <span className="text-xs text-muted-foreground shrink-0">
-                <span>{cfg.label}</span>
-                {isWorkingSession && <AnimatedEllipsis />}
+                <span>{displayStatus.label}</span>
+                {displayStatus.animated && <AnimatedEllipsis />}
               </span>
               <span className="text-xs text-muted-foreground/50 shrink-0">
                 {formatTimeAgo(ts)}
@@ -882,8 +883,8 @@ export function SessionSidebar() {
 
   const renderSavedSessionRow = (session: SessionListItem, renderKey: string) => {
     const isSelected = selectedId === session.id;
-    const cfg = statusConfig[session.status] || statusConfig.pending;
-    const isWorkingSession = workingSet.has(session.status);
+    const displayStatus = deriveSessionDisplayStatus(session);
+    const isWorkingSession = displayStatus.animated;
     const hasUnread = isUnread(session);
     const ts = session.completed_at || session.started_at || session.created_at;
     const isArchived = !!session.archived_at;
@@ -979,8 +980,8 @@ export function SessionSidebar() {
                   >
                     <div className="flex min-w-max items-center gap-1.5 pr-1">
                       <span className="text-xs text-muted-foreground shrink-0">
-                        <span>{cfg.label}</span>
-                        {isWorkingSession && <AnimatedEllipsis />}
+                        <span>{displayStatus.label}</span>
+                        {displayStatus.animated && <AnimatedEllipsis />}
                       </span>
                       {session.pm_plan_id && !session.triggered_by_user_id && (
                         <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
