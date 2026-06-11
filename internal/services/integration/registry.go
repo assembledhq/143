@@ -26,6 +26,7 @@ type Registry struct {
 	prCreators         map[string]PullRequestCreator
 	sessionTabManagers map[string]SessionTabManager
 	projectProposers   map[string]ProjectProposer
+	evalReporters      map[string]EvalCandidateReporter
 	ciTestInsights     map[string]CITestInsights
 	logProviders       map[string]LogProvider
 }
@@ -42,9 +43,26 @@ func NewRegistry() *Registry {
 		prCreators:         make(map[string]PullRequestCreator),
 		sessionTabManagers: make(map[string]SessionTabManager),
 		projectProposers:   make(map[string]ProjectProposer),
+		evalReporters:      make(map[string]EvalCandidateReporter),
 		ciTestInsights:     make(map[string]CITestInsights),
 		logProviders:       make(map[string]LogProvider),
 	}
+}
+
+func (r *Registry) RegisterEvalCandidateReporter(provider EvalCandidateReporter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evalReporters[provider.Name()] = provider
+}
+
+func (r *Registry) EvalCandidateReporters() []EvalCandidateReporter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]EvalCandidateReporter, 0, len(r.evalReporters))
+	for _, p := range r.evalReporters {
+		result = append(result, p)
+	}
+	return result
 }
 
 func (r *Registry) RegisterSessionTabManager(provider SessionTabManager) {

@@ -2639,7 +2639,7 @@ func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetw
 		OrgID:        orgID,
 		ContainerID:  &containerID,
 		SandboxState: models.SandboxStateRunning,
-	}, &models.PreviewConfig{})
+	}, nil)
 
 	require.Nil(t, result.Sandbox, "live container on the direct bridge should not be reused for static egress")
 	require.Equal(t, "NETWORK_SETTING_RESTART_REQUIRED", result.ErrCode, "network mismatch should return a restart-required error code")

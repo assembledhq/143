@@ -13,9 +13,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
-import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
+import { ArrowLeft, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { usePageTitle } from "@/hooks/use-page-title";
-import type { EvalBatchDetail, EvalRun, EvalTask, ListResponse, SingleResponse } from "@/lib/types";
+import type { EvalBatchDetail, EvalReleaseGate, EvalRun, EvalTask, ListResponse, SingleResponse } from "@/lib/types";
 import { evalRunStatusConfig } from "@/lib/types";
 
 // Slow polling backstop while SSE is the primary update channel. Keeps the
@@ -72,6 +72,10 @@ export default function BatchDetailPage() {
     queryKey: queryKeys.evals.tasks(),
     queryFn: () => api.evals.listTasks({}),
     enabled: !!batch?.runs?.length,
+  });
+  const { data: releaseGatesResponse } = useQuery<ListResponse<EvalReleaseGate>>({
+    queryKey: ["evals", "release-gates"],
+    queryFn: () => api.evals.listReleaseGates(),
   });
   const taskNameMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -134,7 +138,7 @@ export default function BatchDetailPage() {
         </div>
 
         {/* Status summary */}
-        <BatchSummary batch={batch} />
+        <BatchSummary batch={batch} releaseGates={releaseGatesResponse?.data ?? []} />
 
         {/* Comparison matrix */}
         {taskNames.length > 0 && configLabels.length > 0 && (
@@ -214,31 +218,48 @@ export default function BatchDetailPage() {
 }
 
 function ScoreCell({ run }: { run: EvalRun }) {
-  if (run.status === "pending" || run.status === "running") {
-    const statusStyle = evalRunStatusConfig[run.status];
-    return (
-      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle.color}`}>
-        {statusStyle.label}
-      </span>
-    );
-  }
-  if (run.status === "failed") {
-    return <span className="text-destructive text-xs">Error</span>;
-  }
-  if (run.final_score == null) return <span className="text-muted-foreground">-</span>;
+  const content = (() => {
+    if (run.status === "pending" || run.status === "running" || run.status === "grading") {
+      const statusStyle = evalRunStatusConfig[run.status];
+      return (
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle.color}`}>
+          {statusStyle.label}
+        </span>
+      );
+    }
+    if (run.status === "failed") {
+      return <span className="text-destructive text-xs">{run.error_message ? "Failed" : "Error"}</span>;
+    }
+    if (run.final_score == null) return <span className="text-muted-foreground">-</span>;
 
-  const pct = (run.final_score * 100).toFixed(0);
-  const color = run.passed ? "text-success" : "text-destructive";
+    const pct = (run.final_score * 100).toFixed(0);
+    const color = run.passed ? "text-success" : "text-destructive";
 
-  return <span className={`font-medium ${color}`}>{pct}%</span>;
+    return <span className={`font-medium ${color}`}>{pct}%</span>;
+  })();
+
+  if (!run.session_id) return content;
+
+  return (
+    <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" asChild>
+      <Link href={`/sessions/${run.session_id}`}>
+        <span className="inline-flex items-center gap-1">
+          {content}
+          <ExternalLink className="h-3 w-3 text-muted-foreground" />
+        </span>
+      </Link>
+    </Button>
+  );
 }
 
-function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
+function BatchSummary({ batch, releaseGates }: { batch: EvalBatchDetail; releaseGates: EvalReleaseGate[] }) {
   let completedCount = 0;
   let failedCount = 0;
   let passedCount = 0;
   let scoreSum = 0;
   let scoreCount = 0;
+  let deterministicFailures = 0;
+  let llmJudgeFailures = 0;
   for (const r of batch.runs) {
     if (r.status === "completed") {
       completedCount++;
@@ -247,11 +268,26 @@ function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
     } else if (r.status === "failed") {
       failedCount++;
     }
+    for (const result of r.criterion_results ?? []) {
+      if (!result.pass && result.grader_type === "code_check") deterministicFailures++;
+      if (!result.pass && result.grader_type === "llm_judge") llmJudgeFailures++;
+    }
   }
   const avgScore = scoreCount > 0 ? scoreSum / scoreCount : null;
+  const passRate = completedCount > 0 ? passedCount / completedCount : null;
+  const enabledGates = releaseGates.filter((gate) => gate.enabled);
+  const decisions = batch.gate_decisions ?? [];
+  const persistedGateTotal = decisions.length;
+  const persistedGatesPassing = decisions.filter((decision) => decision.status === "passed").length;
+  const gatesPassing = persistedGateTotal > 0
+    ? persistedGatesPassing
+    : passRate == null
+      ? 0
+      : enabledGates.filter((gate) => passRate >= gate.min_pass_at_1).length;
+  const gateTotal = persistedGateTotal > 0 ? persistedGateTotal : enabledGates.length;
 
   return (
-    <div className="grid gap-4 md:grid-cols-4">
+    <div className="grid gap-4 md:grid-cols-6">
       <Card>
         <CardContent className="py-3 text-center">
           <p className="text-2xl font-semibold tabular-nums">{completedCount}/{batch.run_count}</p>
@@ -272,8 +308,26 @@ function BatchSummary({ batch }: { batch: EvalBatchDetail }) {
       </Card>
       <Card>
         <CardContent className="py-3 text-center">
+          <p className="text-2xl font-semibold">{passRate != null ? `${(passRate * 100).toFixed(0)}%` : "-"}</p>
+          <p className="text-xs text-muted-foreground">Pass rate</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="py-3 text-center">
           <p className="text-2xl font-semibold tabular-nums text-destructive">{failedCount}</p>
           <p className="text-xs text-muted-foreground">Errors</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="py-3 text-center">
+          <p className="text-2xl font-semibold">{deterministicFailures}/{llmJudgeFailures}</p>
+          <p className="text-xs text-muted-foreground">Code/LLM fails</p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="py-3 text-center">
+          <p className="text-2xl font-semibold">{gateTotal > 0 ? `${gatesPassing}/${gateTotal}` : "-"}</p>
+          <p className="text-xs text-muted-foreground">Gates passing</p>
         </CardContent>
       </Card>
     </div>

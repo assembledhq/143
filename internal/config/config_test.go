@@ -26,6 +26,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("CORS_ALLOWED_ORIGINS", "")
 	t.Setenv("MODE", "")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "")
+	t.Setenv("PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR", "")
 	// Prevent .env files from interfering with defaults
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
@@ -51,6 +52,58 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, "chat", cfg.OpenAIAPIType, "Load should default OpenAI API type to chat")
 	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 	require.Equal(t, "busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should default the sandbox health-check image to a pinned busybox tag")
+	require.Equal(t, "/var/cache/143/preview-dependency-cache", cfg.PreviewDependencyCacheLocalDir, "Load should default dependency cache local L1 storage to the production worker host cache path")
+}
+
+func TestResolvePreviewDependencyCacheLocalDir(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{
+			name:  "keeps configured path",
+			value: "/mnt/fast-cache/preview-dependency-cache",
+			want:  "/mnt/fast-cache/preview-dependency-cache",
+		},
+		{
+			name:  "trims configured path",
+			value: "  /mnt/fast-cache/preview-dependency-cache  ",
+			want:  "/mnt/fast-cache/preview-dependency-cache",
+		},
+		{
+			name:  "off disables local cache",
+			value: "off",
+			want:  "",
+		},
+		{
+			name:  "disabled disables local cache",
+			value: "DISABLED",
+			want:  "",
+		},
+		{
+			name:  "none disables local cache",
+			value: " none ",
+			want:  "",
+		},
+		{
+			name:  "blank disables local cache after explicit normalization",
+			value: "   ",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ResolvePreviewDependencyCacheLocalDir(tt.value)
+
+			require.Equal(t, tt.want, got, "local dependency cache path should normalize opt-out sentinels and configured paths")
+		})
+	}
 }
 
 //nolint:paralleltest // uses t.Setenv

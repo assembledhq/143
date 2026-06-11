@@ -50,7 +50,7 @@
   --accent: oklch(0.95 0.003 260);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --success: oklch(0.527 0.154 150);
+  --success: oklch(0.552 0.145 148.215);
   --success-foreground: oklch(0.985 0 0);
   --warning: oklch(0.666 0.179 58.3);
   --warning-foreground: oklch(0.985 0 0);
@@ -266,6 +266,11 @@
   }
   ::selection {
     background-color: color-mix(in oklch, var(--primary) 22%, transparent);
+  }
+  .chat-user-bubble::selection,
+  .chat-user-bubble ::selection {
+    background-color: color-mix(in oklch, var(--card) 88%, transparent);
+    color: var(--card-foreground);
   }
   /* Thin, unobtrusive scrollbars on every pane (standard properties;
      Chrome 121+/Safari 18.2+, older engines fall back to OS default). */

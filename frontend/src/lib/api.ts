@@ -1065,6 +1065,12 @@ export const api = {
     },
     startBatch: (body: { name: string; task_ids: string[]; configs: Array<{ model: string; config_ref?: string }> }) =>
       post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/batch', body),
+    compare: (body: {
+      name?: string;
+      task_ids: string[];
+      baseline_config: { model: string; config_ref?: string };
+      candidate_configs: Array<{ model: string; config_ref?: string }>;
+    }) => post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/compare', body),
     getBatch: (id: string) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`),
     // Bootstrap
     bootstrap: (body: { repo_id: string }) =>
@@ -1076,8 +1082,33 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`);
     },
-    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
+    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices?: number[]; candidate_ids?: string[] }) =>
       post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
+    reviewBootstrapCandidate: (candidateId: string, body: { status: import('./types').EvalBootstrapCandidateStatus; rejection_reason?: string }) =>
+      patch<import('./types').SingleResponse<{ candidate_id: string; status: import('./types').EvalBootstrapCandidateStatus; rejection_reason?: string }>>(`/api/v1/evals/bootstrap/candidates/${candidateId}`, body),
+    listDatasets: (params?: { repository_id?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalDataset>>(`/api/v1/evals/datasets${qs ? `?${qs}` : ''}`);
+    },
+    createDataset: (body: { name: string; dataset_type: import('./types').EvalDatasetType; repository_id?: string; description?: string; source_summary?: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalDataset>>('/api/v1/evals/datasets', body),
+    addDatasetTask: (datasetId: string, body: { task_id: string; slice_key?: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalDatasetTask>>(`/api/v1/evals/datasets/${datasetId}/tasks`, body),
+    listReleaseGates: () =>
+      get<import('./types').ListResponse<import('./types').EvalReleaseGate>>('/api/v1/evals/release-gates'),
+    upsertReleaseGate: (body: {
+      gate_name: string;
+      enabled?: boolean;
+      dataset_id?: string;
+      min_pass_at_1?: number;
+      min_pass_at_k?: number;
+      max_policy_violations?: number;
+      max_regression_delta?: number;
+      canary_stages?: unknown;
+      rollback_rules?: unknown;
+    }) => post<import('./types').SingleResponse<import('./types').EvalReleaseGate>>('/api/v1/evals/release-gates', body),
   },
   usage: {
     getSummary: (params?: { start?: string; end?: string }) => {

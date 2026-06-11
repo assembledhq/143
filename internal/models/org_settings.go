@@ -326,10 +326,13 @@ func (t SandboxResourceTier) Validate() error {
 
 // SandboxResourceSettings controls org-level sandbox resource defaults and bounds.
 type SandboxResourceSettings struct {
-	AgentDefaultTier          SandboxResourceTier `json:"agent_default_tier,omitempty"`
-	PreviewDefaultTier        SandboxResourceTier `json:"preview_default_tier,omitempty"`
-	AllowRepoResourceRequests *bool               `json:"allow_repo_resource_requests,omitempty"`
-	PreviewMaxTier            SandboxResourceTier `json:"preview_max_tier,omitempty"`
+	AgentDefaultTier           SandboxResourceTier `json:"agent_default_tier,omitempty"`
+	PreviewDefaultTier         SandboxResourceTier `json:"preview_default_tier,omitempty"`
+	AllowRepoResourceRequests  *bool               `json:"allow_repo_resource_requests,omitempty"`
+	PreviewMaxTier             SandboxResourceTier `json:"preview_max_tier,omitempty"`
+	PreviewMaxCPUMillis        int                 `json:"preview_max_cpu_millis,omitempty"`
+	PreviewMaxMemoryMiB        int                 `json:"preview_max_memory_mib,omitempty"`
+	PreviewMaxEphemeralDiskMiB int                 `json:"preview_max_ephemeral_disk_mib,omitempty"`
 }
 
 // EffectiveAllowRepoResourceRequests applies the default resource policy.
@@ -632,6 +635,16 @@ const (
 	MinPreviewMaxPreviewsPerUser     = 1
 	MaxPreviewMaxPreviewsPerUser     = 20
 
+	DefaultPreviewMaxCPUMillis        = 2000
+	MinPreviewMaxCPUMillis            = 250
+	MaxPreviewMaxCPUMillis            = 2000
+	DefaultPreviewMaxMemoryMiB        = 8 * 1024
+	MinPreviewMaxMemoryMiB            = 512
+	MaxPreviewMaxMemoryMiB            = 8 * 1024
+	DefaultPreviewMaxEphemeralDiskMiB = 10 * 1024
+	MinPreviewMaxEphemeralDiskMiB     = 1024
+	MaxPreviewMaxEphemeralDiskMiB     = 10 * 1024
+
 	DefaultCompletedSessionRetentionMinutes = 60
 	MinCompletedSessionRetentionMinutes     = 0
 	MaxCompletedSessionRetentionMinutes     = 24 * 60
@@ -845,6 +858,27 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 	}
 	if s.SandboxResources.PreviewMaxTier == "" {
 		s.SandboxResources.PreviewMaxTier = SandboxResourceTierLarge
+	}
+	if s.SandboxResources.PreviewMaxCPUMillis == 0 {
+		s.SandboxResources.PreviewMaxCPUMillis = DefaultPreviewMaxCPUMillis
+	} else if s.SandboxResources.PreviewMaxCPUMillis < MinPreviewMaxCPUMillis {
+		s.SandboxResources.PreviewMaxCPUMillis = MinPreviewMaxCPUMillis
+	} else if s.SandboxResources.PreviewMaxCPUMillis > MaxPreviewMaxCPUMillis {
+		s.SandboxResources.PreviewMaxCPUMillis = MaxPreviewMaxCPUMillis
+	}
+	if s.SandboxResources.PreviewMaxMemoryMiB == 0 {
+		s.SandboxResources.PreviewMaxMemoryMiB = DefaultPreviewMaxMemoryMiB
+	} else if s.SandboxResources.PreviewMaxMemoryMiB < MinPreviewMaxMemoryMiB {
+		s.SandboxResources.PreviewMaxMemoryMiB = MinPreviewMaxMemoryMiB
+	} else if s.SandboxResources.PreviewMaxMemoryMiB > MaxPreviewMaxMemoryMiB {
+		s.SandboxResources.PreviewMaxMemoryMiB = MaxPreviewMaxMemoryMiB
+	}
+	if s.SandboxResources.PreviewMaxEphemeralDiskMiB == 0 {
+		s.SandboxResources.PreviewMaxEphemeralDiskMiB = DefaultPreviewMaxEphemeralDiskMiB
+	} else if s.SandboxResources.PreviewMaxEphemeralDiskMiB < MinPreviewMaxEphemeralDiskMiB {
+		s.SandboxResources.PreviewMaxEphemeralDiskMiB = MinPreviewMaxEphemeralDiskMiB
+	} else if s.SandboxResources.PreviewMaxEphemeralDiskMiB > MaxPreviewMaxEphemeralDiskMiB {
+		s.SandboxResources.PreviewMaxEphemeralDiskMiB = MaxPreviewMaxEphemeralDiskMiB
 	}
 
 	if s.RuntimeBudgets.NoProgressTimeoutSeconds <= 0 {

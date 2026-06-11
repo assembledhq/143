@@ -64,13 +64,13 @@ const (
 	DefaultSingleServiceMemory = 1024
 	DefaultMultiServiceMemory  = 2048
 	DefaultInfraServiceMemory  = 4096
-	MaxPreviewCPUMillis        = 2000
+	MaxPreviewCPUMillis        = models.MaxPreviewMaxCPUMillis
 	// MaxPreviewMemoryMiB is the ceiling a repo may request via
 	// preview.resources.{requests,limits}.memory in .143/config.json. Defaults
 	// stay modest (above) to bound per-worker capacity; repos that need more
 	// opt in explicitly up to this cap.
-	MaxPreviewMemoryMiB        = 8192
-	MaxPreviewEphemeralDiskMiB = 10 * 1024
+	MaxPreviewMemoryMiB        = models.MaxPreviewMaxMemoryMiB
+	MaxPreviewEphemeralDiskMiB = models.MaxPreviewMaxEphemeralDiskMiB
 )
 
 var ErrInvalidConfig = errors.New("invalid preview config")
@@ -475,9 +475,67 @@ func extractPreviewSection(data []byte) ([]byte, error) {
 // ValidateConfig
 // =============================================================================
 
+// ResourcePolicy is the effective org resource policy for repo-authored
+// preview.resources requests. Admin settings may lower these values, but they
+// cannot raise them above the platform hard caps.
+type ResourcePolicy struct {
+	AllowRepoResourceRequests bool
+	MaxCPUMillis              int
+	MaxMemoryMiB              int
+	MaxDiskMiB                int
+}
+
+func defaultResourcePolicy() ResourcePolicy {
+	return ResourcePolicy{
+		AllowRepoResourceRequests: true,
+		MaxCPUMillis:              MaxPreviewCPUMillis,
+		MaxMemoryMiB:              MaxPreviewMemoryMiB,
+		MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+	}
+}
+
+func ResourcePolicyFromOrgSettings(settings models.OrgSettings) ResourcePolicy {
+	return normalizeResourcePolicy(ResourcePolicy{
+		AllowRepoResourceRequests: settings.SandboxResources.EffectiveAllowRepoResourceRequests(),
+		MaxCPUMillis:              settings.SandboxResources.PreviewMaxCPUMillis,
+		MaxMemoryMiB:              settings.SandboxResources.PreviewMaxMemoryMiB,
+		MaxDiskMiB:                settings.SandboxResources.PreviewMaxEphemeralDiskMiB,
+	})
+}
+
+func normalizeResourcePolicy(policy ResourcePolicy) ResourcePolicy {
+	defaults := defaultResourcePolicy()
+	if policy.MaxCPUMillis <= 0 {
+		policy.MaxCPUMillis = defaults.MaxCPUMillis
+	}
+	if policy.MaxCPUMillis > MaxPreviewCPUMillis {
+		policy.MaxCPUMillis = MaxPreviewCPUMillis
+	}
+	if policy.MaxMemoryMiB <= 0 {
+		policy.MaxMemoryMiB = defaults.MaxMemoryMiB
+	}
+	if policy.MaxMemoryMiB > MaxPreviewMemoryMiB {
+		policy.MaxMemoryMiB = MaxPreviewMemoryMiB
+	}
+	if policy.MaxDiskMiB <= 0 {
+		policy.MaxDiskMiB = defaults.MaxDiskMiB
+	}
+	if policy.MaxDiskMiB > MaxPreviewEphemeralDiskMiB {
+		policy.MaxDiskMiB = MaxPreviewEphemeralDiskMiB
+	}
+	return policy
+}
+
 // ValidateConfig checks all structural and security constraints on a parsed config.
 func ValidateConfig(cfg *models.PreviewConfig) []string {
+	return ValidateConfigWithResourcePolicy(cfg, defaultResourcePolicy())
+}
+
+// ValidateConfigWithResourcePolicy checks structural/security constraints using
+// the effective org resource policy for preview.resources.
+func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy ResourcePolicy) []string {
 	var errs []string
+	resourcePolicy = normalizeResourcePolicy(resourcePolicy)
 
 	// Primary must reference an existing service.
 	if cfg.Primary == "" {
@@ -530,7 +588,7 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	}
 
 	errs = append(errs, validatePreviewInstallConfig(cfg.Install)...)
-	errs = append(errs, validatePreviewResources(cfg.Resources)...)
+	errs = append(errs, validatePreviewResources(cfg.Resources, resourcePolicy)...)
 
 	// Per-infrastructure validation.
 	for name, infra := range cfg.Infrastructure {
@@ -749,6 +807,9 @@ func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []str
 	if dependencyCachePathTargetsPreviewInstallMarkers(filepath.ToSlash(clean)) {
 		errs = append(errs, fmt.Sprintf("%s: path %q must not target preview install markers", field, raw))
 	}
+	if dependencyCachePathTargetsPlatformCache(filepath.ToSlash(clean)) {
+		errs = append(errs, fmt.Sprintf("%s: path %q must not target platform preview cache", field, raw))
+	}
 	if !validPreviewInstallCleanPath.MatchString(raw) {
 		errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, raw))
 	}
@@ -784,7 +845,7 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 		if clean == "" || clean == "." {
 			return
 		}
-		if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
+		if dependencyCachePathTargetsPreviewInstallMarkers(clean) || dependencyCachePathTargetsPlatformCache(clean) {
 			return
 		}
 		if _, ok := seen[clean]; ok {
@@ -842,17 +903,17 @@ func pathDir(clean string) string {
 	return clean[:idx]
 }
 
-// memoryLimitLabel renders MaxPreviewMemoryMiB as a human-friendly limit string
-// for validation messages (e.g. "8Gi"), so the messages track the constant.
-func memoryLimitLabel() string {
-	if MaxPreviewMemoryMiB%1024 == 0 {
-		return fmt.Sprintf("%dGi", MaxPreviewMemoryMiB/1024)
-	}
-	return fmt.Sprintf("%dMi", MaxPreviewMemoryMiB)
-}
-
-func validatePreviewResources(resources models.PreviewResourceRequirements) []string {
+func validatePreviewResources(resources models.PreviewResourceRequirements, policy ResourcePolicy) []string {
 	var errs []string
+	hasResources := resources.Requests.CPU != "" ||
+		resources.Requests.Memory != "" ||
+		resources.Requests.EphemeralStorage != "" ||
+		resources.Limits.CPU != "" ||
+		resources.Limits.Memory != "" ||
+		resources.Limits.EphemeralStorage != ""
+	if hasResources && !policy.AllowRepoResourceRequests {
+		errs = append(errs, "preview.resources cannot be set when repo resource requests are disabled")
+	}
 
 	reqCPU, reqCPUSet, err := parseCPUQuantity("preview.resources.requests.cpu", resources.Requests.CPU)
 	if err != nil {
@@ -880,23 +941,23 @@ func validatePreviewResources(resources models.PreviewResourceRequirements) []st
 		errs = append(errs, err.Error())
 	}
 
-	if reqCPUSet && reqCPU > MaxPreviewCPUMillis {
-		errs = append(errs, "preview.resources.requests.cpu must be at most 2 cores")
+	if reqCPUSet && reqCPU > policy.MaxCPUMillis {
+		errs = append(errs, "preview.resources.requests.cpu must be at most "+cpuLimitLabel(policy.MaxCPUMillis))
 	}
-	if limitCPUSet && limitCPU > MaxPreviewCPUMillis {
-		errs = append(errs, "preview.resources.limits.cpu must be at most 2 cores")
+	if limitCPUSet && limitCPU > policy.MaxCPUMillis {
+		errs = append(errs, "preview.resources.limits.cpu must be at most "+cpuLimitLabel(policy.MaxCPUMillis))
 	}
-	if reqMemorySet && reqMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, fmt.Sprintf("preview.resources.requests.memory must be at most %s", memoryLimitLabel()))
+	if reqMemorySet && reqMemory > policy.MaxMemoryMiB {
+		errs = append(errs, "preview.resources.requests.memory must be at most "+byteLimitLabel(policy.MaxMemoryMiB))
 	}
-	if limitMemorySet && limitMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, fmt.Sprintf("preview.resources.limits.memory must be at most %s", memoryLimitLabel()))
+	if limitMemorySet && limitMemory > policy.MaxMemoryMiB {
+		errs = append(errs, "preview.resources.limits.memory must be at most "+byteLimitLabel(policy.MaxMemoryMiB))
 	}
-	if reqDiskSet && reqDisk > MaxPreviewEphemeralDiskMiB {
-		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most 10Gi")
+	if reqDiskSet && reqDisk > policy.MaxDiskMiB {
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most "+byteLimitLabel(policy.MaxDiskMiB))
 	}
-	if limitDiskSet && limitDisk > MaxPreviewEphemeralDiskMiB {
-		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most 10Gi")
+	if limitDiskSet && limitDisk > policy.MaxDiskMiB {
+		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most "+byteLimitLabel(policy.MaxDiskMiB))
 	}
 
 	if reqCPUSet && limitCPUSet && reqCPU > limitCPU {
@@ -930,6 +991,24 @@ func parseCPUQuantity(field, raw string) (int, bool, error) {
 		return 0, true, fmt.Errorf("%s must be a positive CPU quantity such as 500m, 1, or 1.5", field)
 	}
 	return int(math.Ceil(cores * 1000)), true, nil
+}
+
+func cpuLimitLabel(millis int) string {
+	if millis%1000 == 0 {
+		cores := millis / 1000
+		if cores == 1 {
+			return "1 core"
+		}
+		return strconv.Itoa(cores) + " cores"
+	}
+	return strconv.Itoa(millis) + "m"
+}
+
+func byteLimitLabel(mib int) string {
+	if mib%1024 == 0 {
+		return strconv.Itoa(mib/1024) + "Gi"
+	}
+	return strconv.Itoa(mib) + "Mi"
 }
 
 func parseByteQuantityMiB(field, raw string) (int, bool, error) {
@@ -1159,6 +1238,13 @@ func DetectReadiness(cfg *models.PreviewConfig) models.PreviewDetectionResult {
 
 // ResolveResourceLimits returns the appropriate resource limits based on config.
 func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
+	return ResolveResourceLimitsWithPolicy(cfg, defaultResourcePolicy())
+}
+
+// ResolveResourceLimitsWithPolicy returns resource limits capped by the
+// effective org policy.
+func ResolveResourceLimitsWithPolicy(cfg *models.PreviewConfig, resourcePolicy ResourcePolicy) models.ResourceLimits {
+	resourcePolicy = normalizeResourcePolicy(resourcePolicy)
 	limits := models.ResourceLimits{
 		MemoryMiB: DefaultSingleServiceMemory,
 		CPUMillis: 500,
@@ -1185,6 +1271,15 @@ func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
 	}
 	applyResourceList(cfg.Resources.Requests)
 	applyResourceList(cfg.Resources.Limits)
+	if limits.CPUMillis > resourcePolicy.MaxCPUMillis {
+		limits.CPUMillis = resourcePolicy.MaxCPUMillis
+	}
+	if limits.MemoryMiB > resourcePolicy.MaxMemoryMiB {
+		limits.MemoryMiB = resourcePolicy.MaxMemoryMiB
+	}
+	if limits.DiskMiB > resourcePolicy.MaxDiskMiB {
+		limits.DiskMiB = resourcePolicy.MaxDiskMiB
+	}
 
 	return limits
 }
@@ -1199,4 +1294,15 @@ func ApplyResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, cfg *mo
 	sandboxCfg.MemoryLimitMB = limits.MemoryMiB
 	sandboxCfg.CPULimit = float64(limits.CPUMillis) / 1000
 	sandboxCfg.DiskLimitGB = int(math.Ceil(float64(limits.DiskMiB) / 1024.0))
+}
+
+// ApplyPreviewInstanceResourceLimitsToSandboxConfig maps persisted preview
+// reservation limits onto the sandbox config used by durable worker jobs.
+func ApplyPreviewInstanceResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, instance *models.PreviewInstance) {
+	if sandboxCfg == nil || instance == nil {
+		return
+	}
+	sandboxCfg.MemoryLimitMB = instance.MemoryLimitMB
+	sandboxCfg.CPULimit = float64(instance.CPULimitMillis) / 1000
+	sandboxCfg.DiskLimitGB = int(math.Ceil(float64(instance.DiskLimitMB) / 1024.0))
 }

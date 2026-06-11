@@ -251,6 +251,38 @@ func TestPreviewDependencyCacheEnabledWithConfiguredBucket(t *testing.T) {
 	}
 }
 
+func TestPreviewDependencyCacheUsesNormalizedLocalDir(t *testing.T) {
+	t.Parallel()
+
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "main.go", nil, parser.ParseComments)
+	require.NoError(t, err, "test should parse cmd/server/main.go")
+
+	found := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		kv, ok := node.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "LocalDir" {
+			return true
+		}
+		call, ok := kv.Value.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "ResolvePreviewDependencyCacheLocalDir" {
+			return true
+		}
+		found = true
+		return false
+	})
+
+	require.True(t, found, "dependency cache construction should normalize PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR so opt-out sentinels disable L1")
+}
+
 func TestValidateSessionExecutorStartupConfig(t *testing.T) {
 	t.Parallel()
 
