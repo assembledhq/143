@@ -611,6 +611,8 @@ func TestSessionReviewCommentHandler_SendToAgent(t *testing.T) {
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 		require.Contains(t, resp.Data.Message, "Fix error handling")
 		require.Contains(t, resp.Data.Message, "src/app.ts:10")
+		require.Contains(t, resp.Data.Message, "Target line: `src/app.ts:10` (new side)")
+		require.Contains(t, resp.Data.Message, "Requested change: \"Fix error handling\"")
 		// Resolved comment should not be included
 		require.NotContains(t, resp.Data.Message, "Already fixed")
 	})
