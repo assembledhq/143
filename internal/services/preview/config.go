@@ -807,6 +807,9 @@ func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []str
 	if dependencyCachePathTargetsPreviewInstallMarkers(filepath.ToSlash(clean)) {
 		errs = append(errs, fmt.Sprintf("%s: path %q must not target preview install markers", field, raw))
 	}
+	if dependencyCachePathTargetsPlatformCache(filepath.ToSlash(clean)) {
+		errs = append(errs, fmt.Sprintf("%s: path %q must not target platform preview cache", field, raw))
+	}
 	if !validPreviewInstallCleanPath.MatchString(raw) {
 		errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, raw))
 	}
@@ -842,7 +845,7 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 		if clean == "" || clean == "." {
 			return
 		}
-		if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
+		if dependencyCachePathTargetsPreviewInstallMarkers(clean) || dependencyCachePathTargetsPlatformCache(clean) {
 			return
 		}
 		if _, ok := seen[clean]; ok {

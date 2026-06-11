@@ -1081,7 +1081,9 @@ func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
 }
 
 func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
-	if status != "restore_failed" && status != "restored" {
+	switch status {
+	case "disabled", "miss", "restore_failed", "restored":
+	default:
 		return
 	}
 	level := "info"

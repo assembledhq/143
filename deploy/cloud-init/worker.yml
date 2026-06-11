@@ -82,6 +82,9 @@ runcmd:
   # Reconcile worker host invariants before the first compose up. This is the
   # same idempotent path used by provision.sh, deploy.sh, and manual repair.
   - /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox
+  - mkdir -p /var/cache/143/preview-dependency-cache
+  - chown 1000:1000 /var/cache/143/preview-dependency-cache
+  - chmod 0750 /var/cache/143/preview-dependency-cache
 
   # Concatenate per-host identity (.env.local) into the shared .env so docker
   # compose can interpolate ${NODE_ID}, ${WORKER_PRIVATE_IP}, etc. when it

@@ -194,6 +194,9 @@ func cleanDependencyCacheRepoPath(raw string, allowGlob bool) (string, error) {
 	if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
 		return "", fmt.Errorf("path must not target preview install markers")
 	}
+	if dependencyCachePathTargetsPlatformCache(clean) {
+		return "", fmt.Errorf("path must not target platform preview cache")
+	}
 	return clean, nil
 }
 
@@ -210,6 +213,21 @@ func dependencyCachePathTargetsPreviewInstallMarkers(clean string) bool {
 		return strings.HasPrefix(marker, clean+"/")
 	}
 	return dependencyCacheGlobTargetsPathOrDescendant(clean, marker)
+}
+
+func dependencyCachePathTargetsPlatformCache(clean string) bool {
+	const platformCache = ".143/cache"
+	clean = filepath.ToSlash(filepath.Clean(strings.TrimSpace(clean)))
+	if clean == "" || clean == "." {
+		return false
+	}
+	if clean == platformCache || strings.HasPrefix(clean, platformCache+"/") {
+		return true
+	}
+	if !strings.Contains(clean, "*") {
+		return strings.HasPrefix(platformCache, clean+"/")
+	}
+	return dependencyCacheGlobTargetsPathOrDescendant(clean, platformCache)
 }
 
 func dependencyCacheGlobTargetsPathOrDescendant(pattern, target string) bool {
