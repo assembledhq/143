@@ -460,7 +460,14 @@ echo "healthy $role deploy detail that must stay out of failure output"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Pre-seed the pinned log dir with a previous run's failure; the script
+	// must clear it instead of re-dumping it alongside this run's failures.
 	logDir := filepath.Join(tempDir, "fleet-logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755), "test should create the pinned log dir")
+	staleLog := filepath.Join(logDir, "app-9.9.9.9.log")
+	require.NoError(t, os.WriteFile(staleLog, []byte("stale failure from a previous run\n"), 0o644), "test should seed a stale per-host log")
+	require.NoError(t, os.WriteFile(staleLog+".failed", nil, 0o644), "test should seed a stale failure marker")
+
 	summaryPath := filepath.Join(tempDir, "step-summary.md")
 	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
 	cmd.Env = append(os.Environ(),
@@ -475,7 +482,9 @@ echo "healthy $role deploy detail that must stay out of failure output"
 	text := string(output)
 	require.Contains(t, text, "remote gate said: config changed during routine deploy on 10.0.0.2", "fleet output should include the failed host's log so CI failures are introspectable")
 	require.Contains(t, text, "::group::FAILED worker-10.0.0.2", "fleet output should wrap failed logs in a collapsible GitHub Actions group")
+	require.Contains(t, text, "::stop-commands::", "fleet output should fence dumped remote log content so the runner does not interpret ::-prefixed lines as workflow commands")
 	require.NotContains(t, text, "healthy app deploy detail", "fleet output should not dump logs of hosts that deployed cleanly")
+	require.NotContains(t, text, "stale failure from a previous run", "fleet deploy should clear prior-run state from a reused pinned log dir before deploying")
 	require.FileExists(t, filepath.Join(logDir, "worker-10.0.0.2.log"), "fleet deploy should write per-host logs into the pinned artifact dir")
 
 	summary, err := os.ReadFile(summaryPath)
