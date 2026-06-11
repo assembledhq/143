@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent } from "@testing-library/react";
+import { useQuery } from "@tanstack/react-query";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { AuthenticatedLayout, sessionDetailRouteId } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
@@ -563,8 +564,7 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  describe("auth-gate session detail prefetch", () => {
-    const sessionId = "93cbcc8c-c12e-4bdf-8622-5865502c8977";
+  describe("auth-gate warm mount", () => {
     const loadingAuth = {
       user: null,
       isLoading: true,
@@ -576,90 +576,31 @@ describe("AuthenticatedLayout", () => {
       logout: logoutMock,
     };
 
-    function trackSessionDetailRequests(): string[] {
-      const requests: string[] = [];
-      server.use(
-        http.get("/api/v1/sessions/:id", ({ params }) => {
-          requests.push(String(params.id));
-          return HttpResponse.json({ data: { id: params.id, threads: [] } });
-        })
-      );
-      return requests;
-    }
-
-    it("prefetches the session detail while /auth/me is still in flight", async () => {
-      mockPathname = `/sessions/${sessionId}`;
+    it("mounts children behind the auth skeleton so route queries can warm generally", async () => {
+      mockPathname = "/somewhere";
       useAuthMock.mockReturnValue(loadingAuth);
-      const requests = trackSessionDetailRequests();
+      const queryFn = vi.fn().mockResolvedValue({ data: "ready" });
+
+      function RouteProbe() {
+        useQuery({
+          queryKey: ["route-probe"],
+          queryFn,
+        });
+        return <div>route child</div>;
+      }
 
       renderWithProviders(
         <AuthenticatedLayout>
-          <div>content</div>
+          <RouteProbe />
         </AuthenticatedLayout>
       );
 
       await waitFor(() => {
-        expect(requests).toEqual([sessionId]);
+        expect(queryFn).toHaveBeenCalled();
       });
-    });
-
-    it("does not prefetch when auth has already settled", async () => {
-      mockPathname = `/sessions/${sessionId}`;
-      const requests = trackSessionDetailRequests();
-
-      renderWithProviders(
-        <AuthenticatedLayout>
-          <div>content</div>
-        </AuthenticatedLayout>
-      );
-
-      await new Promise((r) => setTimeout(r, 50));
-      expect(requests).toEqual([]);
-    });
-
-    it("does not prefetch on non-session routes while auth loads", async () => {
-      mockPathname = "/autopilot";
-      useAuthMock.mockReturnValue(loadingAuth);
-      const requests = trackSessionDetailRequests();
-
-      renderWithProviders(
-        <AuthenticatedLayout>
-          <div>content</div>
-        </AuthenticatedLayout>
-      );
-
-      await new Promise((r) => setTimeout(r, 50));
-      expect(requests).toEqual([]);
-    });
-
-    it("prefetches settings agent data while /auth/me is still in flight", async () => {
-      mockPathname = "/settings/agent";
-      useAuthMock.mockReturnValue(loadingAuth);
-      const requests: string[] = [];
-      server.use(
-        http.get("/api/v1/settings", () => {
-          requests.push("settings");
-          return HttpResponse.json({ data: { id: "org-1", name: "Test Org", settings: {} } });
-        }),
-        http.get("/api/v1/coding-credentials", ({ request }) => {
-          const url = new URL(request.url);
-          if (url.searchParams.get("scope") !== "org") {
-            return HttpResponse.json({ data: [], meta: {} }, { status: 400 });
-          }
-          requests.push("coding-credentials");
-          return HttpResponse.json({ data: [], meta: {} });
-        }),
-      );
-
-      renderWithProviders(
-        <AuthenticatedLayout>
-          <div>content</div>
-        </AuthenticatedLayout>
-      );
-
-      await waitFor(() => {
-        expect(requests).toEqual(expect.arrayContaining(["settings", "coding-credentials"]));
-      });
+      const warmMount = screen.getByTestId("auth-gate-warm-mount");
+      expect(warmMount).toHaveAttribute("hidden");
+      expect(within(warmMount).getByText("route child")).toBeInTheDocument();
     });
   });
 });

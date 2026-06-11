@@ -45,10 +45,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { queryKeys } from "@/lib/query-keys";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
@@ -79,45 +76,6 @@ const APP_SIDEBAR_DEFAULT_WIDTH = 236;
 const APP_SIDEBAR_MIN_WIDTH = 200;
 const APP_SIDEBAR_MAX_WIDTH = 300;
 const APP_SIDEBAR_STORAGE_KEY = "143:app-sidebar-width";
-const CODING_AUTHS_QUERY_KEY = ["coding-auths"] as const;
-
-function prefetchAuthGateRouteData(queryClient: QueryClient, pathname: string): void {
-  const sessionId = sessionDetailRouteId(pathname);
-  if (sessionId) {
-    void queryClient.prefetchQuery({
-      queryKey: queryKeys.sessions.detail(sessionId),
-      queryFn: () => api.sessions.get(sessionId),
-    });
-    return;
-  }
-
-  if (!pathname.startsWith("/settings")) {
-    return;
-  }
-
-  void queryClient.prefetchQuery({
-    queryKey: queryKeys.settings.all,
-    queryFn: () => api.settings.get(),
-  });
-
-  if (pathname === "/settings/agent") {
-    void queryClient.prefetchQuery({
-      queryKey: CODING_AUTHS_QUERY_KEY,
-      queryFn: () => api.codingCredentials.list("org"),
-    });
-  }
-
-  if (pathname === "/settings/runtime") {
-    void queryClient.prefetchQuery({
-      queryKey: queryKeys.settings.network,
-      queryFn: () => api.settings.getNetworkStatus(),
-    });
-    void queryClient.prefetchQuery({
-      queryKey: queryKeys.settings.runtimeStatus,
-      queryFn: () => api.settings.getRuntimeStatus(),
-    });
-  }
-}
 
 function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
@@ -528,8 +486,7 @@ function isSessionDetailRoute(pathname: string): boolean {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Strict variant for the auth-gate prefetch: only a UUID segment is worth a
-// speculative request, so non-id paths never hit the API.
+// Strict variant for session detail callers that need an API-safe id.
 export function sessionDetailRouteId(pathname: string): string | null {
   const segment = sessionDetailRouteSegment(pathname);
   return segment !== null && UUID_RE.test(segment) ? segment : null;
@@ -593,24 +550,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-
-  // On a cold load this layout renders only a skeleton until /auth/me
-  // resolves, so the page behind it can't start its own data fetches — every
-  // round trip serializes behind auth. Warm known route data in parallel with
-  // /auth/me; when the page mounts, React Query dedupes against the in-flight
-  // prefetch (or serves the settled payload) instead of paying a fresh round
-  // trip. prefetchQuery swallows errors by design: a 401 here just means the
-  // auth gate is about to redirect to /login anyway.
-  const queryClient = useQueryClient();
-  const didPrefetchRouteDataRef = useRef(false);
-  useEffect(() => {
-    if (didPrefetchRouteDataRef.current) return;
-    didPrefetchRouteDataRef.current = true;
-    // Auth already settled (warm navigation) — the page mounts immediately
-    // and owns its fetches; prefetching would only duplicate work.
-    if (user || !isLoading) return;
-    prefetchAuthGateRouteData(queryClient, pathname);
-  }, [isLoading, pathname, queryClient, user]);
   const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
     storageKey: APP_SIDEBAR_STORAGE_KEY,
     defaultWidth: APP_SIDEBAR_DEFAULT_WIDTH,
@@ -697,59 +636,64 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   if (showLoadingSkeleton) {
     return (
-      <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
-        {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
-        <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-2" />
-        <aside
-          data-testid="app-sidebar"
-          style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
-          className={cn(
-            "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)]"
-          )}
-        >
-          <div className="px-4 py-4">
-            <div className="h-5 w-20 rounded bg-muted animate-pulse" />
-          </div>
-          <nav className="flex-1 px-2 space-y-0.5">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
-                <div className="h-4 w-4 rounded bg-muted animate-pulse" />
-                <div className="h-3.5 rounded bg-muted animate-pulse" style={{ width: `${60 + i * 12}px` }} />
-              </div>
-            ))}
-          </nav>
-          <div className="px-2 pb-3">
-            <div className="flex items-center gap-2 px-2.5 py-2">
-              <div className="h-5 w-5 rounded-full bg-muted animate-pulse" />
-              <div className="h-3.5 w-20 rounded bg-muted animate-pulse" />
-            </div>
-          </div>
-        </aside>
-        <div className="hidden xl:block">
-          <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+      <>
+        <div hidden aria-hidden="true" data-testid="auth-gate-warm-mount">
+          <Suspense fallback={null}>{children}</Suspense>
         </div>
-        <div className="flex flex-1 min-w-0 flex-col">
-          <header className="md:hidden flex h-14 items-center gap-2 border-b border-sidebar-border bg-sidebar px-3">
-            <div className="h-6 w-6 rounded bg-muted animate-pulse" />
-            <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
-            <div className="h-6 w-6 rounded bg-muted animate-pulse" />
-          </header>
-          <main className="flex-1 overflow-auto overscroll-contain bg-background">
-            <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
-              <div className="h-7 w-40 rounded bg-muted animate-pulse" />
-              <div className="space-y-3">
-                <div className="h-4 w-full rounded bg-muted animate-pulse" />
-                <div className="h-4 w-3/4 rounded bg-muted animate-pulse" />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <div key={i} className="h-24 rounded-lg border border-border bg-muted/30 animate-pulse" />
-                ))}
+        <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
+          {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
+          <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-2" />
+          <aside
+            data-testid="app-sidebar"
+            style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
+            className={cn(
+              "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)]"
+            )}
+          >
+            <div className="px-4 py-4">
+              <div className="h-5 w-20 rounded bg-muted animate-pulse" />
+            </div>
+            <nav className="flex-1 px-2 space-y-0.5">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
+                  <div className="h-4 w-4 rounded bg-muted animate-pulse" />
+                  <div className="h-3.5 rounded bg-muted animate-pulse" style={{ width: `${60 + i * 12}px` }} />
+                </div>
+              ))}
+            </nav>
+            <div className="px-2 pb-3">
+              <div className="flex items-center gap-2 px-2.5 py-2">
+                <div className="h-5 w-5 rounded-full bg-muted animate-pulse" />
+                <div className="h-3.5 w-20 rounded bg-muted animate-pulse" />
               </div>
             </div>
-          </main>
+          </aside>
+          <div className="hidden xl:block">
+            <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+          </div>
+          <div className="flex flex-1 min-w-0 flex-col">
+            <header className="md:hidden flex h-14 items-center gap-2 border-b border-sidebar-border bg-sidebar px-3">
+              <div className="h-6 w-6 rounded bg-muted animate-pulse" />
+              <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
+              <div className="h-6 w-6 rounded bg-muted animate-pulse" />
+            </header>
+            <main className="flex-1 overflow-auto overscroll-contain bg-background">
+              <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
+                <div className="h-7 w-40 rounded bg-muted animate-pulse" />
+                <div className="space-y-3">
+                  <div className="h-4 w-full rounded bg-muted animate-pulse" />
+                  <div className="h-4 w-3/4 rounded bg-muted animate-pulse" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={i} className="h-24 rounded-lg border border-border bg-muted/30 animate-pulse" />
+                  ))}
+                </div>
+              </div>
+            </main>
+          </div>
         </div>
-      </div>
+      </>
     );
   }
 
