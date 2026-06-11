@@ -21,10 +21,10 @@ function tokenValue(css: string, selector: string, token: string): string {
 }
 
 describe("theme color tokens", () => {
-  it("uses GitHub's open pull request green for the light success token", () => {
+  it("uses a lighter app success green that stays close to diff additions", () => {
     const css = readFileSync(cssPath, "utf8");
 
-    expect(tokenValue(css, ":root", "--success"), "light success should match GitHub's #1f883d open PR emphasis color in OKLCH").toBe("oklch(0.552 0.145 148.215)");
+    expect(tokenValue(css, ":root", "--success"), "light success should be brighter than the previous GitHub open PR green without adding another status hue").toBe("oklch(0.605 0.165 149)");
     expect(tokenValue(css, "@theme inline", "--color-success"), "Tailwind success should resolve through the semantic palette token").toBe("var(--success)");
   });
 });
