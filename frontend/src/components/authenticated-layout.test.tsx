@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent } from "@testing-library/react";
+import { useEffect } from "react";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { AuthenticatedLayout, sessionDetailRouteId } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
@@ -563,7 +564,7 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  describe("auth-gate session detail prefetch", () => {
+  describe("auth-gate route warming", () => {
     const sessionId = "93cbcc8c-c12e-4bdf-8622-5865502c8977";
     const loadingAuth = {
       user: null,
@@ -587,7 +588,30 @@ describe("AuthenticatedLayout", () => {
       return requests;
     }
 
-    it("prefetches the session detail while /auth/me is still in flight", async () => {
+    it("does not mount route children while auth is still loading", async () => {
+      mockPathname = "/previews/preview-1";
+      useAuthMock.mockReturnValue(loadingAuth);
+      const mounted = vi.fn();
+
+      function RouteWithEffect() {
+        useEffect(() => {
+          mounted();
+        }, []);
+        return <div>route child</div>;
+      }
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <RouteWithEffect />
+        </AuthenticatedLayout>
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mounted).not.toHaveBeenCalled();
+      expect(screen.queryByText("route child")).not.toBeInTheDocument();
+    });
+
+    it("prefetches session detail while /auth/me is still in flight", async () => {
       mockPathname = `/sessions/${sessionId}`;
       useAuthMock.mockReturnValue(loadingAuth);
       const requests = trackSessionDetailRequests();
@@ -601,35 +625,6 @@ describe("AuthenticatedLayout", () => {
       await waitFor(() => {
         expect(requests).toEqual([sessionId]);
       });
-    });
-
-    it("does not prefetch when auth has already settled", async () => {
-      mockPathname = `/sessions/${sessionId}`;
-      const requests = trackSessionDetailRequests();
-
-      renderWithProviders(
-        <AuthenticatedLayout>
-          <div>content</div>
-        </AuthenticatedLayout>
-      );
-
-      await new Promise((r) => setTimeout(r, 50));
-      expect(requests).toEqual([]);
-    });
-
-    it("does not prefetch on non-session routes while auth loads", async () => {
-      mockPathname = "/autopilot";
-      useAuthMock.mockReturnValue(loadingAuth);
-      const requests = trackSessionDetailRequests();
-
-      renderWithProviders(
-        <AuthenticatedLayout>
-          <div>content</div>
-        </AuthenticatedLayout>
-      );
-
-      await new Promise((r) => setTimeout(r, 50));
-      expect(requests).toEqual([]);
     });
   });
 });

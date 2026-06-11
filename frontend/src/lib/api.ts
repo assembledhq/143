@@ -4,7 +4,12 @@ import { normalizeAPIResponse } from './api-normalize';
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
 export class ApiError extends Error {
-  constructor(public code: string, message: string, public details?: unknown) {
+  constructor(
+    public code: string,
+    message: string,
+    public details?: unknown,
+    public status?: number,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -87,7 +92,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new ApiError(
       body?.error?.code || 'UNKNOWN',
       body?.error?.message || res.statusText,
-      body?.error?.details
+      body?.error?.details,
+      res.status,
     );
   }
 
@@ -145,7 +151,8 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
     throw new ApiError(
       body?.error?.code || 'UNKNOWN',
       body?.error?.message || res.statusText,
-      body?.error?.details
+      body?.error?.details,
+      res.status,
     );
   }
 
