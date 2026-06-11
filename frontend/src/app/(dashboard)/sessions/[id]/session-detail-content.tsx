@@ -2317,8 +2317,10 @@ function ChatPanel({
     const optimisticForCurrentView = optimisticMessages.filter((message) =>
       activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
     );
+    const includeLiveLogs = optimisticForCurrentView.length > 0 ||
+      (activeThread ? workingStatusesSet.has(activeThread.status) : workingStatusesSet.has(session.status));
     const visibleLiveLogs = liveLogsForTimeline(
-      activeThread ? workingStatusesSet.has(activeThread.status) : workingStatusesSet.has(session.status),
+      includeLiveLogs,
       liveLogsQuery.data?.data ?? [],
     );
     if (activeThreadId) {
