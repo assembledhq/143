@@ -149,6 +149,23 @@ describe("RuntimeSettingsPage", () => {
     ).not.toHaveLength(0);
   });
 
+  it("places repository resource requests below the resource limits in a separate row", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const diskLimit = await screen.findByLabelText("Preview disk limit");
+    const repositoryRequests = screen.getByLabelText("Allow repository resource requests");
+    const resourceGrid = screen.getByTestId("resource-defaults-grid");
+    const repositoryRequestsRow = screen.getByTestId("repository-resource-requests-row");
+
+    expect(
+      diskLimit.compareDocumentPosition(repositoryRequests) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(resourceGrid).not.toContainElement(repositoryRequestsRow);
+    expect(
+      resourceGrid.compareDocumentPosition(repositoryRequestsRow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("saves runtime settings through the existing org settings API", async () => {
     settingsUpdateMock
       .mockResolvedValueOnce({
