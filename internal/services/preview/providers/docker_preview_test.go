@@ -1613,6 +1613,9 @@ func TestStartPreview_DependencyCacheHitRestoresBeforeMarkerValidation(t *testin
 func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *testing.T) {
 	t.Parallel()
 
+	// Without declared verify_paths there is no contract proving a restored
+	// tree reproduces install output, so a missing marker still skips the
+	// lookup entirely.
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var streamCalls []string
@@ -1651,7 +1654,9 @@ func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *t
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
 	obs := &recordingObserver{}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+	cfg := previewInstallTestConfig()
+	cfg.Install.VerifyPaths = nil
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, cfg, preview.StartPreviewOptions{
 		OrgID:        uuid.New(),
 		RepositoryID: uuid.New(),
 		SessionID:    uuid.New(),
@@ -1660,8 +1665,8 @@ func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *t
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
 	finds, restores, _, _ := cache.counts()
-	require.Equal(t, 0, finds, "missing install marker should skip dependency cache lookup")
-	require.Equal(t, 0, restores, "missing install marker should not restore dependency blobs that install will clean")
+	require.Equal(t, 0, finds, "missing install marker without verify_paths should skip dependency cache lookup")
+	require.Equal(t, 0, restores, "missing install marker without verify_paths should not restore dependency blobs that install will clean")
 	restoresObserved := obs.dependencyCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one cache restore event")
 	require.Equal(t, "skipped_marker_missing", restoresObserved[0].status, "observer should explain why restore was skipped")
@@ -1672,6 +1677,80 @@ func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *t
 	require.Len(t, calls, 2, "missing marker should run install before starting service")
 	require.Contains(t, calls[0], "'npm' 'ci'", "preview.install should run on first cold start")
 	require.Contains(t, calls[1], "'npm' 'run' 'dev'", "service should start after install")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_ColdStartRestoreSatisfiesVerifyPaths(t *testing.T) {
+	t.Parallel()
+
+	// Marker missing + verify_paths declared: a successful restore whose
+	// verify paths all exist writes the install marker and skips install.
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var streamCalls []string
+	markerWritten := false
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, ".143/cache/preview-install/") && strings.Contains(cmd, "printf") {
+				mu.Lock()
+				markerWritten = true
+				mu.Unlock()
+			}
+			return 0, nil // curl, test -e, and marker writes all succeed
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			switch {
+			case path == "package-lock.json":
+				return []byte(`{"lockfileVersion":3}`), nil
+			case strings.Contains(path, ".143/cache/preview-install/"):
+				mu.Lock()
+				written := markerWritten
+				mu.Unlock()
+				if written {
+					return []byte("ok\n"), nil
+				}
+				return nil, os.ErrNotExist
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+	}
+	cache := &fakeDependencyCache{findHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{SizeBytes: 123}}}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.NoError(t, err, "StartPreview should succeed when restore satisfies verify_paths")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	finds, restores, _, _ := cache.counts()
+	require.Equal(t, 1, finds, "cold start with verify_paths should look up the dependency cache")
+	require.Equal(t, 1, restores, "cold start with verify_paths should restore the dependency cache hit")
+	restoresObserved := obs.dependencyCacheRestores()
+	require.Len(t, restoresObserved, 1, "observer should receive one cache restore event")
+	require.Equal(t, "restored_satisfied_install", restoresObserved[0].status, "observer should record that the restore satisfied the install contract")
+
+	mu.Lock()
+	calls := append([]string(nil), streamCalls...)
+	mu.Unlock()
+	require.Len(t, calls, 1, "a satisfied restore should skip preview.install and only start the service")
+	require.NotContains(t, calls[0], "'npm' 'ci'", "preview.install should not run after a satisfied restore")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")

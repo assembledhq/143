@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -330,6 +331,12 @@ type fakePreviewStartupCache struct {
 	createKey     string
 	createMeta    SnapshotMetadata
 	hit           *CacheHit
+
+	baseFindKey   string
+	baseHit       *CacheHit
+	partialCalled bool
+	partialDiff   []byte
+	partialErr    error
 }
 
 func (f *fakePreviewStartupCache) FindSnapshot(_ context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*CacheHit, error) {
@@ -339,9 +346,20 @@ func (f *fakePreviewStartupCache) FindSnapshot(_ context.Context, orgID, repoID 
 	return f.hit, nil
 }
 
+func (f *fakePreviewStartupCache) FindBaseSnapshot(_ context.Context, _, _ uuid.UUID, baseKey, _ string) (*CacheHit, error) {
+	f.baseFindKey = baseKey
+	return f.baseHit, nil
+}
+
 func (f *fakePreviewStartupCache) RestoreSnapshot(context.Context, *agent.Sandbox, *CacheHit) error {
 	f.restoreCalled = true
 	return nil
+}
+
+func (f *fakePreviewStartupCache) ApplyPartialInvalidation(_ context.Context, _ *agent.Sandbox, _ *CacheHit, gitDiff []byte) error {
+	f.partialCalled = true
+	f.partialDiff = append([]byte(nil), gitDiff...)
+	return f.partialErr
 }
 
 func (f *fakePreviewStartupCache) CreateSnapshot(_ context.Context, _ *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error {
@@ -419,15 +437,78 @@ func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_RestoresMatchingSnapsh
 		logger:        zerolog.Nop(),
 	}
 
-	key := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
+	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
+	require.NoError(t, err, "restoring an exact snapshot hit should not surface an error")
 
 	expectedLockInput := []byte("package-lock.json\x00{\"lockfileVersion\":3}\x00")
 	expectedKey := ComputeSnapshotKey(expectedLockInput, "abc1234", computeConfigDigest(cfg))
-	require.Equal(t, expectedKey, key, "branch preview cache key should include committed lockfile contents and config digest")
+	expectedBaseKey := ComputeSnapshotBaseKey(expectedLockInput, computeConfigDigest(cfg))
+	require.Equal(t, expectedKey, keys.SnapshotKey, "branch preview cache key should include committed lockfile contents and config digest")
+	require.Equal(t, expectedBaseKey, keys.BaseKey, "base key should hash lockfiles and config digest without the commit")
+	require.Equal(t, "abc1234", keys.CommitSHA, "cache keys should record the pinned commit")
 	require.Equal(t, expectedKey, cache.findKey, "branch preview startup should look up the computed cache key")
 	require.Equal(t, orgID, cache.findOrgID, "cache lookup should stay org-scoped")
 	require.Equal(t, repoID, cache.findRepoID, "cache lookup should stay repo-scoped")
 	require.True(t, cache.restoreCalled, "branch preview startup should restore a matching cached workspace before launching")
+	require.Empty(t, cache.baseFindKey, "an exact hit should not consult base snapshots")
+}
+
+func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_PartialInvalidationOnExactMiss(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cfg := &models.PreviewConfig{
+		Version: "3",
+		Name:    "web",
+		Primary: "web",
+		Install: &models.PreviewInstallConfig{
+			Command:   []string{"npm", "ci"},
+			Lockfiles: []string{"package-lock.json"},
+		},
+		Services: map[string]models.ServiceConfig{
+			"web": {Command: []string{"npm", "run", "dev"}, Port: 3000},
+		},
+	}
+	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
+	diff := []byte("diff --git a/main.go b/main.go\n")
+	cache := &fakePreviewStartupCache{
+		hit:     nil, // exact miss
+		baseHit: &CacheHit{Entry: models.PreviewStartupCache{CommitSHA: "def5678"}},
+	}
+	runner := &StartRunner{
+		sandboxProvider: diffingSandboxProvider{
+			fakeStartRunnerSandboxProvider: fakeStartRunnerSandboxProvider{
+				files: map[string][]byte{"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`)},
+			},
+			diff: diff,
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+
+	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
+	require.NoError(t, err, "partial invalidation success should not surface an error")
+
+	require.Equal(t, keys.BaseKey, cache.baseFindKey, "an exact miss should look up base snapshots by base key")
+	require.True(t, cache.partialCalled, "a base snapshot hit should restore and patch instead of launching cold")
+	require.Equal(t, diff, cache.partialDiff, "the git diff from the base commit should be applied on top of the restored snapshot")
+	require.False(t, cache.restoreCalled, "partial invalidation owns the restore; the exact-hit restore path should not run")
+}
+
+// diffingSandboxProvider serves a canned `git diff` for partial invalidation
+// tests while inheriting lockfile reads from fakeStartRunnerSandboxProvider.
+type diffingSandboxProvider struct {
+	fakeStartRunnerSandboxProvider
+	diff []byte
+}
+
+func (p diffingSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
+	if !strings.Contains(cmd, "git diff --binary") {
+		panic("unexpected exec: " + cmd)
+	}
+	_, _ = stdout.Write(p.diff)
+	return 0, nil
 }
 
 func TestStartRunnerCreateBranchPreviewStartupCache_RecordsSuccessfulLaunch(t *testing.T) {
@@ -439,10 +520,11 @@ func TestStartRunnerCreateBranchPreviewStartupCache_RecordsSuccessfulLaunch(t *t
 	runner := &StartRunner{snapshotCache: cache, logger: zerolog.Nop()}
 	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
 
-	runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, "cache-key", sb, nil)
+	keys := branchPreviewStartupCacheKeys{SnapshotKey: "cache-key", BaseKey: "base-key", CommitSHA: "abc1234"}
+	runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, keys, sb, nil)
 
 	require.Equal(t, "cache-key", cache.createKey, "successful branch preview launch should write the startup cache snapshot")
-	require.Equal(t, SnapshotMetadata{OrgID: orgID, RepoID: repoID}, cache.createMeta, "startup cache metadata should preserve org and repo scope")
+	require.Equal(t, SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: "base-key", CommitSHA: "abc1234"}, cache.createMeta, "startup cache metadata should record org, repo, base key, and commit")
 }
 
 func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testing.T) {
@@ -472,10 +554,11 @@ func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testi
 	}
 	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
 
-	key := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
-	runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, "cache-key", sb, cfg)
+	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
+	require.NoError(t, err, "skipping secret-file configs should not surface an error")
+	runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, branchPreviewStartupCacheKeys{SnapshotKey: "cache-key"}, sb, cfg)
 
-	require.Empty(t, key, "branch preview startup cache should not restore snapshots for configs with generated secret files")
+	require.Empty(t, keys.SnapshotKey, "branch preview startup cache should not restore snapshots for configs with generated secret files")
 	require.Empty(t, cache.findKey, "secret-file configs should not query startup cache entries")
 	require.Empty(t, cache.createKey, "secret-file configs should not write startup cache snapshots")
 	require.False(t, cache.restoreCalled, "secret-file configs should not restore cached workspace files")

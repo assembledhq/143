@@ -169,6 +169,15 @@ mkdir -p /var/run/143/sandbox-auth
 chown 1000:1000 /var/run/143/sandbox-auth
 chmod 0750 /var/run/143/sandbox-auth
 
+# Worker-local preview dependency cache L1, bind-mounted into the worker
+# container. Docker auto-creates a missing bind source as root:root, and hosts
+# provisioned before the cache moved host-side never ran the provision-time
+# chown, leaving the orchestrator (uid 1000) unable to create its staging dir.
+# Reconciling here heals existing hosts on every deploy.
+mkdir -p /var/cache/143/preview-dependency-cache
+chown 1000:1000 /var/cache/143/preview-dependency-cache
+chmod 0750 /var/cache/143/preview-dependency-cache
+
 cat > /etc/sysctl.d/99-worker.conf <<SYSCTL
 vm.swappiness = 1
 SYSCTL

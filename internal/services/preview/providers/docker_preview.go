@@ -389,6 +389,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
 				notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
 				partiallyReady = true
+				d.warmPrimaryRoute(svcCtx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath)
 			}
 
 			// Wait for support services in the background.
@@ -451,6 +452,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			d.mu.Unlock()
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 			notifyServiceReady(observer, name, svcCfg.Port, pid)
+			if name == cfg.Primary {
+				d.warmPrimaryRoute(svcCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath)
+			}
 		}
 		return nil
 	}(); err != nil {
@@ -1107,10 +1111,14 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 			}
 			notifyPhaseEnd(observer, "dependency_cache_key", nil)
 			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_key", time.Since(keyStarted))
-			if !markerExists {
+			if !markerExists && len(install.VerifyPaths) == 0 {
+				// Without declared verify_paths there is no contract proving a
+				// restored tree reproduces install output, and commands like
+				// `npm ci` wipe restored paths anyway — restoring first would
+				// only add latency to a cold start that must run install.
 				notifyDependencyCacheRestore(observer, "skipped_marker_missing", dependencyCacheKey, 0, nil)
 				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "skipped_marker_missing", 0)
-				d.logger.Debug().Str("cache_key", dependencyCacheKey).Str("marker", markerPath).Msg("preview dependency cache restore skipped because install marker is absent")
+				d.logger.Info().Str("cache_key", dependencyCacheKey).Str("marker", markerPath).Msg("preview dependency cache restore skipped: install marker absent and no verify_paths declared")
 			} else {
 				lookupStarted := time.Now()
 				notifyPhaseStart(observer, "dependency_cache_lookup")
@@ -1126,6 +1134,7 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_lookup", time.Since(lookupStarted))
 					notifyDependencyCacheRestore(observer, "miss", dependencyCacheKey, 0, nil)
 					metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(lookupStarted))
+					d.logger.Info().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache miss")
 				} else {
 					notifyPhaseEnd(observer, "dependency_cache_lookup", nil)
 					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_lookup", time.Since(lookupStarted))
@@ -1140,10 +1149,28 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 						d.logger.Warn().Err(restoreErr).Str("cache_key", dependencyCacheKey).Msg("preview dependency cache restore failed; continuing cold")
 					} else {
 						notifyPhaseEnd(observer, "dependency_cache_restore", nil)
-						notifyDependencyCacheRestore(observer, "restored", dependencyCacheKey, hit.Entry.SizeBytes, nil)
-						metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restored", time.Since(restoreStarted))
+						restoreStatus := "restored"
+						if !markerExists {
+							// Cold start: the cache key proves this blob was
+							// produced by this exact install command against
+							// these exact lockfile contents on this sandbox
+							// image. When the repo's declared verify_paths are
+							// all present after restore, writing the marker
+							// lets the install phase skip entirely.
+							if d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, install.VerifyPaths) {
+								if markerErr := d.writePreviewInstallMarker(ctx, state.sandbox, markerPath); markerErr != nil {
+									d.logger.Warn().Err(markerErr).Str("marker", markerPath).Msg("preview dependency cache restore satisfied verify_paths but marker write failed; running install")
+								} else {
+									restoreStatus = "restored_satisfied_install"
+								}
+							} else {
+								d.logger.Info().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache restored but verify_paths incomplete; running install")
+							}
+						}
+						notifyDependencyCacheRestore(observer, restoreStatus, dependencyCacheKey, hit.Entry.SizeBytes, nil)
+						metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), restoreStatus, time.Since(restoreStarted))
 						metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
-						d.logger.Info().Str("cache_key", dependencyCacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview dependency cache restored")
+						d.logger.Info().Str("cache_key", dependencyCacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Str("result", restoreStatus).Msg("preview dependency cache restored")
 					}
 				}
 			}
@@ -1310,6 +1337,39 @@ func (d *DockerPreviewProvider) previewInstallCacheValid(ctx context.Context, sb
 func (d *DockerPreviewProvider) previewInstallMarkerExists(ctx context.Context, sb *agent.Sandbox, markerPath string) bool {
 	_, err := d.executor.ReadFile(ctx, sb, markerPath)
 	return err == nil
+}
+
+// previewInstallVerifyPathsSatisfied reports whether every declared
+// verify_path exists in the sandbox. An empty list reports false: without a
+// declared contract there is no evidence that a restored dependency tree
+// reproduces the install command's output.
+func (d *DockerPreviewProvider) previewInstallVerifyPathsSatisfied(ctx context.Context, sb *agent.Sandbox, verifyPaths []string) bool {
+	if len(verifyPaths) == 0 {
+		return false
+	}
+	for _, verifyPath := range verifyPaths {
+		cleanPath, err := cleanPreviewInstallRepoPath(verifyPath, false)
+		if err != nil {
+			return false
+		}
+		if !d.previewInstallPathExists(ctx, sb, cleanPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *DockerPreviewProvider) writePreviewInstallMarker(ctx context.Context, sb *agent.Sandbox, markerPath string) error {
+	cmd := fmt.Sprintf("mkdir -p .143/cache/preview-install && printf 'ok\\n' > %s", shellEscape(markerPath))
+	var stderr bytes.Buffer
+	exitCode, err := d.executor.Exec(ctx, sb, cmd, io.Discard, &stderr)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("write install marker exited %d: %s", exitCode, stderr.String())
+	}
+	return nil
 }
 
 func (d *DockerPreviewProvider) previewInstallPathExists(ctx context.Context, sb *agent.Sandbox, repoPath string) bool {
@@ -1705,6 +1765,38 @@ func (d *DockerPreviewProvider) startService(
 // timeout — the for-select can only react to deadline.C *between* probe
 // attempts, so a slow exec stalls the timer too.
 const readinessProbeAttemptTimeout = 5 * time.Second
+
+// primaryRouteWarmTimeout bounds the post-readiness warm request. Dev servers
+// compiling a large route on demand can legitimately take tens of seconds —
+// that is exactly the cost warming exists to absorb.
+const primaryRouteWarmTimeout = 60 * time.Second
+
+// warmPrimaryRoute fires one best-effort GET against the primary service's
+// root route after it passes readiness. Dev servers compile routes on demand,
+// so without this the user's first page load pays the compile cost; warming
+// moves it into the launch window instead. Skipped when the readiness probe
+// already targets "/" — that request warmed the route.
+func (d *DockerPreviewProvider) warmPrimaryRoute(ctx context.Context, state *previewState, name string, port int, readyPath string) {
+	if readyPath == "" || readyPath == "/" {
+		return
+	}
+	state.wg.Add(1)
+	go func() {
+		defer state.wg.Done()
+		warmCtx, cancel := context.WithTimeout(ctx, primaryRouteWarmTimeout)
+		defer cancel()
+		started := time.Now()
+		cmd := fmt.Sprintf("curl -sf -o /dev/null --max-time %d %s",
+			int(primaryRouteWarmTimeout.Seconds())-5,
+			shellEscape(fmt.Sprintf("http://localhost:%d/", port)))
+		exitCode, err := d.executor.Exec(warmCtx, state.sandbox, cmd, io.Discard, io.Discard)
+		if err != nil || exitCode != 0 {
+			d.logger.Debug().Err(err).Int("exit_code", exitCode).Str("service", name).Msg("primary route warm request did not succeed")
+			return
+		}
+		d.logger.Info().Str("service", name).Dur("elapsed_ms", time.Since(started)).Msg("primary route warmed")
+	}()
+}
 
 func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
 	overallCtx, cancelOverall := context.WithTimeout(ctx, timeout)
