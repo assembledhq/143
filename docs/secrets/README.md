@@ -223,15 +223,13 @@ decrypted at runtime
 
 ## Tier 3: Production via SOPS at boot
 
-Production secrets are encrypted in `.env.production.enc` using the same SOPS + age workflow. This lets you version-control production config and deploy it through your CI/CD pipeline instead of managing env vars in a dashboard.
-
-> **Note**: the bundle is no longer baked into the server image (the image is public on GHCR), so this flow requires a deploy target that can stage the file next to the container — the fleet deploy does this by bind-mounting `/opt/143/.env.production.enc` into the workdir. On image-only platforms (e.g. Render via `render.yaml`), set env vars individually in the platform dashboard instead, or bake the bundle into a private image build of your own.
+Production secrets are encrypted in `.env.production.enc` using the same SOPS + age workflow. This is how the fleet deploy works: version-controlled production config in the private secrets repo, decrypted inside the container at boot.
 
 ### How it works
 
 1. Production secrets live in `.env.production.enc` (committed in the private secrets repo)
-2. The deploy stages the bundle on the host and bind-mounts it into the container; at boot, `docker-entrypoint.sh` decrypts it using an age private key supplied as the single `SOPS_AGE_KEY` env var
-3. The decrypted values are exported as environment variables before the server starts
+2. `deploy.sh` stages the bundle at `/opt/143/.env.production.enc` on each host, and compose bind-mounts it into the container's workdir (the bundle is never baked into the server image — the image is public on GHCR)
+3. At boot, `docker-entrypoint.sh` decrypts it via `sops exec-env` using an age private key supplied as the single `SOPS_AGE_KEY` env var, exporting the values before the server starts
 
 ### Setup (one-time)
 
@@ -248,9 +246,10 @@ age-keygen -o /tmp/deploy-key.txt
 # 3. Re-encrypt production secrets so the deploy key can decrypt
 make secrets-rotate
 
-# 4. In Render, set a single env var:
-#    SOPS_AGE_KEY = <paste the full contents of /tmp/deploy-key.txt>
-#    (includes the private key line starting with AGE-SECRET-KEY-...)
+# 4. Supply the deploy key to the deploy environment:
+#    - CI deploys: set the SOPS_AGE_KEY repository secret to the full
+#      contents of /tmp/deploy-key.txt (the AGE-SECRET-KEY-... line)
+#    - laptop deploys: the make targets read ~/.config/sops/age/keys.txt
 
 # 5. Delete /tmp/deploy-key.txt from your local machine
 rm /tmp/deploy-key.txt
@@ -258,23 +257,8 @@ rm /tmp/deploy-key.txt
 # 6. Commit .sops.yaml and .env.production.enc
 cd ../143-infra
 git add .sops.yaml .env.production.enc
-git commit -m "Add deploy key for Render production"
+git commit -m "Add deploy key for production"
 ```
-
-### Deploy command
-
-Update your Render start command (or Dockerfile entrypoint) to decrypt at boot:
-
-```bash
-# Install sops + age in your Docker image, then:
-export SOPS_AGE_KEY_FILE=/tmp/age-key.txt
-echo "$SOPS_AGE_KEY" > "$SOPS_AGE_KEY_FILE"
-sops --decrypt .env.production.enc > .env.production
-set -a && source .env.production && set +a
-exec ./server   # or whatever your start command is
-```
-
-This means the only secret stored in Render is the age private key (`SOPS_AGE_KEY`). All other secrets are managed in the private secrets repo via `.env.production.enc`.
 
 ### Updating production secrets
 
@@ -284,7 +268,7 @@ make secrets-decrypt ENV=production
 # edit .env.production
 make secrets-encrypt ENV=production
 cd ../143-infra && git add .env.production.enc && git commit -m "Update production secrets"
-git push    # Render redeploys automatically
+git push    # the next deploy picks up the new values
 ```
 
 Or use the in-place editor:
@@ -294,21 +278,17 @@ make secrets-edit ENV=production    # opens $EDITOR, re-encrypts on save
 cd ../143-infra && git add .env.production.enc && git commit -m "Update production secrets"
 ```
 
-### Why this is better than Render's env var UI
+### Why this is better than dashboard env vars
 
 - **Version controlled**: every secret change is a git commit with full history
 - **Reviewable**: secret changes can go through PRs like code changes
 - **Reproducible**: `git clone && decrypt` gives you the full production config
-- **Single source of truth**: no drift between what's in git and what's in Render
+- **Single source of truth**: no drift between the repo and what's deployed
 - **Easy rollback**: `git revert` rolls back secret changes instantly
 
 ## Tier 3 (alternative): Cloud secret managers
 
-For production deployments that need automatic rotation, use your cloud provider's secret manager and inject values as environment variables at deploy time:
-
-- **AWS**: Secrets Manager or SSM Parameter Store
-- **GCP**: Secret Manager
-- **Railway/Render/Fly**: Built-in secret management
+For production deployments that need automatic rotation, use your cloud provider's secret manager (AWS Secrets Manager / SSM Parameter Store, GCP Secret Manager, or a PaaS platform's built-in secret management) and inject values as environment variables at deploy time.
 
 No code changes needed — 143 reads from environment variables regardless of how they're set.
 
