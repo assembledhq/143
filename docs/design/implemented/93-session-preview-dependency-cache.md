@@ -11,7 +11,33 @@ The platform already has two preview acceleration mechanisms:
 - Live session sandbox reuse: fastest path, but only works while the session container is still running.
 - Branch/PR preview startup snapshots: worker-local full-workspace snapshots keyed by commit, lockfiles, and preview config.
 
-Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as package-manager stores or framework build caches.
+Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as framework build caches.
+
+## 2026-06 Update: Package-Manager Caches And Prewarming
+
+The cache implementation now treats preview install caching as a generic path-cache with two durable `cache_kind` values:
+
+- `install_artifact`: WorkDir-relative dependency/build artifacts. These are the original dependency artifact caches and remain marker-gated on restore.
+- `package_manager`: HomeDir-relative package-manager global caches. These restore before `preview.install` even when the install marker is absent, because package-manager download caches are useful to first cold installs and are not removed by repo `clean_paths`.
+
+`preview.install.cache.package_manager` supports `enabled`, `include`, and additive HomeDir-relative `paths`. Omitted `include` infers managers from lockfiles and install command. Default paths are:
+
+| Manager | HomeDir-relative paths |
+|---|---|
+| npm | `.npm` |
+| pnpm | `.local/share/pnpm/store` |
+| yarn | `.yarn/berry/cache` |
+| bun | `.bun/install/cache` |
+| pip | `.cache/pip` |
+| uv | `.cache/uv` |
+| poetry | `.cache/pypoetry` |
+| go | `go/pkg/mod`, `.cache/go-build` |
+
+Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
+
+The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-artifact local paths still readable during rollout.
+
+Prewarming is implemented as a low-priority `preview_cache_prewarm` worker job with branch and session payload sources. The automatic triggers are branch/PR preview target creation or commit update, plus successful snapshot-producing `run_agent` and `continue_session` turns. The runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, skips when install/cache inputs are absent or both cache kinds are already warm in L2, runs only `preview.install.command`, saves package-manager and install-artifact caches synchronously, and then destroys the sandbox. Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
 
 ## Goals
 
