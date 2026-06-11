@@ -65,6 +65,30 @@ describe('AuditLogEntry', () => {
     expect(screen.queryByText('changed member role')).not.toBeInTheDocument();
   });
 
+  it('labels auto-join audit actions without assuming a domain source', () => {
+    render(
+      <>
+        <AuditLogEntry
+          entry={makeEntry({ id: 2, action: 'team.member_auto_joined' })}
+          members={mockMembers}
+        />
+        <AuditLogEntry
+          entry={makeEntry({ id: 3, action: 'team.github_org_auto_join_enabled' })}
+          members={mockMembers}
+        />
+        <AuditLogEntry
+          entry={makeEntry({ id: 4, action: 'team.github_org_auto_join_disabled' })}
+          members={mockMembers}
+        />
+      </>
+    );
+
+    expect(screen.getByText('auto-joined team member')).toBeInTheDocument();
+    expect(screen.queryByText('joined via verified domain')).not.toBeInTheDocument();
+    expect(screen.getByText('enabled GitHub organization auto-join')).toBeInTheDocument();
+    expect(screen.getByText('disabled GitHub organization auto-join')).toBeInTheDocument();
+  });
+
   it('renders agent actor type label for non-user actors', () => {
     render(
       <AuditLogEntry

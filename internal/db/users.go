@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -436,9 +437,23 @@ func (s *UserStore) ListByOrgViaMemberships(
 		SELECT u.id, m.org_id, u.email, u.name, m.role,
 		       u.github_id, u.github_login, u.github_noreply_email, u.avatar_url,
 		       u.password_hash, u.google_id, u.created_at,
+		       captured.github_org_login AS captured_github_org_login,
 		       m.created_at AS membership_created_at
 		FROM users u
 		JOIN organization_memberships m ON m.user_id = u.id
+		LEFT JOIN LATERAL (
+			SELECT l.account_login AS github_org_login
+			FROM github_org_members gom
+			JOIN github_installation_org_links l ON l.installation_id = gom.installation_id
+			JOIN github_installations gi ON gi.installation_id = l.installation_id
+			WHERE gom.github_user_id = u.github_id
+			  AND l.org_id = m.org_id
+			  AND l.status = 'active'
+			  AND l.auto_join_enabled
+			  AND gi.status = 'active'
+			ORDER BY l.updated_at ASC, l.org_id ASC
+			LIMIT 1
+		) captured ON u.github_id IS NOT NULL
 		WHERE m.org_id = @org_id
 		  AND (
 		      @cursor_created_at::timestamptz IS NULL
@@ -467,16 +482,21 @@ func (s *UserStore) ListByOrgViaMemberships(
 	)
 	for rows.Next() {
 		var (
-			u       models.User
-			memTime time.Time
+			u                 models.User
+			capturedGitHubOrg sql.NullString
+			memTime           time.Time
 		)
 		if err := rows.Scan(
 			&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role,
 			&u.GitHubID, &u.GitHubLogin, &u.GitHubNoreplyEmail, &u.AvatarURL,
 			&u.PasswordHash, &u.GoogleID, &u.CreatedAt,
+			&capturedGitHubOrg,
 			&memTime,
 		); err != nil {
 			return nil, time.Time{}, fmt.Errorf("scan user via memberships: %w", err)
+		}
+		if capturedGitHubOrg.Valid {
+			u.CapturedGitHubOrgLogin = &capturedGitHubOrg.String
 		}
 		users = append(users, u)
 		lastMembershipTime = memTime

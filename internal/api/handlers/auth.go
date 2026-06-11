@@ -28,18 +28,24 @@ import (
 	"github.com/assembledhq/143/internal/services/email"
 )
 
+type githubOrgAutoJoinVerifier interface {
+	IsActiveOrgMember(ctx context.Context, installationID int64, orgLogin, username string) (bool, error)
+}
+
 type AuthHandler struct {
-	cfg                *config.Config
-	pool               db.TxStarter
-	userStore          *db.UserStore
-	sessionStore       *db.AuthSessionStore
-	invitationStore    *db.InvitationStore
-	memberships        *db.OrganizationMembershipStore
-	userCredentials    *db.UserCredentialStore
-	orgDomains         *db.OrganizationDomainStore
-	emailVerifications *db.EmailVerificationStore
-	emailSender        email.Sender
-	audit              *db.AuditEmitter
+	cfg                 *config.Config
+	pool                db.TxStarter
+	userStore           *db.UserStore
+	sessionStore        *db.AuthSessionStore
+	invitationStore     *db.InvitationStore
+	memberships         *db.OrganizationMembershipStore
+	userCredentials     *db.UserCredentialStore
+	orgDomains          *db.OrganizationDomainStore
+	githubInstallations *db.GitHubInstallationStore
+	githubOrgVerifier   githubOrgAutoJoinVerifier
+	emailVerifications  *db.EmailVerificationStore
+	emailSender         email.Sender
+	audit               *db.AuditEmitter
 	// gitHubAPIBaseURL / gitHubOAuthBaseURL are overridable so tests can
 	// point the OAuth callback flow at a local httptest.Server instead of
 	// mutating http.DefaultTransport (which would silently redirect any
@@ -104,6 +110,11 @@ func (h *AuthHandler) SetUserCredentialStore(store *db.UserCredentialStore) {
 // auto-join during OAuth signup. When nil, signups always create a fresh org.
 func (h *AuthHandler) SetOrgDomainStore(store *db.OrganizationDomainStore) {
 	h.orgDomains = store
+}
+
+func (h *AuthHandler) SetGitHubOrgAutoJoinDeps(store *db.GitHubInstallationStore, verifier githubOrgAutoJoinVerifier) {
+	h.githubInstallations = store
+	h.githubOrgVerifier = verifier
 }
 
 // SetEmailVerificationDeps wires the token store and email sender that power
@@ -594,13 +605,16 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		// gets the membership granted; already-a-member or a bad token is a
 		// no-op (matches ClaimInvitation's best-effort posture).
 		h.applyJoinTokenForExistingUser(r, pendingJoin, &existingUser)
+		joined := h.tryGitHubOrgAutoJoinExisting(r, &existingUser)
 		h.storeGitHubToken(r, &existingUser, tokenResp)
 		h.emitAuthEvent(r, &existingUser, models.AuditActionAuthLogin)
 		if cliIntent != nil {
+			// CLI flows have no browser redirect to carry the join toast; the
+			// membership grant still happened — only the UI notification is skipped.
 			h.createSessionAndFinishCLILogin(w, r, &existingUser, cliIntent)
 			return
 		}
-		h.createSessionAndRedirect(w, r, &existingUser)
+		h.createSessionAndRedirectWithJoin(w, r, &existingUser, joined)
 		return
 	}
 
@@ -623,13 +637,16 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		h.markEmailVerified(r, emailUser.ID, true, email)
 		h.claimPendingInvitationForExistingUser(r, pendingInvite, email, ghUser.Login, emailUser.ID)
 		h.applyJoinTokenForExistingUser(r, pendingJoin, &emailUser)
+		joined := h.tryGitHubOrgAutoJoinExisting(r, &emailUser)
 		h.storeGitHubToken(r, &emailUser, tokenResp)
 		h.emitAuthEvent(r, &emailUser, models.AuditActionAuthLogin)
 		if cliIntent != nil {
+			// CLI flows have no browser redirect to carry the join toast; the
+			// membership grant still happened — only the UI notification is skipped.
 			h.createSessionAndFinishCLILogin(w, r, &emailUser, cliIntent)
 			return
 		}
-		h.createSessionAndRedirect(w, r, &emailUser)
+		h.createSessionAndRedirectWithJoin(w, r, &emailUser, joined)
 		return
 	}
 
@@ -731,6 +748,17 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return us.UpsertFromGitHub(ctx, u)
 	}
 
+	if sessionToken, joined := h.tryGitHubOrgAutoJoinSignup(r, user, upsertGitHub); joined != nil {
+		h.storeGitHubToken(r, user, tokenResp)
+		h.emitAuthEvent(r, user, models.AuditActionAuthRegister)
+		if cliIntent != nil {
+			h.finishCLILoginWithSession(w, r, user, sessionToken, cliIntent)
+			return
+		}
+		h.redirectWithSessionAndJoin(w, r, sessionToken, joined)
+		return
+	}
+
 	// Domain capture: a GitHub-verified email on a domain some org has
 	// DNS-verified with auto-join enabled lands the user directly in that
 	// org instead of a lonely fresh one. The capture email may differ from
@@ -751,7 +779,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 				h.finishCLILoginWithSession(w, r, user, sessionToken, cliIntent)
 				return
 			}
-			h.redirectWithSession(w, r, sessionToken)
+			h.redirectWithSessionAndJoin(w, r, sessionToken, &autoJoinProvenance{OrgID: user.OrgID, Via: "domain"})
 			return
 		}
 		// Capture failed mid-flight (e.g. domain toggled off in the race
@@ -1248,6 +1276,183 @@ func (h *AuthHandler) emitAutoJoinEvent(r *http.Request, user *models.User, targ
 			"email":  user.Email,
 			"domain": target.Domain,
 			"role":   string(user.Role),
+			"source": "domain",
+		}),
+	}
+	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
+		params.RequestID = &reqID
+	}
+	if ua := r.UserAgent(); ua != "" {
+		params.UserAgent = &ua
+	}
+	if ip := parseClientIP(r); ip != nil {
+		params.IPAddress = ip
+	}
+	h.audit.EmitUserAction(r.Context(), params)
+}
+
+type autoJoinProvenance struct {
+	OrgID          uuid.UUID
+	OrgName        string
+	Via            string
+	GitHubOrgLogin string
+}
+
+func (h *AuthHandler) tryGitHubOrgAutoJoinSignup(r *http.Request, user *models.User, createUser signupUserCreateFunc) (string, *autoJoinProvenance) {
+	if h.githubInstallations == nil || h.githubOrgVerifier == nil || user == nil || user.GitHubID == nil || user.GitHubLogin == nil {
+		return "", nil
+	}
+	candidates, err := h.githubInstallations.FindAutoJoinCandidatesByGitHubUserID(r.Context(), *user.GitHubID)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("github org auto-join lookup failed; falling back")
+		return "", nil
+	}
+	confirmed := h.confirmGitHubOrgAutoJoinCandidates(r, *user.GitHubLogin, candidates)
+	if len(confirmed) == 0 {
+		return "", nil
+	}
+
+	sessionToken, err := h.createGitHubOrgAutoJoinUser(r.Context(), user, createUser, confirmed)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("github org auto-join signup failed; falling back")
+		user.OrgID = uuid.Nil
+		user.Role = ""
+		return "", nil
+	}
+	for _, target := range confirmed {
+		h.emitGitHubOrgAutoJoinEvent(r, user, target)
+	}
+	first := confirmed[0]
+	return sessionToken, &autoJoinProvenance{
+		OrgID:          first.OrgID,
+		OrgName:        first.OrgName,
+		Via:            "github_org",
+		GitHubOrgLogin: first.AccountLogin,
+	}
+}
+
+func (h *AuthHandler) tryGitHubOrgAutoJoinExisting(r *http.Request, user *models.User) *autoJoinProvenance {
+	if h.githubInstallations == nil || h.githubOrgVerifier == nil || h.memberships == nil || h.userStore == nil || user == nil || user.GitHubID == nil || user.GitHubLogin == nil {
+		return nil
+	}
+	candidates, err := h.githubInstallations.FindAutoJoinCandidatesByGitHubUserID(r.Context(), *user.GitHubID)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("github org auto-join lookup failed during login")
+		return nil
+	}
+	confirmed := h.confirmGitHubOrgAutoJoinCandidates(r, *user.GitHubLogin, candidates)
+	if len(confirmed) == 0 {
+		return nil
+	}
+	var firstJoined *models.GitHubOrgAutoJoinCandidate
+	for i := range confirmed {
+		target := confirmed[i]
+		if _, err := h.memberships.Get(r.Context(), user.ID, target.OrgID); err == nil {
+			continue // already a member — nothing to grant
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("org_id", target.OrgID.String()).Msg("github org auto-join membership check failed; attempting grant anyway")
+		}
+		effectiveRole, err := h.memberships.GrantAtLeast(r.Context(), user.ID, target.OrgID, models.RoleMember)
+		if err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("org_id", target.OrgID.String()).Msg("github org auto-join grant failed during login")
+			continue
+		}
+		user.Role = models.Role(effectiveRole)
+		if firstJoined == nil {
+			firstJoined = &target
+		}
+		h.emitGitHubOrgAutoJoinEvent(r, user, target)
+	}
+	if firstJoined == nil {
+		return nil
+	}
+	if err := h.userStore.UpdateLastOrgID(r.Context(), user.ID, &firstJoined.OrgID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("org_id", firstJoined.OrgID.String()).Msg("failed to pin github auto-joined org")
+	}
+	user.OrgID = firstJoined.OrgID
+	return &autoJoinProvenance{
+		OrgID:          firstJoined.OrgID,
+		OrgName:        firstJoined.OrgName,
+		Via:            "github_org",
+		GitHubOrgLogin: firstJoined.AccountLogin,
+	}
+}
+
+func (h *AuthHandler) confirmGitHubOrgAutoJoinCandidates(r *http.Request, githubLogin string, candidates []models.GitHubOrgAutoJoinCandidate) []models.GitHubOrgAutoJoinCandidate {
+	confirmed := make([]models.GitHubOrgAutoJoinCandidate, 0, len(candidates))
+	for _, target := range candidates {
+		ok, err := h.githubOrgVerifier.IsActiveOrgMember(r.Context(), target.InstallationID, target.AccountLogin, githubLogin)
+		if err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", target.InstallationID).Msg("github org membership confirmation failed")
+			continue
+		}
+		if ok {
+			confirmed = append(confirmed, target)
+		}
+	}
+	return confirmed
+}
+
+func (h *AuthHandler) createGitHubOrgAutoJoinUser(ctx context.Context, user *models.User, createUser signupUserCreateFunc, targets []models.GitHubOrgAutoJoinCandidate) (string, error) {
+	if h.pool == nil {
+		return "", fmt.Errorf("auth handler pool is not configured")
+	}
+	if len(targets) == 0 {
+		return "", fmt.Errorf("github org auto-join target is required")
+	}
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin github org auto-join signup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	first := targets[0]
+	user.OrgID = first.OrgID
+	user.Role = models.RoleMember
+	txUserStore := db.NewUserStore(tx)
+	if err := createUser(ctx, txUserStore, user); err != nil {
+		return "", fmt.Errorf("create github org auto-join user: %w", err)
+	}
+	txMemberships := db.NewOrganizationMembershipStore(tx)
+	for _, target := range targets {
+		effectiveRole, err := txMemberships.GrantAtLeast(ctx, user.ID, target.OrgID, models.RoleMember)
+		if err != nil {
+			return "", fmt.Errorf("grant github org auto-join membership: %w", err)
+		}
+		if target.OrgID == first.OrgID {
+			user.Role = models.Role(effectiveRole)
+		}
+	}
+	if err := txUserStore.UpdateLastOrgID(ctx, user.ID, &first.OrgID); err != nil {
+		return "", fmt.Errorf("set github org auto-join last org: %w", err)
+	}
+	sessionToken, err := h.persistSessionTx(ctx, tx, user)
+	if err != nil {
+		return "", fmt.Errorf("create github org auto-join session: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit github org auto-join signup transaction: %w", err)
+	}
+	return sessionToken, nil
+}
+
+func (h *AuthHandler) emitGitHubOrgAutoJoinEvent(r *http.Request, user *models.User, target models.GitHubOrgAutoJoinCandidate) {
+	if h.audit == nil {
+		return
+	}
+	userIDStr := user.ID.String()
+	params := db.UserActionParams{
+		OrgID:        target.OrgID,
+		UserID:       user.ID,
+		Action:       models.AuditActionTeamMemberAutoJoined,
+		ResourceType: models.AuditResourceTeamMember,
+		ResourceID:   &userIDStr,
+		Details: marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{
+			"email":            user.Email,
+			"role":             string(models.RoleMember),
+			"source":           "github_org",
+			"github_org_login": target.AccountLogin,
+			"installation_id":  target.InstallationID,
 		}),
 	}
 	if reqID := chiMiddleware.GetReqID(r.Context()); reqID != "" {
@@ -1339,6 +1544,10 @@ func (h *AuthHandler) respondWithSession(w http.ResponseWriter, r *http.Request,
 // post-login redirect. Honors the oauth_return_to cookie for same-origin
 // relative paths only.
 func (h *AuthHandler) redirectWithSession(w http.ResponseWriter, r *http.Request, sessionToken string) {
+	h.redirectWithSessionAndJoin(w, r, sessionToken, nil)
+}
+
+func (h *AuthHandler) redirectWithSessionAndJoin(w http.ResponseWriter, r *http.Request, sessionToken string, joined *autoJoinProvenance) {
 	if !h.writeSessionAndCSRFCookies(w, r, sessionToken) {
 		return
 	}
@@ -1349,6 +1558,22 @@ func (h *AuthHandler) redirectWithSession(w http.ResponseWriter, r *http.Request
 			redirectURL = h.cfg.FrontendURL + returnCookie.Value
 		}
 	}
+	if joined != nil && joined.OrgID != uuid.Nil && joined.Via != "" {
+		parsed, err := url.Parse(redirectURL)
+		if err == nil {
+			q := parsed.Query()
+			q.Set("joined_org", joined.OrgID.String())
+			q.Set("joined_via", joined.Via)
+			if joined.OrgName != "" {
+				q.Set("joined_org_name", joined.OrgName)
+			}
+			if joined.GitHubOrgLogin != "" {
+				q.Set("github_org", joined.GitHubOrgLogin)
+			}
+			parsed.RawQuery = q.Encode()
+			redirectURL = parsed.String()
+		}
+	}
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
@@ -1356,12 +1581,16 @@ func (h *AuthHandler) redirectWithSession(w http.ResponseWriter, r *http.Request
 // exists (login) so the session is created via the pool, not inside a tx.
 // Signup flows use the Tx-variant that co-commits with user/org/membership.
 func (h *AuthHandler) createSessionAndRedirect(w http.ResponseWriter, r *http.Request, user *models.User) {
+	h.createSessionAndRedirectWithJoin(w, r, user, nil)
+}
+
+func (h *AuthHandler) createSessionAndRedirectWithJoin(w http.ResponseWriter, r *http.Request, user *models.User, joined *autoJoinProvenance) {
 	token, err := h.persistSessionTx(r.Context(), h.pool, user)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SESSION_CREATE_FAILED", "failed to create session", err)
 		return
 	}
-	h.redirectWithSession(w, r, token)
+	h.redirectWithSessionAndJoin(w, r, token, joined)
 }
 
 // createSessionAndRespond is the non-signup JSON path (email login): the user
