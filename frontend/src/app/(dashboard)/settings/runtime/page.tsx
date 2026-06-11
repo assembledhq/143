@@ -535,7 +535,7 @@ function ResourceDefaultsSection() {
       <SectionHeader title="Resource defaults" status={autosave.status} />
       <Card>
         <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
+          <div data-testid="resource-defaults-grid" className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <SettingLabel
                 htmlFor="agent-default-tier"
@@ -579,25 +579,6 @@ function ResourceDefaultsSection() {
                 onChange={(value) => {
                   autosave.save({ settings: { sandbox_resources: { preview_max_tier: value } } });
                 }}
-              />
-            </div>
-            <div className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="space-y-1">
-                <SettingLabel
-                  htmlFor="allow-repo-resource-requests"
-                  label="Allow repository resource requests"
-                  tooltip="Lets repository preview config request CPU, memory, and disk up to the organization limits."
-                />
-              </div>
-              <Switch
-                id="allow-repo-resource-requests"
-                checked={allowRepoResourceRequests}
-                onCheckedChange={(checked) => {
-                  autosave.save({
-                    settings: { sandbox_resources: { allow_repo_resource_requests: checked } },
-                  });
-                }}
-                aria-label="Allow repository resource requests"
               />
             </div>
             <div className="space-y-2">
@@ -664,6 +645,28 @@ function ResourceDefaultsSection() {
               </div>
               <MaxHint>{`Max ${MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB`}</MaxHint>
             </div>
+          </div>
+          <div
+            data-testid="repository-resource-requests-row"
+            className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="space-y-1">
+              <SettingLabel
+                htmlFor="allow-repo-resource-requests"
+                label="Allow repository resource requests"
+                tooltip="Lets repository preview config request CPU, memory, and disk up to the organization limits."
+              />
+            </div>
+            <Switch
+              id="allow-repo-resource-requests"
+              checked={allowRepoResourceRequests}
+              onCheckedChange={(checked) => {
+                autosave.save({
+                  settings: { sandbox_resources: { allow_repo_resource_requests: checked } },
+                });
+              }}
+              aria-label="Allow repository resource requests"
+            />
           </div>
         </CardContent>
       </Card>
