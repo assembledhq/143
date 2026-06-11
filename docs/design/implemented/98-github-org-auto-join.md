@@ -1,6 +1,6 @@
 # Design: GitHub Organization Auto-Join
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-10
+> **Status:** Implemented | **Last reviewed:** 2026-06-10
 
 ## Problem
 
@@ -82,8 +82,7 @@ So the design splits the two concerns:
 
 ### Database schema
 
-Migration `000170_github_org_auto_join` (renumber against origin/main
-before push):
+Migration `000178_github_org_auto_join`:
 
 ```sql
 -- Admin intent lives on the existing link row: auto-join is precisely a

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -53,6 +54,109 @@ type workerLinearMissingIntegrationReader struct{}
 
 func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context, uuid.UUID, models.IntegrationProvider) (models.Integration, error) {
 	return models.Integration{}, pgx.ErrNoRows
+}
+
+type fakeGitHubOrgRosterService struct {
+	members []ghservice.OrgMember
+	err     error
+}
+
+func (s fakeGitHubOrgRosterService) ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghservice.OrgMember, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.members, nil
+}
+
+type fakeHTTPStatusError struct {
+	status int
+}
+
+func (e fakeHTTPStatusError) Error() string {
+	return http.StatusText(e.status)
+}
+
+func (e fakeHTTPStatusError) HTTPStatus() int {
+	return e.status
+}
+
+func TestSyncGitHubOrgRosterHandlerReplacesRoster(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	payload, err := json.Marshal(syncGitHubOrgRosterPayload{
+		OrgID:          orgID.String(),
+		InstallationID: 12345,
+		AccountLogin:   "acme",
+	})
+	require.NoError(t, err, "test payload should marshal")
+
+	mock.ExpectBegin()
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(workerAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 2))
+	mock.ExpectCopyFrom(pgx.Identifier{"github_org_members"}, []string{"installation_id", "github_user_id", "github_login"}).
+		WillReturnResult(2)
+	mock.ExpectExec("UPDATE github_installations").
+		WithArgs(workerAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	handler := newSyncGitHubOrgRosterHandler(
+		&Stores{GitHubInstallations: db.NewGitHubInstallationStore(mock)},
+		&Services{GitHubOrgRoster: fakeGitHubOrgRosterService{members: []ghservice.OrgMember{
+			{ID: 111, Login: "alice"},
+			{ID: 222, Login: "bob"},
+		}}},
+		zerolog.Nop(),
+	)
+
+	err = handler(context.Background(), models.JobTypeSyncGitHubOrgRoster, payload)
+
+	require.NoError(t, err, "roster sync should replace the installation roster")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSyncGitHubOrgRosterHandlerDisablesAutoJoinOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	payload, err := json.Marshal(syncGitHubOrgRosterPayload{
+		OrgID:          orgID.String(),
+		InstallationID: 12345,
+		AccountLogin:   "acme",
+	})
+	require.NoError(t, err, "test payload should marshal")
+
+	mock.ExpectQuery("UPDATE github_installation_org_links").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+		}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", false, now, now))
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(workerAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 10))
+
+	handler := newSyncGitHubOrgRosterHandler(
+		&Stores{GitHubInstallations: db.NewGitHubInstallationStore(mock)},
+		&Services{GitHubOrgRoster: fakeGitHubOrgRosterService{err: fakeHTTPStatusError{status: http.StatusForbidden}}},
+		zerolog.Nop(),
+	)
+
+	err = handler(context.Background(), models.JobTypeSyncGitHubOrgRoster, payload)
+
+	require.NoError(t, err, "forbidden roster sync should disable auto-join without retrying")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandlersRetryActiveThreadRuntimeConflict(t *testing.T) {

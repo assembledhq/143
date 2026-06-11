@@ -828,13 +828,13 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	membershipTime1 := now.Add(-2 * time.Hour)
 	membershipTime2 := now.Add(-time.Hour)
 
-	cols := append(append([]string{}, userColumns...), "membership_created_at")
+	cols := append(append([]string{}, userColumns...), "captured_github_org_login", "membership_created_at")
 	mock.ExpectQuery("(?s)FROM users u.+JOIN organization_memberships m").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(cols).
-				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, now, membershipTime1).
-				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, now, membershipTime2),
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, now, "acme", membershipTime1).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, now, nil, membershipTime2),
 		)
 
 	users, lastMembershipTime, err := store.ListByOrgViaMemberships(context.Background(), orgID, MembershipPageFilters{Limit: 100})
@@ -842,8 +842,11 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	require.Len(t, users, 2)
 	require.Equal(t, "Alice", users[0].Name)
 	require.Equal(t, models.RoleAdmin, users[0].Role)
+	require.NotNil(t, users[0].CapturedGitHubOrgLogin, "captured GitHub org login should be surfaced for removal warnings")
+	require.Equal(t, "acme", *users[0].CapturedGitHubOrgLogin, "captured GitHub org login should match the linked roster")
 	require.Equal(t, "Bob", users[1].Name)
 	require.Equal(t, models.RoleMember, users[1].Role)
+	require.Nil(t, users[1].CapturedGitHubOrgLogin, "users outside an enabled GitHub roster should not include a captured GitHub org login")
 	require.Equal(t, membershipTime2.UTC(), lastMembershipTime.UTC())
 	require.NoError(t, mock.ExpectationsWereMet())
 }

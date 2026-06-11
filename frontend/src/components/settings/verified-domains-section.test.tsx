@@ -25,6 +25,7 @@ function mockDomains(domains: DomainFixture[]) {
   }));
   server.use(
     http.get("/api/v1/team/domains", () => HttpResponse.json({ data: enriched, meta: {} })),
+    http.get("/api/v1/team/github-orgs", () => HttpResponse.json({ github_orgs: [] })),
   );
 }
 
@@ -33,6 +34,7 @@ describe("VerifiedDomainsSection", () => {
     mockDomains([]);
     renderWithProviders(<VerifiedDomainsSection />);
 
+    expect(await screen.findByText(/People who match these rules join as members automatically/)).toBeInTheDocument();
     expect(await screen.findByText(/No domains yet/)).toBeInTheDocument();
   });
 
@@ -54,6 +56,51 @@ describe("VerifiedDomainsSection", () => {
     expect(await screen.findByText("Verified")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Auto-join for assembledhq.com" })).toBeChecked();
     expect(screen.queryByText("143-domain-verify=tok123")).not.toBeInTheDocument();
+  });
+
+  it("renders GitHub organization auto-join rows and approval guidance", async () => {
+    mockDomains([]);
+    let patched: { auto_join_enabled: boolean } | null = null;
+    server.use(
+      http.get("/api/v1/team/github-orgs", () =>
+        HttpResponse.json({
+          github_orgs: [
+            {
+              installation_id: 123,
+              account_login: "assembledhq",
+              account_type: "Organization",
+              auto_join_enabled: true,
+              members_permission: "granted",
+              captured_by_other_org: false,
+            },
+            {
+              installation_id: 456,
+              account_login: "needs-approval",
+              account_type: "Organization",
+              auto_join_enabled: false,
+              members_permission: "missing",
+              captured_by_other_org: false,
+              settings_url: "https://github.com/organizations/needs-approval/settings/installations/456",
+            },
+          ],
+        }),
+      ),
+      http.patch("/api/v1/team/github-orgs/123", async ({ request }) => {
+        patched = (await request.json()) as { auto_join_enabled: boolean };
+        return HttpResponse.json({ data: {} });
+      }),
+    );
+
+    renderWithProviders(<VerifiedDomainsSection />);
+
+    expect(await screen.findByText("GitHub organization assembledhq")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Auto-join for GitHub organization assembledhq" })).toBeChecked();
+    expect(screen.getByText(/owner of needs-approval needs to approve/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("switch", { name: "Auto-join for GitHub organization assembledhq" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Turn off" }));
+
+    await waitFor(() => expect(patched).toEqual({ auto_join_enabled: false }));
   });
 
   it("adds a domain and refetches the list", async () => {
