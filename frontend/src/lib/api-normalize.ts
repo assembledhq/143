@@ -41,6 +41,28 @@ function withCreatedAt(record: APIRecord, fallback?: string): APIRecord {
   return { ...record, created_at: createdAt };
 }
 
+function byteLength(value: string): number {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(value).byteLength;
+  }
+  return value.length;
+}
+
+function withSessionLogMetrics(record: APIRecord): APIRecord {
+  if (!isSessionLogShape(record)) return record;
+  let next = record;
+  if (typeof next.message_bytes !== "number") {
+    next = { ...next, message_bytes: byteLength(record.message as string) };
+  }
+  if (typeof next.message_chars !== "number") {
+    next = { ...next, message_chars: Array.from(record.message as string).length };
+  }
+  if (typeof next.message_truncated !== "boolean") {
+    next = { ...next, message_truncated: false };
+  }
+  return next;
+}
+
 function isSessionLogShape(record: APIRecord): boolean {
   return (
     typeof record.id === "number" &&
@@ -95,7 +117,7 @@ function normalizeValue(value: unknown): unknown {
   }
 
   if (isSessionLogShape(record)) {
-    const normalizedLog = withCreatedAt(record);
+    const normalizedLog = withSessionLogMetrics(withCreatedAt(record));
     if (normalizedLog !== record) {
       record = normalizedLog;
     }

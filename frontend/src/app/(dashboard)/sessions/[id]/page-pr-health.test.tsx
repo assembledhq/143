@@ -130,6 +130,9 @@ describe('SessionDetailPage PR health and merge', () => {
                   metadata: null,
                   turn_number: 1,
                   created_at: '2026-02-17T07:03:00Z',
+                  message_bytes: 'late log after reconnect'.length,
+                  message_chars: 'late log after reconnect'.length,
+                  message_truncated: false,
                 },
               }]
             : [],

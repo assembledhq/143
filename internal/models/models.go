@@ -737,6 +737,10 @@ type SessionLog struct {
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	TurnNumber int             `db:"turn_number" json:"turn_number"`
+
+	MessageBytes     int  `db:"-" json:"message_bytes,omitempty"`
+	MessageChars     int  `db:"-" json:"message_chars,omitempty"`
+	MessageTruncated bool `db:"-" json:"message_truncated,omitempty"`
 }
 
 // SessionMessageSource identifies the originator of a session message.
