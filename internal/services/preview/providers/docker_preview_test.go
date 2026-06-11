@@ -772,6 +772,12 @@ func (r *recordingObserver) dependencyCacheRestores() []recordedCacheEvent {
 	return append([]recordedCacheEvent(nil), r.cacheRestores...)
 }
 
+func (r *recordingObserver) dependencyCacheSaves() []recordedCacheEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedCacheEvent(nil), r.cacheSaves...)
+}
+
 func (r *recordingObserver) packageManagerCacheRestores() []recordedCacheEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1697,12 +1703,16 @@ func TestStartPreview_DependencyCacheHitRestoresBeforeMarkerValidation(t *testin
 	require.NoError(t, err, "StartPreview should continue after dependency cache restore")
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
-	finds, restores, _, _ := cache.counts()
+	finds, restores, saves, _ := cache.counts()
 	require.Equal(t, 1, finds, "dependency cache should be looked up once")
 	require.Equal(t, 1, restores, "dependency cache hit should restore before marker validation")
+	require.Equal(t, 0, saves, "a blob restored this launch must not be re-archived under the same key")
 	restoresObserved := obs.dependencyCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one restore event")
 	require.Equal(t, "restored", restoresObserved[0].status, "observer should report a restored cache hit")
+	savesObserved := obs.dependencyCacheSaves()
+	require.Len(t, savesObserved, 1, "observer should receive one save event")
+	require.Equal(t, "skipped_fresh_restore", savesObserved[0].status, "observer should explain why the save was skipped")
 
 	mu.Lock()
 	calls := append([]string(nil), streamCalls...)
@@ -1843,12 +1853,16 @@ func TestStartPreview_ColdStartRestoreSatisfiesVerifyPaths(t *testing.T) {
 	require.NoError(t, err, "StartPreview should succeed when restore satisfies verify_paths")
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
-	finds, restores, _, _ := cache.counts()
+	finds, restores, saves, _ := cache.counts()
 	require.Equal(t, 1, finds, "cold start with verify_paths should look up the dependency cache")
 	require.Equal(t, 1, restores, "cold start with verify_paths should restore the dependency cache hit")
+	require.Equal(t, 0, saves, "a blob restored this launch must not be re-archived under the same key")
 	restoresObserved := obs.dependencyCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one cache restore event")
 	require.Equal(t, "restored_satisfied_install", restoresObserved[0].status, "observer should record that the restore satisfied the install contract")
+	savesObserved := obs.dependencyCacheSaves()
+	require.Len(t, savesObserved, 1, "observer should receive one save event")
+	require.Equal(t, "skipped_fresh_restore", savesObserved[0].status, "observer should explain why the save was skipped")
 
 	mu.Lock()
 	calls := append([]string(nil), streamCalls...)

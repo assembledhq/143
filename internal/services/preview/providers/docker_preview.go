@@ -1100,6 +1100,10 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	var packageManagerLockfiles []preview.PreviewInstallLockfileKey
 	var packageManagerPlacementKey string
 	forceInstallAfterDependencyRestoreFailure := false
+	// dependencyRestoredThisLaunch records that the install-artifact blob for
+	// dependencyCacheKey was extracted into this sandbox during this launch,
+	// making a post-hit save byte-identical re-archival of the same key.
+	dependencyRestoredThisLaunch := false
 
 	markerCheckStarted := time.Now()
 	notifyPhaseStart(observer, "install_marker_check")
@@ -1253,6 +1257,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 						d.logger.Warn().Err(restoreErr).Str("cache_key", dependencyCacheKey).Msg("preview dependency cache restore failed; continuing cold")
 					} else {
 						notifyPhaseEnd(observer, "dependency_cache_restore", nil)
+						dependencyRestoredThisLaunch = true
 						restoreStatus := "restored"
 						if !markerExists {
 							// Cold start: the cache key proves this blob was
@@ -1292,7 +1297,19 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	// restore can satisfy verify_paths and skip preview.install entirely.
 	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
-		d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync)
+		if dependencyRestoredThisLaunch {
+			// The blob for this exact key was just extracted into the
+			// sandbox; re-archiving byte-identical content would burn
+			// sandbox CPU/IO while services boot. Restore already touched
+			// the cache entry and refreshed worker-local blobs.
+			notifyDependencyCacheSave(observer, "skipped_fresh_restore", dependencyCacheKey, 0, nil)
+			if opts.OrgID != uuid.Nil {
+				metrics.RecordSessionDependencyCacheSave(ctx, opts.OrgID.String(), "skipped_fresh_restore", 0)
+			}
+			d.logger.Debug().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache save skipped: blob restored this launch")
+		} else {
+			d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync)
+		}
 		return nil
 	}
 	if forceInstallAfterDependencyRestoreFailure {
