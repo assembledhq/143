@@ -89,14 +89,13 @@ import {
   toCodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
 import type {
-  CodingAuth,
+  CodingCredentialSummary,
   Integration,
   OrgSettings,
   Organization,
   Repository,
   SingleResponse,
   ListResponse,
-  ResolvedCredential,
   SessionInputCommand,
   SessionInputReference,
 } from "@/lib/types";
@@ -523,19 +522,18 @@ export function ManualSessionComposer({
     }
   }, [userSelectedRepoId, reposResponse, repositories]);
 
-  const { data: resolvedCredsResponse, isSuccess: resolvedCredsLoaded } = useQuery<ListResponse<ResolvedCredential>>({
-    queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.userCredentials.listResolved(),
+  // The unified resolved stack (personal rows first, then the org fallback)
+  // carries agent + status per row, so it powers both the model picker and
+  // the missing-credentials banner without a separate org-stack query.
+  const { data: resolvedCredsResponse, isSuccess: resolvedCredsLoaded } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
   });
   const resolvedCredentials = useMemo(() => resolvedCredsResponse?.data ?? [], [resolvedCredsResponse]);
 
   const { data: codexAuthResponse, isSuccess: codexAuthLoaded } = useQuery({
     queryKey: queryKeys.codexAuth.status,
     queryFn: () => api.codexAuth.status(),
-  });
-  const { data: codingAuthsResponse, isSuccess: codingAuthsLoaded } = useQuery<ListResponse<CodingAuth>>({
-    queryKey: ["coding-auths"],
-    queryFn: () => api.codingAuths.list(),
   });
   const { data: integrationsResponse, isSuccess: integrationsLoaded } = useQuery<ListResponse<Integration>>({
     queryKey: queryKeys.integrations.all,
@@ -582,20 +580,20 @@ export function ManualSessionComposer({
   const fileMentions = useMemo(() => fileMentionsResponse?.data ?? [], [fileMentionsResponse]);
 
   const codexAuthStatus = codexAuthResponse?.data;
-  const codingAuths = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse]);
   const userDefaultModel = user?.settings?.coding_agent_model_default ?? "";
-  // Sessions run under the user's own credentials, so we don't pass
-  // orgAgentConfig — agents the org has keys for but the user doesn't are
-  // intentionally hidden from the picker.
+  // Sessions run under the user's resolved credential stack (personal rows
+  // ahead of the org fallback), so we don't pass orgAgentConfig — agents the
+  // org has raw env-var keys for but the user can't resolve are intentionally
+  // hidden from the picker.
   const modelGroups = useMemo(
     () =>
       availableAgentModelGroups(
-        resolvedCredentials,
+        [],
         codexAuthStatus,
-        codingAuths,
+        resolvedCredentials,
         defaultAgentType,
       ),
-    [codingAuths, defaultAgentType, resolvedCredentials, codexAuthStatus],
+    [defaultAgentType, resolvedCredentials, codexAuthStatus],
   );
 
   // Drop a previously selected model (from React state or restored draft) when
@@ -603,11 +601,11 @@ export function ManualSessionComposer({
   // what's renderable. Only act once all availability queries have resolved so
   // a transient loading state doesn't nuke a valid choice.
   useEffect(() => {
-    if (!resolvedCredsResponse || !codexAuthResponse || !codingAuthsResponse) return;
+    if (!resolvedCredsResponse || !codexAuthResponse) return;
     if (!selectedModel) return;
     const stillAvailable = modelGroups.some((g) => g.models.includes(selectedModel));
     if (!stillAvailable) setSelectedModel("");
-  }, [modelGroups, selectedModel, resolvedCredsResponse, codexAuthResponse, codingAuthsResponse]);
+  }, [modelGroups, selectedModel, resolvedCredsResponse, codexAuthResponse]);
 
   // Determine which agent type would be used and whether credentials exist.
   const submittedModel = selectedModel || userDefaultModel;
@@ -621,8 +619,8 @@ export function ManualSessionComposer({
     () => getCodingAgentReasoningOptions(effectiveAgentType),
     [effectiveAgentType],
   );
-  const hasAgentCredentials = isAgentAvailable(effectiveAgentType, resolvedCredentials, codexAuthStatus, codingAuths);
-  const agentCredentialStateLoaded = settingsLoaded && resolvedCredsLoaded && codexAuthLoaded && codingAuthsLoaded;
+  const hasAgentCredentials = isAgentAvailable(effectiveAgentType, [], codexAuthStatus, resolvedCredentials);
+  const agentCredentialStateLoaded = settingsLoaded && resolvedCredsLoaded && codexAuthLoaded;
   const shouldShowAgentKeyRequiredBanner = agentCredentialStateLoaded && !hasAgentCredentials;
   const linearConnected = integrationsLoaded && (integrationsResponse?.data ?? []).some(
     (integration) => integration.provider === "linear" && integration.status === "active",

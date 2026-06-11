@@ -111,6 +111,47 @@ func (mockTx) Rollback(_ context.Context) error { return nil }
 
 // --- mock credential store ---
 
+// mockCodingCredStore implements agent.CodingCredentialProvider for PM tests
+// that need agent API keys to reach the sandbox env — the legacy resolution
+// cascade is gone, so keys only resolve through the unified store.
+type mockCodingCredStore struct {
+	rows map[models.ProviderName][]models.DecryptedCodingCredential
+}
+
+func (m *mockCodingCredStore) ListResolvable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	if m.rows == nil {
+		return nil, nil
+	}
+	return m.rows[provider], nil
+}
+
+// codingCredsFromLegacyStore derives unified rows from a mockCredStore's
+// coding-agent entries.
+func codingCredsFromLegacyStore(creds *mockCredStore) *mockCodingCredStore {
+	out := &mockCodingCredStore{rows: map[models.ProviderName][]models.DecryptedCodingCredential{}}
+	if creds == nil {
+		return out
+	}
+	for provider, cred := range creds.creds {
+		if cred == nil || !provider.IsCodingAgentProvider() {
+			continue
+		}
+		id := cred.ID
+		if id == uuid.Nil {
+			id = uuid.New()
+		}
+		out.rows[provider] = append(out.rows[provider], models.DecryptedCodingCredential{
+			ID:       id,
+			OrgID:    cred.OrgID,
+			Provider: provider,
+			Label:    cred.Label,
+			Status:   models.CodingCredentialStatusActive,
+			Config:   cred.Config,
+		})
+	}
+	return out
+}
+
 type mockCredStore struct {
 	creds    map[models.ProviderName]*models.DecryptedCredential
 	getCalls []models.ProviderName

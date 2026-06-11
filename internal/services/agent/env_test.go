@@ -93,40 +93,6 @@ func (m *envCredentialProvider) ListByProvider(_ context.Context, _ uuid.UUID, p
 	return nil, nil
 }
 
-type envUserCredentialProvider struct {
-	personal map[models.ProviderName]*models.DecryptedUserCredential
-	team     map[models.ProviderName]*models.DecryptedUserCredential
-}
-
-// defaultUserActiveStatus mirrors envCredentialProvider.defaultActiveStatus
-// for DecryptedUserCredential. Same rationale: pre-status-filter tests didn't
-// set Status, and the legacy production data always does.
-func defaultUserActiveStatus(cred *models.DecryptedUserCredential) *models.DecryptedUserCredential {
-	if cred == nil {
-		return nil
-	}
-	if cred.Status == "" {
-		copy := *cred
-		copy.Status = models.CredentialStatusActive
-		return &copy
-	}
-	return cred
-}
-
-func (m *envUserCredentialProvider) GetForUser(_ context.Context, _, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
-	if cred, ok := m.personal[provider]; ok {
-		return defaultUserActiveStatus(cred), nil
-	}
-	return nil, nil
-}
-
-func (m *envUserCredentialProvider) GetTeamDefault(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error) {
-	if cred, ok := m.team[provider]; ok {
-		return defaultUserActiveStatus(cred), nil
-	}
-	return nil, nil
-}
-
 type envCodingCredentialProvider struct {
 	resolvable      map[models.ProviderName][]models.DecryptedCodingCredential
 	errs            map[models.ProviderName]error
@@ -253,16 +219,16 @@ func (m *envOrgStore) GetByID(_ context.Context, _ uuid.UUID) (models.Organizati
 }
 
 type envCodexAuthProvider struct {
-	token         *models.OpenAIChatGPTConfig
+	token         *models.OpenAISubscriptionConfig
 	err           error
-	refreshToken  *models.OpenAIChatGPTConfig
+	refreshToken  *models.OpenAISubscriptionConfig
 	refreshErr    error
 	authInvalid   bool
 	refreshIDs    []uuid.UUID
 	refreshScopes []models.Scope
 }
 
-func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m envCodexAuthProvider) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -273,7 +239,7 @@ func (m envCodexAuthProvider) IsAuthInvalid(_ error) bool {
 	return m.authInvalid
 }
 
-func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m *envCodexAuthProvider) RefreshTokenByID(_ context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	m.refreshIDs = append(m.refreshIDs, credID)
 	m.refreshScopes = append(m.refreshScopes, scope)
 	if m.refreshErr != nil {
@@ -401,16 +367,18 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 	tests := []struct {
 		name      string
 		agentType models.AgentType
-		userCreds *envUserCredentialProvider
+		coding    *envCodingCredentialProvider
 		orgCreds  *envCredentialProvider
 		expected  map[string]string
 	}{
 		{
 			name:      "claude uses personal credential and integration tokens",
 			agentType: models.AgentTypeClaudeCode,
-			userCreds: &envUserCredentialProvider{
-				personal: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant", BaseURL: "https://anthropic.example"}},
+			coding: &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderAnthropic: {
+						{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderAnthropic, Status: models.CodingCredentialStatusActive, Config: models.AnthropicConfig{APIKey: "sk-ant", BaseURL: "https://anthropic.example"}},
+					},
 				},
 			},
 			orgCreds: &envCredentialProvider{
@@ -434,11 +402,13 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 			},
 		},
 		{
-			name:      "codex uses team default openai config and disables nested sandbox",
+			name:      "codex uses unified openai config and disables nested sandbox",
 			agentType: models.AgentTypeCodex,
-			userCreds: &envUserCredentialProvider{
-				team: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderOpenAI: {Config: models.OpenAIConfig{APIKey: "sk-openai", BaseURL: "https://openai.example"}},
+			coding: &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderOpenAI: {
+						{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderOpenAI, Status: models.CodingCredentialStatusActive, Config: models.OpenAIConfig{APIKey: "sk-openai", BaseURL: "https://openai.example"}},
+					},
 				},
 			},
 			orgCreds: &envCredentialProvider{},
@@ -449,14 +419,16 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 			},
 		},
 		{
-			name:      "gemini falls back to org credential",
+			name:      "gemini resolves the org-scoped unified row",
 			agentType: models.AgentTypeGeminiCLI,
-			userCreds: &envUserCredentialProvider{},
-			orgCreds: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderGemini: {Config: models.GeminiConfig{APIKey: "gem-key", Model: "gemini-2.5-pro"}},
+			coding: &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderGemini: {
+						{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Status: models.CodingCredentialStatusActive, Config: models.GeminiConfig{APIKey: "gem-key", Model: "gemini-2.5-pro"}},
+					},
 				},
 			},
+			orgCreds: &envCredentialProvider{},
 			expected: map[string]string{
 				"GEMINI_API_KEY": "gem-key",
 				"GEMINI_MODEL":   "gemini-2.5-pro",
@@ -470,10 +442,10 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 			t.Parallel()
 
 			env := NewAgentEnv(AgentEnvDeps{
-				Credentials:     tt.orgCreds,
-				UserCredentials: tt.userCreds,
-				Provider:        &envSandboxProvider{},
-				Logger:          zerolog.Nop(),
+				Credentials:       tt.orgCreds,
+				CodingCredentials: tt.coding,
+				Provider:          &envSandboxProvider{},
+				Logger:            zerolog.Nop(),
 			})
 
 			got := env.Resolve(ctx, orgID, tt.agentType, &userID)
@@ -551,9 +523,8 @@ func TestAgentEnvResolveLinearTokenInjection(t *testing.T) {
 					models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "stale-cached-token"}},
 				},
 			},
-			UserCredentials: &envUserCredentialProvider{},
-			Provider:        &envSandboxProvider{},
-			Logger:          zerolog.Nop(),
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
 		})
 		resolver := &fakeLinearTokens{token: "rotated-token"}
 		env.SetLinearTokens(resolver)
@@ -571,9 +542,8 @@ func TestAgentEnvResolveLinearTokenInjection(t *testing.T) {
 					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "sk-ant"}},
 				},
 			},
-			UserCredentials: &envUserCredentialProvider{},
-			Provider:        &envSandboxProvider{},
-			Logger:          zerolog.Nop(),
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
 		})
 		env.SetLinearTokens(&fakeLinearTokens{token: "", err: nil})
 
@@ -595,9 +565,8 @@ func TestAgentEnvResolveLinearTokenInjection(t *testing.T) {
 					models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "doomed-cached-token"}},
 				},
 			},
-			UserCredentials: &envUserCredentialProvider{},
-			Provider:        &envSandboxProvider{},
-			Logger:          zerolog.Nop(),
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
 		})
 		env.SetLinearTokens(&fakeLinearTokens{err: errors.New("refresh token revoked")})
 
@@ -619,9 +588,8 @@ func TestAgentEnvResolveLinearTokenInjection(t *testing.T) {
 					models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "legacy-token"}},
 				},
 			},
-			UserCredentials: &envUserCredentialProvider{},
-			Provider:        &envSandboxProvider{},
-			Logger:          zerolog.Nop(),
+			Provider: &envSandboxProvider{},
+			Logger:   zerolog.Nop(),
 		})
 
 		got := env.Resolve(ctx, orgID, models.AgentTypeClaudeCode, &userID)
@@ -651,10 +619,14 @@ func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
 		},
 	}
 	env := NewAgentEnv(AgentEnvDeps{
-		Credentials: &envCredentialProvider{
-			creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderAmp: {Config: models.AmpConfig{APIKey: "amp-from-credential"}},
-				models.ProviderPi:  {Config: models.PiConfig{APIKey: "pi-from-credential"}},
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAmp: {
+					{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAmp, Status: models.CodingCredentialStatusActive, Config: models.AmpConfig{APIKey: "amp-from-credential"}},
+				},
+				models.ProviderPi: {
+					{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderPi, Status: models.CodingCredentialStatusActive, Config: models.PiConfig{APIKey: "pi-from-credential"}},
+				},
 			},
 		},
 		Orgs:             store,
@@ -727,123 +699,6 @@ func TestAgentEnvLoadAgentConfigFailures(t *testing.T) {
 	}
 }
 
-func TestAgentEnvResolveProviderConfigPrecedence(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	orgID := uuid.New()
-	userID := uuid.New()
-
-	tests := []struct {
-		name     string
-		userCred *envUserCredentialProvider
-		orgCred  *envCredentialProvider
-		expected string
-	}{
-		{
-			name: "personal credential wins",
-			userCred: &envUserCredentialProvider{
-				personal: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "personal"}},
-				},
-				team: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "team"}},
-				},
-			},
-			orgCred: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "org"}},
-				},
-			},
-			expected: "personal",
-		},
-		{
-			name: "team default beats org when personal missing",
-			userCred: &envUserCredentialProvider{
-				team: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "team"}},
-				},
-			},
-			orgCred: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "org"}},
-				},
-			},
-			expected: "team",
-		},
-		{
-			name:     "org credential is the final fallback",
-			userCred: &envUserCredentialProvider{},
-			orgCred: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {Config: models.AnthropicConfig{APIKey: "org"}},
-				},
-			},
-			expected: "org",
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			env := NewAgentEnv(AgentEnvDeps{
-				Credentials:     tt.orgCred,
-				UserCredentials: tt.userCred,
-				Provider:        &envSandboxProvider{},
-				Logger:          zerolog.Nop(),
-			})
-			cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-			require.IsType(t, models.AnthropicConfig{}, cfg, "resolveProviderConfig should return the provider config type for %s", tt.name)
-			require.Equal(t, tt.expected, cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should honor precedence for %s", tt.name)
-		})
-	}
-}
-
-func TestAgentEnvResolveProviderConfig_UsesPriorityOrderedOrgAPIKeys(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	orgID := uuid.New()
-	userID := uuid.New()
-
-	env := NewAgentEnv(AgentEnvDeps{
-		Credentials: &envCredentialProvider{
-			listCreds: map[models.ProviderName][]models.DecryptedCredential{
-				models.ProviderAnthropic: {
-					{
-						Provider: models.ProviderAnthropic,
-						Label:    "subscription-first",
-						Priority: 1,
-						Config: models.AnthropicConfig{
-							Subscription: &models.AnthropicSubscription{AccessToken: "sub-token", RefreshToken: "sub-refresh", ExpiresAt: time.Now().Add(time.Hour)},
-						},
-					},
-					{
-						Provider: models.ProviderAnthropic,
-						Label:    "api-key-second",
-						Priority: 2,
-						Config:   models.AnthropicConfig{APIKey: "priority-api-key"},
-					},
-					{
-						Provider: models.ProviderAnthropic,
-						Label:    "api-key-third",
-						Priority: 3,
-						Config:   models.AnthropicConfig{APIKey: "lower-priority-api-key"},
-					},
-				},
-			},
-		},
-		UserCredentials: &envUserCredentialProvider{},
-		Provider:        &envSandboxProvider{},
-		Logger:          zerolog.Nop(),
-	})
-
-	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-	require.IsType(t, models.AnthropicConfig{}, cfg, "resolveProviderConfig should return an AnthropicConfig when org API keys exist")
-	require.Equal(t, "priority-api-key", cfg.(models.AnthropicConfig).APIKey, "resolveProviderConfig should choose the highest-priority org API key row")
-}
-
 func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T) {
 	t.Parallel()
 
@@ -859,7 +714,7 @@ func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T)
 		assert   func(t *testing.T, cfg models.ProviderConfig)
 	}{
 		{
-			name:     "returns anthropic subscription twin as legacy anthropic config",
+			name:     "returns anthropic subscription twin config",
 			provider: models.ProviderAnthropic,
 			rows: map[models.ProviderName][]models.DecryptedCodingCredential{
 				models.ProviderAnthropicSubscription: {
@@ -878,15 +733,14 @@ func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T)
 			},
 			assert: func(t *testing.T, cfg models.ProviderConfig) {
 				t.Helper()
-				require.IsType(t, models.AnthropicConfig{}, cfg, "resolveProviderConfig should return the legacy AnthropicConfig shape")
-				sub := cfg.(models.AnthropicConfig).Subscription
-				require.NotNil(t, sub, "resolveProviderConfig should preserve the Claude subscription payload")
+				require.IsType(t, models.AnthropicSubscriptionConfig{}, cfg, "resolveProviderConfig should return the subscription config shape")
+				sub := cfg.(models.AnthropicSubscriptionConfig)
 				require.Equal(t, "claude-token", sub.AccessToken, "resolveProviderConfig should preserve the Claude access token")
 				require.Equal(t, "claude-refresh", sub.RefreshToken, "resolveProviderConfig should preserve the Claude refresh token")
 			},
 		},
 		{
-			name:     "returns openai subscription twin as legacy chatgpt config",
+			name:     "returns openai subscription twin config",
 			provider: models.ProviderOpenAI,
 			rows: map[models.ProviderName][]models.DecryptedCodingCredential{
 				models.ProviderOpenAISubscription: {
@@ -906,9 +760,9 @@ func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T)
 			},
 			assert: func(t *testing.T, cfg models.ProviderConfig) {
 				t.Helper()
-				require.IsType(t, models.OpenAIChatGPTConfig{}, cfg, "resolveProviderConfig should return the legacy OpenAIChatGPTConfig shape")
-				require.Equal(t, "openai-token", cfg.(models.OpenAIChatGPTConfig).AccessToken, "resolveProviderConfig should preserve the OpenAI access token")
-				require.Equal(t, "openai-refresh", cfg.(models.OpenAIChatGPTConfig).RefreshToken, "resolveProviderConfig should preserve the OpenAI refresh token")
+				require.IsType(t, models.OpenAISubscriptionConfig{}, cfg, "resolveProviderConfig should return the OpenAISubscriptionConfig shape")
+				require.Equal(t, "openai-token", cfg.(models.OpenAISubscriptionConfig).AccessToken, "resolveProviderConfig should preserve the OpenAI access token")
+				require.Equal(t, "openai-refresh", cfg.(models.OpenAISubscriptionConfig).RefreshToken, "resolveProviderConfig should preserve the OpenAI refresh token")
 			},
 		},
 	}
@@ -977,10 +831,9 @@ func TestAgentEnvResolveProviderConfig_UnifiedPersonalRowsBeatOrgRowsAcrossAuthT
 			},
 			assert: func(t *testing.T, cfg models.ProviderConfig) {
 				t.Helper()
-				require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the Claude runtime config shape")
-				sub := cfg.(models.AnthropicConfig).Subscription
-				require.NotNil(t, sub, "resolver should choose the personal subscription before org fallback")
-				require.Equal(t, "personal-sub-token", sub.AccessToken, "resolver should use the personal subscription token")
+				require.IsType(t, models.AnthropicSubscriptionConfig{}, cfg, "resolver should return the subscription config shape")
+				sub := cfg.(models.AnthropicSubscriptionConfig)
+				require.Equal(t, "personal-sub-token", sub.AccessToken, "resolver should choose the personal subscription before org fallback")
 			},
 		},
 		{
@@ -1045,7 +898,7 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 	ctx := context.Background()
 	orgID := uuid.New()
 
-	t.Run("returns nil when credential store is missing", func(t *testing.T) {
+	t.Run("returns nil when no unified store is wired", func(t *testing.T) {
 		t.Parallel()
 
 		env := NewAgentEnv(AgentEnvDeps{
@@ -1053,34 +906,8 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 			Logger:   zerolog.Nop(),
 		})
 
-		cfg, _, ok := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderAnthropic)
-		require.False(t, ok, "resolveOrgProviderConfig should not report a hit when the credential store is unwired")
-		require.Nil(t, cfg, "resolveOrgProviderConfig should return nil when no org credential store is configured")
-	})
-
-	t.Run("falls back to singleton get when list lookup misses", func(t *testing.T) {
-		t.Parallel()
-
-		env := NewAgentEnv(AgentEnvDeps{
-			Credentials: &envCredentialProvider{
-				listErrs: map[models.ProviderName]error{
-					models.ProviderOpenAI: errors.New("list failed"),
-				},
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderOpenAI: {
-						Provider: models.ProviderOpenAI,
-						Config:   models.OpenAIConfig{APIKey: "sk-openai-fallback"},
-					},
-				},
-			},
-			Provider: &envSandboxProvider{},
-			Logger:   zerolog.Nop(),
-		})
-
-		cfg, _, ok := env.resolveOrgProviderConfig(ctx, orgID, models.ProviderOpenAI)
-		require.True(t, ok, "resolveOrgProviderConfig should report a hit on the singleton fallback")
-		require.IsType(t, models.OpenAIConfig{}, cfg, "resolveOrgProviderConfig should fall back to Get when list lookup fails")
-		require.Equal(t, "sk-openai-fallback", cfg.(models.OpenAIConfig).APIKey, "resolveOrgProviderConfig should use the fallback org API key")
+		cfg := env.resolveProviderConfig(ctx, orgID, nil, models.ProviderAnthropic)
+		require.Nil(t, cfg, "resolveProviderConfig should return nil when no unified credential store is configured")
 	})
 
 	t.Run("filters incompatible coding provider configs", func(t *testing.T) {
@@ -1099,7 +926,7 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 			require.Nil(t, out, msg)
 		}
 
-		assertIncompatible(models.ProviderAnthropic, models.AnthropicConfig{Subscription: &models.AnthropicSubscription{AccessToken: "sub", RefreshToken: "refresh"}}, "compatibleCodingProviderConfig should reject Anthropic subscriptions for API-key env injection")
+		assertIncompatible(models.ProviderAnthropic, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}, "compatibleCodingProviderConfig should reject subscription configs for the API-key provider")
 		assertCompatible(models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}, "compatibleCodingProviderConfig should accept Anthropic subscription rows for the subscription twin")
 		assertCompatible(models.ProviderOpenAISubscription, models.OpenAISubscriptionConfig{AccessToken: "openai-sub", RefreshToken: "openai-refresh"}, "compatibleCodingProviderConfig should accept OpenAI subscription rows for the subscription twin")
 		assertCompatible(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}, "compatibleCodingProviderConfig should accept Anthropic API keys")
@@ -1238,7 +1065,7 @@ func TestAgentEnvShedAfterSubscriptionPickUsesAgentProviderAlias(t *testing.T) {
 	})
 
 	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-	require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the Claude runtime config shape for subscription rows")
+	require.IsType(t, models.AnthropicSubscriptionConfig{}, cfg, "resolver should return the subscription config shape for subscription rows")
 
 	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
 	require.Equal(t, []uuid.UUID{credID}, coding.rateLimitedIDs,
@@ -1318,181 +1145,26 @@ func TestAgentEnvShedNoopWhenNoRecentPick(t *testing.T) {
 	require.Empty(t, coding.authRejectedIDs, "ShedAuthRejected without a recorded pick should not call the store")
 }
 
-// TestAgentEnvLegacyFallbackSkipsInactiveRows verifies that the legacy
-// fallback resolver only picks status='active' rows. Disabled / invalid /
-// pending_auth rows in the legacy stores must NOT be returned even when the
-// unified resolver has nothing to offer — otherwise a row left around during
-// migration cleanup would silently re-enter the runtime path.
-func TestAgentEnvLegacyFallbackSkipsInactiveRows(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	orgID := uuid.New()
-	userID := uuid.New()
-
-	tests := []struct {
-		name     string
-		userCred *envUserCredentialProvider
-		orgCred  *envCredentialProvider
-		wantNil  bool
-		wantKey  string
-	}{
-		{
-			name: "disabled personal row is skipped",
-			userCred: &envUserCredentialProvider{
-				personal: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "personal"}},
-				},
-			},
-			orgCred: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
-				},
-			},
-			wantKey: "org",
-		},
-		{
-			name: "invalid team row is skipped, falls through to org",
-			userCred: &envUserCredentialProvider{
-				team: map[models.ProviderName]*models.DecryptedUserCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusInvalid, Config: models.AnthropicConfig{APIKey: "team"}},
-				},
-			},
-			orgCred: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "org"}},
-				},
-			},
-			wantKey: "org",
-		},
-		{
-			name:     "all inactive returns nil",
-			userCred: &envUserCredentialProvider{},
-			orgCred: &envCredentialProvider{
-				creds: map[models.ProviderName]*models.DecryptedCredential{
-					models.ProviderAnthropic: {ID: uuid.New(), Status: models.CredentialStatusDisabled, Config: models.AnthropicConfig{APIKey: "org"}},
-				},
-			},
-			wantNil: true,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			env := NewAgentEnv(AgentEnvDeps{
-				Credentials:     tt.orgCred,
-				UserCredentials: tt.userCred,
-				Provider:        &envSandboxProvider{},
-				Logger:          zerolog.Nop(),
-			})
-			cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-			if tt.wantNil {
-				require.Nil(t, cfg, "resolver should return nil when every legacy row is inactive")
-				return
-			}
-			require.IsType(t, models.AnthropicConfig{}, cfg, "resolver should return the active legacy row's config")
-			require.Equal(t, tt.wantKey, cfg.(models.AnthropicConfig).APIKey, "resolver should pick the active legacy row, not an inactive one")
-		})
-	}
-}
-
 func TestAgentEnvUnifiedResolverEmptyDoesNotFallbackToLegacy(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	orgID := uuid.New()
 	userID := uuid.New()
-	legacyCredID := uuid.New()
 
 	coding := &envCodingCredentialProvider{}
-	userCred := &envUserCredentialProvider{
-		personal: map[models.ProviderName]*models.DecryptedUserCredential{
-			models.ProviderAnthropic: {
-				ID:     legacyCredID,
-				Status: models.CredentialStatusActive,
-				Config: models.AnthropicConfig{APIKey: "legacy-key"},
-			},
-		},
-	}
 
 	env := NewAgentEnv(AgentEnvDeps{
 		CodingCredentials: coding,
-		UserCredentials:   userCred,
 		Provider:          &envSandboxProvider{},
 		Logger:            zerolog.Nop(),
 	})
 
 	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-	require.Nil(t, cfg, "wired unified credentials should be authoritative even when no active unified row exists")
+	require.Nil(t, cfg, "unified credentials are authoritative — no rows means no config")
 
 	env.ShedRateLimited(orgID, &userID, models.ProviderAnthropic)
-	require.Empty(t, coding.rateLimitedIDs, "no legacy pick should be recorded when unified resolver handles the lookup")
-}
-
-func TestAgentEnvUnifiedListErrorFallsBackToLegacy(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	orgID := uuid.New()
-	userID := uuid.New()
-	legacyCredID := uuid.New()
-
-	// Unified resolver returns a transient error for the queried provider and
-	// its subscription twin. The legacy fallback must serve traffic instead of
-	// the resolver short-circuiting as "unified authoritative with no rows".
-	coding := &envCodingCredentialProvider{
-		errs: map[models.ProviderName]error{
-			models.ProviderAnthropic:             errors.New("transient pgx error"),
-			models.ProviderAnthropicSubscription: errors.New("transient pgx error"),
-		},
-	}
-	userCred := &envUserCredentialProvider{
-		personal: map[models.ProviderName]*models.DecryptedUserCredential{
-			models.ProviderAnthropic: {
-				ID:     legacyCredID,
-				Status: models.CredentialStatusActive,
-				Config: models.AnthropicConfig{APIKey: "legacy-key"},
-			},
-		},
-	}
-
-	env := NewAgentEnv(AgentEnvDeps{
-		CodingCredentials: coding,
-		UserCredentials:   userCred,
-		Provider:          &envSandboxProvider{},
-		Logger:            zerolog.Nop(),
-	})
-
-	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-	require.IsType(t, models.AnthropicConfig{}, cfg, "transient unified-resolver error must yield to legacy fallback")
-	require.Equal(t, "legacy-key", cfg.(models.AnthropicConfig).APIKey, "legacy credential should be served when unified ListResolvable errors")
-}
-
-func TestAgentEnvLegacyFallbackWhenUnifiedUnwired(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	orgID := uuid.New()
-	userID := uuid.New()
-	legacyCredID := uuid.New()
-
-	userCred := &envUserCredentialProvider{
-		personal: map[models.ProviderName]*models.DecryptedUserCredential{
-			models.ProviderAnthropic: {ID: legacyCredID, Status: models.CredentialStatusActive, Config: models.AnthropicConfig{APIKey: "legacy-key"}},
-		},
-	}
-
-	env := NewAgentEnv(AgentEnvDeps{
-		UserCredentials: userCred,
-		Provider:        &envSandboxProvider{},
-		Logger:          zerolog.Nop(),
-	})
-
-	cfg := env.resolveProviderConfig(ctx, orgID, &userID, models.ProviderAnthropic)
-	require.IsType(t, models.AnthropicConfig{}, cfg, "legacy fallback should return an AnthropicConfig")
-	require.Equal(t, "legacy-key", cfg.(models.AnthropicConfig).APIKey)
+	require.Empty(t, coding.rateLimitedIDs, "no pick should be recorded when the resolver returns nothing")
 }
 
 func TestAgentEnvInjectCodexAuth(t *testing.T) {
@@ -1529,19 +1201,19 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 		},
 		{
 			name:            "mkdir exec failure is returned",
-			codexAuth:       envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth:       envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			sandboxProvider: &envSandboxProvider{execErr: errors.New("exec failed")},
 			wantErr:         "create .codex dir",
 		},
 		{
 			name:            "mkdir non zero exit is returned",
-			codexAuth:       envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth:       envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			sandboxProvider: &envSandboxProvider{execExitCode: 23},
 			wantErr:         "mkdir exited with code 23",
 		},
 		{
 			name:      "write auth json error is returned",
-			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth: envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			sandboxProvider: &envSandboxProvider{writeErrByPath: map[string]error{
 				"/home/test/.codex/auth.json": errors.New("disk full"),
 			}},
@@ -1549,7 +1221,7 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 		},
 		{
 			name:      "write config error is returned",
-			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth: envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			sandboxProvider: &envSandboxProvider{writeErrByPath: map[string]error{
 				"/home/test/.codex/config.toml": errors.New("disk full"),
 			}},
@@ -1557,7 +1229,7 @@ func TestAgentEnvInjectCodexAuth(t *testing.T) {
 		},
 		{
 			name:            "successful injection writes auth and config files",
-			codexAuth:       envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", RefreshToken: "refresh", IDToken: "id"}},
+			codexAuth:       envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", RefreshToken: "refresh", IDToken: "id"}},
 			sandboxProvider: &envSandboxProvider{},
 			wantInjected:    true,
 			assertWrites: func(t *testing.T, provider *envSandboxProvider) {
@@ -1771,19 +1443,19 @@ func TestAgentEnvInjectCodexAuth_ErrorClassification(t *testing.T) {
 		},
 		{
 			name:          "Docker exec failure is NOT auth-shaped",
-			codexAuth:     envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth:     envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			provider:      &envSandboxProvider{execErr: errors.New("Error response from daemon: No such container: abc123")},
 			wantAuthError: false,
 		},
 		{
 			name:          "mkdir non-zero exit is NOT auth-shaped",
-			codexAuth:     envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth:     envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			provider:      &envSandboxProvider{execExitCode: 1},
 			wantAuthError: false,
 		},
 		{
 			name:      "WriteFile failure is NOT auth-shaped",
-			codexAuth: envCodexAuthProvider{token: &models.OpenAIChatGPTConfig{AccessToken: "access", IDToken: "id"}},
+			codexAuth: envCodexAuthProvider{token: &models.OpenAISubscriptionConfig{AccessToken: "access", IDToken: "id"}},
 			provider: &envSandboxProvider{writeErrByPath: map[string]error{
 				"/home/test/.codex/auth.json": errors.New("disk full"),
 			}},
@@ -1824,7 +1496,7 @@ func TestAgentEnvInjectCodexAuthForUser_RefreshesUnifiedSubscriptionByID(t *test
 	sandbox := &Sandbox{HomeDir: "/home/test"}
 	provider := &envSandboxProvider{}
 	codexAuth := &envCodexAuthProvider{
-		refreshToken: &models.OpenAIChatGPTConfig{
+		refreshToken: &models.OpenAISubscriptionConfig{
 			AccessToken:  "fresh-access",
 			RefreshToken: "fresh-refresh",
 			IDToken:      "fresh-id",

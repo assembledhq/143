@@ -1445,47 +1445,20 @@ export interface CredentialSummary {
   account_type?: string;
 }
 
-export interface UserCredentialSummary {
-  provider: string;
-  configured: boolean;
-  is_team_default: boolean;
-  masked_key?: string;
-  set_by_user_id?: string;
-  set_by_user_name?: string;
-  status?: string;
-  last_verified_at?: string;
-}
-
+// ResolvedCredential is a provider-keyed view of the caller's effective
+// credentials, derived from the unified coding-credentials resolved stack.
+// "personal" rows belong to the requesting user, "org" rows are the shared
+// fallback; "none" marks a provider with no usable credential. The legacy
+// "team_default" source is gone — org-scoped credentials fill that role.
 export interface ResolvedCredential {
   provider: string;
-  source: string;
+  source: "personal" | "org" | "none";
   masked_key?: string;
 }
 
 export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
-
-export interface CodingAuth {
-  id: string;
-  org_id: string;
-  priority: number;
-  agent: CodingAuthAgent;
-  auth_type: CodingAuthType;
-  label: string;
-  scope: string;
-  provider: string;
-  status: CodingAuthStatus;
-  is_default: boolean;
-  last_verified_at?: string;
-  rate_limited_until?: string;
-  rate_limit_message?: string;
-  last_used_at?: string;
-  usage_note?: string;
-  created_by?: string;
-  created_at: string;
-  updated_at: string;
-}
 
 // CodingCredentialScope is the scope dimension of the unified
 // coding-credentials API: "org" rows are visible to every member of the org as

@@ -32,6 +32,13 @@ type mockCredentialStore struct {
 	creds     map[string]*models.DecryptedCredential
 	credScope map[uuid.UUID]models.Scope
 	status    map[string]string
+	// pickByPriority makes ClaimNextRoundRobin reproduce the production
+	// unified resolver (PickRunnable): it returns the lowest-Priority active
+	// credential deterministically and does NOT advance LastUsedAt, so the
+	// same top-priority row keeps coming back until it is marked invalid. The
+	// default (false) keeps the legacy last_used_at LRU semantics the older
+	// tests were written against.
+	pickByPriority bool
 }
 
 func newMockCredentialStore() *mockCredentialStore {
@@ -211,6 +218,25 @@ func (m *mockCredentialStore) GetByProviderAndLabel(_ context.Context, scope mod
 }
 
 func (m *mockCredentialStore) ClaimNextRoundRobin(_ context.Context, scope models.Scope, provider models.ProviderName) (*models.DecryptedCredential, error) {
+	if m.pickByPriority {
+		// Reproduce PickRunnable: return the lowest-Priority active credential
+		// deterministically (ties broken by id) and do NOT touch LastUsedAt, so
+		// the same row keeps coming back until it is marked invalid.
+		var best *models.DecryptedCredential
+		for _, cred := range m.creds {
+			if cred.OrgID != scope.OrgID || cred.Provider != provider || cred.Status != "active" {
+				continue
+			}
+			if best == nil || cred.Priority < best.Priority ||
+				(cred.Priority == best.Priority && cred.ID.String() < best.ID.String()) {
+				best = cred
+			}
+		}
+		if best == nil {
+			return nil, ErrCredentialNotFound
+		}
+		return best, nil
+	}
 	// Find the active credential with the oldest LastUsedAt (nil = never used, comes first).
 	var oldest *models.DecryptedCredential
 	for _, cred := range m.creds {
@@ -331,7 +357,7 @@ func TestInitiateDeviceAuth(t *testing.T) {
 	}
 
 	// The pending credential row should remember who started the flow.
-	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, "")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription, "")
 	if err != nil {
 		t.Fatalf("expected pending credential to be persisted: %v", err)
 	}
@@ -478,11 +504,11 @@ func TestPollForToken_Success(t *testing.T) {
 	}
 
 	// Verify credential was stored.
-	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err != nil {
 		t.Fatalf("credential not stored: %v", err)
 	}
-	cfg := cred.Config.(models.OpenAIChatGPTConfig)
+	cfg := cred.Config.(models.OpenAISubscriptionConfig)
 	if cfg.AccessToken != "cha_test_access_token_12345" {
 		t.Errorf("unexpected access token: %s", cfg.AccessToken)
 	}
@@ -571,7 +597,7 @@ func TestGetValidToken_ValidToken(t *testing.T) {
 
 	orgID := uuid.New()
 	// Pre-store a valid credential.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_valid_token",
 		RefreshToken: "chr_valid_refresh",
 		ExpiresAt:    time.Now().Add(1 * time.Hour), // Not expiring soon.
@@ -609,7 +635,7 @@ func TestGetValidToken_AutoRefresh(t *testing.T) {
 
 	orgID := uuid.New()
 	// Pre-store a credential expiring within the refresh window.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_old_token",
 		RefreshToken: "chr_old_refresh",
 		ExpiresAt:    time.Now().Add(2 * time.Minute), // Within 5-min refresh window.
@@ -658,7 +684,7 @@ func TestGetValidToken_RoundRobinFailover(t *testing.T) {
 
 	// First credential: expired access token + broken refresh token. Seeded
 	// with an older LastUsedAt so round-robin claims it first.
-	firstID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team A", models.OpenAIChatGPTConfig{
+	firstID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team A", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_broken_expired",
 		RefreshToken: "chr_broken",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
@@ -667,12 +693,12 @@ func TestGetValidToken_RoundRobinFailover(t *testing.T) {
 		t.Fatalf("seed first credential: %v", err)
 	}
 	older := time.Now().Add(-1 * time.Hour)
-	firstKey := store.labelKey(orgID, models.ProviderOpenAIChatGPT, "Team A")
+	firstKey := store.labelKey(orgID, models.ProviderOpenAISubscription, "Team A")
 	store.creds[firstKey].LastUsedAt = &older
 
 	// Second credential: also expired but with a working refresh token.
 	// Seeded with a newer LastUsedAt so round-robin picks it second.
-	if _, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team B", models.OpenAIChatGPTConfig{
+	if _, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team B", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_good_expired",
 		RefreshToken: "chr_good",
 		ExpiresAt:    time.Now().Add(-30 * time.Minute),
@@ -680,7 +706,7 @@ func TestGetValidToken_RoundRobinFailover(t *testing.T) {
 		t.Fatalf("seed second credential: %v", err)
 	}
 	newer := time.Now().Add(-1 * time.Minute)
-	secondKey := store.labelKey(orgID, models.ProviderOpenAIChatGPT, "Team B")
+	secondKey := store.labelKey(orgID, models.ProviderOpenAISubscription, "Team B")
 	store.creds[secondKey].LastUsedAt = &newer
 
 	cfg, err := svc.GetValidToken(context.Background(), orgID)
@@ -704,6 +730,96 @@ func TestGetValidToken_RoundRobinFailover(t *testing.T) {
 	}
 }
 
+// TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority is the
+// regression guard for the PR-5 round-robin change. ClaimNextRoundRobin now
+// delegates to the unified PickRunnable, which deterministically returns the
+// same highest-priority active credential until it leaves the active set —
+// unlike the old last_used_at LRU that advanced on every call. If the top
+// credential is unusable for a reason that does NOT mark it invalid (empty
+// access token, or a config that fails the subscription type assertion),
+// GetValidToken must still mark it invalid itself so the next claim advances
+// to the healthy lower-priority credential. Without the fix, PickRunnable
+// re-returns the bad row, the tried-map breaks the loop, and a perfectly good
+// credential at priority 2 is never reached.
+func TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority(t *testing.T) {
+	t.Parallel()
+
+	goodCfg := models.OpenAISubscriptionConfig{
+		AccessToken:  "cha_good",
+		RefreshToken: "chr_good",
+		ExpiresAt:    time.Now().Add(2 * time.Hour), // fresh: no refresh attempted
+	}
+
+	cases := []struct {
+		name   string
+		badCfg models.ProviderConfig
+	}{
+		{
+			name:   "empty access token",
+			badCfg: models.OpenAISubscriptionConfig{AccessToken: "", RefreshToken: "chr_bad"},
+		},
+		{
+			name: "wrong config type",
+			// An AnthropicConfig stored under provider=openai_subscription
+			// fails the OpenAISubscriptionConfig type assertion.
+			badCfg: models.AnthropicConfig{APIKey: "sk-ant-not-a-subscription"},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newMockCredentialStore()
+			store.pickByPriority = true // reproduce PickRunnable selection
+			svc := NewService(store, zerolog.Nop())
+
+			orgID := uuid.New()
+			badID := uuid.New()
+			goodID := uuid.New()
+
+			// Priority 1 (top of stack) is the unusable credential; priority 2
+			// is the healthy one the resolver must fall through to.
+			store.creds["bad"] = &models.DecryptedCredential{
+				ID: badID, OrgID: orgID, Provider: models.ProviderOpenAISubscription,
+				Label: "Bad", Config: tc.badCfg, Status: "active", Priority: 1,
+			}
+			store.creds["good"] = &models.DecryptedCredential{
+				ID: goodID, OrgID: orgID, Provider: models.ProviderOpenAISubscription,
+				Label: "Good", Config: goodCfg, Status: "active", Priority: 2,
+			}
+
+			cfg, err := svc.GetValidToken(context.Background(), orgID)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg == nil {
+				t.Fatal("expected the healthy priority-2 credential, got nil")
+			}
+			if cfg.AccessToken != "cha_good" {
+				t.Errorf("expected token from the healthy credential, got %q", cfg.AccessToken)
+			}
+
+			bad, getErr := store.GetByID(context.Background(), models.Scope{OrgID: orgID}, badID)
+			if getErr != nil {
+				t.Fatalf("get bad credential: %v", getErr)
+			}
+			if bad.Status != "invalid" {
+				t.Errorf("expected the unusable top credential to be marked invalid, got %q", bad.Status)
+			}
+
+			good, getErr := store.GetByID(context.Background(), models.Scope{OrgID: orgID}, goodID)
+			if getErr != nil {
+				t.Fatalf("get good credential: %v", getErr)
+			}
+			if good.Status != "active" {
+				t.Errorf("expected the healthy credential to stay active, got %q", good.Status)
+			}
+		})
+	}
+}
+
 func TestRefreshTokenByID_Revoked(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -718,12 +834,12 @@ func TestRefreshTokenByID_Revoked(t *testing.T) {
 	svc.SetIssuer(server.URL)
 
 	orgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_expired",
 		RefreshToken: "chr_revoked",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
 	})
-	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err != nil {
 		t.Fatalf("failed to get credential: %v", err)
 	}
@@ -734,7 +850,7 @@ func TestRefreshTokenByID_Revoked(t *testing.T) {
 	}
 
 	// Verify credential was marked invalid.
-	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	k := store.key(orgID, models.ProviderOpenAISubscription)
 	if store.status[k] != "invalid" {
 		t.Errorf("expected credential status 'invalid', got %q", store.status[k])
 	}
@@ -746,14 +862,14 @@ func TestDisconnect(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_token",
 		RefreshToken: "chr_refresh",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
 	})
 
 	// Get the credential ID assigned by Upsert.
-	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err != nil {
 		t.Fatalf("failed to get credential: %v", err)
 	}
@@ -763,7 +879,7 @@ func TestDisconnect(t *testing.T) {
 	}
 
 	// Verify credential was deleted.
-	_, err = store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	_, err = store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err == nil {
 		t.Error("expected credential to be deleted")
 	}
@@ -776,11 +892,11 @@ func TestDisconnectForOrg_WrongOrg(t *testing.T) {
 
 	orgID := uuid.New()
 	otherOrgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken: "cha_token",
 	})
 
-	cred, _ := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	cred, _ := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 
 	// Attempt to disconnect using a different org should fail.
 	err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: otherOrgID}, cred.ID)
@@ -789,7 +905,7 @@ func TestDisconnectForOrg_WrongOrg(t *testing.T) {
 	}
 
 	// Credential should still exist.
-	_, err = store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	_, err = store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err != nil {
 		t.Error("credential should not have been deleted")
 	}
@@ -823,7 +939,7 @@ func TestListSubscriptions(t *testing.T) {
 	}
 
 	// Add a credential.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken: "cha_token",
 		AccountType: "plus",
 	})
@@ -1099,7 +1215,7 @@ func TestPollForToken_RestoreFromDB_Active(t *testing.T) {
 
 	orgID := uuid.New()
 	// Pre-store an active credential in the DB.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_active_token",
 		RefreshToken: "chr_refresh",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -1128,7 +1244,7 @@ func TestPollForToken_EmptyLabelDetectsActiveLabeledPersonalSubscription(t *test
 	orgID := uuid.New()
 	userID := uuid.New()
 	scope := models.Scope{OrgID: orgID, UserID: &userID}
-	_, err := store.UpsertWithLabel(context.Background(), scope, &userID, "Codex subscription", models.OpenAIChatGPTConfig{
+	_, err := store.UpsertWithLabel(context.Background(), scope, &userID, "Codex subscription", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_personal",
 		RefreshToken: "chr_personal",
 		ExpiresAt:    time.Now().Add(time.Hour),
@@ -1167,11 +1283,11 @@ func TestPollForToken_RestoreFromDB_PendingAuth(t *testing.T) {
 
 	orgID := uuid.New()
 	// Pre-store a pending_auth credential in the DB.
-	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	k := store.key(orgID, models.ProviderOpenAISubscription)
 	store.creds[k] = &models.DecryptedCredential{
 		OrgID:    orgID,
-		Provider: models.ProviderOpenAIChatGPT,
-		Config: models.OpenAIChatGPTConfig{
+		Provider: models.ProviderOpenAISubscription,
+		Config: models.OpenAISubscriptionConfig{
 			DeviceAuthID:    "dev_restored",
 			UserCode:        "REST-CODE",
 			VerificationURI: "https://auth.openai.com/codex/device",
@@ -1197,10 +1313,10 @@ func TestPollForToken_InvalidConfigType(t *testing.T) {
 
 	orgID := uuid.New()
 	// Store an active credential with the wrong config type.
-	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	k := store.key(orgID, models.ProviderOpenAISubscription)
 	store.creds[k] = &models.DecryptedCredential{
 		OrgID:    orgID,
-		Provider: models.ProviderOpenAIChatGPT,
+		Provider: models.ProviderOpenAISubscription,
 		Config:   models.AnthropicConfig{APIKey: "wrong-type"},
 		Status:   "active",
 	}
@@ -1233,13 +1349,13 @@ func TestGetValidToken_InactiveStatus(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_tok",
 		RefreshToken: "chr_tok",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
 	})
 	// Mark as inactive.
-	store.UpdateStatus(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, models.CredentialStatusInvalid)
+	store.UpdateStatus(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription, models.CredentialStatusInvalid)
 
 	cfg, err := svc.GetValidToken(context.Background(), orgID)
 	if err != nil {
@@ -1256,10 +1372,10 @@ func TestGetValidToken_InvalidConfigType(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	k := store.key(orgID, models.ProviderOpenAISubscription)
 	store.creds[k] = &models.DecryptedCredential{
 		OrgID:    orgID,
-		Provider: models.ProviderOpenAIChatGPT,
+		Provider: models.ProviderOpenAISubscription,
 		Config:   models.AnthropicConfig{APIKey: "wrong"},
 		Status:   "active",
 	}
@@ -1286,7 +1402,7 @@ func TestGetValidToken_RefreshFailsButTokenValid(t *testing.T) {
 
 	orgID := uuid.New()
 	// Token expiring within refresh window but not yet expired.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_still_valid",
 		RefreshToken: "chr_refresh",
 		ExpiresAt:    time.Now().Add(3 * time.Minute), // Within 5-min window but still valid.
@@ -1320,7 +1436,7 @@ func TestGetValidToken_RefreshFailsTokenExpired(t *testing.T) {
 
 	orgID := uuid.New()
 	// Token already expired and refresh fails.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_expired",
 		RefreshToken: "chr_refresh",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute), // Already expired.
@@ -1349,7 +1465,7 @@ func TestGetValidToken_RefreshRevokedTokenExpiredIsAuthInvalid(t *testing.T) {
 	svc.SetIssuer(server.URL)
 
 	orgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_expired",
 		RefreshToken: "chr_revoked",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute),
@@ -1378,12 +1494,12 @@ func TestRefreshTokenByID_NonAuthError(t *testing.T) {
 	svc.SetIssuer(server.URL)
 
 	orgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_tok",
 		RefreshToken: "chr_tok",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour),
 	})
-	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err != nil {
 		t.Fatalf("failed to get credential: %v", err)
 	}
@@ -1401,11 +1517,11 @@ func TestRefreshTokenByID_InvalidConfigType(t *testing.T) {
 
 	orgID := uuid.New()
 	credID := uuid.New()
-	k := store.key(orgID, models.ProviderOpenAIChatGPT)
+	k := store.key(orgID, models.ProviderOpenAISubscription)
 	store.creds[k] = &models.DecryptedCredential{
 		ID:       credID,
 		OrgID:    orgID,
-		Provider: models.ProviderOpenAIChatGPT,
+		Provider: models.ProviderOpenAISubscription,
 		Config:   models.AnthropicConfig{APIKey: "wrong"},
 		Status:   "active",
 	}
@@ -1483,7 +1599,7 @@ func TestInitiateDeviceAuth_LabelConflict(t *testing.T) {
 	const label = "Team A"
 
 	// Seed an active credential under this label so the next initiate must conflict.
-	if _, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, models.OpenAIChatGPTConfig{
+	if _, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_existing",
 		RefreshToken: "chr_existing",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -1534,21 +1650,21 @@ func TestInitiateDeviceAuth_DisabledLabelResurrects(t *testing.T) {
 	const label = "Team A"
 
 	// Seed a disabled credential so the next initiate should resurrect it.
-	k := store.labelKey(orgID, models.ProviderOpenAIChatGPT, label)
+	k := store.labelKey(orgID, models.ProviderOpenAISubscription, label)
 	store.creds[k] = &models.DecryptedCredential{
 		ID:       uuid.New(),
 		OrgID:    orgID,
-		Provider: models.ProviderOpenAIChatGPT,
+		Provider: models.ProviderOpenAISubscription,
 		Label:    label,
 		Status:   "disabled",
-		Config:   models.OpenAIChatGPTConfig{},
+		Config:   models.OpenAISubscriptionConfig{},
 	}
 
 	if _, err := svc.InitiateDeviceAuth(context.Background(), models.Scope{OrgID: orgID}, nil, label); err != nil {
 		t.Fatalf("expected re-initiate against disabled label to succeed, got: %v", err)
 	}
 
-	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, label)
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription, label)
 	if err != nil {
 		t.Fatalf("expected to find resurrected credential: %v", err)
 	}
@@ -1604,18 +1720,18 @@ func TestRefreshTokenByID_ConcurrentRefreshesAreSerialized(t *testing.T) {
 	svc.SetIssuer(server.URL)
 
 	orgID := uuid.New()
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_old",
 		RefreshToken: "chr_old",
 		ExpiresAt:    time.Now().Add(-1 * time.Minute), // Expired.
 	})
-	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT)
+	cred, err := store.Get(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription)
 	if err != nil {
 		t.Fatalf("failed to get credential: %v", err)
 	}
 
 	// Fire two concurrent refreshes.
-	done := make(chan *models.OpenAIChatGPTConfig, 2)
+	done := make(chan *models.OpenAISubscriptionConfig, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
 			cfg, _ := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
@@ -1656,7 +1772,7 @@ func TestGetValidToken_RefreshTokenReused_ExpiredToken(t *testing.T) {
 
 	orgID := uuid.New()
 	// Store a credential that is ALREADY EXPIRED and needs refresh.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_expired",
 		RefreshToken: "chr_reused",
 		ExpiresAt:    time.Now().Add(-10 * time.Minute), // Already expired.
@@ -1692,7 +1808,7 @@ func TestGetValidToken_RefreshTokenReused_ValidToken(t *testing.T) {
 
 	orgID := uuid.New()
 	// Store a credential within the refresh window but NOT yet expired.
-	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAIChatGPTConfig{
+	store.Upsert(context.Background(), models.Scope{OrgID: orgID}, models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_still_valid",
 		RefreshToken: "chr_reused",
 		ExpiresAt:    time.Now().Add(3 * time.Minute), // Within 5-min window but still valid.
@@ -1723,7 +1839,7 @@ func TestDisconnectForOrg_AlreadyDisabled(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	credID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team A", models.OpenAIChatGPTConfig{
+	credID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team A", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_token",
 		RefreshToken: "chr_refresh",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -1734,7 +1850,7 @@ func TestDisconnectForOrg_AlreadyDisabled(t *testing.T) {
 
 	// Flip the row's status to "disabled" directly (simulating a row the real
 	// DB would leave in status='disabled' after a prior DisableByID).
-	k := store.labelKey(orgID, models.ProviderOpenAIChatGPT, "Team A")
+	k := store.labelKey(orgID, models.ProviderOpenAISubscription, "Team A")
 	store.creds[k].Status = "disabled"
 
 	// Disconnecting an already-disabled row should return nil, not ErrCredentialNotFound.
@@ -1779,14 +1895,14 @@ func TestGetValidToken_TriedDedupeBreaksLoop(t *testing.T) {
 
 	base := newMockCredentialStore()
 	orgID := uuid.New()
-	if _, err := base.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Solo", models.OpenAIChatGPTConfig{
+	if _, err := base.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Solo", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_expired",
 		RefreshToken: "chr_broken",
 		ExpiresAt:    time.Now().Add(-1 * time.Hour), // Already expired.
 	}); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
-	k := base.labelKey(orgID, models.ProviderOpenAIChatGPT, "Solo")
+	k := base.labelKey(orgID, models.ProviderOpenAISubscription, "Solo")
 	fixed := base.creds[k]
 
 	store := &alwaysSameCredStore{mockCredentialStore: base, fixed: fixed}
@@ -1820,7 +1936,7 @@ func TestDisconnectAll_CleansRefreshMutexes(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	firstID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team A", models.OpenAIChatGPTConfig{
+	firstID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team A", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_a",
 		RefreshToken: "chr_a",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -1828,7 +1944,7 @@ func TestDisconnectAll_CleansRefreshMutexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed first credential: %v", err)
 	}
-	secondID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team B", models.OpenAIChatGPTConfig{
+	secondID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "Team B", models.OpenAISubscriptionConfig{
 		AccessToken:  "cha_b",
 		RefreshToken: "chr_b",
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -1921,7 +2037,7 @@ func TestInitiateDeviceAuth_PersonalScope(t *testing.T) {
 
 	// The personal pending row must be reachable from personal scope and
 	// invisible to org scope — that is the whole point of the refactor.
-	cred, err := store.GetByProviderAndLabel(context.Background(), personalScope, models.ProviderOpenAIChatGPT, "Personal A")
+	cred, err := store.GetByProviderAndLabel(context.Background(), personalScope, models.ProviderOpenAISubscription, "Personal A")
 	if err != nil {
 		t.Fatalf("expected personal pending row to be persisted: %v", err)
 	}
@@ -1932,7 +2048,7 @@ func TestInitiateDeviceAuth_PersonalScope(t *testing.T) {
 		t.Errorf("expected created_by=%s, got %v", userID, cred.CreatedBy)
 	}
 
-	if _, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, "Personal A"); err == nil {
+	if _, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription, "Personal A"); err == nil {
 		t.Error("personal-scope row must not be visible to an org-scope read")
 	}
 }
@@ -1971,11 +2087,11 @@ func TestInitiateDeviceAuth_SameLabelAcrossScopes(t *testing.T) {
 		t.Fatalf("personal initiate with same label must succeed: %v", err)
 	}
 
-	orgRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAIChatGPT, label)
+	orgRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderOpenAISubscription, label)
 	if err != nil {
 		t.Fatalf("expected org pending row: %v", err)
 	}
-	personalRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, models.ProviderOpenAIChatGPT, label)
+	personalRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, models.ProviderOpenAISubscription, label)
 	if err != nil {
 		t.Fatalf("expected personal pending row: %v", err)
 	}

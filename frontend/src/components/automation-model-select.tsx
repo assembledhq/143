@@ -4,13 +4,11 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import type {
-  CodingAuth,
   CodingCredentialSummary,
   ListResponse,
   OrgSettings,
-  ResolvedCredential,
-  UserCredentialSummary,
 } from "@/lib/types";
 import {
   Select,
@@ -41,65 +39,47 @@ export function AutomationModelSelect({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
   });
-  const { data: resolvedCredsResponse } = useQuery<ListResponse<ResolvedCredential>>({
-    queryKey: ["resolved-credentials"],
-    queryFn: () => api.userCredentials.listResolved(),
-  });
-  const { data: teamDefaultsResponse } = useQuery<ListResponse<UserCredentialSummary>>({
-    queryKey: ["team-default-credentials"],
-    queryFn: () => api.userCredentials.listTeamDefaults(),
+  const { data: resolvedCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
   });
   const { data: codexAuthResponse } = useQuery({
     queryKey: ["codex-auth-status"],
     queryFn: () => api.codexAuth.status(),
   });
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
-    queryKey: ["coding-auths"],
-    queryFn: () => api.codingAuths.list(),
-  });
   const { data: orgCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "org"],
+    queryKey: queryKeys.codingCredentials.list("org"),
     queryFn: () => api.codingCredentials.list("org"),
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const resolvedCredentials = useMemo(
-    () => resolvedCredsResponse?.data ?? [],
-    [resolvedCredsResponse],
-  );
-  const teamDefaultCredentials = useMemo(
-    () => teamDefaultsResponse?.data ?? [],
-    [teamDefaultsResponse],
-  );
-  const codingAuths = useMemo(
-    () => codingAuthsResponse?.data ?? [],
-    [codingAuthsResponse],
+    () => resolvedCredentialsResponse?.data ?? [],
+    [resolvedCredentialsResponse],
   );
   const orgCodingCredentials = useMemo(
     () => orgCodingCredentialsResponse?.data ?? [],
     [orgCodingCredentialsResponse],
   );
+  // Automations run server-side without a user id, so only org-scoped
+  // credentials count toward availability.
   const automationResolvedCredentials = useMemo(
-    () => pmUsableResolvedCredentials(resolvedCredentials, teamDefaultCredentials),
-    [resolvedCredentials, teamDefaultCredentials],
-  );
-  const automationCodingAuthAvailability = useMemo(
-    () => [...codingAuths, ...orgCodingCredentials],
-    [codingAuths, orgCodingCredentials],
+    () => pmUsableResolvedCredentials(resolvedCredentials),
+    [resolvedCredentials],
   );
   const modelGroups = useMemo(
     () =>
       availableAgentModelGroups(
         automationResolvedCredentials,
         codexAuthResponse?.data,
-        automationCodingAuthAvailability,
+        orgCodingCredentials,
         settings.default_agent_type || "codex",
         { orgAgentConfig: settings.agent_config },
       ),
     [
       automationResolvedCredentials,
       codexAuthResponse?.data,
-      automationCodingAuthAvailability,
+      orgCodingCredentials,
       settings.default_agent_type,
       settings.agent_config,
     ],
