@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent } from "@testing-library/react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { AuthenticatedLayout, sessionDetailRouteId } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
@@ -564,7 +564,8 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  describe("auth-gate warm mount", () => {
+  describe("auth-gate route warming", () => {
+    const sessionId = "93cbcc8c-c12e-4bdf-8622-5865502c8977";
     const loadingAuth = {
       user: null,
       isLoading: true,
@@ -576,31 +577,54 @@ describe("AuthenticatedLayout", () => {
       logout: logoutMock,
     };
 
-    it("mounts children behind the auth skeleton so route queries can warm generally", async () => {
-      mockPathname = "/somewhere";
-      useAuthMock.mockReturnValue(loadingAuth);
-      const queryFn = vi.fn().mockResolvedValue({ data: "ready" });
+    function trackSessionDetailRequests(): string[] {
+      const requests: string[] = [];
+      server.use(
+        http.get("/api/v1/sessions/:id", ({ params }) => {
+          requests.push(String(params.id));
+          return HttpResponse.json({ data: { id: params.id, threads: [] } });
+        })
+      );
+      return requests;
+    }
 
-      function RouteProbe() {
-        useQuery({
-          queryKey: ["route-probe"],
-          queryFn,
-        });
+    it("does not mount route children while auth is still loading", async () => {
+      mockPathname = "/previews/preview-1";
+      useAuthMock.mockReturnValue(loadingAuth);
+      const mounted = vi.fn();
+
+      function RouteWithEffect() {
+        useEffect(() => {
+          mounted();
+        }, []);
         return <div>route child</div>;
       }
 
       renderWithProviders(
         <AuthenticatedLayout>
-          <RouteProbe />
+          <RouteWithEffect />
+        </AuthenticatedLayout>
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mounted).not.toHaveBeenCalled();
+      expect(screen.queryByText("route child")).not.toBeInTheDocument();
+    });
+
+    it("prefetches session detail while /auth/me is still in flight", async () => {
+      mockPathname = `/sessions/${sessionId}`;
+      useAuthMock.mockReturnValue(loadingAuth);
+      const requests = trackSessionDetailRequests();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
         </AuthenticatedLayout>
       );
 
       await waitFor(() => {
-        expect(queryFn).toHaveBeenCalled();
+        expect(requests).toEqual([sessionId]);
       });
-      const warmMount = screen.getByTestId("auth-gate-warm-mount");
-      expect(warmMount).toHaveAttribute("hidden");
-      expect(within(warmMount).getByText("route child")).toBeInTheDocument();
     });
   });
 });

@@ -45,7 +45,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { CommandPalette } from "@/components/command-palette/command-palette";
@@ -76,6 +79,16 @@ const APP_SIDEBAR_DEFAULT_WIDTH = 236;
 const APP_SIDEBAR_MIN_WIDTH = 200;
 const APP_SIDEBAR_MAX_WIDTH = 300;
 const APP_SIDEBAR_STORAGE_KEY = "143:app-sidebar-width";
+
+function prefetchAuthGateRouteData(queryClient: QueryClient, pathname: string): void {
+  const sessionId = sessionDetailRouteId(pathname);
+  if (!sessionId) return;
+
+  void queryClient.prefetchQuery({
+    queryKey: queryKeys.sessions.detail(sessionId),
+    queryFn: () => api.sessions.get(sessionId),
+  });
+}
 
 function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
@@ -550,6 +563,17 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const prefetchedPathRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Keep auth-gate warming to explicit, idempotent query preloads. Rendering
+    // route children here would also run mount effects and mutations before
+    // auth/role gates settle.
+    if (user || !isLoading) return;
+    if (prefetchedPathRef.current === pathname) return;
+    prefetchedPathRef.current = pathname;
+    prefetchAuthGateRouteData(queryClient, pathname);
+  }, [isLoading, pathname, queryClient, user]);
   const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
     storageKey: APP_SIDEBAR_STORAGE_KEY,
     defaultWidth: APP_SIDEBAR_DEFAULT_WIDTH,
@@ -636,64 +660,59 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   if (showLoadingSkeleton) {
     return (
-      <>
-        <div hidden aria-hidden="true" data-testid="auth-gate-warm-mount">
-          <Suspense fallback={null}>{children}</Suspense>
-        </div>
-        <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
-          {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
-          <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-2" />
-          <aside
-            data-testid="app-sidebar"
-            style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
-            className={cn(
-              "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)]"
-            )}
-          >
-            <div className="px-4 py-4">
-              <div className="h-5 w-20 rounded bg-muted animate-pulse" />
+      <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
+        {/* Compact rail placeholder — holds space between md and xl so no layout shift on load */}
+        <div className="hidden md:flex xl:hidden h-full w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar py-2" />
+        <aside
+          data-testid="app-sidebar"
+          style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
+          className={cn(
+            "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)]"
+          )}
+        >
+          <div className="px-4 py-4">
+            <div className="h-5 w-20 rounded bg-muted animate-pulse" />
+          </div>
+          <nav className="flex-1 px-2 space-y-0.5">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
+                <div className="h-4 w-4 rounded bg-muted animate-pulse" />
+                <div className="h-3.5 rounded bg-muted animate-pulse" style={{ width: `${60 + i * 12}px` }} />
+              </div>
+            ))}
+          </nav>
+          <div className="px-2 pb-3">
+            <div className="flex items-center gap-2 px-2.5 py-2">
+              <div className="h-5 w-5 rounded-full bg-muted animate-pulse" />
+              <div className="h-3.5 w-20 rounded bg-muted animate-pulse" />
             </div>
-            <nav className="flex-1 px-2 space-y-0.5">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
-                  <div className="h-4 w-4 rounded bg-muted animate-pulse" />
-                  <div className="h-3.5 rounded bg-muted animate-pulse" style={{ width: `${60 + i * 12}px` }} />
-                </div>
-              ))}
-            </nav>
-            <div className="px-2 pb-3">
-              <div className="flex items-center gap-2 px-2.5 py-2">
-                <div className="h-5 w-5 rounded-full bg-muted animate-pulse" />
-                <div className="h-3.5 w-20 rounded bg-muted animate-pulse" />
+          </div>
+        </aside>
+        <div className="hidden xl:block">
+          <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+        </div>
+        <div className="flex flex-1 min-w-0 flex-col">
+          <header className="md:hidden flex h-14 items-center gap-2 border-b border-sidebar-border bg-sidebar px-3">
+            <div className="h-6 w-6 rounded bg-muted animate-pulse" />
+            <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
+            <div className="h-6 w-6 rounded bg-muted animate-pulse" />
+          </header>
+          <main className="flex-1 overflow-auto overscroll-contain bg-background">
+            <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
+              <div className="h-7 w-40 rounded bg-muted animate-pulse" />
+              <div className="space-y-3">
+                <div className="h-4 w-full rounded bg-muted animate-pulse" />
+                <div className="h-4 w-3/4 rounded bg-muted animate-pulse" />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="h-24 rounded-lg border border-border bg-muted/30 animate-pulse" />
+                ))}
               </div>
             </div>
-          </aside>
-          <div className="hidden xl:block">
-            <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
-          </div>
-          <div className="flex flex-1 min-w-0 flex-col">
-            <header className="md:hidden flex h-14 items-center gap-2 border-b border-sidebar-border bg-sidebar px-3">
-              <div className="h-6 w-6 rounded bg-muted animate-pulse" />
-              <div className="ml-auto h-6 w-6 rounded bg-muted animate-pulse" />
-              <div className="h-6 w-6 rounded bg-muted animate-pulse" />
-            </header>
-            <main className="flex-1 overflow-auto overscroll-contain bg-background">
-              <div className="max-w-none px-4 sm:px-6 lg:px-10 py-5 sm:py-6 space-y-4">
-                <div className="h-7 w-40 rounded bg-muted animate-pulse" />
-                <div className="space-y-3">
-                  <div className="h-4 w-full rounded bg-muted animate-pulse" />
-                  <div className="h-4 w-3/4 rounded bg-muted animate-pulse" />
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <div key={i} className="h-24 rounded-lg border border-border bg-muted/30 animate-pulse" />
-                  ))}
-                </div>
-              </div>
-            </main>
-          </div>
+          </main>
         </div>
-      </>
+      </div>
     );
   }
 

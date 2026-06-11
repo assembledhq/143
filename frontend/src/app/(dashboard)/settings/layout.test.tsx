@@ -207,7 +207,7 @@ describe('SettingsLayout', () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it('mounts children for access-controlled pages while auth is still loading', () => {
+  it('does not mount children for access-controlled pages while auth is still loading', () => {
     useAuthMock.mockReturnValue({ user: null, isLoading: true });
     pathnameMock.value = '/settings/team';
     const onMount = vi.fn();
@@ -219,8 +219,8 @@ describe('SettingsLayout', () => {
     );
 
     expect(replaceMock).not.toHaveBeenCalled();
-    expect(onMount).toHaveBeenCalled();
-    expect(screen.getByText('child content')).toBeInTheDocument();
+    expect(onMount).not.toHaveBeenCalled();
+    expect(screen.queryByText('child content')).not.toBeInTheDocument();
   });
 
   it('still renders unrestricted pages while auth is still loading', () => {
