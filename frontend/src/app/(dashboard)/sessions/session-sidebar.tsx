@@ -27,6 +27,7 @@ import type { ListResponse, SessionCounts, SessionDetail, SessionListItem, Singl
 import { prMergedAccent } from "@/lib/pr-status-styles";
 import { deriveSessionDisplayStatus } from "@/lib/session-display-status";
 import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
+import { preloadSessionDetailContent } from "./[id]/session-detail-page-client";
 import { hasSessionKeyboardTransientSurface, isSessionKeyboardTextEntryTarget } from "@/hooks/use-session-keyboard-shortcuts";
 import {
   workingSet,
@@ -788,6 +789,14 @@ export function SessionSidebar() {
     router.prefetch(href);
   }, [router]);
 
+  // Session rows also warm the detail view's render-time dynamic chunk,
+  // which router.prefetch skips — otherwise the first session open stalls
+  // on it. Non-session routes (e.g. /sessions/new) keep the plain prefetch.
+  const prefetchSessionRoute = useCallback((href: string) => {
+    router.prefetch(href);
+    preloadSessionDetailContent();
+  }, [router]);
+
   const toggleArchiveActiveSession = useCallback(() => {
     if (!activeSession) return;
     if (activeSession.archived_at) {
@@ -938,8 +947,8 @@ export function SessionSidebar() {
             ariaCurrent={isSelected ? "page" : undefined}
             onClick={() => handleSessionLinkClick(session)}
             onMouseDown={() => seedSessionDetailCache(session)}
-            onMouseEnter={() => prefetchRoute(sessionHref)}
-            onFocus={() => prefetchRoute(sessionHref)}
+            onMouseEnter={() => prefetchSessionRoute(sessionHref)}
+            onFocus={() => prefetchSessionRoute(sessionHref)}
             className={
               isSelected
                 ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
