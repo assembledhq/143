@@ -5,6 +5,15 @@
   "preview": {
     "name": "manado",
     "primary": "frontend",
+    "install": {
+      "command": ["sh", ".143/preview-install-frontend.sh"],
+      "lockfiles": ["frontend/package-lock.json"],
+      "verify_paths": ["frontend/node_modules/.bin/next"],
+      "timeout_seconds": 600,
+      "cache": {
+        "paths": ["frontend/.next/cache"]
+      }
+    },
     "services": {
       "frontend": {
         "command": ["sh", ".143/preview-frontend.sh"],
