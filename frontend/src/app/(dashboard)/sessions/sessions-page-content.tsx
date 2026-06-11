@@ -36,6 +36,7 @@ import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
 import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
+import { preloadSessionDetailContent } from "./[id]/session-detail-page-client";
 import { deriveSessionDisplayStatus, type SessionDisplayStatus } from "@/lib/session-display-status";
 import type { Session, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import {
@@ -449,10 +450,14 @@ export function SessionsPageContent() {
                     <TableRow
                       key={row.id}
                       className="cursor-pointer"
-                      // Prefetch the route on hover and seed the detail cache on
-                      // mousedown so the click navigates instantly to a seeded
-                      // skeleton instead of silently waiting on a server fetch.
-                      onMouseEnter={() => router.prefetch(`/sessions/${row.original.id}`)}
+                      // Prefetch the route and warm the detail view's dynamic
+                      // chunk on hover, and seed the detail cache on mousedown,
+                      // so the click navigates instantly to a seeded skeleton
+                      // instead of silently waiting on a server fetch.
+                      onMouseEnter={() => {
+                        router.prefetch(`/sessions/${row.original.id}`);
+                        preloadSessionDetailContent();
+                      }}
                       onMouseDown={() => seedSessionDetailCache(row.original)}
                       onClick={() => navigateToSession(row.original)}
                     >
