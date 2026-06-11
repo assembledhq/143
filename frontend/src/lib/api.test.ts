@@ -1207,10 +1207,11 @@ describe('api client', () => {
       try {
         await api.issues.list();
       } catch (err: unknown) {
-        const error = err as { name: string; code: string; message: string };
+        const error = err as { name: string; code: string; message: string; status: number };
         expect(error.name).toBe('ApiError');
         expect(error.code).toBe('BAD_REQUEST');
         expect(error.message).toBe('bad request');
+        expect(error.status).toBe(400);
       }
     });
 

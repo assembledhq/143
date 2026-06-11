@@ -631,5 +631,31 @@ describe("AuthenticatedLayout", () => {
       await new Promise((r) => setTimeout(r, 50));
       expect(requests).toEqual([]);
     });
+
+    it("prefetches settings agent data while /auth/me is still in flight", async () => {
+      mockPathname = "/settings/agent";
+      useAuthMock.mockReturnValue(loadingAuth);
+      const requests: string[] = [];
+      server.use(
+        http.get("/api/v1/settings", () => {
+          requests.push("settings");
+          return HttpResponse.json({ data: { id: "org-1", name: "Test Org", settings: {} } });
+        }),
+        http.get("/api/v1/settings/coding-auths", () => {
+          requests.push("coding-auths");
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+      );
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await waitFor(() => {
+        expect(requests).toEqual(expect.arrayContaining(["settings", "coding-auths"]));
+      });
+    });
   });
 });

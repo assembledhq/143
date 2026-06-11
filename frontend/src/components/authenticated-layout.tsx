@@ -45,7 +45,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -79,6 +79,45 @@ const APP_SIDEBAR_DEFAULT_WIDTH = 236;
 const APP_SIDEBAR_MIN_WIDTH = 200;
 const APP_SIDEBAR_MAX_WIDTH = 300;
 const APP_SIDEBAR_STORAGE_KEY = "143:app-sidebar-width";
+const CODING_AUTHS_QUERY_KEY = ["coding-auths"] as const;
+
+function prefetchAuthGateRouteData(queryClient: QueryClient, pathname: string): void {
+  const sessionId = sessionDetailRouteId(pathname);
+  if (sessionId) {
+    void queryClient.prefetchQuery({
+      queryKey: queryKeys.sessions.detail(sessionId),
+      queryFn: () => api.sessions.get(sessionId),
+    });
+    return;
+  }
+
+  if (!pathname.startsWith("/settings")) {
+    return;
+  }
+
+  void queryClient.prefetchQuery({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+
+  if (pathname === "/settings/agent") {
+    void queryClient.prefetchQuery({
+      queryKey: CODING_AUTHS_QUERY_KEY,
+      queryFn: () => api.codingAuths.list(),
+    });
+  }
+
+  if (pathname === "/settings/runtime") {
+    void queryClient.prefetchQuery({
+      queryKey: queryKeys.settings.network,
+      queryFn: () => api.settings.getNetworkStatus(),
+    });
+    void queryClient.prefetchQuery({
+      queryKey: queryKeys.settings.runtimeStatus,
+      queryFn: () => api.settings.getRuntimeStatus(),
+    });
+  }
+}
 
 function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
@@ -557,12 +596,11 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
 
   // On a cold load this layout renders only a skeleton until /auth/me
   // resolves, so the page behind it can't start its own data fetches — every
-  // round trip serializes behind auth. Warm the session detail cache for
-  // /sessions/[id] routes in parallel with /auth/me; when the page mounts,
-  // React Query dedupes against the in-flight prefetch (or serves the settled
-  // payload) instead of paying a fresh round trip. prefetchQuery swallows
-  // errors by design: a 401 here just means the auth gate is about to
-  // redirect to /login anyway.
+  // round trip serializes behind auth. Warm known route data in parallel with
+  // /auth/me; when the page mounts, React Query dedupes against the in-flight
+  // prefetch (or serves the settled payload) instead of paying a fresh round
+  // trip. prefetchQuery swallows errors by design: a 401 here just means the
+  // auth gate is about to redirect to /login anyway.
   const queryClient = useQueryClient();
   const didPrefetchRouteDataRef = useRef(false);
   useEffect(() => {
@@ -571,12 +609,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     // Auth already settled (warm navigation) — the page mounts immediately
     // and owns its fetches; prefetching would only duplicate work.
     if (user || !isLoading) return;
-    const sessionId = sessionDetailRouteId(pathname);
-    if (!sessionId) return;
-    void queryClient.prefetchQuery({
-      queryKey: queryKeys.sessions.detail(sessionId),
-      queryFn: () => api.sessions.get(sessionId),
-    });
+    prefetchAuthGateRouteData(queryClient, pathname);
   }, [isLoading, pathname, queryClient, user]);
   const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
     storageKey: APP_SIDEBAR_STORAGE_KEY,
