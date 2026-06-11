@@ -3,10 +3,10 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 
 /**
- * Safety-net window after resolution before we force-remove a placeholder.
- * The sidebar normally GCs resolved rows as soon as the real session appears
- * in its list, but if the user's current filters exclude the new session (or
- * no sidebar is mounted), the placeholder would otherwise linger forever.
+ * How long to keep a resolved placeholder alive before force-removing it.
+ * The sidebar renders the real session data through the resolved row's stable
+ * key for this window, then the optimistic entry is dropped and the real
+ * session takes over via the regular session list path.
  * 10s comfortably exceeds a typical post-invalidation refetch.
  */
 const RESOLUTION_FALLBACK_MS = 10_000;

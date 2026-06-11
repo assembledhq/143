@@ -326,6 +326,11 @@ function CurrentSessionContextRow({
   );
 }
 
+type SidebarSessionRow =
+  | { kind: "optimistic"; renderKey: string; optimistic: OptimisticSession }
+  | { kind: "resolved"; renderKey: string; optimistic: OptimisticSession; session: SessionListItem }
+  | { kind: "session"; renderKey: string; session: SessionListItem };
+
 // ---------------------------------------------------------------------------
 // Sidebar component
 // ---------------------------------------------------------------------------
@@ -401,7 +406,7 @@ export function SessionSidebar() {
   });
   const members = useMemo<User[]>(() => membersData?.data ?? [], [membersData?.data]);
 
-  const { optimisticSessions, removeOptimisticSession } = useOptimisticSessions();
+  const { optimisticSessions } = useOptimisticSessions();
 
   const currentFilter = activeFilter ?? "all";
   const isArchivedView = currentFilter === "archived";
@@ -638,27 +643,45 @@ export function SessionSidebar() {
     }
     return displayedSessions[0]?.id ?? null;
   }, [activeSessionId, displayedSessions, hasNavigatedFromNewSessionDraft, isNewSession, selectedId, selectedSessionIsDisplayed]);
-  // Hide optimistic rows whose real session is already in the list — prevents
-  // the double-render flash between "optimistic added" and "server refetch
-  // lands". Resolved-but-not-yet-visible rows stay until the real row arrives.
-  const realIds = useMemo(() => new Set(displayedSessions.map((s) => s.id)), [displayedSessions]);
-  const visibleOptimistic = useMemo(
-    () => optimisticSessions.filter((os) => !(os.resolvedId && realIds.has(os.resolvedId))),
-    [optimisticSessions, realIds],
+  const realSessionsById = useMemo(
+    () => new Map(displayedSessions.map((session) => [session.id, session])),
+    [displayedSessions],
   );
-
-  // Garbage-collect resolved optimistic rows once we've observed their real
-  // counterpart in the list. Done in an effect so state updates happen after
-  // render. This also handles the failure case: if the real session later
-  // changes status (e.g. to "failed"), it's still in the list, so the
-  // optimistic stays hidden and gets cleaned up here.
-  useEffect(() => {
-    for (const os of optimisticSessions) {
-      if (os.resolvedId && realIds.has(os.resolvedId)) {
-        removeOptimisticSession(os.id);
-      }
+  const optimisticRows = useMemo<SidebarSessionRow[]>(
+    () =>
+      optimisticSessions.map((optimistic): SidebarSessionRow => {
+        const session = optimistic.resolvedId ? realSessionsById.get(optimistic.resolvedId) : undefined;
+        if (session) {
+          return { kind: "resolved", renderKey: optimistic.id, optimistic, session };
+        }
+        return { kind: "optimistic", renderKey: optimistic.id, optimistic };
+      }),
+    [optimisticSessions, realSessionsById],
+  );
+  const optimisticOwnedSessionIds = useMemo(
+    () =>
+      new Set(
+        optimisticRows
+          .filter((row): row is Extract<SidebarSessionRow, { kind: "resolved" }> => row.kind === "resolved")
+          .map((row) => row.session.id),
+      ),
+    [optimisticRows],
+  );
+  const sidebarSessionRows = useMemo<SidebarSessionRow[]>(
+    () => [
+      ...optimisticRows,
+      ...displayedSessions
+        .filter((session) => !optimisticOwnedSessionIds.has(session.id))
+        .map((session) => ({ kind: "session" as const, renderKey: session.id, session })),
+    ],
+    [displayedSessions, optimisticOwnedSessionIds, optimisticRows],
+  );
+  const sidebarRowsForCurrentFilter = useMemo<SidebarSessionRow[]>(() => {
+    if (currentFilter === "all" || currentFilter === "active") {
+      return sidebarSessionRows;
     }
-  }, [optimisticSessions, realIds, removeOptimisticSession]);
+    return displayedSessions.map((session) => ({ kind: "session", renderKey: session.id, session }));
+  }, [currentFilter, displayedSessions, sidebarSessionRows]);
 
   const counts = countsData?.data;
 
@@ -857,6 +880,135 @@ export function SessionSidebar() {
     return () => document.removeEventListener("keydown", handleDocumentKeyDown);
   }, [filterSuffix, focusSearch, moveActiveSession, router]);
 
+  const renderSavedSessionRow = (session: SessionListItem, renderKey: string) => {
+    const isSelected = selectedId === session.id;
+    const cfg = statusConfig[session.status] || statusConfig.pending;
+    const isWorkingSession = workingSet.has(session.status);
+    const hasUnread = isUnread(session);
+    const ts = session.completed_at || session.started_at || session.created_at;
+    const isArchived = !!session.archived_at;
+    const title = sessionTitle(session);
+    const sessionHref = `/sessions/${session.id}${filterSuffix}`;
+
+    return (
+      <SwipeActionRow
+        key={renderKey}
+        className="mb-0.5"
+        actionLabel={isArchived ? "Unarchive session" : "Archive session"}
+        actionText={isArchived ? "Restore" : "Archive"}
+        desktopActionVisibility="hover"
+        actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+        onAction={() => {
+          if (isArchived) {
+            return unarchiveMutation.mutateAsync(session);
+          } else {
+            return archiveMutation.mutateAsync(session);
+          }
+        }}
+      >
+        <SessionSidebarOptionFrame
+          id={`session-sidebar-option-${session.id}`}
+          ariaSelected={currentActiveSessionId === session.id}
+          optionRef={(node) => {
+            if (node) {
+              optionRefs.current.set(session.id, node);
+            } else {
+              optionRefs.current.delete(session.id);
+            }
+          }}
+          onMouseDown={() => seedSessionDetailCache(session)}
+          className={cn(
+            "cursor-pointer",
+            currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-muted/40 ring-1 ring-ring/20",
+            isSelected && "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10",
+          )}
+          onClick={(event) => {
+            // Clicks on the frame padding (outside the inner link surface)
+            // should still open the session — a dead zone here reads as
+            // "click did nothing".
+            if (event.defaultPrevented || event.target !== event.currentTarget) {
+              return;
+            }
+            navigateToSession(session, sessionHref);
+          }}
+        >
+          <SessionSidebarRowSurface
+            href={sessionHref}
+            ariaCurrent={isSelected ? "page" : undefined}
+            onClick={() => handleSessionLinkClick(session)}
+            onMouseDown={() => seedSessionDetailCache(session)}
+            onMouseEnter={() => prefetchRoute(sessionHref)}
+            onFocus={() => prefetchRoute(sessionHref)}
+            className={
+              isSelected
+                ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+                : "hover:border-border/60 hover:bg-card md:hover:border-transparent md:hover:bg-muted/50"
+            }
+          >
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
+                isSelected && "bg-primary",
+              )}
+            />
+            <div className="flex items-start gap-2.5 min-w-0">
+              <div className="mt-1.5 shrink-0">
+                {isWorkingSession ? (
+                  <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
+                ) : hasUnread ? (
+                  <StatusDot color="bg-primary" />
+                ) : (
+                  <span className="inline-flex rounded-full h-2 w-2" />
+                )}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start justify-between gap-2">
+                  <p className={cn(
+                    "text-xs font-medium truncate leading-snug",
+                    hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
+                  )}>
+                    {title}
+                  </p>
+                </div>
+                <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                  <div
+                    data-testid={`session-row-meta-scroll-${session.id}`}
+                    className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
+                  >
+                    <div className="flex min-w-max items-center gap-1.5 pr-1">
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        <span>{cfg.label}</span>
+                        {isWorkingSession && <AnimatedEllipsis />}
+                      </span>
+                      {session.pm_plan_id && !session.triggered_by_user_id && (
+                        <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
+                          PM
+                        </span>
+                      )}
+                      <SessionLinearBadge session={session} />
+                      <span className="text-xs text-muted-foreground/50 shrink-0">
+                        {formatTimeAgo(ts)}
+                      </span>
+                      <PRStatusBadge prSummary={session.pr_summary} />
+                      <SessionDiffBadge diffStats={session.diff_stats} />
+                    </div>
+                  </div>
+                </div>
+                {session.status === "failed" && (session.failure_explanation || session.error) && (
+                  <p className="text-xs text-destructive/70 truncate mt-0.5">
+                    {session.failure_explanation || session.error}
+                  </p>
+                )}
+              </div>
+            </div>
+          </SessionSidebarRowSurface>
+        </SessionSidebarOptionFrame>
+      </SwipeActionRow>
+    );
+  };
+
   return (
     <div className="w-full h-full border-r border-border bg-panel flex flex-col">
       {/* Header */}
@@ -1006,10 +1158,12 @@ export function SessionSidebar() {
           </div>
         )}
 
-        {(currentFilter === "all" || currentFilter === "active") &&
-          visibleOptimistic.map((os) => (
-            <OptimisticSessionRow key={os.id} session={os} />
-          ))}
+        {sidebarRowsForCurrentFilter.map((row) => {
+          if (row.kind === "optimistic") {
+            return <OptimisticSessionRow key={row.renderKey} session={row.optimistic} />;
+          }
+          return renderSavedSessionRow(row.session, row.renderKey);
+        })}
 
         {(!isResolved || isLoading) && (
           <div className="px-2 py-8 text-center text-xs text-muted-foreground">
@@ -1031,135 +1185,6 @@ export function SessionSidebar() {
             No sessions match this filter.
           </div>
         )}
-
-        {displayedSessions.map((session) => {
-          const isSelected = selectedId === session.id;
-          const cfg = statusConfig[session.status] || statusConfig.pending;
-          const isWorkingSession = workingSet.has(session.status);
-          const hasUnread = isUnread(session);
-          const ts = session.completed_at || session.started_at || session.created_at;
-          const isArchived = !!session.archived_at;
-          const title = sessionTitle(session);
-          const sessionHref = `/sessions/${session.id}${filterSuffix}`;
-
-          return (
-            <SwipeActionRow
-              key={session.id}
-              className="mb-0.5"
-              actionLabel={isArchived ? "Unarchive session" : "Archive session"}
-              actionText={isArchived ? "Restore" : "Archive"}
-              desktopActionVisibility="hover"
-              actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
-              onAction={() => {
-                if (isArchived) {
-                  return unarchiveMutation.mutateAsync(session);
-                } else {
-                  return archiveMutation.mutateAsync(session);
-                }
-              }}
-            >
-              <SessionSidebarOptionFrame
-                id={`session-sidebar-option-${session.id}`}
-                ariaSelected={currentActiveSessionId === session.id}
-                optionRef={(node) => {
-                  if (node) {
-                    optionRefs.current.set(session.id, node);
-                  } else {
-                    optionRefs.current.delete(session.id);
-                  }
-                }}
-                onMouseDown={() => seedSessionDetailCache(session)}
-                className={cn(
-                  "cursor-pointer",
-                  currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-muted/40 ring-1 ring-ring/20",
-                  isSelected && "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10",
-                )}
-                onClick={(event) => {
-                  // Clicks on the frame padding (outside the inner link surface)
-                  // should still open the session — a dead zone here reads as
-                  // "click did nothing".
-                  if (event.defaultPrevented || event.target !== event.currentTarget) {
-                    return;
-                  }
-                  navigateToSession(session, sessionHref);
-                }}
-              >
-                <SessionSidebarRowSurface
-                  href={sessionHref}
-                  ariaCurrent={isSelected ? "page" : undefined}
-                  onClick={() => handleSessionLinkClick(session)}
-                  onMouseDown={() => seedSessionDetailCache(session)}
-                  onMouseEnter={() => prefetchRoute(sessionHref)}
-                  onFocus={() => prefetchRoute(sessionHref)}
-                  className={
-                    isSelected
-                      ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                      : "hover:border-border/60 hover:bg-card md:hover:border-transparent md:hover:bg-muted/50"
-                  }
-                >
-                  <span
-                    aria-hidden="true"
-                    className={cn(
-                      "absolute inset-y-2 left-1 w-0.5 rounded-full bg-primary/0 transition-colors duration-150",
-                      isSelected && "bg-primary",
-                    )}
-                  />
-                  <div className="flex items-start gap-2.5 min-w-0">
-                    <div className="mt-1.5 shrink-0">
-                      {isWorkingSession ? (
-                        <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />
-                      ) : hasUnread ? (
-                        <StatusDot color="bg-primary" />
-                      ) : (
-                        <span className="inline-flex rounded-full h-2 w-2" />
-                      )}
-                    </div>
-
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className={cn(
-                          "text-xs font-medium truncate leading-snug",
-                          hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
-                        )}>
-                          {title}
-                        </p>
-                      </div>
-                      <div className="mt-0.5 flex min-w-0 items-center gap-2">
-                        <div
-                          data-testid={`session-row-meta-scroll-${session.id}`}
-                          className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden scrollbar-hide"
-                        >
-                          <div className="flex min-w-max items-center gap-1.5 pr-1">
-                            <span className="text-xs text-muted-foreground shrink-0">
-                              <span>{cfg.label}</span>
-                              {isWorkingSession && <AnimatedEllipsis />}
-                            </span>
-                            {session.pm_plan_id && !session.triggered_by_user_id && (
-                              <span className="inline-flex items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary shrink-0">
-                                PM
-                              </span>
-                            )}
-                            <SessionLinearBadge session={session} />
-                            <span className="text-xs text-muted-foreground/50 shrink-0">
-                              {formatTimeAgo(ts)}
-                            </span>
-                            <PRStatusBadge prSummary={session.pr_summary} />
-                            <SessionDiffBadge diffStats={session.diff_stats} />
-                          </div>
-                        </div>
-                      </div>
-                      {session.status === "failed" && (session.failure_explanation || session.error) && (
-                        <p className="text-xs text-destructive/70 truncate mt-0.5">
-                          {session.failure_explanation || session.error}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </SessionSidebarRowSurface>
-              </SessionSidebarOptionFrame>
-            </SwipeActionRow>
-          );
-        })}
 
         {loadMoreMutation.isError && (
           <p className="px-2 py-2 text-center text-xs text-destructive/80">
