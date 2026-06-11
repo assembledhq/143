@@ -815,7 +815,9 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 		logs = []models.SessionLog{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{Data: logs})
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLogResponse]{
+		Data: models.NewSessionLogResponses(logs),
+	})
 }
 
 // maxLatestTurns bounds the latest_turns parameter so a client cannot turn

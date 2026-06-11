@@ -181,6 +181,34 @@ func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionLogStore_GetByID_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.id .+ sl.session_id .+ sl.org_id").
+		WithArgs(int64(42), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(logColumns).
+				AddRow(int64(42), sessionID, orgID, nil, now, "output", "full output", json.RawMessage(`{"type":"tool_result"}`), 3),
+		)
+
+	log, err := store.GetByID(context.Background(), orgID, sessionID, 42)
+	require.NoError(t, err, "GetByID should return the scoped log")
+	require.Equal(t, int64(42), log.ID, "GetByID should return the requested log")
+	require.Equal(t, sessionID, log.SessionID, "GetByID should preserve session ID")
+	require.Equal(t, orgID, log.OrgID, "GetByID should preserve org ID")
+	require.Equal(t, "full output", log.Message, "GetByID should return the full message")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionLogStore_ListByRunID_Empty(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

@@ -321,6 +321,37 @@ describe('api client', () => {
       expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
     });
 
+    it('fetches session log detail by log id', async () => {
+      let capturedUrl: string | undefined;
+      const mockDetail = {
+        data: {
+          id: 42,
+          session_id: 'session-abc',
+          level: 'output',
+          message: 'full output',
+          metadata: { type: 'tool_result' },
+          turn_number: 7,
+          created_at: '2026-01-01T00:00:00Z',
+          message_bytes: 11,
+          message_chars: 11,
+          message_truncated: false,
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/logs/:logId', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json(mockDetail);
+        }),
+      );
+
+      const result = await api.sessions.getLogDetail('session-abc', 42);
+
+      expect(result).toEqual(mockDetail);
+      expect(capturedUrl).toBeDefined();
+      expect(new URL(capturedUrl!).pathname).toBe('/api/v1/sessions/session-abc/logs/42');
+    });
+
     it('fetches recoverable thread inbox entries', async () => {
       const mockEntries = {
         data: [
