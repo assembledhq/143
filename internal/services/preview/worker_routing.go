@@ -470,16 +470,30 @@ func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, 
 	if err != nil {
 		return WorkerNode{}, false, err
 	}
-	for _, location := range locations {
+	best := WorkerNode{}
+	bestCount := 0
+	bestOrder := 0
+	found := false
+	for order, location := range locations {
 		worker, ok := routable[location.WorkerNodeID]
 		if !ok {
 			continue
 		}
-		if counts[worker.ID] < s.maxPreviewsPerWorker {
-			return worker, true, nil
+		count := counts[worker.ID]
+		if count >= s.maxPreviewsPerWorker {
+			continue
+		}
+		if !found || count < bestCount || (count == bestCount && order < bestOrder) {
+			best = worker
+			bestCount = count
+			bestOrder = order
+			found = true
 		}
 	}
-	return WorkerNode{}, false, nil
+	if !found {
+		return WorkerNode{}, false, nil
+	}
+	return best, true, nil
 }
 
 func (s *WorkerSelector) selectRendezvousWorker(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, topN int, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
