@@ -743,6 +743,15 @@ export interface SessionLog {
   metadata: Record<string, unknown> | null;
   turn_number: number;
   created_at: string;
+  message_bytes: number;
+  message_chars: number;
+  message_truncated: boolean;
+}
+
+export interface SessionLogDetail extends Omit<SessionLog, 'message_truncated'> {
+  message: string;
+  message_bytes: number;
+  message_chars: number;
 }
 
 export interface SessionTimelineEntry {

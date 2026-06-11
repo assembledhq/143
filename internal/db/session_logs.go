@@ -118,6 +118,27 @@ func (s *SessionLogStore) ListByRunID(ctx context.Context, orgID, sessionID uuid
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionLog])
 }
 
+func (s *SessionLogStore) GetByID(ctx context.Context, orgID, sessionID uuid.UUID, logID int64) (models.SessionLog, error) {
+	query := `
+		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number
+		FROM session_logs sl
+		WHERE sl.id = @id AND sl.session_id = @session_id AND sl.org_id = @org_id`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":         logID,
+		"session_id": sessionID,
+		"org_id":     orgID,
+	})
+	if err != nil {
+		return models.SessionLog{}, fmt.Errorf("query session log: %w", err)
+	}
+	log, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionLog])
+	if err != nil {
+		return models.SessionLog{}, err
+	}
+	return log, nil
+}
+
 func (s *SessionLogStore) ListByRunIDSince(ctx context.Context, orgID, sessionID uuid.UUID, sinceID int64) ([]models.SessionLog, error) {
 	query := `
 		SELECT sl.id, sl.session_id, sl.org_id, sl.thread_id, sl.timestamp, sl.level, sl.message, sl.metadata, sl.turn_number

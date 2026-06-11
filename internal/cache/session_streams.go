@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -25,6 +26,8 @@ const (
 	maxRedisLogPayloadBytes  = 4 * 1024
 	sessionStreamExpiryAfter = time.Hour
 )
+
+const redisTruncatedLogSuffix = "… [truncated in Redis]"
 
 type SessionTerminalLister interface {
 	// lint:allow-no-orgid reason="cross-org Redis cleanup scans terminal sessions across the whole fleet"
@@ -986,16 +989,55 @@ func clampLogPayload(log models.SessionLog) ([]byte, error) {
 	if overflow < 0 {
 		overflow = 0
 	}
-	const suffix = "… [truncated in Redis]"
-	keep := len(log.Message) - overflow - len(suffix)
+	keep := len(log.Message) - overflow - len(redisTruncatedLogSuffix)
+	return marshalRedisTruncatedLogPayload(log, keep)
+}
+
+func marshalRedisTruncatedLogPayload(log models.SessionLog, keep int) ([]byte, error) {
+	originalMessage := log.Message
 	if keep < 0 {
 		keep = 0
 	}
-	if keep > len(log.Message) {
-		keep = len(log.Message)
+	if keep > len(originalMessage) {
+		keep = len(originalMessage)
 	}
-	log.Message = log.Message[:keep] + suffix
-	return json.Marshal(log)
+
+	log.MessageBytes = len([]byte(originalMessage))
+	log.MessageChars = utf8.RuneCountInString(originalMessage)
+	log.MessageTruncated = true
+
+	for {
+		log.Message = validUTF8Prefix(originalMessage, keep) + redisTruncatedLogSuffix
+		encoded, err := json.Marshal(log)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) <= maxRedisLogPayloadBytes || keep == 0 {
+			return encoded, nil
+		}
+		overflow := len(encoded) - maxRedisLogPayloadBytes
+		if overflow < 1 {
+			overflow = 1
+		}
+		keep -= overflow
+		if keep < 0 {
+			keep = 0
+		}
+	}
+}
+
+func validUTF8Prefix(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if maxBytes > len(value) {
+		maxBytes = len(value)
+	}
+	prefix := value[:maxBytes]
+	for !utf8.ValidString(prefix) && len(prefix) > 0 {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix
 }
 
 func logStreamKey(sessionID uuid.UUID) string {

@@ -2422,11 +2422,140 @@ func TestSessionHandler_GetLogs_Success(t *testing.T) {
 	handler.GetLogs(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
-	var resp models.ListResponse[models.SessionLog]
+	var resp models.ListResponse[models.SessionLogResponse]
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(resp.Data))
+	require.False(t, resp.Data[0].MessageTruncated, "short log should not be marked truncated")
+	require.Equal(t, len("Starting agent"), resp.Data[0].MessageBytes, "log response should report original byte length")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSessionHandler_GetLogDetail_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	handler := newSessionHandler(t, mock)
+
+	issueID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                      // triggered_by_user_id
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.id").
+		WithArgs(int64(99), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(99), runID, orgID, nil, now, "output", strings.Repeat("full ", 3_000), json.RawMessage(`{"type":"tool_result"}`), 4),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/99", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	rctx.URLParams.Add("log_id", "99")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetLogDetail(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "GetLogDetail should return OK for an authorized log")
+
+	var resp models.SingleResponse[models.SessionLogDetailResponse]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, int64(99), resp.Data.ID, "detail response should include requested log ID")
+	require.Equal(t, strings.Repeat("full ", 3_000), resp.Data.Message, "detail response should include the full message")
+	require.Equal(t, len([]byte(strings.Repeat("full ", 3_000))), resp.Data.MessageBytes, "detail response should report full byte length")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_GetLogDetail_NotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	handler := newSessionHandler(t, mock)
+
+	issueID := uuid.New()
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				runID, issueID, orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                      // triggered_by_user_id
+				nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.id").
+		WithArgs(int64(404), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+runID.String()+"/logs/404", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", runID.String())
+	rctx.URLParams.Add("log_id", "404")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetLogDetail(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code, "GetLogDetail should hide logs outside the scoped session")
+	require.Contains(t, w.Body.String(), "NOT_FOUND", "GetLogDetail should return a not found error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_GetLogs_InvalidID(t *testing.T) {
@@ -2509,7 +2638,7 @@ func TestSessionHandler_GetLogs_EmptyLogs(t *testing.T) {
 	handler.GetLogs(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
-	var resp models.ListResponse[models.SessionLog]
+	var resp models.ListResponse[models.SessionLogResponse]
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(resp.Data))
@@ -2580,13 +2709,88 @@ func TestSessionHandler_GetTimeline_Success(t *testing.T) {
 	handler.GetTimeline(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "should return expected status code")
 
-	var resp models.ListResponse[models.SessionTimelineEntry]
+	var resp models.ListResponse[models.SessionTimelineResponseEntry]
 	err = json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err, "response body should be valid JSON")
 	require.Len(t, resp.Data, 1, "duplicate final output log should be suppressed from fetched timeline")
 	require.Equal(t, models.SessionTimelineKindMessage, resp.Data[0].Kind, "assistant transcript should remain visible")
 	require.NotNil(t, resp.Data[0].Message, "timeline message entry should include message payload")
 	require.Equal(t, "Done fixing", resp.Data[0].Message.Content, "timeline should return the persisted assistant transcript")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_GetTimeline_TruncatesToolResult(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	handler := newSessionHandler(t, mock)
+	longOutput := strings.Repeat("x", models.SessionLogPreviewBytes+100)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(
+				pgxmock.NewRows(sessionColumns),
+				sessionID, uuid.New(), orgID, "claude-code", "completed", "supervised", "standard",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,                      // triggered_by_user_id
+				nil, 1, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
+				nil,      // target_branch
+				nil,      // working_branch
+				nil,      // repository_id
+				nil,      // diff_stats
+				nil,      // diff_history
+				nil,      // input_manifest
+				nil, nil, // archived_at, archived_by_user_id
+				nil,            // automation_run_id
+				"idle",         // pr_creation_state
+				(*string)(nil), // pr_creation_error
+				nil,            // deleted_at
+				now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM session_messages WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(messageColumns))
+	mock.ExpectQuery("SELECT .+ FROM session_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number"}).
+				AddRow(int64(20), sessionID, orgID, nil, now.Add(-time.Second), "tool_use", "using tool: Bash", json.RawMessage(`{"tool":"Bash","call_id":"call-1"}`), 1).
+				AddRow(int64(21), sessionID, orgID, nil, now, "output", longOutput, json.RawMessage(`{"type":"tool_result","call_id":"call-1"}`), 1),
+		)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/timeline", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.GetTimeline(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "timeline should return OK")
+
+	var resp models.ListResponse[models.SessionTimelineResponseEntry]
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Len(t, resp.Data, 1, "tool use/result should be paired into one timeline entry")
+	require.Equal(t, models.SessionTimelineKindToolGroup, resp.Data[0].Kind, "timeline should return a tool group")
+	require.NotNil(t, resp.Data[0].ToolResult, "tool group should include the result preview")
+	require.True(t, resp.Data[0].ToolResult.MessageTruncated, "long tool result should be marked truncated")
+	require.Equal(t, models.SessionLogPreviewBytes, len(resp.Data[0].ToolResult.Message), "tool result should be previewed to the configured byte limit")
+	require.Equal(t, len([]byte(longOutput)), resp.Data[0].ToolResult.MessageBytes, "tool result should report original byte length")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

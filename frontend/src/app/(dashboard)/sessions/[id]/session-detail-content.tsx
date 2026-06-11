@@ -1942,6 +1942,7 @@ const THREAD_LOG_BOOTSTRAP_TURNS_KEY = `latest:${THREAD_LOG_BOOTSTRAP_TURNS}`;
 // queries yet. The buffer lives in React Query so remounting the chat panel
 // cannot drop the transcript during the SSE-to-DB handoff.
 const STREAMED_LOGS_MAX = 2000;
+const LIVE_LOG_MESSAGE_MAX_BYTES = 32 * 1024;
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
@@ -1986,6 +1987,46 @@ export function mergeSessionLogListResponse(
     data,
     meta: existing?.meta ?? {},
   };
+}
+
+function truncateUTF8Bytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(value);
+  if (bytes.byteLength <= maxBytes) return value;
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let end = maxBytes; end > 0; end -= 1) {
+    try {
+      return decoder.decode(bytes.slice(0, end));
+    } catch {
+      continue;
+    }
+  }
+  return "";
+}
+
+export function capLiveSessionLogMessage(log: SessionLog): SessionLog {
+  const originalBytes = new TextEncoder().encode(log.message).byteLength;
+  if (originalBytes <= LIVE_LOG_MESSAGE_MAX_BYTES) {
+    return {
+      ...log,
+      message_bytes: log.message_bytes ?? originalBytes,
+      message_chars: log.message_chars ?? Array.from(log.message).length,
+      message_truncated: log.message_truncated ?? false,
+    };
+  }
+
+  return {
+    ...log,
+    message: truncateUTF8Bytes(log.message, LIVE_LOG_MESSAGE_MAX_BYTES),
+    message_bytes: log.message_bytes ?? originalBytes,
+    message_chars: log.message_chars ?? Array.from(log.message).length,
+    message_truncated: true,
+  };
+}
+
+export function liveLogsForTimeline(includeLiveLogs: boolean, logs: SessionLog[]): SessionLog[] {
+  return includeLiveLogs ? logs : [];
 }
 
 export function mergeVisibleThreadLogs(
@@ -2189,6 +2230,12 @@ function ChatPanel({
     enabled: false,
     initialData: { data: [], meta: {} } satisfies ListResponse<SessionLog>,
   });
+  const clearCurrentLiveLogs = useCallback(() => {
+    queryClient.setQueryData<ListResponse<SessionLog>>(
+      liveLogsQueryKey,
+      { data: [], meta: {} } satisfies ListResponse<SessionLog>,
+    );
+  }, [liveLogsQueryKey, queryClient]);
 
   const humanInputStatusFilter = activeThreadId ? undefined : "pending";
   const humanInputQuery = useQuery({
@@ -2270,10 +2317,14 @@ function ChatPanel({
     const optimisticForCurrentView = optimisticMessages.filter((message) =>
       activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
     );
+    const visibleLiveLogs = liveLogsForTimeline(
+      activeThread ? workingStatusesSet.has(activeThread.status) : workingStatusesSet.has(session.status),
+      liveLogsQuery.data?.data ?? [],
+    );
     if (activeThreadId) {
       const loadedThreadLogs = mergeVisibleThreadLogs(
         threadLogsQuery.data,
-        liveLogsQuery.data?.data ?? [],
+        visibleLiveLogs,
         threadMessages,
         visibleThreadLogTurns,
       );
@@ -2291,7 +2342,7 @@ function ChatPanel({
     const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
     const sessionLogs = mergeSessionLogListResponse(
       { data: flattenedTimeline.logs, meta: {} },
-      liveLogsQuery.data?.data ?? [],
+      visibleLiveLogs,
     ).data;
     const entries = sortTimelineEntries([...buildTimeline(
       mergePendingMessages(flattenedTimeline.messages, optimisticForCurrentView),
@@ -2311,7 +2362,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data, visibleThreadLogTurns]);
+  }, [activeThread, activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, session.status, humanInputQuery.data?.data, visibleThreadLogTurns]);
 
   const baseTimelineHumanInputIds = useMemo(() => {
     const humanInputIds = new Set<string>();
@@ -2560,9 +2611,10 @@ function ChatPanel({
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
     if (newLogs.length === 0) return;
+    const cappedLogs = newLogs.map(capLiveSessionLogMessage);
 
     const logsByThread = new Map<string, SessionLog[]>();
-    for (const log of newLogs) {
+    for (const log of cappedLogs) {
       if (!log.thread_id) continue;
       const threadLogs = logsByThread.get(log.thread_id) ?? [];
       threadLogs.push(log);
@@ -2581,7 +2633,7 @@ function ChatPanel({
 
     queryClient.setQueryData<ListResponse<SessionLog>>(
       sessionLiveLogsQueryKey(sessionId),
-      (existing) => mergeSessionLogListResponse(existing, newLogs, STREAMED_LOGS_MAX),
+      (existing) => mergeSessionLogListResponse(existing, cappedLogs, STREAMED_LOGS_MAX),
     );
   }, [activeThreadId, queryClient, sessionId]);
 
@@ -2690,6 +2742,7 @@ function ChatPanel({
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
+          clearCurrentLiveLogs();
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
           invalidateSessionHumanInputRequests(queryClient, sessionId);
           if (activeThreadId) {
@@ -2707,6 +2760,7 @@ function ChatPanel({
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
+        clearCurrentLiveLogs();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         if (activeThreadId) {
@@ -2742,7 +2796,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId, clearCurrentLiveLogs]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {

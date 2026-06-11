@@ -2051,13 +2051,62 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 				require.NoError(t, err, "response body should be valid JSON")
 				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
 			} else {
-				var resp models.ListResponse[models.SessionLog]
+				var resp models.ListResponse[models.SessionLogResponse]
 				err := json.Unmarshal(w.Body.Bytes(), &resp)
 				require.NoError(t, err, "response body should be valid JSON")
 				require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of logs")
+				if len(resp.Data) > 0 {
+					require.Equal(t, len([]byte(resp.Data[0].Message)), resp.Data[0].MessageBytes, "thread log response should include message byte length for short logs")
+					require.False(t, resp.Data[0].MessageTruncated, "short thread log should not be truncated")
+				}
 			}
 		})
 	}
+}
+
+func TestSessionThreadHandler_GetThreadLogs_TruncatesLongLog(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+	longOutput := strings.Repeat("o", models.SessionLogPreviewBytes+37)
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request organization")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should target the requested thread")
+		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+	}
+	deps.logStore.listByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) ([]models.SessionLog, error) {
+		require.Equal(t, orgID, gotOrgID, "log lookup should be scoped to the request organization")
+		require.Equal(t, threadID, gotThreadID, "log lookup should target the requested thread")
+		return []models.SessionLog{
+			{ID: 77, SessionID: sessionID, ThreadID: &threadID, Level: "output", Message: longOutput, Timestamp: now},
+		}, nil
+	}
+
+	req := threadRequest(
+		http.MethodGet,
+		"/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/logs",
+		"",
+		orgID,
+		map[string]string{"id": sessionID.String(), "tid": threadID.String()},
+	)
+	w := httptest.NewRecorder()
+
+	handler.GetThreadLogs(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return OK for thread logs")
+
+	var resp models.ListResponse[models.SessionLogResponse]
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Len(t, resp.Data, 1, "should return one log response")
+	require.Equal(t, models.SessionLogPreviewBytes, len(resp.Data[0].Message), "long log message should be previewed")
+	require.Equal(t, len([]byte(longOutput)), resp.Data[0].MessageBytes, "response should report original byte length")
+	require.Equal(t, len(longOutput), resp.Data[0].MessageChars, "response should report original character length")
+	require.True(t, resp.Data[0].MessageTruncated, "long log should be marked truncated")
 }
 
 func TestParseTurnNumbersRejectsOverflow(t *testing.T) {
