@@ -111,6 +111,7 @@ type Scheduler struct {
 	domainStore    schedulerDomainStore    // nil-safe: verified-domain recheck disabled if nil
 	domainVerifier schedulerDomainVerifier // nil-safe: verified-domain recheck disabled if nil
 	audit          *db.AuditEmitter        // nil-safe: recheck disable events unlogged if nil
+	githubOrgs     schedulerGitHubOrgStore // nil-safe: GitHub org roster reconciliation disabled if nil
 
 	lastDailyJobDates map[string]string // tracks UTC date of last daily scheduling per job type
 }
@@ -128,6 +129,10 @@ type schedulerDomainVerifier interface {
 	Verify(ctx context.Context, domain, token string) (bool, error)
 }
 
+type schedulerGitHubOrgStore interface {
+	ListEnabledAutoJoinLinksDueForRosterSync(ctx context.Context, syncedBefore time.Time, limit int) ([]models.GitHubOrgAutoJoinCandidate, error)
+}
+
 // domainRecheckInterval is how stale a verified domain's last check may be
 // before the sweep re-verifies it. The data is the gate (last_checked_at),
 // so the 10-minute scheduler tick re-checks each domain about once a day
@@ -140,6 +145,9 @@ const domainRecheckInterval = 24 * time.Hour
 // pass. 25/tick clears 3600 domains/day — far above any realistic count —
 // while capping a worst-case tick at ~4 minutes of DNS.
 const domainRecheckBatchSize = 25
+
+const githubOrgRosterSyncInterval = 24 * time.Hour
+const githubOrgRosterSyncBatchSize = 25
 
 func NewScheduler(
 	lock schedulerLock,
@@ -188,6 +196,10 @@ func (s *Scheduler) SetDomainRecheck(store schedulerDomainStore, verifier schedu
 	s.domainStore = store
 	s.domainVerifier = verifier
 	s.audit = audit
+}
+
+func (s *Scheduler) SetGitHubOrgRosterReconciliation(store schedulerGitHubOrgStore) {
+	s.githubOrgs = store
 }
 
 func (s *Scheduler) Start(ctx context.Context, interval time.Duration) {
@@ -347,6 +359,35 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// records, auto-join is disabled (the verified claim is kept so nobody
 	// else can grab the domain; re-enabling is an explicit admin action).
 	s.recheckVerifiedDomains(ctx, now)
+
+	// Ninth pass: reconcile GitHub org auto-join rosters roughly daily.
+	// Login-time grants still live-confirm membership, so stale rosters only
+	// affect discovery latency; this sweep heals missed organization webhooks.
+	s.scheduleGitHubOrgRosterSyncs(ctx, now)
+}
+
+func (s *Scheduler) scheduleGitHubOrgRosterSyncs(ctx context.Context, now time.Time) {
+	if s.githubOrgs == nil || s.jobs == nil {
+		return
+	}
+	due, err := s.githubOrgs.ListEnabledAutoJoinLinksDueForRosterSync(ctx, now.Add(-githubOrgRosterSyncInterval), githubOrgRosterSyncBatchSize)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("failed to list github org rosters due for sync")
+		return
+	}
+	for _, link := range due {
+		dedupe := fmt.Sprintf("sync_github_org_roster:%d", link.InstallationID)
+		if _, err := s.jobs.Enqueue(ctx, link.OrgID, "github", models.JobTypeSyncGitHubOrgRoster, map[string]any{
+			"org_id":          link.OrgID.String(),
+			"installation_id": link.InstallationID,
+			"account_login":   link.AccountLogin,
+		}, 5, &dedupe); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", link.OrgID.String()).
+				Int64("installation_id", link.InstallationID).
+				Msg("failed to enqueue github org roster sync")
+		}
+	}
 }
 
 // recheckVerifiedDomains is the expired/transferred-domain hygiene sweep.
