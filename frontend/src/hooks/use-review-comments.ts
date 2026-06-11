@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
-import type { SessionReviewComment } from "@/lib/types";
+import type { ListResponse, SessionReviewComment } from "@/lib/types";
 
 /** Key for grouping comments by file + line + side */
 export type DiffSide = "old" | "new";
@@ -38,6 +38,7 @@ export interface UseReviewCommentsResult {
 
 export function useReviewComments(sessionId: string): UseReviewCommentsResult {
   const queryClient = useQueryClient();
+  const pendingIDCounter = useRef(0);
   const queryKey = useMemo(
     () => ["session", sessionId, "review-comments"],
     [sessionId]
@@ -84,7 +85,56 @@ export function useReviewComments(sessionId: string): UseReviewCommentsResult {
       side?: DiffSide;
       body: string;
     }) => api.sessions.createReviewComment(sessionId, body),
-    onSuccess: invalidate,
+    onMutate: async (body) => {
+      await queryClient.cancelQueries({ queryKey });
+      pendingIDCounter.current += 1;
+      const optimisticID = `pending-${Date.now()}-${pendingIDCounter.current}`;
+      const now = new Date().toISOString();
+      const optimisticComment: SessionReviewComment = {
+        id: optimisticID,
+        session_id: sessionId,
+        org_id: "",
+        user_id: "",
+        file_path: body.file_path,
+        line_number: body.line_number,
+        diff_side: body.side ?? "new",
+        body: body.body,
+        resolved: false,
+        pass_number: 1,
+        created_at: now,
+        updated_at: now,
+      };
+
+      queryClient.setQueryData<ListResponse<SessionReviewComment>>(queryKey, (previous) => ({
+        data: [...(previous?.data ?? []), optimisticComment],
+        meta: previous?.meta ?? {},
+      }));
+
+      return { optimisticID };
+    },
+    onSuccess: (response, _variables, context) => {
+      queryClient.setQueryData<ListResponse<SessionReviewComment>>(queryKey, (previous) => {
+        if (!previous) {
+          return { data: [response.data], meta: {} };
+        }
+        return {
+          ...previous,
+          data: previous.data.map((comment) =>
+            comment.id === context?.optimisticID ? response.data : comment
+          ),
+        };
+      });
+    },
+    onError: (_error, _variables, context) => {
+      queryClient.setQueryData<ListResponse<SessionReviewComment>>(queryKey, (previous) => {
+        if (!previous) return previous;
+        return {
+          ...previous,
+          data: previous.data.filter((comment) => comment.id !== context?.optimisticID),
+        };
+      });
+    },
+    onSettled: invalidate,
   });
   const { mutate: createReviewComment, isPending: isCreating } = createMutation;
 
