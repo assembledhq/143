@@ -35,31 +35,13 @@ import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
-import { prMergedAccent } from "@/lib/pr-status-styles";
 import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
-import type { Session, SessionDetail, SessionListItem, SessionStatus, SingleResponse, User } from "@/lib/types";
+import { deriveSessionDisplayStatus, type SessionDisplayStatus } from "@/lib/session-display-status";
+import type { Session, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import {
-  workingSet,
   filterToStatusParam as baseFilterToStatusParam,
 } from "@/lib/session-status-groups";
 import { getCountForTab, renderCount } from "@/lib/session-counts";
-
-// ---------------------------------------------------------------------------
-// Status config
-// ---------------------------------------------------------------------------
-
-const statusConfig: Record<SessionStatus, { dot: string; text: string; bg: string; label: string }> = {
-  pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
-  running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
-  idle: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Idle" },
-  awaiting_input: { dot: "bg-warning", text: "text-warning", bg: "bg-warning/10", label: "Awaiting input" },
-  needs_human_guidance: { dot: "bg-attention", text: "text-attention", bg: "bg-attention/10", label: "Needs guidance" },
-  completed: { dot: "bg-success", text: "text-success", bg: "bg-success/10", label: "Completed" },
-  pr_created: { dot: prMergedAccent.dot, text: prMergedAccent.text, bg: prMergedAccent.bg, label: "PR created" },
-  failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
-  cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
-  skipped: { dot: "bg-muted-foreground/30", text: "text-muted-foreground", bg: "bg-muted", label: "Skipped" },
-};
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -76,13 +58,11 @@ function filterToStatusParam(filter: string | null): string | undefined {
 // Inline cell components
 // ---------------------------------------------------------------------------
 
-function SessionStatusDot({ status }: { status: SessionStatus }) {
-  const working = workingSet.has(status);
-  const cfg = statusConfig[status];
-  if (working) {
+function SessionStatusDot({ displayStatus }: { displayStatus: SessionDisplayStatus }) {
+  if (displayStatus.animated) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
-  return <StatusDot color={cfg.dot} />;
+  return <StatusDot color={displayStatus.dotClass} />;
 }
 
 function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
@@ -109,15 +89,13 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       header: ({ column }) => <SortableHeader label="Status" column={column} />,
       size: 140,
       cell: ({ row }) => {
-        const status = row.original.status;
-        const cfg = statusConfig[status];
-        const working = workingSet.has(status);
+        const displayStatus = deriveSessionDisplayStatus(row.original);
         return (
           <div className="flex items-center gap-2">
-            <SessionStatusDot status={status} />
-            <span className={`text-xs font-medium ${cfg.text}`}>
-              <span>{cfg.label}</span>
-              {working && <AnimatedEllipsis />}
+            <SessionStatusDot displayStatus={displayStatus} />
+            <span className={`text-xs font-medium ${displayStatus.textClass}`}>
+              <span>{displayStatus.label}</span>
+              {displayStatus.animated && <AnimatedEllipsis />}
             </span>
           </div>
         );
