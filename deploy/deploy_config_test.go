@@ -506,6 +506,31 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID, WORKER_PRIVATE_IP, or DOCKER_GID")
 }
 
+func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.worker.yml")
+	require.NoError(t, err, "test should read the worker compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, "PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR: ${PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR:-/var/cache/143/preview-dependency-cache}", "worker compose should default the dependency cache L1 to a host-backed path")
+	require.Contains(t, composeText, "/var/cache/143/preview-dependency-cache:/var/cache/143/preview-dependency-cache", "worker compose should bind-mount the default L1 path so local cache blobs survive worker container recreation")
+
+	provisionScript, err := os.ReadFile("../deploy/scripts/provision.sh")
+	require.NoError(t, err, "test should read the provisioning script")
+	provisionText := string(provisionScript)
+	require.Contains(t, provisionText, "mkdir -p /var/cache/143/preview-dependency-cache", "worker provisioning should create the host dependency cache directory before compose starts")
+	require.Contains(t, provisionText, "chown 1000:1000 /var/cache/143/preview-dependency-cache", "worker provisioning should make the host dependency cache directory writable by appuser in the worker container")
+	require.Contains(t, provisionText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker provisioning should keep the host dependency cache directory private to the worker runtime user")
+
+	cloudInit, err := os.ReadFile("../deploy/cloud-init/worker.yml")
+	require.NoError(t, err, "test should read the worker cloud-init template")
+	cloudInitText := string(cloudInit)
+	require.Contains(t, cloudInitText, "mkdir -p /var/cache/143/preview-dependency-cache", "worker cloud-init should create the host dependency cache directory before first compose startup")
+	require.Contains(t, cloudInitText, "chown 1000:1000 /var/cache/143/preview-dependency-cache", "worker cloud-init should make the host dependency cache directory writable by appuser")
+	require.Contains(t, cloudInitText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker cloud-init should keep the host dependency cache directory private")
+}
+
 func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	t.Parallel()
 

@@ -1229,6 +1229,15 @@ func TestResolvePreviewInstallCachePaths(t *testing.T) {
 			enabled: false,
 		},
 		{
+			name: "excludes platform cache descendants while keeping dependencies",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"package-lock.json"},
+				CleanPaths: []string{".143/cache/turbo", "node_modules"},
+			},
+			want:    []string{"node_modules"},
+			enabled: true,
+		},
+		{
 			name: "explicit opt out disables paths",
 			install: &models.PreviewInstallConfig{
 				Lockfiles:  []string{"package-lock.json"},
@@ -1332,6 +1341,15 @@ func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache"}},
 			},
 			wantErr: "must not target preview install markers",
+		},
+		{
+			name: "rejects platform cache descendant path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache/turbo"}},
+			},
+			wantErr: "must not target platform preview cache",
 		},
 		{
 			name: "rejects broad path",

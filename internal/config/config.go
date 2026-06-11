@@ -277,7 +277,7 @@ type Config struct {
 	PreviewDependencyCacheS3Region          string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_REGION"`
 	PreviewDependencyCacheS3Endpoint        string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_ENDPOINT"`
 	PreviewDependencyCacheS3UsePathStyle    bool          `env:"PREVIEW_DEPENDENCY_CACHE_S3_USE_PATH_STYLE" envDefault:"false"`
-	PreviewDependencyCacheLocalDir          string        `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR"`
+	PreviewDependencyCacheLocalDir          string        `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR" envDefault:"/var/cache/143/preview-dependency-cache"`
 	PreviewDependencyCacheLocalMaxBytes     int64         `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES" envDefault:"10737418240"`
 	PreviewDependencyCacheRetentionDays     int           `env:"PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS" envDefault:"30"`
 	PreviewDependencyCacheKeepNewestPerRepo int           `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO" envDefault:"50"`
@@ -322,6 +322,19 @@ type Config struct {
 	RedisMasterName string `env:"REDIS_MASTER_NAME"`
 	RedisPassword   string `env:"REDIS_PASSWORD"`
 	RedisPoolSize   int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
+}
+
+// ResolvePreviewDependencyCacheLocalDir normalizes the optional worker-local
+// dependency cache path. Sentinel values disable L1 while keeping shared L2
+// dependency caching available.
+func ResolvePreviewDependencyCacheLocalDir(value string) string {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(trimmed) {
+	case "", "off", "none", "disabled":
+		return ""
+	default:
+		return trimmed
+	}
 }
 
 // Load reads configuration from env files and environment variables.

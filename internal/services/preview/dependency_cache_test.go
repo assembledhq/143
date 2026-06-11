@@ -269,6 +269,47 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSharedDependencyCache_StageBlobUsesLocalCacheStagingDir(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	localDir := t.TempDir()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cacheKey := strings.Repeat("a", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.bin/next": "next"})
+	blobKey := "deps/blob.tar.gz"
+	blobStore := newMemorySnapshotStore()
+	require.NoError(t, blobStore.Save(ctx, blobKey, bytes.NewReader(payload)), "test blob should be available in object storage")
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(nil),
+		Executor:  &dependencyCacheExec{},
+		BlobStore: blobStore,
+		Logger:    zerolog.Nop(),
+		LocalDir:  localDir,
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	blob, err := cache.stageBlob(ctx, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			ID:         uuid.New(),
+			OrgID:      orgID,
+			RepoID:     repoID,
+			CacheKey:   cacheKey,
+			BlobKey:    blobKey,
+			SizeBytes:  int64(len(payload)),
+			LastUsedAt: time.Now().UTC(),
+		},
+		BlobKey: blobKey,
+	})
+	require.NoError(t, err, "stageBlob should download the remote dependency cache blob")
+	defer blob.cleanup()
+
+	expectedRoot := filepath.Join(localDir, ".staging") + string(os.PathSeparator)
+	require.True(t, strings.HasPrefix(blob.path, expectedRoot), "stageBlob should use the local dependency cache staging directory instead of the process temp dir")
+}
+
 func TestSharedDependencyCache_SaveRejectsPreviewInstallMarkerParentPath(t *testing.T) {
 	t.Parallel()
 
