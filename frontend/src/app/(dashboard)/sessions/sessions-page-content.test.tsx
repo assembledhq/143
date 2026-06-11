@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen } from '@/test/test-utils';
+import { fireEvent, renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { SessionsPageContent } from './sessions-page-content';
 import type { SessionListItem } from '@/lib/types';
@@ -18,10 +18,16 @@ const mockAuthState: {
 };
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn(), prefetch: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => '/sessions',
   useParams: () => ({}),
+}));
+
+const preloadSessionDetailContent = vi.hoisted(() => vi.fn());
+
+vi.mock('./[id]/session-detail-page-client', () => ({
+  preloadSessionDetailContent,
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
@@ -119,5 +125,17 @@ describe('SessionsPageContent', () => {
     expect(await screen.findByText('Opening a pull request')).toBeInTheDocument();
     expect(screen.getByText('Creating PR')).toBeInTheDocument();
     expect(screen.getByText('Pushing changes')).toBeInTheDocument();
+  });
+
+  it('warms the session detail chunk when hovering a session row', async () => {
+    preloadSessionDetailContent.mockClear();
+
+    renderWithProviders(<SessionsPageContent />);
+
+    const row = (await screen.findByText(/Fixed TypeError by adding null check/)).closest('tr');
+    expect(row).not.toBeNull();
+    fireEvent.mouseEnter(row!);
+
+    expect(preloadSessionDetailContent).toHaveBeenCalled();
   });
 });

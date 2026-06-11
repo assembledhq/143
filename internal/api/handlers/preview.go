@@ -893,32 +893,40 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 	if session.RepositoryID != nil {
 		repoID = *session.RepositoryID
 	}
-	placementKey := ""
+	var cachePlacements []preview.WorkerCachePlacement
 	if repoID != uuid.Nil {
 		if body.Config != nil {
-			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled {
-				configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
-				if digestErr != nil {
-					h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
-				}
+			configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
+			if digestErr != nil {
+				h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
+			}
+			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled && len(paths) > 0 {
 				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
 				if placementErr != nil {
 					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 				} else {
-					placementKey = computedPlacementKey
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
+				}
+			}
+			if paths, _, enabled := preview.ResolvePreviewInstallPackageManagerCachePaths(body.Config.Install); enabled && len(paths) > 0 {
+				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
+				if placementErr != nil {
+					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview package-manager cache placement key")
+				} else {
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindPackageManager, PlacementKey: computedPlacementKey})
 				}
 			}
 		}
-		if placementKey == "" {
+		if len(cachePlacements) == 0 {
 			computedPlacementKey, placementErr := preview.ComputePreviewDependencyCacheRepoPlacementKey(orgID, repoID)
 			if placementErr != nil {
 				h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 			} else {
-				placementKey = computedPlacementKey
+				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
 			}
 		}
 	}
-	worker, err := h.workerSelector.SelectStartNodeWithPlacementAndRequirements(ctx, orgID, &session, repoID, placementKey, reqs)
+	worker, err := h.workerSelector.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, &session, repoID, cachePlacements, reqs)
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):

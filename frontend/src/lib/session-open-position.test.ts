@@ -31,14 +31,18 @@ function makeMessage(overrides: Partial<SessionMessage>): SessionMessage {
 }
 
 function makeLog(overrides: Partial<SessionLog>): SessionLog {
+  const message = overrides.message ?? "assistant output";
   return {
     id: overrides.id ?? 1,
     session_id: overrides.session_id ?? "session-1",
     level: overrides.level ?? "output",
-    message: overrides.message ?? "assistant output",
+    message,
     created_at: overrides.created_at ?? "2026-04-22T10:00:01Z",
     turn_number: overrides.turn_number ?? 1,
     metadata: overrides.metadata ?? null,
+    message_bytes: overrides.message_bytes ?? message.length,
+    message_chars: overrides.message_chars ?? message.length,
+    message_truncated: overrides.message_truncated ?? false,
   };
 }
 

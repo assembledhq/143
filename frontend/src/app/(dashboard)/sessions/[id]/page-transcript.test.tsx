@@ -234,6 +234,9 @@ describe('SessionDetailPage transcript and scroll', () => {
           metadata: null,
           turn_number: 1,
           created_at: '2026-02-17T07:01:00Z',
+          message_bytes: 'I am checking the codebase first.'.length,
+          message_chars: 'I am checking the codebase first.'.length,
+          message_truncated: false,
         },
       },
       {
@@ -247,6 +250,9 @@ describe('SessionDetailPage transcript and scroll', () => {
           metadata: null,
           turn_number: 1,
           created_at: '2026-02-17T07:01:30Z',
+          message_bytes: 'hidden log 1'.length,
+          message_chars: 'hidden log 1'.length,
+          message_truncated: false,
         },
       },
       {
@@ -260,6 +266,9 @@ describe('SessionDetailPage transcript and scroll', () => {
           metadata: null,
           turn_number: 1,
           created_at: '2026-02-17T07:01:40Z',
+          message_bytes: 'hidden log 2'.length,
+          message_chars: 'hidden log 2'.length,
+          message_truncated: false,
         },
       },
       {

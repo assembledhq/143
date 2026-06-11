@@ -10,7 +10,7 @@ Interactive sessions depend on snapshot persistence for:
 - preview hydrate after the live sandbox has been torn down
 - recovery after worker restarts or deploys
 
-The current runtime wiring constructs a local filesystem snapshot store in [cmd/server/main.go](/Users/wangjohn/.codex/worktrees/ac7f/143/cmd/server/main.go) via `storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)`. That works on a single machine, but it is incorrect for split app/worker deployments:
+The current runtime wiring constructs a local filesystem snapshot store in [cmd/server/main.go](../../../cmd/server/main.go) via `storage.NewFileSnapshotStore(cfg.SnapshotStorageDir)`. That works on a single machine, but it is incorrect for split app/worker deployments:
 
 - the worker writes snapshots to its own local disk
 - the API node later tries to hydrate previews from its own different local disk
@@ -51,9 +51,9 @@ S3-compatible object storage is the simplest fit.
 
 ### 4.1 Existing primitives
 
-- `storage.SnapshotStore` already exists in [internal/services/storage/snapshot.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/services/storage/snapshot.go).
-- `storage.S3SnapshotStore` already exists in [internal/services/storage/s3.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/services/storage/s3.go).
-- `storage.FileSnapshotStore` exists in [internal/services/storage/file.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/services/storage/file.go).
+- `storage.SnapshotStore` already exists in [internal/services/storage/snapshot.go](../../../internal/services/storage/snapshot.go).
+- `storage.S3SnapshotStore` already exists in [internal/services/storage/s3.go](../../../internal/services/storage/s3.go).
+- `storage.FileSnapshotStore` exists in [internal/services/storage/file.go](../../../internal/services/storage/file.go).
 - Snapshot save/load/delete is already abstracted throughout the agent and preview codepaths.
 
 ### 4.2 Implemented wiring
@@ -69,7 +69,7 @@ Deployment credentials and per-environment rollout still need to be supplied ope
 
 ### 4.3 Existing upload pattern
 
-Uploads already have optional S3 support in [internal/api/router.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/api/router.go), but that implementation was not sufficient to copy directly:
+Uploads already have optional S3 support in [internal/api/router.go](../../../internal/api/router.go), but that implementation was not sufficient to copy directly:
 
 - it does not currently use `UPLOAD_S3_ENDPOINT`
 - it does not expose path-style config
@@ -158,7 +158,7 @@ If the extra `snapshots/` repetition feels redundant, we can normalize keys late
 
 ### 5.5 Encryption
 
-Keep the current baseline behavior in [internal/services/storage/s3.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/services/storage/s3.go):
+Keep the current baseline behavior in [internal/services/storage/s3.go](../../../internal/services/storage/s3.go):
 
 - `ServerSideEncryption: AES256`
 
@@ -405,8 +405,8 @@ The important operational distinction is:
 
 ### Code
 
-1. Add `SNAPSHOT_S3_*` fields to [internal/config/config.go](/Users/wangjohn/.codex/worktrees/ac7f/143/internal/config/config.go). Done.
-2. Add a snapshot-store builder used by [cmd/server/main.go](/Users/wangjohn/.codex/worktrees/ac7f/143/cmd/server/main.go). Done.
+1. Add `SNAPSHOT_S3_*` fields to [internal/config/config.go](../../../internal/config/config.go). Done.
+2. Add a snapshot-store builder used by [cmd/server/main.go](../../../cmd/server/main.go). Done.
 3. Add a shared S3 client builder that supports endpoint override and path-style. Done.
 4. Wire `storage.NewS3SnapshotStore(...)` when snapshot S3 config is present. Done.
 5. Keep `storage.NewFileSnapshotStore(...)` as fallback for local/dev. Done.

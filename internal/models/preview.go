@@ -387,33 +387,83 @@ type PreviewInstallConfig struct {
 // preview.install. Enabled is a pointer so named config merge/defaulting can
 // distinguish omitted from explicitly false.
 type PreviewInstallCacheConfig struct {
+	Enabled        *bool                             `json:"enabled,omitempty"`
+	Paths          []string                          `json:"paths,omitempty"`
+	PackageManager *PreviewPackageManagerCacheConfig `json:"package_manager,omitempty"`
+	Prewarm        *PreviewInstallPrewarmCacheConfig `json:"prewarm,omitempty"`
+}
+
+type PreviewPackageManagerCacheConfig struct {
 	Enabled *bool    `json:"enabled,omitempty"`
+	Include []string `json:"include,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
 }
 
+type PreviewInstallPrewarmCacheConfig struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type PreviewCacheKind string
+
+const (
+	PreviewCacheKindInstallArtifact PreviewCacheKind = "install_artifact"
+	PreviewCacheKindPackageManager  PreviewCacheKind = "package_manager"
+)
+
+type PreviewCacheRoot string
+
+const (
+	PreviewCacheRootWorkDir PreviewCacheRoot = "workdir"
+	PreviewCacheRootHomeDir PreviewCacheRoot = "homedir"
+)
+
 type PreviewDependencyCache struct {
-	ID           uuid.UUID       `db:"id" json:"id"`
-	OrgID        uuid.UUID       `db:"org_id" json:"org_id"`
-	RepoID       uuid.UUID       `db:"repo_id" json:"repo_id"`
-	CacheKey     string          `db:"cache_key" json:"cache_key"`
-	PlacementKey string          `db:"placement_key" json:"placement_key"`
-	BlobKey      string          `db:"blob_key" json:"-"`
-	SizeBytes    int64           `db:"size_bytes" json:"size_bytes"`
-	Metadata     json.RawMessage `db:"metadata" json:"metadata"`
-	LastUsedAt   time.Time       `db:"last_used_at" json:"last_used_at"`
-	CreatedAt    time.Time       `db:"created_at" json:"created_at"`
+	ID           uuid.UUID        `db:"id" json:"id"`
+	OrgID        uuid.UUID        `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID        `db:"repo_id" json:"repo_id"`
+	CacheKind    PreviewCacheKind `db:"cache_kind" json:"cache_kind"`
+	CacheKey     string           `db:"cache_key" json:"cache_key"`
+	PlacementKey string           `db:"placement_key" json:"placement_key"`
+	BlobKey      string           `db:"blob_key" json:"-"`
+	SizeBytes    int64            `db:"size_bytes" json:"size_bytes"`
+	Metadata     json.RawMessage  `db:"metadata" json:"metadata"`
+	LastUsedAt   time.Time        `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time        `db:"created_at" json:"created_at"`
 }
 
 type PreviewDependencyCacheLocation struct {
-	ID           uuid.UUID `db:"id" json:"id"`
-	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
-	RepoID       uuid.UUID `db:"repo_id" json:"repo_id"`
-	CacheKey     string    `db:"cache_key" json:"cache_key"`
-	PlacementKey string    `db:"placement_key" json:"placement_key"`
-	WorkerNodeID string    `db:"worker_node_id" json:"worker_node_id"`
-	SizeBytes    int64     `db:"size_bytes" json:"size_bytes"`
-	LastUsedAt   time.Time `db:"last_used_at" json:"last_used_at"`
-	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	ID           uuid.UUID        `db:"id" json:"id"`
+	OrgID        uuid.UUID        `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID        `db:"repo_id" json:"repo_id"`
+	CacheKind    PreviewCacheKind `db:"cache_kind" json:"cache_kind"`
+	CacheKey     string           `db:"cache_key" json:"cache_key"`
+	PlacementKey string           `db:"placement_key" json:"placement_key"`
+	WorkerNodeID string           `db:"worker_node_id" json:"worker_node_id"`
+	SizeBytes    int64            `db:"size_bytes" json:"size_bytes"`
+	LastUsedAt   time.Time        `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time        `db:"created_at" json:"created_at"`
+}
+
+type PreviewCachePrewarmRun struct {
+	ID                     uuid.UUID  `db:"id" json:"id"`
+	OrgID                  uuid.UUID  `db:"org_id" json:"org_id"`
+	RepoID                 uuid.UUID  `db:"repo_id" json:"repo_id"`
+	Source                 string     `db:"source" json:"source"`
+	SourceID               string     `db:"source_id" json:"source_id"`
+	CacheScopeKey          string     `db:"cache_scope_key" json:"cache_scope_key"`
+	JobID                  *uuid.UUID `db:"job_id" json:"job_id,omitempty"`
+	WorkerNodeID           string     `db:"worker_node_id" json:"worker_node_id"`
+	Status                 string     `db:"status" json:"status"`
+	PackageManagerCacheKey string     `db:"package_manager_cache_key" json:"package_manager_cache_key"`
+	DependencyCacheKey     string     `db:"dependency_cache_key" json:"dependency_cache_key"`
+	ConfigDigest           string     `db:"config_digest" json:"config_digest"`
+	CommitSHA              string     `db:"commit_sha" json:"commit_sha"`
+	WorkspaceRevision      int64      `db:"workspace_revision" json:"workspace_revision"`
+	Error                  string     `db:"error" json:"error"`
+	StartedAt              *time.Time `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt            *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt              time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt              time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // ServiceConfig defines a single service within a preview.

@@ -30,7 +30,12 @@ describe("addSSEListener", () => {
     const payload = { id: 1, session_id: "s1", level: "info", message: "hi", metadata: null, turn_number: 1, created_at: "2026-01-01T00:00:00Z" };
     source._fire("message", JSON.stringify(payload));
 
-    expect(handler).toHaveBeenCalledWith(payload);
+    expect(handler).toHaveBeenCalledWith({
+      ...payload,
+      message_bytes: 2,
+      message_chars: 2,
+      message_truncated: false,
+    });
   });
 
   it("normalizes LOG events before invoking the handler", () => {
@@ -42,7 +47,13 @@ describe("addSSEListener", () => {
     const payload = { id: 1, session_id: "s1", level: "info", message: "hi", metadata: null, turn_number: 1, timestamp: "2026-01-01T00:00:00Z" };
     source._fire("message", JSON.stringify(payload));
 
-    expect(handler).toHaveBeenCalledWith({ ...payload, created_at: "2026-01-01T00:00:00Z" });
+    expect(handler).toHaveBeenCalledWith({
+      ...payload,
+      created_at: "2026-01-01T00:00:00Z",
+      message_bytes: 2,
+      message_chars: 2,
+      message_truncated: false,
+    });
   });
 
   it("normalizes named human-input events before invoking the handler", () => {
@@ -54,7 +65,13 @@ describe("addSSEListener", () => {
     const payload = { id: 12, session_id: "s1", level: "human_input", message: "created", metadata: { status: "pending" }, turn_number: 1, timestamp: "2026-01-01T00:00:00Z" };
     source._fire("session_human_input.created", JSON.stringify(payload));
 
-    expect(handler).toHaveBeenCalledWith({ ...payload, created_at: "2026-01-01T00:00:00Z" });
+    expect(handler).toHaveBeenCalledWith({
+      ...payload,
+      created_at: "2026-01-01T00:00:00Z",
+      message_bytes: 7,
+      message_chars: 7,
+      message_truncated: false,
+    });
   });
 
   it("handles STATUS events via addEventListener", () => {
@@ -90,7 +107,12 @@ describe("addSSEListener", () => {
     const payload = { id: 12, session_id: "s1", level: "human_input", message: "answered", metadata: { status: "answered" }, turn_number: 1, created_at: "2026-01-01T00:00:00Z" };
     source._fire("session_human_input.updated", JSON.stringify(payload));
 
-    expect(handler).toHaveBeenCalledWith(payload);
+    expect(handler).toHaveBeenCalledWith({
+      ...payload,
+      message_bytes: 8,
+      message_chars: 8,
+      message_truncated: false,
+    });
   });
 
   it("ignores unparseable JSON for message events", () => {

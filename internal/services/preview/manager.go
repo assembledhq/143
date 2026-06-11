@@ -1103,6 +1103,29 @@ func (o *managerServiceObserver) OnDependencyCacheSave(status string, cacheKey s
 	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
 }
 
+func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
+	switch status {
+	case "disabled", "miss", "restore_failed", "restored", "key_failed", "skipped_no_paths":
+	default:
+		return
+	}
+	level := "info"
+	msg := fmt.Sprintf("preview package-manager cache %s", status)
+	if err != nil {
+		level = "warn"
+		msg = fmt.Sprintf("preview package-manager cache restore failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
+	if status != "save_failed" {
+		return
+	}
+	msg := fmt.Sprintf("preview package-manager cache save failed: %v", err)
+	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
+}
+
 func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey string, sizeBytes int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
 	defer cancel()

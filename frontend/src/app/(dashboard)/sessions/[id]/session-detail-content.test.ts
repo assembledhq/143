@@ -10,6 +10,8 @@ import {
   invalidateSessionHumanInputRequests,
   applyThreadInboxEventToThreads,
   applyThreadRuntimeEventToThreads,
+  capLiveSessionLogMessage,
+  liveLogsForTimeline,
   mergeSessionLogListResponse,
   mergeSessionDetailStatusUpdate,
   mergeVisibleThreadLogs,
@@ -350,6 +352,9 @@ describe("thread message windows", () => {
       turn_number: turn,
       created_at: start,
       metadata: null,
+      message_bytes: `log ${id}`.length,
+      message_chars: `log ${id}`.length,
+      message_truncated: false,
     };
   }
 
@@ -415,6 +420,27 @@ describe("thread message windows", () => {
     );
 
     expect(result.data.map((item) => item.id)).toEqual([20, 30, 40]);
+  });
+
+  it("caps oversized live streamed log messages before caching them", () => {
+    const result = capLiveSessionLogMessage({
+      ...log(99, 2),
+      message: "a".repeat(40 * 1024),
+      message_bytes: 40 * 1024,
+      message_chars: 40 * 1024,
+    });
+
+    expect(result.message).toHaveLength(32 * 1024);
+    expect(result.message_truncated).toBe(true);
+    expect(result.message_bytes).toBe(40 * 1024);
+    expect(result.message_chars).toBe(40 * 1024);
+  });
+
+  it("drops stale live logs for settled timelines", () => {
+    const liveLogs = [log(50, 3)];
+
+    expect(liveLogsForTimeline(true, liveLogs)).toEqual(liveLogs);
+    expect(liveLogsForTimeline(false, liveLogs)).toEqual([]);
   });
 
   it("keeps live thread logs before their turn is represented in loaded message windows", () => {

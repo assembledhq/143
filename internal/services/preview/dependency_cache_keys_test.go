@@ -69,6 +69,42 @@ func TestComputePreviewDependencyCacheKey(t *testing.T) {
 	require.NotEqual(t, base, imageKey, "sandbox image should affect dependency artifact identity")
 }
 
+func TestComputePreviewPackageManagerCacheKey(t *testing.T) {
+	t.Parallel()
+
+	exec := dependencyKeyExecutor{files: map[string][]byte{
+		"pnpm-lock.yaml": []byte("lockfileVersion: '9.0'\n"),
+	}}
+	sb := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{"image": "143-sandbox@sha256:abc"}}
+	install := &models.PreviewInstallConfig{
+		Command:   []string{"pnpm", "install", "--frozen-lockfile"},
+		Cwd:       "frontend",
+		Lockfiles: []string{"pnpm-lock.yaml"},
+	}
+
+	base, lockfiles, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, sb, install, []string{".local/share/pnpm/store"}, []string{"pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute")
+	require.Equal(t, []PreviewInstallLockfileKey{{Path: "pnpm-lock.yaml", SHA256: "f0bcde463fa201480015b9caa7db2017d3c1b6ca9c7e133df955038c54333d48"}}, lockfiles, "package-manager cache key should return lockfile hashes for metadata")
+
+	reordered, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, sb, install, []string{".local/share/pnpm/store"}, []string{"pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute for same inputs")
+	require.Equal(t, base, reordered, "package-manager cache key should be stable for same inputs")
+
+	pathsChanged, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, sb, install, []string{".cache/pnpm", ".local/share/pnpm/store"}, []string{"pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute when paths change")
+	require.NotEqual(t, base, pathsChanged, "home cache paths should affect package-manager cache identity")
+
+	managersChanged, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, sb, install, []string{".local/share/pnpm/store"}, []string{"npm", "pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute when manager set changes")
+	require.NotEqual(t, base, managersChanged, "package-manager set should affect package-manager cache identity")
+
+	commandChanged := *install
+	commandChanged.Command = []string{"pnpm", "install"}
+	commandKey, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, sb, &commandChanged, []string{".local/share/pnpm/store"}, []string{"pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute when command changes")
+	require.NotEqual(t, base, commandKey, "install command should affect package-manager cache identity")
+}
+
 func TestComputePreviewDependencyCachePlacementKey(t *testing.T) {
 	t.Parallel()
 

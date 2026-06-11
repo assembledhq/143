@@ -27,6 +27,10 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("MODE", "")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "")
 	t.Setenv("PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR", "")
+	t.Setenv("PREVIEW_PACKAGE_MANAGER_CACHE_ENABLED", "")
+	t.Setenv("PREVIEW_CACHE_PREWARM_ENABLED", "")
+	t.Setenv("PREVIEW_CACHE_PREWARM_TIMEOUT", "")
+	t.Setenv("PREVIEW_CACHE_PREWARM_PRIORITY", "")
 	// Prevent .env files from interfering with defaults
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
@@ -53,6 +57,10 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 	require.Equal(t, "busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should default the sandbox health-check image to a pinned busybox tag")
 	require.Equal(t, "/var/cache/143/preview-dependency-cache", cfg.PreviewDependencyCacheLocalDir, "Load should default dependency cache local L1 storage to the production worker host cache path")
+	require.True(t, cfg.PreviewPackageManagerCacheEnabled, "Load should enable package-manager caches by default")
+	require.False(t, cfg.PreviewCachePrewarmEnabled, "Load should disable preview cache prewarming by default")
+	require.Equal(t, 15*time.Minute, cfg.PreviewCachePrewarmTimeout, "Load should default preview cache prewarm timeout")
+	require.Equal(t, -50, cfg.PreviewCachePrewarmPriority, "Load should default preview cache prewarm to low priority")
 }
 
 func TestResolvePreviewDependencyCacheLocalDir(t *testing.T) {

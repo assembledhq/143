@@ -172,6 +172,111 @@ func TestNewStartRunner_SnapshotCacheDoesNotUseTypedNilInterface(t *testing.T) {
 	require.Same(t, cache, got, "runner should use the manager snapshot cache instead of a typed nil interface")
 }
 
+func TestPreviewCachePrewarmScopeKey_SessionAllowsDeferredConfigDigest(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	payload := PreviewCachePrewarmJobPayload{
+		Source:            PreviewCachePrewarmSourceSession,
+		SessionID:         sessionID,
+		WorkspaceRevision: 7,
+	}
+
+	require.Equal(t, "preview_cache_prewarm:session:"+sessionID.String()+":7", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should be computable before config digest is known")
+
+	payload.ConfigDigest = "digest"
+	require.Equal(t, "preview_cache_prewarm:session:"+sessionID.String()+":7:digest", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should include digest when enqueue already knows it")
+}
+
+type prewarmLiveSandboxProvider struct {
+	createdCfg agent.SandboxConfig
+	created    *agent.Sandbox
+	sourceID   string
+	restored   bool
+	destroyed  bool
+}
+
+func (p *prewarmLiveSandboxProvider) Name() string { return "fake" }
+func (p *prewarmLiveSandboxProvider) Create(_ context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	p.createdCfg = cfg
+	p.created = &agent.Sandbox{ID: "prewarm-sandbox", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir, SessionID: cfg.SessionID, OrgID: cfg.OrgID}
+	return p.created, nil
+}
+func (p *prewarmLiveSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, string, string, string) error {
+	panic("not used")
+}
+func (p *prewarmLiveSandboxProvider) Exec(context.Context, *agent.Sandbox, string, io.Writer, io.Writer) (int, error) {
+	panic("not used")
+}
+func (p *prewarmLiveSandboxProvider) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	panic("not used")
+}
+func (p *prewarmLiveSandboxProvider) WriteFile(context.Context, *agent.Sandbox, string, []byte) error {
+	panic("not used")
+}
+func (p *prewarmLiveSandboxProvider) Destroy(_ context.Context, sb *agent.Sandbox) error {
+	p.destroyed = sb != nil && sb.ID == "prewarm-sandbox"
+	return nil
+}
+func (p *prewarmLiveSandboxProvider) IsAlive(_ context.Context, sb *agent.Sandbox) (bool, error) {
+	p.sourceID = sb.ID
+	return true, nil
+}
+func (p *prewarmLiveSandboxProvider) ConnectionInfo(context.Context, *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+	panic("not used")
+}
+func (p *prewarmLiveSandboxProvider) Snapshot(_ context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+	p.sourceID = sb.ID
+	return io.NopCloser(strings.NewReader("snapshot")), nil
+}
+func (p *prewarmLiveSandboxProvider) Restore(_ context.Context, sb *agent.Sandbox, reader io.Reader) error {
+	p.restored = sb != nil && sb.ID == "prewarm-sandbox"
+	_, err := io.ReadAll(reader)
+	return err
+}
+func (p *prewarmLiveSandboxProvider) ExecStream(context.Context, *agent.Sandbox, string, func([]byte), io.Writer) (int, error) {
+	panic("not used")
+}
+
+func TestStartRunnerPrepareLiveSessionPreviewCachePrewarmSandbox_ClonesLiveContainer(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	containerID := "live-container"
+	workerNodeID := "worker-a"
+	provider := &prewarmLiveSandboxProvider{}
+	runner := &StartRunner{
+		sandboxProvider: provider,
+		nodeID:          workerNodeID,
+		logger:          zerolog.Nop(),
+	}
+
+	sb, cleanup, ok, err := runner.prepareLiveSessionPreviewCachePrewarmSandbox(context.Background(), PreviewCachePrewarmJobPayload{
+		OrgID:        orgID,
+		RepositoryID: repoID,
+		SessionID:    sessionID,
+	}, &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		RepositoryID: &repoID,
+		ContainerID:  &containerID,
+		WorkerNodeID: &workerNodeID,
+		SandboxState: models.SandboxStateRunning,
+	})
+
+	require.NoError(t, err, "live session prewarm helper should clone a live local container")
+	require.True(t, ok, "live session prewarm helper should report that live clone was used")
+	require.NotNil(t, sb, "live session prewarm helper should return an ephemeral sandbox")
+	require.Equal(t, "preview_cache_prewarm", provider.createdCfg.Purpose, "prewarm clone should use the prewarm sandbox purpose")
+	require.Equal(t, containerID, provider.sourceID, "prewarm clone should snapshot the live session container")
+	require.True(t, provider.restored, "prewarm clone should restore live snapshot bytes into the ephemeral sandbox")
+	require.NotNil(t, cleanup, "live session prewarm helper should return cleanup")
+	cleanup()
+	require.True(t, provider.destroyed, "cleanup should destroy the ephemeral prewarm sandbox")
+}
+
 type acquireSandboxProvider struct {
 	aliveByID map[string]bool
 	probedIDs []string

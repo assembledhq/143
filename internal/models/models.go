@@ -737,6 +737,10 @@ type SessionLog struct {
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	TurnNumber int             `db:"turn_number" json:"turn_number"`
+
+	MessageBytes     int  `db:"-" json:"message_bytes,omitempty"`
+	MessageChars     int  `db:"-" json:"message_chars,omitempty"`
+	MessageTruncated bool `db:"-" json:"message_truncated,omitempty"`
 }
 
 // SessionMessageSource identifies the originator of a session message.
@@ -931,13 +935,14 @@ type LatestJobError struct {
 
 // Job type constants for async work queue items.
 const (
-	JobTypePMAnalyze          = "pm_analyze"
-	JobTypePMBootstrap        = "pm_bootstrap"
-	JobTypePMContextRefresh   = "pm_context_refresh"
-	JobTypeProjectCycle       = "project_cycle"
-	JobTypeAutomationRun      = "automation_run"
-	JobTypeStartPreview       = "start_preview"
-	JobTypeStartBranchPreview = "start_branch_preview"
+	JobTypePMAnalyze           = "pm_analyze"
+	JobTypePMBootstrap         = "pm_bootstrap"
+	JobTypePMContextRefresh    = "pm_context_refresh"
+	JobTypeProjectCycle        = "project_cycle"
+	JobTypeAutomationRun       = "automation_run"
+	JobTypeStartPreview        = "start_preview"
+	JobTypeStartBranchPreview  = "start_branch_preview"
+	JobTypePreviewCachePrewarm = "preview_cache_prewarm"
 )
 
 // Job represents an async work queue item.
