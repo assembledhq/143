@@ -16,9 +16,24 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
+
+func withUserAndOrg(r *http.Request, userID, orgID uuid.UUID, role string) *http.Request {
+	ctx := middleware.WithOrgID(r.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.Role(role)})
+	ctx = middleware.WithActiveRole(ctx, role)
+	return r.WithContext(ctx)
+}
+
+func withAdminUser(r *http.Request, userID, orgID uuid.UUID) *http.Request {
+	ctx := middleware.WithOrgID(r.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	ctx = middleware.WithActiveRole(ctx, "admin")
+	return r.WithContext(ctx)
+}
 
 type mockCodingCredentialStore struct {
 	getFn              func(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error)
@@ -663,7 +678,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	verifiedAt := now.Add(-time.Hour)
 	rows := []models.DecryptedCodingCredential{
 		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Codex", Config: models.OpenAIConfig{APIKey: "sk-openai-123456"}, Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
-		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAIChatGPT, Config: models.OpenAIChatGPTConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAISubscription, Config: models.OpenAISubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "max"}, Priority: 1, Status: models.CodingCredentialStatusActive, LastVerifiedAt: &verifiedAt, RateLimitedUntil: ptrTime(now.Add(time.Hour)), RateLimitMessage: ptrString("try again at 8:50 AM"), CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gemini-key"}, Priority: 2, Status: models.CodingCredentialStatusPendingAuth, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-key"}, Priority: 3, Status: "disabled", CreatedAt: now, UpdatedAt: now},
@@ -1127,54 +1142,26 @@ func TestAuthTypeForProvider(t *testing.T) {
 	tests := []struct {
 		name     string
 		provider models.ProviderName
-		cfg      models.ProviderConfig
 		want     models.CodingAuthType
 	}{
 		{
 			name:     "anthropic api key",
 			provider: models.ProviderAnthropic,
-			cfg:      models.AnthropicConfig{APIKey: "sk-ant-1"},
 			want:     models.CodingAuthTypeAPIKey,
-		},
-		{
-			// During the dual-write window a legacy mirrored row can still
-			// arrive with provider=anthropic and a non-nil Subscription
-			// embedded (the post-step migration is what later rewrites it
-			// to anthropic_subscription). The auth_type response field must
-			// agree with usageNoteFor's view of the same row.
-			name:     "anthropic with embedded subscription is reported as subscription",
-			provider: models.ProviderAnthropic,
-			cfg: models.AnthropicConfig{
-				Subscription: &models.AnthropicSubscription{
-					AccessToken:  "tok",
-					RefreshToken: "ref",
-					AccountType:  "claude_pro",
-				},
-			},
-			want: models.CodingAuthTypeSubscription,
 		},
 		{
 			name:     "anthropic_subscription provider",
 			provider: models.ProviderAnthropicSubscription,
-			cfg:      models.AnthropicSubscriptionConfig{AccessToken: "tok"},
 			want:     models.CodingAuthTypeSubscription,
 		},
 		{
 			name:     "openai api key",
 			provider: models.ProviderOpenAI,
-			cfg:      models.OpenAIConfig{APIKey: "sk-openai"},
 			want:     models.CodingAuthTypeAPIKey,
 		},
 		{
 			name:     "openai_subscription provider",
 			provider: models.ProviderOpenAISubscription,
-			cfg:      models.OpenAISubscriptionConfig{AccessToken: "tok"},
-			want:     models.CodingAuthTypeSubscription,
-		},
-		{
-			name:     "legacy openai_chatgpt provider",
-			provider: models.ProviderOpenAIChatGPT,
-			cfg:      models.OpenAIChatGPTConfig{AccessToken: "tok"},
 			want:     models.CodingAuthTypeSubscription,
 		},
 	}
@@ -1183,7 +1170,7 @@ func TestAuthTypeForProvider(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, authTypeForProvider(tt.provider, tt.cfg))
+			require.Equal(t, tt.want, authTypeForProvider(tt.provider))
 		})
 	}
 }

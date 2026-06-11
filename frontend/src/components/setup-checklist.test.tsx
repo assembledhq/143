@@ -15,7 +15,6 @@ const mocks = vi.hoisted(() => ({
   codexAuthMock: vi.fn().mockResolvedValue({ data: { status: "pending" } }),
   integrationsListMock: vi.fn().mockResolvedValue({ data: [] }),
   repositoriesListMock: vi.fn().mockResolvedValue({ data: [] }),
-  userCredentialsListResolvedMock: vi.fn().mockResolvedValue({ data: [] }),
   codingCredentialsListMock: vi.fn().mockResolvedValue({ data: [] }),
   codexModalMock: vi.fn((props: unknown) => {
     void props;
@@ -36,9 +35,6 @@ vi.mock("@/lib/api", () => ({
     codexAuth: {
       status: mocks.codexAuthMock,
       start: vi.fn().mockResolvedValue({ data: {} }),
-    },
-    userCredentials: {
-      listResolved: mocks.userCredentialsListResolvedMock,
     },
     codingCredentials: {
       list: mocks.codingCredentialsListMock,

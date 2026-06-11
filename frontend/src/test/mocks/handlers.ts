@@ -877,13 +877,6 @@ export const handlers = [
     });
   }),
 
-  http.get('/api/v1/settings/credentials/resolved', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
-    });
-  }),
-
   http.get('/api/v1/settings/network', () => {
     return HttpResponse.json({
       data: {
@@ -894,24 +887,14 @@ export const handlers = [
     });
   }),
 
-  http.get('/api/v1/settings/credentials/team', () => {
+  // Default unified coding-credentials handler. Returns an empty stack for
+  // every scope (org / personal / resolved); the scope is echoed back in
+  // meta so failing tests are easier to diagnose.
+  http.get('/api/v1/coding-credentials', ({ request }) => {
+    const url = new URL(request.url);
     return HttpResponse.json({
       data: [],
-      meta: {},
-    });
-  }),
-
-  http.get('/api/v1/settings/coding-auths', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
-    });
-  }),
-
-  http.get('/api/v1/coding-credentials', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
+      meta: { scope: url.searchParams.get('scope') },
     });
   }),
 

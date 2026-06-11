@@ -78,7 +78,7 @@ func (s *stubSessionPRAuthCredentialChecker) HasValidCredential(ctx context.Cont
 	return false, nil
 }
 
-func (s *stubSessionPRCredentialStore) Upsert(_ context.Context, _, _ uuid.UUID, _ models.ProviderConfig, _ bool) error {
+func (s *stubSessionPRCredentialStore) Upsert(_ context.Context, _, _ uuid.UUID, _ models.ProviderConfig) error {
 	return nil
 }
 

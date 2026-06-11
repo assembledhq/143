@@ -107,7 +107,6 @@ describe("AutopilotSettingsPage", () => {
         },
       })),
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
-      http.get("/api/v1/settings/coding-auths", () => HttpResponse.json({ data: [], meta: {} })),
       http.get("/api/v1/coding-credentials", ({ request }) => {
         const url = new URL(request.url);
         if (url.searchParams.get("scope") !== "org") {

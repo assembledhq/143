@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
-import type { CodingAuth } from "@/lib/types";
+import type { CodingCredentialSummary } from "@/lib/types";
 import { CodingAuthStack } from "./coding-auth-stack";
 
-const rows: CodingAuth[] = [
+const rows: CodingCredentialSummary[] = [
   {
     id: "auth-1",
     org_id: "org-1",
@@ -11,8 +11,8 @@ const rows: CodingAuth[] = [
     agent: "codex",
     auth_type: "subscription",
     label: "Team seat A",
-    scope: "organization",
-    provider: "openai_chatgpt",
+    scope: "org",
+    provider: "openai_subscription",
     status: "healthy",
     is_default: true,
     usage_note: "ChatGPT Plus",
@@ -26,7 +26,7 @@ const rows: CodingAuth[] = [
     agent: "pi",
     auth_type: "api_key",
     label: "Pi backup",
-    scope: "organization",
+    scope: "org",
     provider: "pi",
     status: "invalid",
     is_default: false,

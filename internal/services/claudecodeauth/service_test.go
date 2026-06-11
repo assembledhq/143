@@ -42,6 +42,12 @@ type mockCredentialStore struct {
 	hasActiveLabeledErr   error
 	getByProviderLabelErr error
 	upsertByIDCalls       int
+	// pickByPriority makes ClaimNextLabeledRoundRobin reproduce the production
+	// unified resolver (PickRunnable): it returns the lowest-Priority active
+	// labeled credential deterministically and does NOT advance LastUsedAt, so
+	// the same top-priority row keeps coming back until it is marked invalid.
+	// Default (false) keeps the legacy last_used_at LRU semantics.
+	pickByPriority bool
 }
 
 func newMockCredentialStore() *mockCredentialStore {
@@ -168,6 +174,25 @@ func (m *mockCredentialStore) ClaimNextLabeledRoundRobin(_ context.Context, scop
 	if m.claimErr != nil {
 		return nil, m.claimErr
 	}
+	if m.pickByPriority {
+		// Reproduce PickRunnable: return the lowest-Priority active labeled
+		// credential deterministically (ties broken by id) and do NOT touch
+		// LastUsedAt, so the same row keeps coming back until marked invalid.
+		var best *models.DecryptedCredential
+		for _, cred := range m.creds {
+			if !m.scopesMatch(cred.ID, scope) || cred.Provider != provider || cred.Status != "active" || cred.Label == "" {
+				continue
+			}
+			if best == nil || cred.Priority < best.Priority ||
+				(cred.Priority == best.Priority && cred.ID.String() < best.ID.String()) {
+				best = cred
+			}
+		}
+		if best == nil {
+			return nil, ErrCredentialNotFound
+		}
+		return best, nil
+	}
 	var oldest *models.DecryptedCredential
 	for _, cred := range m.creds {
 		if !m.scopesMatch(cred.ID, scope) || cred.Provider != provider || cred.Status != "active" || cred.Label == "" {
@@ -281,18 +306,18 @@ func TestInitiateOAuth_PersistsPendingSubscriptionRow(t *testing.T) {
 		t.Errorf("authorize URL state mismatch: %s", resp.AuthorizeURL)
 	}
 
-	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "team-a")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropicSubscription, "team-a")
 	if err != nil {
 		t.Fatalf("expected persisted pending row: %v", err)
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok || cfg.Subscription == nil {
-		t.Fatalf("expected AnthropicConfig with Subscription, got %T", cred.Config)
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok {
+		t.Fatalf("expected AnthropicSubscriptionConfig, got %T", cred.Config)
 	}
-	if cfg.Subscription.State != resp.State {
-		t.Errorf("stored state %q != returned state %q", cfg.Subscription.State, resp.State)
+	if cfg.State != resp.State {
+		t.Errorf("stored state %q != returned state %q", cfg.State, resp.State)
 	}
-	if cfg.Subscription.CodeVerifier == "" {
+	if cfg.CodeVerifier == "" {
 		t.Error("want non-empty code_verifier stored on pending row")
 	}
 	if cred.Label != "team-a" {
@@ -310,9 +335,7 @@ func TestInitiateOAuth_LabelTakenByActiveRow(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	_, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
-	})
+	_, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -342,13 +365,11 @@ func TestGetValidToken_SkipsAPIKeyRow(t *testing.T) {
 
 	// Seed a labeled subscription row.
 	now := time.Now()
-	subCfg := models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			AccessToken:  "access-1",
-			RefreshToken: "refresh-1",
-			ExpiresAt:    now.Add(time.Hour),
-			AccountType:  "pro",
-		},
+	subCfg := models.AnthropicSubscriptionConfig{
+		AccessToken:  "access-1",
+		RefreshToken: "refresh-1",
+		ExpiresAt:    now.Add(time.Hour),
+		AccountType:  "pro",
 	}
 	subID, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", subCfg)
 	if err != nil {
@@ -390,6 +411,91 @@ func TestGetValidToken_ReturnsNilWhenOnlyAPIKeyPresent(t *testing.T) {
 	}
 }
 
+// TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority is the
+// regression guard for the PR-5 round-robin change. ClaimNextLabeledRoundRobin
+// now delegates to the unified PickRunnable, which deterministically returns
+// the same highest-priority active credential until it leaves the active set —
+// unlike the old last_used_at LRU. If the top credential is unusable for a
+// reason that does NOT already mark it invalid (empty access token, or a
+// config that fails the subscription type assertion), GetValidToken must mark
+// it invalid itself so the next claim advances to the healthy lower-priority
+// credential. Without the fix, PickRunnable re-returns the bad row, the
+// tried-map breaks the loop, and the healthy priority-2 credential is stranded.
+func TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority(t *testing.T) {
+	t.Parallel()
+
+	goodCfg := models.AnthropicSubscriptionConfig{
+		AccessToken:  "access-good",
+		RefreshToken: "refresh-good",
+		ExpiresAt:    time.Now().Add(2 * time.Hour), // fresh: no refresh attempted
+		AccountType:  "pro",
+	}
+
+	cases := []struct {
+		name   string
+		badCfg models.ProviderConfig
+	}{
+		{
+			name:   "empty access token",
+			badCfg: models.AnthropicSubscriptionConfig{AccessToken: "", RefreshToken: "refresh-bad"},
+		},
+		{
+			name: "wrong config type",
+			// An AnthropicConfig stored under provider=anthropic_subscription
+			// fails the AnthropicSubscriptionConfig type assertion.
+			badCfg: models.AnthropicConfig{APIKey: "sk-ant-not-a-subscription"},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := newMockCredentialStore()
+			store.pickByPriority = true // reproduce PickRunnable selection
+			svc := NewService(store, zerolog.Nop())
+
+			orgID := uuid.New()
+			badID := uuid.New()
+			goodID := uuid.New()
+
+			// Priority 1 (top of stack) is the unusable credential; priority 2
+			// is the healthy one the resolver must fall through to. Both are
+			// labeled — the subscription claim skips the label="" API-key row.
+			store.creds[badID] = &models.DecryptedCredential{
+				ID: badID, OrgID: orgID, Provider: models.ProviderAnthropicSubscription,
+				Label: "team-bad", Config: tc.badCfg, Status: "active", Priority: 1,
+			}
+			store.creds[goodID] = &models.DecryptedCredential{
+				ID: goodID, OrgID: orgID, Provider: models.ProviderAnthropicSubscription,
+				Label: "team-good", Config: goodCfg, Status: "active", Priority: 2,
+			}
+
+			sub, gotID, err := svc.GetValidToken(context.Background(), orgID)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sub == nil {
+				t.Fatal("expected the healthy priority-2 credential, got nil")
+			}
+			if sub.AccessToken != "access-good" {
+				t.Errorf("expected token from the healthy credential, got %q", sub.AccessToken)
+			}
+			if gotID == nil || *gotID != goodID {
+				t.Errorf("expected healthy cred id %v, got %v", goodID, gotID)
+			}
+
+			if store.creds[badID].Status != "invalid" {
+				t.Errorf("expected the unusable top credential to be marked invalid, got %q", store.creds[badID].Status)
+			}
+			if store.creds[goodID].Status != "active" {
+				t.Errorf("expected the healthy credential to stay active, got %q", store.creds[goodID].Status)
+			}
+		})
+	}
+}
+
 func TestGetValidToken_RotatesLRU(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
@@ -398,12 +504,12 @@ func TestGetValidToken_RotatesLRU(t *testing.T) {
 	orgID := uuid.New()
 
 	mk := func(label, access string) *uuid.UUID {
-		cfg := models.AnthropicConfig{Subscription: &models.AnthropicSubscription{
+		cfg := models.AnthropicSubscriptionConfig{
 			AccessToken:  access,
 			RefreshToken: "refresh",
 			ExpiresAt:    time.Now().Add(time.Hour),
 			AccountType:  "max",
-		}}
+		}
 		id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, cfg)
 		if err != nil {
 			t.Fatalf("seed: %v", err)
@@ -433,9 +539,7 @@ func TestDisconnectAll_PreservesAPIKeyRow(t *testing.T) {
 
 	orgID := uuid.New()
 	apiKeyID, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "", models.AnthropicConfig{APIKey: "sk-ant"})
-	subID, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
-	})
+	subID, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
 
 	if err := svc.DisconnectAll(context.Background(), models.Scope{OrgID: orgID}); err != nil {
 		t.Fatalf("DisconnectAll: %v", err)
@@ -477,9 +581,7 @@ func TestListSubscriptions_SkipsAPIKeyRow(t *testing.T) {
 
 	orgID := uuid.New()
 	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "", models.AnthropicConfig{APIKey: "sk-ant"})
-	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour), AccountType: "max"},
-	})
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour), AccountType: "max"})
 
 	subs, err := svc.ListSubscriptions(context.Background(), models.Scope{OrgID: orgID})
 	if err != nil {
@@ -500,13 +602,11 @@ func TestListSubscriptions_SkipsAPIKeyRow(t *testing.T) {
 // row and returns its ID so tests can exercise the refresh path.
 func seedActiveSub(t *testing.T, store *mockCredentialStore, orgID uuid.UUID, label, access, refresh string, expiresAt time.Time) uuid.UUID {
 	t.Helper()
-	id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			AccessToken:  access,
-			RefreshToken: refresh,
-			ExpiresAt:    expiresAt,
-			AccountType:  "claude_max",
-		},
+	id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, label, models.AnthropicSubscriptionConfig{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		ExpiresAt:    expiresAt,
+		AccountType:  "claude_max",
 	})
 	if err != nil {
 		t.Fatalf("seed sub: %v", err)
@@ -600,12 +700,10 @@ func TestStoreTokenByID_PersistsHarvestedSubscription(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 	scope := models.Scope{OrgID: orgID, UserID: &userID}
-	credID, err := store.UpsertWithLabel(context.Background(), scope, &userID, "personal-claude", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			AccessToken:  "old-access",
-			RefreshToken: "old-refresh",
-			ExpiresAt:    time.Now().Add(time.Hour),
-		},
+	credID, err := store.UpsertWithLabel(context.Background(), scope, &userID, "personal-claude", models.AnthropicSubscriptionConfig{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
 	})
 	require.NoError(t, err, "seed subscription should be stored")
 
@@ -625,10 +723,9 @@ func TestStoreTokenByID_PersistsHarvestedSubscription(t *testing.T) {
 	require.True(t, stored, "StoreTokenByID should report when harvested credentials were persisted")
 	cred := store.creds[*credID]
 	require.NotNil(t, cred, "stored credential should still exist")
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	require.True(t, ok, "stored credential config should remain AnthropicConfig")
-	require.NotNil(t, cfg.Subscription, "stored credential should contain a subscription")
-	require.Equal(t, sub, *cfg.Subscription, "stored credential should contain the harvested subscription")
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	require.True(t, ok, "stored credential config should be AnthropicSubscriptionConfig")
+	require.Equal(t, models.FromAnthropicSubscription(sub), cfg, "stored credential should contain the harvested subscription")
 	require.Equal(t, 1, store.upsertByIDCalls, "StoreTokenByID should persist exactly one harvested credential version")
 }
 
@@ -655,9 +752,9 @@ func TestStoreTokenByID_RejectsInvalidHarvestedAccessToken(t *testing.T) {
 
 	require.Error(t, err, "StoreTokenByID should reject a harvested token that Anthropic does not accept")
 	require.False(t, stored, "StoreTokenByID should report no write for rejected harvested credentials")
-	cfg := store.creds[credID].Config.(models.AnthropicConfig)
-	require.Equal(t, "old-access", cfg.Subscription.AccessToken, "StoreTokenByID should not overwrite with an invalid harvested token")
-	require.Equal(t, "old-refresh", cfg.Subscription.RefreshToken, "StoreTokenByID should preserve the existing refresh token after validation failure")
+	cfg := store.creds[credID].Config.(models.AnthropicSubscriptionConfig)
+	require.Equal(t, "old-access", cfg.AccessToken, "StoreTokenByID should not overwrite with an invalid harvested token")
+	require.Equal(t, "old-refresh", cfg.RefreshToken, "StoreTokenByID should preserve the existing refresh token after validation failure")
 	require.Equal(t, 0, store.upsertByIDCalls, "StoreTokenByID should not persist invalid harvested credentials")
 }
 
@@ -678,9 +775,9 @@ func TestStoreTokenByID_DoesNotOverwriteNewerStoredToken(t *testing.T) {
 
 	require.NoError(t, err, "StoreTokenByID should no-op when the DB already has a newer token")
 	require.False(t, stored, "StoreTokenByID should report no write for stale harvested credentials")
-	cfg := store.creds[credID].Config.(models.AnthropicConfig)
-	require.Equal(t, "newer-access", cfg.Subscription.AccessToken, "StoreTokenByID should preserve the newer stored access token")
-	require.Equal(t, "newer-refresh", cfg.Subscription.RefreshToken, "StoreTokenByID should preserve the newer stored refresh token")
+	cfg := store.creds[credID].Config.(models.AnthropicSubscriptionConfig)
+	require.Equal(t, "newer-access", cfg.AccessToken, "StoreTokenByID should preserve the newer stored access token")
+	require.Equal(t, "newer-refresh", cfg.RefreshToken, "StoreTokenByID should preserve the newer stored refresh token")
 	require.Equal(t, 0, store.upsertByIDCalls, "StoreTokenByID should not persist stale harvested credentials")
 }
 
@@ -737,11 +834,10 @@ func TestRefreshTokenByID_RejectsEmptyAccessToken(t *testing.T) {
 	storedCred, getErr := store.GetByID(context.Background(), models.Scope{OrgID: orgID}, credID)
 	require.NoError(t, getErr, "GetByID should return the seeded credential after a failed refresh")
 
-	storedCfg, ok := storedCred.Config.(models.AnthropicConfig)
-	require.True(t, ok, "stored credential should remain an AnthropicConfig after a failed refresh")
-	require.NotNil(t, storedCfg.Subscription, "stored credential should still include its subscription after a failed refresh")
-	require.Equal(t, "old-access", storedCfg.Subscription.AccessToken, "failed refresh should preserve the previously stored access token")
-	require.Equal(t, "old-refresh", storedCfg.Subscription.RefreshToken, "failed refresh should preserve the previously stored refresh token")
+	storedCfg, ok := storedCred.Config.(models.AnthropicSubscriptionConfig)
+	require.True(t, ok, "stored credential should remain an AnthropicSubscriptionConfig after a failed refresh")
+	require.Equal(t, "old-access", storedCfg.AccessToken, "failed refresh should preserve the previously stored access token")
+	require.Equal(t, "old-refresh", storedCfg.RefreshToken, "failed refresh should preserve the previously stored refresh token")
 }
 
 func TestRefreshTokenByID_RefreshTokenReused(t *testing.T) {
@@ -835,11 +931,9 @@ func TestRefreshTokenByID_NoRefreshToken(t *testing.T) {
 
 	orgID := uuid.New()
 	// Store a sub with empty refresh token + expired access.
-	id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			AccessToken: "old-access",
-			ExpiresAt:   time.Now().Add(-time.Minute),
-		},
+	id, err := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{
+		AccessToken: "old-access",
+		ExpiresAt:   time.Now().Add(-time.Minute),
 	})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
@@ -887,12 +981,12 @@ func TestCompleteOAuth_ParsesScopesAndFetchesProfile(t *testing.T) {
 		t.Fatalf("CompleteOAuth: %v", err)
 	}
 
-	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "team-a")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropicSubscription, "team-a")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
-	cfg := cred.Config.(models.AnthropicConfig)
-	sub := cfg.Subscription
+	cfg := cred.Config.(models.AnthropicSubscriptionConfig)
+	sub := cfg
 	if sub.AccessToken != "access-1" {
 		t.Errorf("access_token: %q", sub.AccessToken)
 	}
@@ -944,9 +1038,7 @@ func TestDisconnectForOrg_WrongOrgNotFound(t *testing.T) {
 
 	org1 := uuid.New()
 	org2 := uuid.New()
-	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: org1}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
-	})
+	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: org1}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
 
 	if err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: org2}, *id); err != ErrCredentialNotFound {
 		t.Errorf("want ErrCredentialNotFound, got %v", err)
@@ -1036,9 +1128,7 @@ func TestHasActiveSubscription(t *testing.T) {
 		t.Errorf("empty store: got (%v, %v), want (false, nil)", has, err)
 	}
 
-	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
-	})
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
 	has, err = svc.HasActiveSubscription(context.Background(), orgID)
 	if err != nil || !has {
 		t.Errorf("with labeled sub: got (%v, %v), want (true, nil)", has, err)
@@ -1105,7 +1195,7 @@ func TestCompleteOAuth_Expired(t *testing.T) {
 	}
 
 	// Backdate the pending row past the TTL window.
-	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "team-a")
+	cred, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropicSubscription, "team-a")
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
@@ -1123,11 +1213,9 @@ func TestCompleteOAuth_AlreadyActive(t *testing.T) {
 
 	orgID := uuid.New()
 	// Seed an active (not pending) row — replay attempts must not overwrite it.
-	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			AccessToken: "live", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour),
-			State: "s", CodeVerifier: "v",
-		},
+	_, _ = store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{
+		AccessToken: "live", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour),
+		State: "s", CodeVerifier: "v",
 	})
 
 	if _, err := svc.CompleteOAuth(context.Background(), models.Scope{OrgID: orgID}, "team-a", "code#s"); !errors.Is(err, ErrPendingAuthNotFound) {
@@ -1223,9 +1311,7 @@ func TestDisconnect_ClearsRefreshMutex(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
-	})
+	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
 
 	// Prime the refresh mutex so Disconnect has something to drop.
 	_ = svc.credRefreshMu(*id)
@@ -1244,9 +1330,7 @@ func TestDisconnectForOrg_Success(t *testing.T) {
 	svc := NewService(store, zerolog.Nop())
 
 	orgID := uuid.New()
-	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)},
-	})
+	id, _ := store.UpsertWithLabel(context.Background(), models.Scope{OrgID: orgID}, nil, "team-a", models.AnthropicSubscriptionConfig{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
 
 	if err := svc.DisconnectForOrg(context.Background(), models.Scope{OrgID: orgID}, *id); err != nil {
 		t.Fatalf("DisconnectForOrg: %v", err)
@@ -1348,13 +1432,11 @@ func TestCompleteOAuth_PendingRowMissingState(t *testing.T) {
 	// treat it as "no pending row".
 	id := uuid.New()
 	store.creds[id] = &models.DecryptedCredential{
-		ID:       id,
-		OrgID:    orgID,
-		Provider: models.ProviderAnthropic,
-		Label:    "team-a",
-		Config: models.AnthropicConfig{
-			Subscription: &models.AnthropicSubscription{},
-		},
+		ID:        id,
+		OrgID:     orgID,
+		Provider:  models.ProviderAnthropicSubscription,
+		Label:     "team-a",
+		Config:    models.AnthropicSubscriptionConfig{},
 		Status:    "pending_auth",
 		UpdatedAt: time.Now(),
 	}
@@ -1403,7 +1485,7 @@ func TestRefreshTokenByID_NotAnthropicConfig(t *testing.T) {
 	store.creds[id] = &models.DecryptedCredential{
 		ID:       id,
 		OrgID:    orgID,
-		Provider: models.ProviderAnthropic,
+		Provider: models.ProviderAnthropicSubscription,
 		Label:    "team-a",
 		Config:   models.AnthropicConfig{APIKey: "sk-ant"},
 		Status:   "active",
@@ -1556,13 +1638,11 @@ func TestGetValidToken_SkipsInvalidAndEmptyTokenRows(t *testing.T) {
 	store.creds[id] = &models.DecryptedCredential{
 		ID:       id,
 		OrgID:    orgID,
-		Provider: models.ProviderAnthropic,
+		Provider: models.ProviderAnthropicSubscription,
 		Label:    "team-a",
-		Config: models.AnthropicConfig{
-			Subscription: &models.AnthropicSubscription{
-				AccessToken: "",
-				ExpiresAt:   time.Now().Add(time.Hour),
-			},
+		Config: models.AnthropicSubscriptionConfig{
+			AccessToken: "",
+			ExpiresAt:   time.Now().Add(time.Hour),
 		},
 		Status: "active",
 	}
@@ -1581,12 +1661,12 @@ func TestGetValidToken_WrongConfigType(t *testing.T) {
 	orgID := uuid.New()
 	id := uuid.New()
 	// Mock store's ClaimNextLabeledRoundRobin filters by Label != "" but picks
-	// by provider — give the row a label and ProviderAnthropic but a non-sub
-	// config so the "not an Anthropic subscription" branch fires.
+	// by provider — give the row a label and ProviderAnthropicSubscription but
+	// a non-sub config so the "not an Anthropic subscription" branch fires.
 	store.creds[id] = &models.DecryptedCredential{
 		ID:       id,
 		OrgID:    orgID,
-		Provider: models.ProviderAnthropic,
+		Provider: models.ProviderAnthropicSubscription,
 		Label:    "team-a",
 		Config:   models.AnthropicConfig{APIKey: "sk-ant"},
 		Status:   "active",
@@ -1694,7 +1774,7 @@ func TestListSubscriptions_SkipsNonSubscriptionConfig(t *testing.T) {
 	store.creds[id] = &models.DecryptedCredential{
 		ID:       id,
 		OrgID:    orgID,
-		Provider: models.ProviderAnthropic,
+		Provider: models.ProviderAnthropicSubscription,
 		Label:    "labelled-but-apikey",
 		Config:   models.AnthropicConfig{APIKey: "sk-ant"},
 		Status:   "active",
@@ -1882,13 +1962,13 @@ func TestInitiateOAuth_PersonalScope(t *testing.T) {
 	require.NotEmpty(t, resp.State, "personal OAuth must produce a CSRF state")
 	require.Contains(t, resp.AuthorizeURL, "code_challenge=", "authorize URL missing PKCE challenge")
 
-	cred, err := store.GetByProviderAndLabel(context.Background(), personalScope, models.ProviderAnthropic, "personal-claude")
+	cred, err := store.GetByProviderAndLabel(context.Background(), personalScope, models.ProviderAnthropicSubscription, "personal-claude")
 	require.NoError(t, err, "personal pending row must be persisted")
 	require.Equal(t, models.CredentialStatusPendingAuth, cred.Status, "personal row must start in pending_auth")
 	require.NotNil(t, cred.CreatedBy)
 	require.Equal(t, userID, *cred.CreatedBy)
 
-	_, err = store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, "personal-claude")
+	_, err = store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropicSubscription, "personal-claude")
 	require.Error(t, err, "personal-scope row must not be visible to an org-scope read")
 }
 
@@ -1909,9 +1989,9 @@ func TestInitiateOAuth_SameLabelAcrossScopes(t *testing.T) {
 	_, err = svc.InitiateOAuth(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, &userID, label)
 	require.NoError(t, err, "personal initiate with the same label must succeed")
 
-	orgRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropic, label)
+	orgRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID}, models.ProviderAnthropicSubscription, label)
 	require.NoError(t, err)
-	personalRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, models.ProviderAnthropic, label)
+	personalRow, err := store.GetByProviderAndLabel(context.Background(), models.Scope{OrgID: orgID, UserID: &userID}, models.ProviderAnthropicSubscription, label)
 	require.NoError(t, err)
 	require.NotEqual(t, orgRow.ID, personalRow.ID, "org and personal rows must be distinct credentials despite sharing the label")
 }

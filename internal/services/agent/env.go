@@ -87,7 +87,6 @@ func (e *AuthError) Error() string {
 // exactly one place — no more "PM works for Claude Code but breaks for Codex".
 type AgentEnv struct {
 	credentials       CredentialProvider
-	userCredentials   UserCredentialProvider
 	codingCredentials CodingCredentialProvider
 	orgs              OrgStore
 	orgSettingsCache  *OrgSettingsCache
@@ -174,7 +173,6 @@ const codexSubscriptionRefreshWindow = 5 * time.Minute
 // helper.
 type AgentEnvDeps struct {
 	Credentials       CredentialProvider
-	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team fallback (used only if CodingCredentials is nil or returns nothing)
 	CodingCredentials CodingCredentialProvider // preferred — unified resolver. Reads `coding_credentials` and is the source of truth post-migration.
 	Orgs              OrgStore                 // optional — enables agent_config overrides
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
@@ -207,7 +205,6 @@ type LinearTokenResolver interface {
 func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 	return &AgentEnv{
 		credentials:       deps.Credentials,
-		userCredentials:   deps.UserCredentials,
 		codingCredentials: deps.CodingCredentials,
 		orgs:              deps.Orgs,
 		orgSettingsCache:  deps.OrgSettingsCache,
@@ -263,7 +260,7 @@ type CodingCredentialPersistentShedder interface {
 // dropping personal subscriptions back to the org fallback after their
 // first 8h of token life.
 type CodexAuthRefresher interface {
-	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error)
 }
 
 // CodingCredentialMultiPicker is implemented by the real unified store for
@@ -292,14 +289,6 @@ func (e *AgentEnv) codingShedder() CodingCredentialShedder {
 		return shedder
 	}
 	return nil
-}
-
-// recordPick stores the credential id chosen by a pickFromCodingProvider walk.
-// Callers are expected to invoke this once per successful pick. The stored
-// record is consulted by ShedRateLimited / ShedAuthRejected when the runtime
-// reports an upstream failure for that (orgID, userID, provider) tuple.
-func (e *AgentEnv) recordPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, credID uuid.UUID) {
-	e.recordPickWithCredential(orgID, userID, provider, credID, nil)
 }
 
 func (e *AgentEnv) recordCredentialPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, cred models.DecryptedCodingCredential) {
@@ -835,30 +824,23 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 
 // resolveProviderConfig returns the best ProviderConfig for a provider.
 //
-// Post-unification (see docs/design/future/65-unified-coding-credentials.md):
-// the unified `coding_credentials` table is the source of truth. We try
-// CodingCredentialProvider.ListResolvable first, which returns one ordered
-// list (personal-then-org, priority-within-scope) covering both API-key and
-// subscription rows. If that returns a runnable row, we use it.
-//
-// Fallback: if CodingCredentials is unwired (older test rigs), we fall
-// through to the legacy 3-step cascade. Once the unified store is wired it is
-// authoritative even when it returns no active rows; otherwise disabling the
-// last migrated row would silently revive the still-present legacy row.
+// The unified `coding_credentials` table is the only credential source (see
+// docs/design/future/65-unified-coding-credentials.md):
+// CodingCredentialProvider.ListResolvable returns one ordered list
+// (personal-then-org, priority-within-scope) covering both API-key and
+// subscription rows, and the first runnable row wins. With no unified store
+// wired (older test rigs) or no runnable rows, the resolver returns nil.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	if cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, provider); cfg != nil || handled {
-		return cfg
-	}
-	return e.resolveFromLegacy(ctx, orgID, userID, provider)
+	cfg, _ := e.resolveFromCodingCredentials(ctx, orgID, userID, provider)
+	return cfg
 }
 
 // resolveFromCodingCredentials walks the unified resolver result, plus its
 // subscription twin for providers that have one. The twin lookup is what
 // lets a Claude Code subscription row (provider=anthropic_subscription) be
-// found when a caller asks for a `claude_code` agent that today resolves to
-// ProviderAnthropic — the legacy code matched by ProviderAnthropic and
-// inferred subscription status from the embedded field; the unified shape
-// uses two distinct provider names.
+// found when a caller asks for a `claude_code` agent that resolves to
+// ProviderAnthropic — API keys and subscriptions are two distinct provider
+// partitions on the unified table.
 func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, bool) {
 	if e.codingCredentials == nil {
 		return nil, false
@@ -877,11 +859,9 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool) {
 	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok {
-		// Lookup errored. Yield to the legacy fallback rather than
-		// short-circuiting as "unified authoritative with zero rows" — during
-		// the dual-write window the legacy stores still hold authoritative
-		// data, so a transient pgx error on the unified table must not bypass
-		// it.
+		// Lookup errored. Report "not handled" rather than "unified
+		// authoritative with zero rows" so callers can distinguish a
+		// transient pgx error from a genuinely empty credential stack.
 		return nil, nil, false
 	}
 	if !sawRows {
@@ -1072,93 +1052,6 @@ func unifiedSubscriptionTwin(provider models.ProviderName) models.ProviderName {
 	}
 }
 
-// resolveFromLegacy is the pre-unification 3-step cascade kept as a safety
-// net during the migration window. It is consulted only when the unified
-// resolver returns nothing, so once `coding_credentials` is fully populated
-// this code path produces no work.
-//
-// Status filter: legacy stores' Get/ListByProvider methods do not all filter
-// to status='active' the same way the unified ListResolvable does. We re-
-// assert active-only here so a disabled or invalid legacy row that lingered
-// in the table during cleanup cannot suddenly become picked when unified
-// returns no rows.
-//
-// Shed integration: legacy-path picks call recordPick under the legacy id.
-// During the dual-write window the mirror reuses legacy ids as the unified
-// row's id for personal and direct-org rows, so a shed marker keyed by
-// legacy id correctly poisons the matching unified row's health-cache
-// entry. Team-default rows are an exception: migration 000111 mints a
-// fresh UUID for those (the legacy user_credentials.id could collide with
-// an org_credentials id), so a shed marker recorded under the legacy id
-// will NOT poison the unified row served by ListResolvable. Sustained
-// shedding still works because repeated legacy fallbacks share the legacy
-// id; the brief staleness window only opens when unified flips from
-// erroring back to healthy and starts returning the unified team-default
-// row again, at which point the next 429 will re-poison the correct id.
-func (e *AgentEnv) resolveFromLegacy(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	if userID != nil && e.userCredentials != nil {
-		if cred, err := e.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
-			e.recordPick(orgID, userID, provider, cred.ID)
-			return cred.Config
-		}
-	}
-	if e.userCredentials != nil {
-		if cred, err := e.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
-			e.recordPick(orgID, userID, provider, cred.ID)
-			return cred.Config
-		}
-	}
-	if cfg, id, ok := e.resolveOrgProviderConfig(ctx, orgID, provider); ok {
-		e.recordPick(orgID, userID, provider, id)
-		return cfg
-	}
-	return nil
-}
-
-// legacyStatusActive reports whether a legacy credential row should be picked
-// by the resolver. Mirrors the unified store's
-// `Status == CodingCredentialStatusActive` filter so the two paths agree
-// during the migration window.
-func legacyStatusActive(status models.CredentialStatus) bool {
-	return status == models.CredentialStatusActive
-}
-
-// resolveOrgProviderConfig returns (config, picked-id, found) for an org-
-// scoped legacy credential. The id is surfaced so the caller can record it
-// for ShedRateLimited / ShedAuthRejected — without that, legacy-path picks
-// would have no traceable id and the health cache would never learn of
-// upstream failures during the migration window.
-func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (models.ProviderConfig, uuid.UUID, bool) {
-	if e.credentials == nil {
-		return nil, uuid.Nil, false
-	}
-
-	if provider.IsCodingAgentProvider() {
-		if creds, err := e.credentials.ListByProvider(ctx, orgID, provider); err == nil {
-			for _, cred := range creds {
-				if !legacyStatusActive(cred.Status) {
-					continue
-				}
-				if cfg, ok := compatibleCodingProviderConfig(provider, cred.Config); ok {
-					return cfg, cred.ID, true
-				}
-			}
-		}
-	}
-
-	if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
-		if provider.IsCodingAgentProvider() {
-			if cfg, ok := compatibleCodingProviderConfig(provider, cred.Config); ok {
-				return cfg, cred.ID, true
-			}
-			return nil, uuid.Nil, false
-		}
-		return cred.Config, cred.ID, true
-	}
-
-	return nil, uuid.Nil, false
-}
-
 // compatibleCodingProviderConfig returns the runtime ProviderConfig that
 // matches the given (provider, stored config) pair, or (nil, false) when the
 // pair is not usable: the provider is unknown, the type assertion fails, the
@@ -1171,7 +1064,7 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 	switch provider {
 	case models.ProviderAnthropic:
 		anthropic, ok := cfg.(models.AnthropicConfig)
-		if !ok || anthropic.APIKey == "" || anthropic.Subscription != nil {
+		if !ok || anthropic.APIKey == "" {
 			return nil, false
 		}
 		return anthropic, true
@@ -1191,14 +1084,14 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 		// the Status='active' filter upstream already excludes pending rows,
 		// but re-asserting their absence here keeps the runtime config minimal
 		// in case that filter ever loosens.
-		return models.AnthropicConfig{Subscription: &models.AnthropicSubscription{
+		return models.AnthropicSubscriptionConfig{
 			AccessToken:   sub.AccessToken,
 			RefreshToken:  sub.RefreshToken,
 			ExpiresAt:     sub.ExpiresAt,
 			AccountType:   sub.AccountType,
 			RateLimitTier: sub.RateLimitTier,
 			Scopes:        sub.Scopes,
-		}}, true
+		}, true
 	case models.ProviderOpenAISubscription:
 		sub, ok := cfg.(models.OpenAISubscriptionConfig)
 		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
@@ -1206,11 +1099,10 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 		}
 		// Strip device-code pending fields (DeviceAuthID, UserCode,
 		// VerificationURI, PollInterval) when constructing the runtime
-		// config. AsOpenAIChatGPTConfig is a type conversion that would
-		// carry them through; the Status='active' filter upstream already
-		// excludes pending rows, but re-asserting their absence here keeps
-		// the runtime config minimal in case that filter ever loosens.
-		return models.OpenAIChatGPTConfig{
+		// config. The Status='active' filter upstream already excludes
+		// pending rows, but re-asserting their absence here keeps the
+		// runtime config minimal in case that filter ever loosens.
+		return models.OpenAISubscriptionConfig{
 			AccessToken:  sub.AccessToken,
 			RefreshToken: sub.RefreshToken,
 			IDToken:      sub.IDToken,
@@ -1259,7 +1151,7 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if e.codingCredentials != nil {
 		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderOpenAI); ok {
-			if chatGPT, ok := codexChatGPTConfigFromPicked(picked); ok {
+			if chatGPT, ok := codexSubscriptionConfigFromPicked(picked); ok {
 				if picked.Provider == models.ProviderOpenAISubscription {
 					// Refresh against the picked row's actual scope —
 					// personal credentials carry UserID, org rows do not.
@@ -1278,7 +1170,7 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 			models.ProviderOpenAISubscription,
 		})
 		if handled {
-			if chatGPT, ok := cfg.(models.OpenAIChatGPTConfig); ok {
+			if chatGPT, ok := cfg.(models.OpenAISubscriptionConfig); ok {
 				if picked != nil && picked.Provider == models.ProviderOpenAISubscription {
 					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, models.Scope{OrgID: orgID, UserID: picked.UserID}, picked.ID, chatGPT)
 					if err != nil {
@@ -1312,16 +1204,16 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 	return e.writeCodexAuth(ctx, orgID, sandbox, *cfg)
 }
 
-func codexChatGPTConfigFromPicked(picked models.DecryptedCodingCredential) (models.OpenAIChatGPTConfig, bool) {
+func codexSubscriptionConfigFromPicked(picked models.DecryptedCodingCredential) (models.OpenAISubscriptionConfig, bool) {
 	cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config)
 	if !ok {
-		return models.OpenAIChatGPTConfig{}, false
+		return models.OpenAISubscriptionConfig{}, false
 	}
-	chatGPT, ok := cfg.(models.OpenAIChatGPTConfig)
+	chatGPT, ok := cfg.(models.OpenAISubscriptionConfig)
 	return chatGPT, ok
 }
 
-func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope models.Scope, credID uuid.UUID, cfg models.OpenAIChatGPTConfig) (*models.OpenAIChatGPTConfig, error) {
+func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope models.Scope, credID uuid.UUID, cfg models.OpenAISubscriptionConfig) (*models.OpenAISubscriptionConfig, error) {
 	if !cfg.NeedsRefresh(codexSubscriptionRefreshWindow) {
 		return &cfg, nil
 	}
@@ -1360,7 +1252,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope m
 	return refreshed, nil
 }
 
-func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, cfg models.OpenAIChatGPTConfig) (bool, error) {
+func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, cfg models.OpenAISubscriptionConfig) (bool, error) {
 	// Omit the refresh_token from auth.json so the Codex CLI never attempts
 	// to refresh the token itself. If the CLI refreshes the token inside the
 	// sandbox, it consumes the refresh_token on OpenAI's servers, but the
@@ -1633,7 +1525,7 @@ func codingProviderConfigIsAPIKey(cfg models.ProviderConfig) bool {
 	case models.OpenAIConfig:
 		return c.APIKey != ""
 	case models.AnthropicConfig:
-		return c.APIKey != "" && c.Subscription == nil
+		return c.APIKey != ""
 	default:
 		return false
 	}

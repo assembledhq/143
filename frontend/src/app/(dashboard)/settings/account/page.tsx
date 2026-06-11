@@ -259,11 +259,6 @@ export default function AccountPage() {
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-      // TODO(unified-credentials cleanup PR): drop the legacy invalidations
-      // once /settings/agent and other surfaces stop reading user-credentials
-      // / credentials.resolved.
-      void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       setApiKey("");
       setAuthLabel("");
       setAddOpen(false);
@@ -279,9 +274,6 @@ export default function AccountPage() {
     mutationFn: (id: string) => api.codingCredentials.delete(id, "personal"),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-      // TODO(unified-credentials cleanup PR): drop the legacy invalidations.
-      void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       toast.success("Personal auth removed");
     },
     onError: (error) => {
@@ -677,10 +669,6 @@ export default function AccountPage() {
             resetModalState();
             // Invalidate the personal stack so the new subscription appears.
             void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-            // Legacy keys that still feed parts of the UI during the
-            // unified-credentials migration window.
-            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
             toast.success("Personal subscription connected");
           }}
         />
@@ -698,8 +686,6 @@ export default function AccountPage() {
             setShowClaudeModal(false);
             resetModalState();
             void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
             toast.success("Personal subscription connected");
           }}
         />
