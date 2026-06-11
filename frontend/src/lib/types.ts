@@ -38,6 +38,7 @@ export interface User {
   role: string;
   github_id?: number;
   github_login?: string;
+  captured_github_org_login?: string;
   avatar_url?: string;
   google_id?: string;
   // Whether the account's current email is attested (OAuth provider claim,
@@ -1396,6 +1397,23 @@ export interface OrganizationDomain {
   failed_checks: number;
   dns_record_name: string;
   dns_record_value: string;
+}
+
+export type GitHubOrgMembersPermission = 'granted' | 'missing';
+
+export interface GitHubOrgAutoJoin {
+  installation_id: number;
+  account_login: string;
+  account_type?: string;
+  auto_join_enabled: boolean;
+  members_permission: GitHubOrgMembersPermission;
+  roster_synced_at?: string;
+  captured_by_other_org: boolean;
+  settings_url?: string;
+}
+
+export interface GitHubOrgAutoJoinResponse {
+  github_orgs: GitHubOrgAutoJoin[];
 }
 
 // JoinableOrganization is a workspace the current user may join because

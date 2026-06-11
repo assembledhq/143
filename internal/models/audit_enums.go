@@ -107,11 +107,13 @@ const (
 	AuditActionTeamInvitationClaimFailed AuditAction = "team.invitation_claim_failed"
 
 	// Verified-domain / auto-join actions
-	AuditActionTeamDomainAdded      AuditAction = "team.domain_added"
-	AuditActionTeamDomainVerified   AuditAction = "team.domain_verified"
-	AuditActionTeamDomainUpdated    AuditAction = "team.domain_updated"
-	AuditActionTeamDomainRemoved    AuditAction = "team.domain_removed"
-	AuditActionTeamMemberAutoJoined AuditAction = "team.member_auto_joined"
+	AuditActionTeamDomainAdded               AuditAction = "team.domain_added"
+	AuditActionTeamDomainVerified            AuditAction = "team.domain_verified"
+	AuditActionTeamDomainUpdated             AuditAction = "team.domain_updated"
+	AuditActionTeamDomainRemoved             AuditAction = "team.domain_removed"
+	AuditActionTeamMemberAutoJoined          AuditAction = "team.member_auto_joined"
+	AuditActionTeamGitHubOrgAutoJoinEnabled  AuditAction = "team.github_org_auto_join_enabled"
+	AuditActionTeamGitHubOrgAutoJoinDisabled AuditAction = "team.github_org_auto_join_disabled"
 
 	// Organization actions
 	AuditActionOrganizationCreated AuditAction = "organization.created"
@@ -187,6 +189,7 @@ func (a AuditAction) Validate() error {
 		AuditActionTeamInvitationDeclined, AuditActionTeamInvitationClaimFailed,
 		AuditActionTeamDomainAdded, AuditActionTeamDomainVerified, AuditActionTeamDomainUpdated,
 		AuditActionTeamDomainRemoved, AuditActionTeamMemberAutoJoined,
+		AuditActionTeamGitHubOrgAutoJoinEnabled, AuditActionTeamGitHubOrgAutoJoinDisabled,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,

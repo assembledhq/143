@@ -896,6 +896,10 @@ export const api = {
     updateDomain: (id: string, body: { auto_join_enabled: boolean }) =>
       patch<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}`, body),
     removeDomain: (id: string) => del<void>(`/api/v1/team/domains/${id}`),
+    listGitHubOrgs: () =>
+      get<import('./types').GitHubOrgAutoJoinResponse>('/api/v1/team/github-orgs'),
+    updateGitHubOrg: (installationId: number, body: { auto_join_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<unknown>>(`/api/v1/team/github-orgs/${installationId}`, body),
     githubInviteStatus: () =>
       get<import('./types').SingleResponse<import('./types').GitHubInviteStatus>>('/api/v1/team/github/status'),
     searchGitHubUsers: (q: string) =>

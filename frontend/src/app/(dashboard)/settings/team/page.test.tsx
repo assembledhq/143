@@ -363,6 +363,45 @@ describe('TeamSettingsPage', () => {
     });
   });
 
+  it('warns when removing a member who can rejoin through a captured GitHub org', async () => {
+    listMembersMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'user-1',
+          org_id: 'org-1',
+          email: 'admin@example.com',
+          name: 'Admin User',
+          role: 'admin',
+          avatar_url: 'https://example.com/avatar.png',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+        {
+          id: 'user-2',
+          org_id: 'org-1',
+          email: 'member@example.com',
+          name: 'Member User',
+          role: 'member',
+          avatar_url: null,
+          captured_github_org_login: 'acme',
+          created_at: '2026-01-02T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Member User')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+
+    expect(await screen.findByText(/They're a member of acme on GitHub/)).toBeInTheDocument();
+    expect(screen.getByText(/will rejoin on their next sign-in/)).toBeInTheDocument();
+  });
+
   it('cancels member removal when Cancel is clicked in confirmation dialog', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);

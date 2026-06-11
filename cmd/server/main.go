@@ -497,6 +497,7 @@ func main() {
 			EvalBatches:         db.NewEvalBatchStore(pool),
 			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
 			Repositories:        repoStore,
+			GitHubInstallations: db.NewGitHubInstallationStore(pool),
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
 			HumanInputRequests:  sessionHumanInputStore,
@@ -730,6 +731,7 @@ func main() {
 			domains.NewVerifier(),
 			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
 		)
+		scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -1573,6 +1575,7 @@ func buildServices(
 		SlackSummarizer: slackSummarizer,
 		LLM:             llmClient,
 		GitHub:          ghSvc,
+		GitHubOrgRoster: ghSvc,
 		TitleService:    titleService,
 		Linear:          linearService,
 		SlackbotMetrics: workerSlackbotMetrics,

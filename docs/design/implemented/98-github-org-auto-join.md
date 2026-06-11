@@ -1,6 +1,6 @@
 # Design: GitHub Organization Auto-Join
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-10
+> **Status:** Implemented | **Last reviewed:** 2026-06-10
 
 ## Problem
 

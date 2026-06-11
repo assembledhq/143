@@ -47,6 +47,7 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
@@ -624,6 +625,34 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       router.replace("/login");
     }
   }, [isLoading, isUnauthorized, router]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const joinedOrg = searchParams.get("joined_org");
+    const joinedVia = searchParams.get("joined_via");
+    if (!joinedOrg || (joinedVia !== "github_org" && joinedVia !== "domain")) {
+      return;
+    }
+    const orgName = searchParams.get("joined_org_name") || "your team";
+    const githubOrg = searchParams.get("github_org");
+    if (joinedVia === "github_org") {
+      toast.success(
+        `You've joined ${orgName} because you're a member of the ${githubOrg || "connected"} GitHub organization.`,
+        { duration: 8000 },
+      );
+    } else {
+      toast.success(`You've joined ${orgName} because your email domain is verified.`, {
+        duration: 8000,
+      });
+    }
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("joined_org");
+    next.delete("joined_via");
+    next.delete("joined_org_name");
+    next.delete("github_org");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  }, [pathname, router]);
 
   // Show the loading skeleton while the initial /me call is in flight OR
   // while retries are still in progress without a cached user. Confirmed

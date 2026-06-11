@@ -75,6 +75,7 @@ export const queryKeys = {
   team: {
     members: ["team", "members"] as const,
     domains: ["team", "domains"] as const,
+    githubOrgs: ["team", "github-orgs"] as const,
   },
   organizations: {
     joinable: ["organizations", "joinable"] as const,

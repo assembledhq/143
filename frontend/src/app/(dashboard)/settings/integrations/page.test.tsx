@@ -174,6 +174,8 @@ describe("IntegrationsPage", () => {
 
     expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
     expect(await screen.findByText("Repository access")).toBeInTheDocument();
+    expect(screen.getByText("Members of acme can now join this workspace automatically. Manage auto-join in Team settings.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Team settings" })).toHaveAttribute("href", "/settings/team");
     expect(await screen.findByText("acme/api")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Claim" })).toBeInTheDocument();
   });
