@@ -185,7 +185,7 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 			return nil, fmt.Errorf("request org members: %w", err)
 		}
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("read org members response: %w", readErr)
 		}
