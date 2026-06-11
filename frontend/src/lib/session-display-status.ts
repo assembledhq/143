@@ -1,6 +1,6 @@
 import { prMergedAccent } from "./pr-status-styles";
 import { workingSet } from "./session-status-groups";
-import type { Session, SessionStatus } from "./types";
+import type { PRCreationState, PRPushState, Session, SessionStatus } from "./types";
 
 export type SessionDisplayStatusKind = "session" | "pr_creation" | "pr_push";
 
@@ -32,7 +32,7 @@ const prActionStatus = {
   bgClass: "bg-primary/10",
 };
 
-function isInFlightState(state?: string): boolean {
+function isInFlightState(state?: PRCreationState | PRPushState): boolean {
   return state === "queued" || state === "pushing";
 }
 
