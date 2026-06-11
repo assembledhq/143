@@ -15,7 +15,14 @@ vi.mock("next/dynamic", () => ({
   },
 }));
 
-import { SessionDetailPageClient } from "./session-detail-page-client";
+const contentModule = vi.hoisted(() => ({ loaded: false }));
+
+vi.mock("./session-detail-content", () => {
+  contentModule.loaded = true;
+  return { SessionDetailContent: () => null };
+});
+
+import { preloadSessionDetailContent, SessionDetailPageClient } from "./session-detail-page-client";
 
 describe("SessionDetailPageClient", () => {
   it("renders the route skeleton while the split session detail module loads", () => {
@@ -23,5 +30,13 @@ describe("SessionDetailPageClient", () => {
 
     expect(screen.getByTestId("mock-dynamic-session-detail")).toBeInTheDocument();
     expect(screen.getByTestId("session-detail-loading-skeleton")).toBeInTheDocument();
+  });
+
+  it("loads the split session detail module when preloaded ahead of navigation", async () => {
+    expect(contentModule.loaded).toBe(false);
+
+    preloadSessionDetailContent();
+
+    await vi.waitFor(() => expect(contentModule.loaded).toBe(true));
   });
 });
