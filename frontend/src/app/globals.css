@@ -267,6 +267,11 @@
   ::selection {
     background-color: color-mix(in oklch, var(--primary) 22%, transparent);
   }
+  .chat-user-bubble::selection,
+  .chat-user-bubble ::selection {
+    background-color: color-mix(in oklch, var(--card) 88%, transparent);
+    color: var(--card-foreground);
+  }
   /* Thin, unobtrusive scrollbars on every pane (standard properties;
      Chrome 121+/Safari 18.2+, older engines fall back to OS default). */
   * {
