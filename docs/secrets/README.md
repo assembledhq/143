@@ -40,7 +40,9 @@ github.com/<your-org>/143         # this repo (public)
 github.com/<your-org>/143-infra   # private: .sops.yaml + .env*.enc
 ```
 
-All `make secrets-*` targets, the deploy scripts, and `setup.sh` resolve the bundles from `SECRETS_DIR` (default `../143-infra`, i.e. a clone of the private repo next to this one). Override with `make secrets-edit SECRETS_DIR=/path/to/checkout` if you keep it elsewhere.
+All `make secrets-*` targets, the deploy scripts, and `setup.sh` resolve the bundles from `SECRETS_DIR`. The default is a `143-infra` clone next to the **main** checkout — resolved via the shared git dir (`git rev-parse --git-common-dir`), so it works identically from linked worktrees (Claude Code, Codex, Conductor) without any per-worktree setup. Override with `make secrets-edit SECRETS_DIR=/path/to/checkout` if you keep it elsewhere.
+
+Unlike the code repo, `143-infra` never needs worktrees or branches: agent sessions only read (decrypt) from it, concurrent reads are safe, and the occasional secret edit lands on its `main`. Just remember to push it after edits — CI deploys read the GitHub copy while local make targets read your clone.
 
 Bootstrap the private repo once:
 

@@ -379,9 +379,8 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
 fi
 
 # The encrypted bundle lives in the private secrets checkout, not this
-# (public) repo. SECRETS_DIR comes from the Makefile or CI; the default
-# assumes a sibling clone of the private repo.
-SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+# (public) repo. Resolved worktree-safely; see resolve-secrets-dir.sh.
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
 ENC_FILE="$SECRETS_DIR/.env.production.enc"
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Refreshing secrets from .env.production.enc..."

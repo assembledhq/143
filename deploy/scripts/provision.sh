@@ -71,7 +71,7 @@ fi
 
 # Decrypt .env.production.enc to extract secrets locally.
 # Values set as env vars already will take precedence (eval won't overwrite).
-SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
 ENC_FILE="$SECRETS_DIR/.env.production.enc"
 if [ -f "$ENC_FILE" ]; then
   echo "Reading secrets from .env.production.enc..."

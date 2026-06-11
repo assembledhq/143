@@ -10,7 +10,7 @@ SSH_KEY="${2:-${SSH_KEY:-}}"
 EGRESS_SSH_USER="${EGRESS_SSH_USER:-${SSH_USER:-}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
 ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$SECRETS_DIR/.env.production.enc}"
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 

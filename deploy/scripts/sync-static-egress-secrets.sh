@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SECRETS_DIR="${SECRETS_DIR:-$PROJECT_DIR/../143-infra}"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
 ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$SECRETS_DIR/.env.production.enc}"
 APPLY=0
 PROVISION_WORKER_HOST="${PROVISION_WORKER_HOST:-}"
