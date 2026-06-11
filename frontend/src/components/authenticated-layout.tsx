@@ -103,7 +103,7 @@ function prefetchAuthGateRouteData(queryClient: QueryClient, pathname: string): 
   if (pathname === "/settings/agent") {
     void queryClient.prefetchQuery({
       queryKey: CODING_AUTHS_QUERY_KEY,
-      queryFn: () => api.codingAuths.list(),
+      queryFn: () => api.codingCredentials.list("org"),
     });
   }
 

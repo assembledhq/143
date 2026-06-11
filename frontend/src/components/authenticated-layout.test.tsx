@@ -641,8 +641,12 @@ describe("AuthenticatedLayout", () => {
           requests.push("settings");
           return HttpResponse.json({ data: { id: "org-1", name: "Test Org", settings: {} } });
         }),
-        http.get("/api/v1/settings/coding-auths", () => {
-          requests.push("coding-auths");
+        http.get("/api/v1/coding-credentials", ({ request }) => {
+          const url = new URL(request.url);
+          if (url.searchParams.get("scope") !== "org") {
+            return HttpResponse.json({ data: [], meta: {} }, { status: 400 });
+          }
+          requests.push("coding-credentials");
           return HttpResponse.json({ data: [], meta: {} });
         }),
       );
@@ -654,7 +658,7 @@ describe("AuthenticatedLayout", () => {
       );
 
       await waitFor(() => {
-        expect(requests).toEqual(expect.arrayContaining(["settings", "coding-auths"]));
+        expect(requests).toEqual(expect.arrayContaining(["settings", "coding-credentials"]));
       });
     });
   });
