@@ -185,7 +185,7 @@ For Go projects that use vendoring, `go.mod` infers `vendor`:
 }
 ```
 
-Add framework or package-manager caches with `cache.paths`:
+Add framework artifact caches with WorkDir-relative `cache.paths`, and add extra package-manager global caches with HomeDir-relative `cache.package_manager.paths`:
 
 ```json
 {
@@ -194,7 +194,13 @@ Add framework or package-manager caches with `cache.paths`:
       "command": ["npm", "ci"],
       "lockfiles": ["package-lock.json"],
       "clean_paths": ["node_modules"],
-      "cache": { "paths": [".next/cache", ".turbo/cache"] }
+      "cache": {
+        "paths": [".next/cache", ".turbo/cache"],
+        "package_manager": {
+          "paths": [".cache/custom-package-manager"]
+        },
+        "prewarm": { "enabled": true }
+      }
     }
   }
 }
@@ -215,7 +221,7 @@ Opt out when dependency artifacts are not safe to reuse:
 }
 ```
 
-Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. `requirements.txt` can be unsafe if dependencies are not pinned; use a lockfile or opt out. Mutable image tags such as `latest` can also leave stale dependency artifacts, so prefer immutable digests or versioned tags.
+Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. Package-manager paths are relative to the sandbox home directory; broad or sensitive paths such as `.`, `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, and `.143` are rejected. `requirements.txt` can be unsafe if dependencies are not pinned; use a lockfile or opt out. Mutable image tags such as `latest` can also leave stale dependency artifacts, so prefer immutable digests or versioned tags.
 
 If dependencies look stale, change the lockfile so the cache key changes, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
 

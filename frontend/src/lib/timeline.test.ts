@@ -14,11 +14,15 @@ function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_
 }
 
 function makeLog(overrides: Partial<SessionLog> & { id: number; created_at: string; level: string }): SessionLog {
+  const message = overrides.message ?? "log msg";
   return {
     session_id: "s1",
-    message: "log msg",
+    message,
     metadata: null,
     turn_number: 1,
+    message_bytes: overrides.message_bytes ?? message.length,
+    message_chars: overrides.message_chars ?? message.length,
+    message_truncated: overrides.message_truncated ?? false,
     ...overrides,
   };
 }

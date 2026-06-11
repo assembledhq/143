@@ -765,6 +765,10 @@ type SessionLog struct {
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	TurnNumber int             `db:"turn_number" json:"turn_number"`
+
+	MessageBytes     int  `db:"-" json:"message_bytes,omitempty"`
+	MessageChars     int  `db:"-" json:"message_chars,omitempty"`
+	MessageTruncated bool `db:"-" json:"message_truncated,omitempty"`
 }
 
 // SessionMessageSource identifies the originator of a session message.
@@ -967,6 +971,7 @@ const (
 	JobTypeStartPreview        = "start_preview"
 	JobTypeStartBranchPreview  = "start_branch_preview"
 	JobTypeSyncGitHubOrgRoster = "sync_github_org_roster"
+	JobTypePreviewCachePrewarm = "preview_cache_prewarm"
 )
 
 // Job represents an async work queue item.

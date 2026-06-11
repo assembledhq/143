@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1412,8 +1413,44 @@ func (h *SessionHandler) writeLogsForOrg(w http.ResponseWriter, r *http.Request,
 		logs = []models.SessionLog{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{
-		Data: logs,
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLogResponse]{
+		Data: models.NewSessionLogResponses(logs),
+	})
+}
+
+// GetLogDetail returns the full message for one session log. Historical log
+// list and timeline endpoints return previews, so expanded UI rows call this
+// endpoint only when full detail is needed.
+func (h *SessionHandler) GetLogDetail(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	logID, err := strconv.ParseInt(chi.URLParam(r, "log_id"), 10, 64)
+	if err != nil || logID <= 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid log ID")
+		return
+	}
+
+	if _, err := h.runStore.GetByID(r.Context(), orgID, sessionID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	log, err := h.logStore.GetByID(r.Context(), orgID, sessionID, logID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "log not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to get log", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionLogDetailResponse]{
+		Data: models.NewSessionLogDetailResponse(log),
 	})
 }
 
@@ -3076,7 +3113,9 @@ func (h *SessionHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
 		timeline = []models.SessionTimelineEntry{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineEntry]{Data: timeline})
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineResponseEntry]{
+		Data: models.NewSessionTimelineResponseEntries(timeline),
+	})
 }
 
 // EndSession handles POST /sessions/{id}/end — explicitly ends an idle session.

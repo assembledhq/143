@@ -766,6 +766,18 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 			field := fmt.Sprintf("preview.install.cache.paths[%d]", i)
 			errs = append(errs, validatePreviewDependencyCachePath(field, path, false)...)
 		}
+		if install.Cache.PackageManager != nil {
+			for i, include := range install.Cache.PackageManager.Include {
+				field := fmt.Sprintf("preview.install.cache.package_manager.include[%d]", i)
+				if !knownPreviewPackageManager(include) {
+					errs = append(errs, fmt.Sprintf("%s: unknown package manager %q", field, include))
+				}
+			}
+			for i, path := range install.Cache.PackageManager.Paths {
+				field := fmt.Sprintf("preview.install.cache.package_manager.paths[%d]", i)
+				errs = append(errs, validatePreviewPackageManagerCachePath(field, path)...)
+			}
+		}
 	}
 	if paths, enabled := ResolvePreviewInstallCachePaths(install); enabled {
 		for i, path := range paths {
@@ -785,6 +797,15 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 		errs = append(errs, fmt.Sprintf("preview.install.timeout_seconds must be between 1 and %d seconds when set", MaxInstallTimeoutSeconds))
 	}
 	return errs
+}
+
+func knownPreviewPackageManager(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "npm", "pnpm", "yarn", "bun", "pip", "uv", "poetry", "go":
+		return true
+	default:
+		return false
+	}
 }
 
 func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []string {
@@ -817,6 +838,35 @@ func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []str
 		errs = append(errs, fmt.Sprintf("%s: path %q glob paths are not allowed", field, raw))
 	}
 	return errs
+}
+
+func validatePreviewPackageManagerCachePath(field, raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{field + " is required"}
+	}
+	if strings.HasPrefix(raw, "/") {
+		return []string{fmt.Sprintf("%s: path %q must be a relative path", field, raw)}
+	}
+	if strings.Contains(raw, "*") {
+		return []string{fmt.Sprintf("%s: path %q glob paths are not allowed", field, raw)}
+	}
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+	if clean == "." {
+		return []string{fmt.Sprintf("%s: path %q is too broad to cache", field, raw)}
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return []string{fmt.Sprintf("%s: path %q escapes the sandbox home", field, raw)}
+	}
+	sensitive := []string{".ssh", ".gnupg", ".codex", ".claude", ".config/gh", ".143"}
+	for _, forbidden := range sensitive {
+		if clean == forbidden || strings.HasPrefix(clean, forbidden+"/") || strings.HasPrefix(forbidden, clean+"/") {
+			return []string{fmt.Sprintf("%s: path %q must not target sensitive sandbox home state", field, raw)}
+		}
+	}
+	if !validPreviewInstallCleanPath.MatchString(raw) {
+		return []string{fmt.Sprintf("%s: path %q contains unsupported characters", field, raw)}
+	}
+	return nil
 }
 
 func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
@@ -869,6 +919,132 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 	}
 	sort.Strings(paths)
 	return paths, len(paths) > 0
+}
+
+func ResolvePreviewInstallPackageManagerCachePaths(install *models.PreviewInstallConfig) ([]string, []string, bool) {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return nil, nil, false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return nil, nil, false
+	}
+	if install.Cache != nil && install.Cache.PackageManager != nil && install.Cache.PackageManager.Enabled != nil && !*install.Cache.PackageManager.Enabled {
+		return nil, nil, false
+	}
+	managersSeen := make(map[string]struct{})
+	pathsSeen := make(map[string]struct{})
+	var managers []string
+	var paths []string
+	addManager := func(manager string) {
+		manager = strings.ToLower(strings.TrimSpace(manager))
+		if !knownPreviewPackageManager(manager) {
+			return
+		}
+		if _, ok := managersSeen[manager]; ok {
+			return
+		}
+		managersSeen[manager] = struct{}{}
+		managers = append(managers, manager)
+		for _, p := range previewPackageManagerDefaultPaths(manager) {
+			addPath := filepath.ToSlash(filepath.Clean(strings.TrimSpace(p)))
+			if addPath == "" || addPath == "." {
+				continue
+			}
+			if _, ok := pathsSeen[addPath]; ok {
+				continue
+			}
+			pathsSeen[addPath] = struct{}{}
+			paths = append(paths, addPath)
+		}
+	}
+	for _, lockfile := range install.Lockfiles {
+		if manager, ok := inferPreviewPackageManagerFromLockfile(lockfile); ok {
+			addManager(manager)
+		}
+	}
+	for _, part := range install.Command {
+		if manager, ok := inferPreviewPackageManagerFromCommandPart(part); ok {
+			addManager(manager)
+		}
+	}
+	if install.Cache != nil && install.Cache.PackageManager != nil {
+		for _, manager := range install.Cache.PackageManager.Include {
+			addManager(manager)
+		}
+		for _, p := range install.Cache.PackageManager.Paths {
+			clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(p)))
+			if clean == "" || clean == "." {
+				continue
+			}
+			if _, ok := pathsSeen[clean]; ok {
+				continue
+			}
+			pathsSeen[clean] = struct{}{}
+			paths = append(paths, clean)
+		}
+	}
+	sort.Strings(managers)
+	sort.Strings(paths)
+	return paths, managers, len(paths) > 0
+}
+
+func inferPreviewPackageManagerFromLockfile(lockfile string) (string, bool) {
+	base := filepath.Base(filepath.ToSlash(filepath.Clean(strings.TrimSpace(lockfile))))
+	switch base {
+	case "package-lock.json", "npm-shrinkwrap.json":
+		return "npm", true
+	case "pnpm-lock.yaml":
+		return "pnpm", true
+	case "yarn.lock":
+		return "yarn", true
+	case "bun.lock", "bun.lockb":
+		return "bun", true
+	case "requirements.txt", "requirements-dev.txt", "Pipfile.lock":
+		return "pip", true
+	case "uv.lock":
+		return "uv", true
+	case "poetry.lock":
+		return "poetry", true
+	case "go.mod", "go.sum":
+		return "go", true
+	default:
+		return "", false
+	}
+}
+
+func inferPreviewPackageManagerFromCommandPart(part string) (string, bool) {
+	name := filepath.Base(strings.TrimSpace(part))
+	switch name {
+	case "npm", "pnpm", "yarn", "bun", "pip", "uv", "poetry", "go":
+		return name, true
+	case "pip3":
+		return "pip", true
+	default:
+		return "", false
+	}
+}
+
+func previewPackageManagerDefaultPaths(manager string) []string {
+	switch strings.ToLower(strings.TrimSpace(manager)) {
+	case "npm":
+		return []string{".npm"}
+	case "pnpm":
+		return []string{".local/share/pnpm/store"}
+	case "yarn":
+		return []string{".yarn/berry/cache"}
+	case "bun":
+		return []string{".bun/install/cache"}
+	case "pip":
+		return []string{".cache/pip"}
+	case "uv":
+		return []string{".cache/uv"}
+	case "poetry":
+		return []string{".cache/pypoetry"}
+	case "go":
+		return []string{"go/pkg/mod", ".cache/go-build"}
+	default:
+		return nil
+	}
 }
 
 func inferPreviewDependencyCachePath(lockfile string) (string, bool) {

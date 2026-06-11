@@ -1,7 +1,7 @@
 import { renderWithProviders, screen } from "@/test/test-utils";
 import { useQueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { Providers } from "./providers";
+import { Providers, shouldRetryQuery } from "./providers";
 
 function QueryDefaultsProbe() {
   const queryClient = useQueryClient();
@@ -49,5 +49,16 @@ describe("Providers", () => {
         refetchOnWindowFocus: false,
       }),
     );
+  });
+
+  it("does not retry deterministic client errors", () => {
+    expect(shouldRetryQuery(0, { status: 403 })).toBe(false);
+    expect(shouldRetryQuery(1, { status: 404 })).toBe(false);
+  });
+
+  it("retries transient query errors only within the app retry budget", () => {
+    expect(shouldRetryQuery(0, { status: 500 })).toBe(true);
+    expect(shouldRetryQuery(1, new Error("network reset"))).toBe(true);
+    expect(shouldRetryQuery(2, new Error("network reset"))).toBe(false);
   });
 });

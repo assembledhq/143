@@ -282,6 +282,10 @@ type Config struct {
 	PreviewDependencyCacheRetentionDays     int           `env:"PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS" envDefault:"30"`
 	PreviewDependencyCacheKeepNewestPerRepo int           `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO" envDefault:"50"`
 	PreviewDependencyCacheCleanupInterval   time.Duration `env:"PREVIEW_DEPENDENCY_CACHE_CLEANUP_INTERVAL" envDefault:"1h"`
+	PreviewPackageManagerCacheEnabled       bool          `env:"PREVIEW_PACKAGE_MANAGER_CACHE_ENABLED" envDefault:"true"`
+	PreviewCachePrewarmEnabled              bool          `env:"PREVIEW_CACHE_PREWARM_ENABLED" envDefault:"false"`
+	PreviewCachePrewarmTimeout              time.Duration `env:"PREVIEW_CACHE_PREWARM_TIMEOUT" envDefault:"15m"`
+	PreviewCachePrewarmPriority             int           `env:"PREVIEW_CACHE_PREWARM_PRIORITY" envDefault:"-50"`
 
 	// Concurrency caps for the preview subsystem. Each StartPreview checks
 	// these before hydrating a sandbox, so an overloaded worker returns a

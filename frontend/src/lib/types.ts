@@ -462,11 +462,11 @@ export interface Session {
   recovery_queued_at?: string;
   recovery_started_at?: string;
   recovery_attempt_count?: number;
-  pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_creation_state?: PRCreationState;
   pr_creation_error?: string;
-  pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_push_state?: PRPushState;
   pr_push_error?: string;
-  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_state?: BranchCreationState;
   branch_creation_error?: string;
   branch_url?: string;
   has_unpushed_changes?: boolean;
@@ -744,6 +744,15 @@ export interface SessionLog {
   metadata: Record<string, unknown> | null;
   turn_number: number;
   created_at: string;
+  message_bytes: number;
+  message_chars: number;
+  message_truncated: boolean;
+}
+
+export interface SessionLogDetail extends Omit<SessionLog, 'message_truncated'> {
+  message: string;
+  message_bytes: number;
+  message_chars: number;
 }
 
 export interface SessionTimelineEntry {
@@ -2171,15 +2180,24 @@ export interface AutomationRun {
   session?: AutomationRunSession;
 }
 
-// Mirrors models.PRCreationState. Kept as a literal union so the row UI
-// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
-// pill on completed_no_pr rows).
-export type PRCreationState =
+// Mirrors the session publish lifecycle enums in internal/models/session_enums.go.
+// Kept as a literal union so UI branches get exhaustiveness checks while only
+// accepting backend-defined enum values.
+export type SessionPublishState =
   | 'idle'
   | 'queued'
   | 'pushing'
   | 'succeeded'
   | 'failed';
+
+// Mirrors models.PRCreationState.
+export type PRCreationState = SessionPublishState;
+
+// Mirrors models.PRPushState.
+export type PRPushState = SessionPublishState;
+
+// Mirrors models.BranchCreationState.
+export type BranchCreationState = SessionPublishState;
 
 export interface AutomationRunSession {
   id: string;

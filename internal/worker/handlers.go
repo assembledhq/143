@@ -340,6 +340,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if services != nil && services.PreviewStarter != nil {
 		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(stores, services, logger))
 		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(stores, services, logger))
+		w.Register(models.JobTypePreviewCachePrewarm, newPreviewCachePrewarmHandler(services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -560,6 +561,12 @@ type Services struct {
 	// PreviewStarter completes durable preview startup jobs. nil when this
 	// node has no preview provider.
 	PreviewStarter previewStarter
+	// PreviewCachePrewarmEnabled gates opportunistic low-priority prewarm
+	// enqueues from successful session turns.
+	PreviewCachePrewarmEnabled bool
+	// PreviewCachePrewarmPriority is the job priority for opportunistic prewarm
+	// work; production defaults it below foreground preview starts.
+	PreviewCachePrewarmPriority int
 	// PreviewController handles control-plane actions for already-created
 	// previews. nil when preview control is unavailable on this process.
 	PreviewController previewController
@@ -584,6 +591,7 @@ type githubOrgRosterService interface {
 type previewStarter interface {
 	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
 	StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error
+	PrewarmPreviewCaches(ctx context.Context, payload previewsvc.PreviewCachePrewarmJobPayload) error
 }
 
 type previewController interface {
@@ -768,6 +776,45 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 			Body:      "The preview is ready.",
 			PreviewID: &input.PreviewID,
 		})
+		return nil
+	}
+}
+
+func newPreviewCachePrewarmHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.PreviewCachePrewarmJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal preview_cache_prewarm payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("preview_cache_prewarm payload missing required ids")}
+		}
+		switch input.Source {
+		case previewsvc.PreviewCachePrewarmSourceSession:
+			if input.SessionID == uuid.Nil {
+				return &FatalError{Err: fmt.Errorf("preview_cache_prewarm session payload missing session_id")}
+			}
+		case previewsvc.PreviewCachePrewarmSourceBranch:
+			if input.PreviewTargetID == uuid.Nil || input.CommitSHA == "" {
+				return &FatalError{Err: fmt.Errorf("preview_cache_prewarm branch payload missing target or commit")}
+			}
+		default:
+			return &FatalError{Err: fmt.Errorf("preview_cache_prewarm payload has invalid source %q", input.Source)}
+		}
+		logger.Info().
+			Str("repository_id", input.RepositoryID.String()).
+			Str("source", string(input.Source)).
+			Msg("processing preview_cache_prewarm job")
+		if err := services.PreviewStarter.PrewarmPreviewCaches(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCachePrewarmCapacitySkipped) || errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				logger.Info().Err(err).Msg("preview cache prewarm skipped due to capacity")
+				return nil
+			}
+			return &FatalError{Err: err}
+		}
 		return nil
 	}
 }
@@ -4688,6 +4735,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSlackFinalIfLinked(ctx, stores, logger, orgID, runID)
 		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.completed", "143 session completed", "The session finished successfully.")
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
+		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
 		return nil
 	}
 }
@@ -6082,8 +6130,82 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
+		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
+}
+
+func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
+	if stores == nil || services == nil || !services.PreviewCachePrewarmEnabled || stores.Sessions == nil || stores.Jobs == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for preview cache prewarm enqueue")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		UserID:            userID,
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Reason:            reason,
+	}
+	dedupeKey := previewsvc.PreviewCachePrewarmScopeKey(payload)
+	if dedupeKey == "" {
+		return
+	}
+	targetNodeID := models.SessionWorkerTarget(&session)
+	var jobID uuid.UUID
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to enqueue session preview cache prewarm")
+		return
+	}
+	if stores.Previews != nil {
+		var jobIDPtr *uuid.UUID
+		if jobID != uuid.Nil {
+			jobIDCopy := jobID
+			jobIDPtr = &jobIDCopy
+		}
+		_, runErr := stores.Previews.UpsertPreviewCachePrewarmRun(ctx, &models.PreviewCachePrewarmRun{
+			OrgID:             orgID,
+			RepoID:            *session.RepositoryID,
+			Source:            string(previewsvc.PreviewCachePrewarmSourceSession),
+			SourceID:          session.ID.String(),
+			CacheScopeKey:     dedupeKey,
+			JobID:             jobIDPtr,
+			WorkerNodeID:      stringPtrValue(targetNodeID),
+			Status:            "pending",
+			WorkspaceRevision: session.WorkspaceRevision,
+		})
+		if runErr != nil {
+			logger.Warn().Err(runErr).Str("session_id", session.ID.String()).Msg("failed to upsert session preview cache prewarm run")
+		}
+	}
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid.UUID {

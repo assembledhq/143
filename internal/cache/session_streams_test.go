@@ -83,6 +83,25 @@ func TestSessionStreams_ClampsLargeLogPayload(t *testing.T) {
 
 	raw := entry[0].Values[1]
 	require.LessOrEqual(t, len(raw), maxRedisLogPayloadBytes, "stored Redis payload should respect the 4KB clamp")
+
+	var payload struct {
+		Message          string `json:"message"`
+		MessageBytes     int    `json:"message_bytes"`
+		MessageChars     int    `json:"message_chars"`
+		MessageTruncated bool   `json:"message_truncated"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &payload), "stored Redis payload should decode as JSON")
+	require.True(t, payload.MessageTruncated, "Redis-clamped payload should tell SSE clients the message is a preview")
+	require.Equal(t, len([]byte(log.Message)), payload.MessageBytes, "Redis-clamped payload should preserve original byte length")
+	require.Equal(t, len([]rune(log.Message)), payload.MessageChars, "Redis-clamped payload should preserve original character length")
+	require.Less(t, len([]byte(payload.Message)), payload.MessageBytes, "Redis-clamped payload should contain a shorter preview message")
+
+	ranged, err := streams.RangeLogsSince(context.Background(), sessionID, "", 100)
+	require.NoError(t, err, "Redis range replay should decode the clamped payload")
+	require.Len(t, ranged, 1, "Redis range replay should return the clamped log")
+	require.True(t, ranged[0].Log.MessageTruncated, "decoded Redis log should keep truncation metadata for SSE")
+	require.Equal(t, payload.MessageBytes, ranged[0].Log.MessageBytes, "decoded Redis log should keep original byte length for SSE")
+	require.Equal(t, payload.MessageChars, ranged[0].Log.MessageChars, "decoded Redis log should keep original character length for SSE")
 }
 
 func TestSessionStreams_SubscribeLogsCloseRemovesClient(t *testing.T) {

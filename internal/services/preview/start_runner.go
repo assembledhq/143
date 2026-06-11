@@ -28,6 +28,7 @@ import (
 const previewNoConfigMessage = "This repo has no .143/config.json committed with a preview section. Add one (see docs/guides/previews.md) so the preview knows what command to run."
 
 var ErrSandboxBusy = errors.New("session sandbox is busy")
+var ErrPreviewCachePrewarmCapacitySkipped = errors.New("preview cache prewarm skipped because sandbox capacity is unavailable")
 
 // StartRunner completes durable preview startup jobs after the API has
 // reserved the preview row and enqueued start_preview.
@@ -45,6 +46,9 @@ type StartRunner struct {
 	snapshotCache   previewStartupCache
 	github          branchPreviewGitHub
 	nodeID          string
+	dependencyCache PreviewPathCache
+	prewarmEnabled  bool
+	prewarmTimeout  time.Duration
 	logger          zerolog.Logger
 }
 
@@ -62,6 +66,9 @@ type StartRunnerConfig struct {
 	SnapshotCache   *SnapshotCache
 	GitHub          branchPreviewGitHub
 	NodeID          string
+	DependencyCache PreviewPathCache
+	PrewarmEnabled  bool
+	PrewarmTimeout  time.Duration
 	Logger          zerolog.Logger
 }
 
@@ -90,6 +97,9 @@ func NewStartRunner(cfg StartRunnerConfig) *StartRunner {
 		snapshotCache:   snapshotCache,
 		github:          cfg.GitHub,
 		nodeID:          cfg.NodeID,
+		dependencyCache: cfg.DependencyCache,
+		prewarmEnabled:  cfg.PrewarmEnabled,
+		prewarmTimeout:  cfg.PrewarmTimeout,
 		logger:          cfg.Logger,
 	}
 }
@@ -267,6 +277,479 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	}
 	r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKey, sb, cfg)
 	return nil
+}
+
+func (r *StartRunner) PrewarmPreviewCaches(ctx context.Context, payload PreviewCachePrewarmJobPayload) error {
+	if r == nil || r.manager == nil || r.sandboxProvider == nil {
+		return fmt.Errorf("preview cache prewarm runner is not configured")
+	}
+	if !r.prewarmEnabled {
+		r.logger.Debug().Msg("preview cache prewarm skipped because runtime flag is disabled")
+		return nil
+	}
+	scopeKey := previewCachePrewarmScopeKey(payload)
+	if scopeKey == "" {
+		return fmt.Errorf("preview cache prewarm payload is missing scope identity")
+	}
+	r.createPreviewCachePrewarmRun(ctx, payload, scopeKey)
+	r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "running", "", "", "", "", false)
+	started := time.Now()
+	timeout := r.prewarmTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	sb, cfg, cleanup, err := r.preparePreviewCachePrewarmSandbox(runCtx, payload)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err != nil {
+		if errors.Is(err, ErrPreviewCachePrewarmCapacitySkipped) {
+			r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_capacity", "", "", "", err.Error(), true)
+			metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_capacity", time.Since(started))
+			return err
+		}
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "failed", "", "", "", err.Error(), true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "failed", time.Since(started))
+		return fmt.Errorf("prepare preview cache prewarm sandbox: %w", err)
+	}
+	if sb == nil || cfg == nil || cfg.Install == nil {
+		r.logger.Debug().Msg("preview cache prewarm skipped because preview install config is absent")
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_no_install", "", "", "", "", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_no_install", time.Since(started))
+		return nil
+	}
+	if !previewInstallPrewarmEnabled(cfg.Install) {
+		r.logger.Debug().Msg("preview cache prewarm skipped by repo config")
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_disabled", "", "", "", "", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_disabled", time.Since(started))
+		return nil
+	}
+	if len(cfg.Install.Lockfiles) == 0 {
+		r.logger.Debug().Msg("preview cache prewarm skipped because install lockfiles are absent")
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_no_lockfiles", "", "", "", "", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_no_lockfiles", time.Since(started))
+		return nil
+	}
+	dependencyPaths, dependencyEnabled := ResolvePreviewInstallCachePaths(cfg.Install)
+	packageManagerPaths, packageManagers, packageManagerEnabled := ResolvePreviewInstallPackageManagerCachePaths(cfg.Install)
+	if (!dependencyEnabled || len(dependencyPaths) == 0) && (!packageManagerEnabled || len(packageManagerPaths) == 0) {
+		r.logger.Debug().Msg("preview cache prewarm skipped because no effective cache paths were found")
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_no_paths", "", "", "", "", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_no_paths", time.Since(started))
+		return nil
+	}
+	opts := StartPreviewOptions{
+		OrgID:        payload.OrgID,
+		RepositoryID: payload.RepositoryID,
+		SessionID:    payload.SessionID,
+		ConfigDigest: payload.ConfigDigest,
+	}
+	if opts.ConfigDigest == "" {
+		opts.ConfigDigest = computeConfigDigest(cfg)
+	}
+	dependencyCacheKey, packageManagerCacheKey := r.previewCachePrewarmKeys(runCtx, sb, cfg, dependencyEnabled, dependencyPaths, packageManagerEnabled, packageManagerPaths, packageManagers)
+	r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "running", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "", false)
+	if warm, warmErr := r.previewCachesAlreadyWarm(runCtx, sb, cfg, opts, dependencyEnabled, dependencyPaths, packageManagerEnabled, packageManagerPaths, packageManagers); warmErr != nil {
+		r.logger.Warn().Err(warmErr).Msg("preview cache prewarm warm-check failed; continuing")
+	} else if warm {
+		r.logger.Info().
+			Str("repository_id", payload.RepositoryID.String()).
+			Str("source", string(payload.Source)).
+			Msg("preview cache prewarm skipped because caches are already warm")
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_warm", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_warm", time.Since(started))
+		return nil
+	}
+	prewarmProvider, ok := r.manager.provider.(PreviewCachePrewarmProvider)
+	if !ok || prewarmProvider == nil {
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "failed", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "preview provider does not support cache prewarm", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "failed", time.Since(started))
+		return fmt.Errorf("preview provider does not support cache prewarm")
+	}
+	if err := prewarmProvider.PrewarmPreviewInstallCaches(runCtx, sb, cfg, opts, nil); err != nil {
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "failed", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, err.Error(), true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "failed", time.Since(started))
+		return fmt.Errorf("prewarm preview install caches: %w", err)
+	}
+	r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "succeeded", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "", true)
+	metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "succeeded", time.Since(started))
+	return nil
+}
+
+func (r *StartRunner) preparePreviewCachePrewarmSandbox(ctx context.Context, payload PreviewCachePrewarmJobPayload) (*agent.Sandbox, *models.PreviewConfig, func(), error) {
+	switch payload.Source {
+	case PreviewCachePrewarmSourceBranch:
+		return r.prepareBranchPreviewCachePrewarmSandbox(ctx, payload)
+	case PreviewCachePrewarmSourceSession:
+		return r.prepareSessionPreviewCachePrewarmSandbox(ctx, payload)
+	default:
+		return nil, nil, nil, fmt.Errorf("invalid prewarm source %q", payload.Source)
+	}
+}
+
+func (r *StartRunner) prepareBranchPreviewCachePrewarmSandbox(ctx context.Context, payload PreviewCachePrewarmJobPayload) (*agent.Sandbox, *models.PreviewConfig, func(), error) {
+	if r.previews == nil || r.repositories == nil || r.github == nil {
+		return nil, nil, nil, fmt.Errorf("branch preview cache prewarm dependencies are not configured")
+	}
+	if payload.PreviewTargetID == uuid.Nil || payload.CommitSHA == "" || !gitCommitSHARe.MatchString(payload.CommitSHA) {
+		return nil, nil, nil, fmt.Errorf("branch preview cache prewarm payload is invalid")
+	}
+	target, err := r.previews.GetPreviewTarget(ctx, payload.OrgID, payload.PreviewTargetID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get preview target: %w", err)
+	}
+	if target.RepositoryID != payload.RepositoryID || target.CommitSHA != payload.CommitSHA {
+		return nil, nil, nil, fmt.Errorf("preview target payload mismatch")
+	}
+	repo, err := r.repositories.GetByID(ctx, payload.OrgID, payload.RepositoryID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get repository: %w", err)
+	}
+	if !repo.IsActive() {
+		return nil, nil, nil, fmt.Errorf("repository is disconnected")
+	}
+
+	sandboxCfg := agent.DefaultSandboxConfig()
+	sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + agent.SlugForRepo(repo.FullName)
+	sandboxCfg.SessionID = payload.PreviewTargetID.String()
+	sandboxCfg.OrgID = payload.OrgID.String()
+	sandboxCfg.Purpose = "preview_cache_prewarm"
+	if err := r.applyBranchPreviewSandboxNetwork(ctx, payload.OrgID, &sandboxCfg); err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve sandbox network: %w", err)
+	}
+	release, err := r.acquirePrewarmCapacity(ctx, sandboxCfg.Purpose, sandboxCfg.SessionID, sandboxCfg.OrgID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sb, err := r.sandboxProvider.Create(ctx, sandboxCfg)
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		return nil, nil, nil, fmt.Errorf("create sandbox: %w", err)
+	}
+	cleanup := r.previewCachePrewarmCleanup(sb, release)
+	token, err := r.github.GetInstallationToken(ctx, repo.InstallationID)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("get github token: %w", err)
+	}
+	if err := r.sandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, target.Branch, token); err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("clone repository: %w", err)
+	}
+	var checkoutErr bytes.Buffer
+	exitCode, err := r.sandboxProvider.Exec(ctx, sb, "git checkout --detach "+target.CommitSHA, io.Discard, &checkoutErr)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("checkout commit: %w", err)
+	}
+	if exitCode != 0 {
+		cleanup()
+		return nil, nil, nil, fmt.Errorf("checkout commit failed with code %d: %s", exitCode, checkoutErr.String())
+	}
+	cfg, err := r.readWorkspacePreviewConfig(ctx, sb, uuid.Nil, target.PreviewConfigName)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	if cfg != nil && target.PreviewConfigName != "" && cfg.Name == "" {
+		cfg.Name = target.PreviewConfigName
+	}
+	return sb, cfg, cleanup, nil
+}
+
+func (r *StartRunner) prepareSessionPreviewCachePrewarmSandbox(ctx context.Context, payload PreviewCachePrewarmJobPayload) (*agent.Sandbox, *models.PreviewConfig, func(), error) {
+	if r.sessions == nil || r.snapshots == nil {
+		return nil, nil, nil, fmt.Errorf("session preview cache prewarm dependencies are not configured")
+	}
+	if payload.SessionID == uuid.Nil {
+		return nil, nil, nil, fmt.Errorf("session preview cache prewarm payload is invalid")
+	}
+	session, err := r.sessions.GetByID(ctx, payload.OrgID, payload.SessionID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get session: %w", err)
+	}
+	if session.RepositoryID == nil || *session.RepositoryID != payload.RepositoryID {
+		return nil, nil, nil, fmt.Errorf("session repository mismatch")
+	}
+	if sb, cleanup, ok, liveErr := r.prepareLiveSessionPreviewCachePrewarmSandbox(ctx, payload, &session); liveErr != nil {
+		return nil, nil, nil, liveErr
+	} else if ok {
+		cfg, err := r.readWorkspacePreviewConfig(ctx, sb, payload.SessionID, payload.PreviewConfigName)
+		if err != nil {
+			cleanup()
+			return nil, nil, nil, err
+		}
+		return sb, cfg, cleanup, nil
+	}
+	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+		r.logger.Debug().Str("session_id", payload.SessionID.String()).Msg("preview cache prewarm skipped because session snapshot is unavailable")
+		return nil, nil, nil, nil
+	}
+	sandboxCfg := agent.DefaultSandboxConfig()
+	sandboxCfg.WorkDir = r.resolveSandboxWorkDir(ctx, &session)
+	sandboxCfg.SessionID = payload.SessionID.String()
+	sandboxCfg.OrgID = payload.OrgID.String()
+	sandboxCfg.Purpose = "preview_cache_prewarm"
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, payload.OrgID, r.staticEgress, &sandboxCfg); err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve sandbox network: %w", err)
+	}
+	release, err := r.acquirePrewarmCapacity(ctx, sandboxCfg.Purpose, sandboxCfg.SessionID, sandboxCfg.OrgID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sb, err := agent.HydrateSandboxFromSnapshot(ctx, r.sandboxProvider, r.snapshots, *session.SnapshotKey, sandboxCfg)
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		if errors.Is(err, agent.ErrSnapshotMissing) {
+			r.logger.Debug().Str("session_id", payload.SessionID.String()).Msg("preview cache prewarm skipped because session snapshot blob is missing")
+			return nil, nil, nil, nil
+		}
+		return nil, nil, nil, fmt.Errorf("hydrate sandbox: %w", err)
+	}
+	cleanup := r.previewCachePrewarmCleanup(sb, release)
+	cfg, err := r.readWorkspacePreviewConfig(ctx, sb, payload.SessionID, payload.PreviewConfigName)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, err
+	}
+	return sb, cfg, cleanup, nil
+}
+
+func (r *StartRunner) prepareLiveSessionPreviewCachePrewarmSandbox(ctx context.Context, payload PreviewCachePrewarmJobPayload, session *models.Session) (*agent.Sandbox, func(), bool, error) {
+	if r == nil || r.sandboxProvider == nil || session == nil || session.ContainerID == nil || *session.ContainerID == "" {
+		return nil, nil, false, nil
+	}
+	if r.nodeID == "" || session.WorkerNodeID == nil || *session.WorkerNodeID != r.nodeID || session.SandboxState != models.SandboxStateRunning {
+		return nil, nil, false, nil
+	}
+	source := &agent.Sandbox{
+		ID:        *session.ContainerID,
+		WorkDir:   r.resolveSandboxWorkDir(ctx, session),
+		HomeDir:   agent.DefaultSandboxConfig().HomeDir,
+		SessionID: session.ID.String(),
+		OrgID:     session.OrgID.String(),
+		Purpose:   "preview_cache_prewarm_source",
+	}
+	alive, err := r.sandboxProvider.IsAlive(ctx, source)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("inspect live session sandbox: %w", err)
+	}
+	if !alive {
+		return nil, nil, false, nil
+	}
+	sandboxCfg := agent.DefaultSandboxConfig()
+	sandboxCfg.WorkDir = source.WorkDir
+	sandboxCfg.SessionID = payload.SessionID.String()
+	sandboxCfg.OrgID = payload.OrgID.String()
+	sandboxCfg.Purpose = "preview_cache_prewarm"
+	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, r.orgs, payload.OrgID, r.staticEgress, &sandboxCfg); err != nil {
+		return nil, nil, false, fmt.Errorf("resolve sandbox network: %w", err)
+	}
+	release, err := r.acquirePrewarmCapacity(ctx, sandboxCfg.Purpose, sandboxCfg.SessionID, sandboxCfg.OrgID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	sb, err := r.sandboxProvider.Create(ctx, sandboxCfg)
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		return nil, nil, false, fmt.Errorf("create sandbox: %w", err)
+	}
+	cleanup := r.previewCachePrewarmCleanup(sb, release)
+	reader, err := r.sandboxProvider.Snapshot(ctx, source)
+	if err != nil {
+		cleanup()
+		return nil, nil, false, fmt.Errorf("snapshot live session sandbox: %w", err)
+	}
+	defer func() {
+		if closeErr := reader.Close(); closeErr != nil {
+			r.logger.Warn().Err(closeErr).Str("session_id", session.ID.String()).Msg("failed to close live session prewarm snapshot")
+		}
+	}()
+	if err := r.sandboxProvider.Restore(ctx, sb, reader); err != nil {
+		cleanup()
+		return nil, nil, false, fmt.Errorf("restore live session sandbox: %w", err)
+	}
+	return sb, cleanup, true, nil
+}
+
+func (r *StartRunner) acquirePrewarmCapacity(ctx context.Context, purpose, sessionID, orgID string) (func(), error) {
+	if r.sandboxCapacity == nil {
+		return nil, nil
+	}
+	reservation, err := r.sandboxCapacity.Acquire(ctx, agent.SandboxCapacityRequest{
+		Purpose: purpose, SessionID: sessionID, OrgID: orgID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrPreviewCachePrewarmCapacitySkipped, err)
+	}
+	return reservation.Release, nil
+}
+
+func (r *StartRunner) previewCachePrewarmCleanup(sb *agent.Sandbox, release func()) func() {
+	return func() {
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+		if r == nil || r.sandboxProvider == nil || sb == nil {
+			return
+		}
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := r.sandboxProvider.Destroy(destroyCtx, sb); err != nil {
+			r.logger.Warn().Err(err).Str("sandbox_id", sb.ID).Msg("failed to destroy preview cache prewarm sandbox")
+		}
+	}
+}
+
+func (r *StartRunner) previewCachesAlreadyWarm(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, dependencyEnabled bool, dependencyPaths []string, packageManagerEnabled bool, packageManagerPaths, packageManagers []string) (bool, error) {
+	if r.dependencyCache == nil || cfg == nil || cfg.Install == nil {
+		return false, nil
+	}
+	dependencyWarm := !dependencyEnabled || len(dependencyPaths) == 0
+	if !dependencyWarm {
+		cacheKey, _, err := ComputePreviewDependencyCacheKey(ctx, r.sandboxProvider, sb, cfg.Install, dependencyPaths)
+		if err != nil {
+			return false, err
+		}
+		hit, err := r.dependencyCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindInstallArtifact, cacheKey)
+		if err != nil {
+			return false, err
+		}
+		dependencyWarm = hit != nil
+	}
+	packageManagerWarm := !packageManagerEnabled || len(packageManagerPaths) == 0
+	if !packageManagerWarm {
+		cacheKey, _, err := ComputePreviewPackageManagerCacheKey(ctx, r.sandboxProvider, sb, cfg.Install, packageManagerPaths, packageManagers)
+		if err != nil {
+			return false, err
+		}
+		hit, err := r.dependencyCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindPackageManager, cacheKey)
+		if err != nil {
+			return false, err
+		}
+		packageManagerWarm = hit != nil
+	}
+	return dependencyWarm && packageManagerWarm, nil
+}
+
+func previewInstallPrewarmEnabled(install *models.PreviewInstallConfig) bool {
+	if install == nil || install.Cache == nil {
+		return true
+	}
+	if install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return false
+	}
+	if install.Cache.Prewarm == nil || install.Cache.Prewarm.Enabled == nil {
+		return true
+	}
+	return *install.Cache.Prewarm.Enabled
+}
+
+func (r *StartRunner) previewCachePrewarmKeys(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, dependencyEnabled bool, dependencyPaths []string, packageManagerEnabled bool, packageManagerPaths, packageManagers []string) (string, string) {
+	if cfg == nil || cfg.Install == nil {
+		return "", ""
+	}
+	var dependencyKey string
+	if dependencyEnabled && len(dependencyPaths) > 0 {
+		if key, _, err := ComputePreviewDependencyCacheKey(ctx, r.sandboxProvider, sb, cfg.Install, dependencyPaths); err == nil {
+			dependencyKey = key
+		}
+	}
+	var packageManagerKey string
+	if packageManagerEnabled && len(packageManagerPaths) > 0 {
+		if key, _, err := ComputePreviewPackageManagerCacheKey(ctx, r.sandboxProvider, sb, cfg.Install, packageManagerPaths, packageManagers); err == nil {
+			packageManagerKey = key
+		}
+	}
+	return dependencyKey, packageManagerKey
+}
+
+func (r *StartRunner) createPreviewCachePrewarmRun(ctx context.Context, payload PreviewCachePrewarmJobPayload, scopeKey string) {
+	if r == nil || r.previews == nil {
+		return
+	}
+	run := &models.PreviewCachePrewarmRun{
+		OrgID:             payload.OrgID,
+		RepoID:            payload.RepositoryID,
+		Source:            string(payload.Source),
+		SourceID:          previewCachePrewarmSourceID(payload),
+		CacheScopeKey:     scopeKey,
+		WorkerNodeID:      r.nodeID,
+		Status:            "pending",
+		JobID:             nonNilJobID(payload.JobID),
+		ConfigDigest:      payload.ConfigDigest,
+		CommitSHA:         payload.CommitSHA,
+		WorkspaceRevision: payload.WorkspaceRevision,
+	}
+	if _, err := r.previews.UpsertPreviewCachePrewarmRun(ctx, run); err != nil {
+		r.logger.Warn().Err(err).Str("cache_scope_key", scopeKey).Msg("failed to upsert preview cache prewarm run")
+	}
+}
+
+func (r *StartRunner) updatePreviewCachePrewarmRun(ctx context.Context, payload PreviewCachePrewarmJobPayload, scopeKey, status, packageManagerCacheKey, dependencyCacheKey, configDigest, errMsg string, completed bool) {
+	if r == nil || r.previews == nil {
+		return
+	}
+	if err := r.previews.UpdatePreviewCachePrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, scopeKey, status, packageManagerCacheKey, dependencyCacheKey, configDigest, errMsg, completed); err != nil {
+		r.logger.Warn().Err(err).Str("cache_scope_key", scopeKey).Str("status", status).Msg("failed to update preview cache prewarm run")
+	}
+}
+
+func nonNilJobID(jobID uuid.UUID) *uuid.UUID {
+	if jobID == uuid.Nil {
+		return nil
+	}
+	return &jobID
+}
+
+func PreviewCachePrewarmScopeKey(payload PreviewCachePrewarmJobPayload) string {
+	return previewCachePrewarmScopeKey(payload)
+}
+
+func PreviewCachePrewarmSourceID(payload PreviewCachePrewarmJobPayload) string {
+	return previewCachePrewarmSourceID(payload)
+}
+
+func previewCachePrewarmScopeKey(payload PreviewCachePrewarmJobPayload) string {
+	switch payload.Source {
+	case PreviewCachePrewarmSourceSession:
+		if payload.SessionID == uuid.Nil {
+			return ""
+		}
+		if payload.ConfigDigest != "" {
+			return fmt.Sprintf("preview_cache_prewarm:session:%s:%d:%s", payload.SessionID, payload.WorkspaceRevision, payload.ConfigDigest)
+		}
+		return fmt.Sprintf("preview_cache_prewarm:session:%s:%d", payload.SessionID, payload.WorkspaceRevision)
+	case PreviewCachePrewarmSourceBranch:
+		if payload.PreviewTargetID == uuid.Nil || payload.CommitSHA == "" {
+			return ""
+		}
+		return fmt.Sprintf("preview_cache_prewarm:branch:%s:%s:%s", payload.PreviewTargetID, payload.CommitSHA, payload.PreviewConfigName)
+	default:
+		return ""
+	}
+}
+
+func previewCachePrewarmSourceID(payload PreviewCachePrewarmJobPayload) string {
+	switch payload.Source {
+	case PreviewCachePrewarmSourceSession:
+		return payload.SessionID.String()
+	case PreviewCachePrewarmSourceBranch:
+		return payload.PreviewTargetID.String()
+	default:
+		return ""
+	}
 }
 
 // StartReservedPreview completes one reserved preview. It marks the preview

@@ -3987,11 +3987,13 @@ func TestRegisterHandlers_LegacyEvalJobsRemainRegisteredDuringRollout(t *testing
 }
 
 type mockPreviewStarter struct {
-	called        bool
-	payload       previewsvc.StartPreviewJobPayload
-	branchCalled  bool
-	branchPayload previewsvc.StartBranchPreviewJobPayload
-	err           error
+	called         bool
+	payload        previewsvc.StartPreviewJobPayload
+	branchCalled   bool
+	branchPayload  previewsvc.StartBranchPreviewJobPayload
+	prewarmCalled  bool
+	prewarmPayload previewsvc.PreviewCachePrewarmJobPayload
+	err            error
 }
 
 func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error {
@@ -4003,6 +4005,12 @@ func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload p
 func (m *mockPreviewStarter) StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error {
 	m.branchCalled = true
 	m.branchPayload = payload
+	return m.err
+}
+
+func (m *mockPreviewStarter) PrewarmPreviewCaches(ctx context.Context, payload previewsvc.PreviewCachePrewarmJobPayload) error {
+	m.prewarmCalled = true
+	m.prewarmPayload = payload
 	return m.err
 }
 
@@ -4022,6 +4030,8 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	require.True(t, ok, "start_preview handler should be registered when preview starter is available")
 	_, ok = w.handlers[models.JobTypeStartBranchPreview]
 	require.True(t, ok, "start_branch_preview handler should be registered when preview starter is available")
+	_, ok = w.handlers[models.JobTypePreviewCachePrewarm]
+	require.True(t, ok, "preview cache prewarm handler should be registered when preview starter is available")
 
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -4040,6 +4050,115 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	require.NoError(t, err, "start_preview handler should delegate successfully")
 	require.True(t, starter.called, "start_preview handler should call the preview starter")
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestPreviewCachePrewarmHandler_DelegatesToPreviewStarter(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{}
+	handler := newPreviewCachePrewarmHandler(&Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:           uuid.New(),
+		RepositoryID:    uuid.New(),
+		UserID:          uuid.New(),
+		Source:          previewsvc.PreviewCachePrewarmSourceBranch,
+		PreviewTargetID: uuid.New(),
+		Branch:          "main",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "preview cache prewarm payload should marshal")
+
+	err = handler(context.Background(), models.JobTypePreviewCachePrewarm, raw)
+
+	require.NoError(t, err, "preview cache prewarm handler should delegate successfully")
+	require.True(t, starter.prewarmCalled, "preview cache prewarm handler should call the preview starter")
+	require.Equal(t, payload, starter.prewarmPayload, "preview cache prewarm handler should pass the decoded payload")
+}
+
+func TestPreviewCachePrewarmHandler_CapacitySkipIsNotFatal(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: previewsvc.ErrPreviewCachePrewarmCapacitySkipped}
+	handler := newPreviewCachePrewarmHandler(&Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             uuid.New(),
+		RepositoryID:      uuid.New(),
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         uuid.New(),
+		WorkspaceRevision: 3,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "preview cache prewarm payload should marshal")
+
+	err = handler(context.Background(), models.JobTypePreviewCachePrewarm, raw)
+
+	require.NoError(t, err, "capacity skips should complete the prewarm job without dead-lettering")
+	require.True(t, starter.prewarmCalled, "preview cache prewarm handler should still delegate capacity-skipped payloads")
+}
+
+func TestPreviewCachePrewarmHandler_InvalidPayloadIsFatal(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{}
+	handler := newPreviewCachePrewarmHandler(&Services{PreviewStarter: starter}, logger)
+
+	err := handler(context.Background(), models.JobTypePreviewCachePrewarm, json.RawMessage(`{"source":"branch"}`))
+
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "preview cache prewarm handler should return fatal error for invalid payload")
+	require.False(t, starter.prewarmCalled, "preview cache prewarm handler should not call starter for invalid payload")
+}
+
+func TestEnqueueSessionPreviewCachePrewarm_TargetsLiveSessionWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
+	containerID := "session-container"
+	workerNodeID := "worker-a"
+	row := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(row, "repository_id", &repoID)
+	setWorkerSessionColumn(row, "triggered_by_user_id", &userID)
+	setWorkerSessionColumn(row, "workspace_revision", int64(7))
+	setWorkerSessionColumn(row, "container_id", &containerID)
+	setWorkerSessionColumn(row, "worker_node_id", &workerNodeID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "preview", models.JobTypePreviewCachePrewarm, pgxmock.AnyArg(), -50, pgxmock.AnyArg(), &workerNodeID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	enqueueSessionPreviewCachePrewarm(context.Background(), stores, &Services{
+		PreviewCachePrewarmEnabled:  true,
+		PreviewCachePrewarmPriority: -50,
+	}, zerolog.Nop(), orgID, sessionID, "turn_complete")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "session prewarm enqueue should target the live session worker")
+}
+
+func setWorkerSessionColumn(row []any, name string, value any) {
+	for i, column := range workerSessionColumns {
+		if column == name {
+			row[i] = value
+			return
+		}
+	}
 }
 
 func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {

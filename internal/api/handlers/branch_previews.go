@@ -15,6 +15,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -48,6 +49,8 @@ type BranchPreviewHandler struct {
 	stopper               *preview.WorkerStopper
 	orgStore              agent.OrgSettingsReader
 	staticEgressPublicIP  string
+	prewarmEnabled        bool
+	prewarmPriority       int
 	baseURL               string
 	previewOriginTemplate string
 	// configContentCache caches raw .143/config.json content keyed by
@@ -74,6 +77,11 @@ func NewBranchPreviewHandler(previews *db.PreviewStore, repos *db.RepositoryStor
 func (h *BranchPreviewHandler) SetWorkerRuntime(jobs *db.JobStore, selector *preview.WorkerSelector) {
 	h.jobs = jobs
 	h.selector = selector
+}
+
+func (h *BranchPreviewHandler) SetPreviewCachePrewarm(enabled bool, priority int) {
+	h.prewarmEnabled = enabled
+	h.prewarmPriority = priority
 }
 
 func (h *BranchPreviewHandler) SetStaticEgressSettings(orgStore agent.OrgSettingsReader, publicIP string) {
@@ -364,6 +372,7 @@ func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 		_ = h.previews.UpsertPreviewIdempotencyKey(r.Context(), orgID, pendingIdemKey, target.ID)
 	}
 	metrics.RecordBranchPreviewCreate(r.Context(), orgID.String(), string(sourceType), repo.FullName)
+	h.enqueueBranchPreviewCachePrewarm(context.WithoutCancel(r.Context()), orgID, userID, target, "target_created")
 
 	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, target, req.TTLSeconds, restart, parsedConfig)
 	if startErr != nil {
@@ -1387,7 +1396,63 @@ func (h *BranchPreviewHandler) resolveLatestTarget(ctx context.Context, orgID, u
 	if err := h.previews.CreatePreviewTarget(ctx, latest); err != nil {
 		return nil, err
 	}
+	h.enqueueBranchPreviewCachePrewarm(context.WithoutCancel(ctx), orgID, userID, latest, "target_commit_updated")
 	return latest, nil
+}
+
+func (h *BranchPreviewHandler) enqueueBranchPreviewCachePrewarm(ctx context.Context, orgID, userID uuid.UUID, target *models.PreviewTarget, reason string) {
+	if h == nil || !h.prewarmEnabled || h.jobs == nil || target == nil || target.RepositoryID == uuid.Nil || target.CommitSHA == "" {
+		return
+	}
+	payload := preview.PreviewCachePrewarmJobPayload{
+		OrgID:             orgID,
+		RepositoryID:      target.RepositoryID,
+		UserID:            userID,
+		Source:            preview.PreviewCachePrewarmSourceBranch,
+		PreviewTargetID:   target.ID,
+		Branch:            target.Branch,
+		CommitSHA:         target.CommitSHA,
+		PreviewConfigName: target.PreviewConfigName,
+		Reason:            reason,
+	}
+	dedupeKey := preview.PreviewCachePrewarmScopeKey(payload)
+	jobID, err := h.jobs.Enqueue(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, h.prewarmPriority, &dedupeKey)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("preview_target_id", target.ID.String()).Msg("failed to enqueue preview cache prewarm job")
+		return
+	}
+	payload.JobID = jobID
+	h.upsertPreviewCachePrewarmRun(ctx, payload, "")
+}
+
+func (h *BranchPreviewHandler) upsertPreviewCachePrewarmRun(ctx context.Context, payload preview.PreviewCachePrewarmJobPayload, workerNodeID string) {
+	if h == nil || h.previews == nil {
+		return
+	}
+	scopeKey := preview.PreviewCachePrewarmScopeKey(payload)
+	if scopeKey == "" {
+		return
+	}
+	var jobID *uuid.UUID
+	if payload.JobID != uuid.Nil {
+		jobID = &payload.JobID
+	}
+	_, err := h.previews.UpsertPreviewCachePrewarmRun(ctx, &models.PreviewCachePrewarmRun{
+		OrgID:             payload.OrgID,
+		RepoID:            payload.RepositoryID,
+		Source:            string(payload.Source),
+		SourceID:          preview.PreviewCachePrewarmSourceID(payload),
+		CacheScopeKey:     scopeKey,
+		JobID:             jobID,
+		WorkerNodeID:      workerNodeID,
+		Status:            "pending",
+		ConfigDigest:      payload.ConfigDigest,
+		CommitSHA:         payload.CommitSHA,
+		WorkspaceRevision: payload.WorkspaceRevision,
+	})
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("cache_scope_key", scopeKey).Msg("failed to upsert preview cache prewarm run")
+	}
 }
 
 func (h *BranchPreviewHandler) responseForPreview(slug string, target *models.PreviewTarget, instance *models.PreviewInstance) branchPreviewResponse {

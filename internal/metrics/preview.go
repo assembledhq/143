@@ -29,6 +29,12 @@ type PreviewMetrics struct {
 	DependencyCacheSaves           otelmetric.Int64Counter
 	DependencyCacheRestoreDuration otelmetric.Float64Histogram
 	DependencyCacheSaveDuration    otelmetric.Float64Histogram
+	PackageManagerCacheRestores    otelmetric.Int64Counter
+	PackageManagerCacheSaves       otelmetric.Int64Counter
+	PackageManagerRestoreDuration  otelmetric.Float64Histogram
+	PackageManagerSaveDuration     otelmetric.Float64Histogram
+	PrewarmRuns                    otelmetric.Int64Counter
+	PrewarmRunDuration             otelmetric.Float64Histogram
 	SchedulerDecisions             otelmetric.Int64Counter
 }
 
@@ -48,6 +54,12 @@ func getPreviewMetrics() *PreviewMetrics {
 		depSaves, _ := meter.Int64Counter("preview.session.dependency_cache.saves", otelmetric.WithUnit("{save}"))
 		depRestoreDuration, _ := meter.Float64Histogram("preview.session.dependency_cache.restore_duration", otelmetric.WithUnit("s"))
 		depSaveDuration, _ := meter.Float64Histogram("preview.session.dependency_cache.save_duration", otelmetric.WithUnit("s"))
+		pmRestores, _ := meter.Int64Counter("preview.session.package_manager_cache.restores", otelmetric.WithUnit("{restore}"))
+		pmSaves, _ := meter.Int64Counter("preview.session.package_manager_cache.saves", otelmetric.WithUnit("{save}"))
+		pmRestoreDuration, _ := meter.Float64Histogram("preview.session.package_manager_cache.restore_duration", otelmetric.WithUnit("s"))
+		pmSaveDuration, _ := meter.Float64Histogram("preview.session.package_manager_cache.save_duration", otelmetric.WithUnit("s"))
+		prewarmRuns, _ := meter.Int64Counter("preview.cache_prewarm.runs", otelmetric.WithUnit("{run}"))
+		prewarmRunDuration, _ := meter.Float64Histogram("preview.cache_prewarm.run_duration", otelmetric.WithUnit("s"))
 		schedulerDecisions, _ := meter.Int64Counter("preview.session.dependency_cache.scheduler_decisions", otelmetric.WithUnit("{decision}"))
 		previewMetrics = &PreviewMetrics{
 			CreatesTotal:                   creates,
@@ -63,6 +75,12 @@ func getPreviewMetrics() *PreviewMetrics {
 			DependencyCacheSaves:           depSaves,
 			DependencyCacheRestoreDuration: depRestoreDuration,
 			DependencyCacheSaveDuration:    depSaveDuration,
+			PackageManagerCacheRestores:    pmRestores,
+			PackageManagerCacheSaves:       pmSaves,
+			PackageManagerRestoreDuration:  pmRestoreDuration,
+			PackageManagerSaveDuration:     pmSaveDuration,
+			PrewarmRuns:                    prewarmRuns,
+			PrewarmRunDuration:             prewarmRunDuration,
 			SchedulerDecisions:             schedulerDecisions,
 		}
 	})
@@ -199,6 +217,46 @@ func RecordSessionDependencyCacheSave(ctx context.Context, orgID, result string,
 	m.DependencyCacheSaves.Add(ctx, 1, attrs)
 	if m.DependencyCacheSaveDuration != nil && duration > 0 {
 		m.DependencyCacheSaveDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordSessionPackageManagerCacheRestore(ctx context.Context, orgID, result string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.PackageManagerCacheRestores == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(attribute.String("org.id", orgID), attribute.String("result", result))
+	m.PackageManagerCacheRestores.Add(ctx, 1, attrs)
+	if m.PackageManagerRestoreDuration != nil && duration > 0 {
+		m.PackageManagerRestoreDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordSessionPackageManagerCacheSave(ctx context.Context, orgID, result string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.PackageManagerCacheSaves == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(attribute.String("org.id", orgID), attribute.String("result", result))
+	m.PackageManagerCacheSaves.Add(ctx, 1, attrs)
+	if m.PackageManagerSaveDuration != nil && duration > 0 {
+		m.PackageManagerSaveDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordPreviewCachePrewarmRun(ctx context.Context, orgID, source, status string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.PrewarmRuns == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("preview.source", source),
+		attribute.String("status", status),
+	)
+	m.PrewarmRuns.Add(ctx, 1, attrs)
+	if m.PrewarmRunDuration != nil && duration > 0 {
+		m.PrewarmRunDuration.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
