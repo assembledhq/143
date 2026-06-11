@@ -70,7 +70,7 @@ var previewRuntimeTestCols = []string{
 }
 
 var previewStartupCacheTestCols = []string{
-	"id", "org_id", "repo_id", "snapshot_key", "blob_path",
+	"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
 	"size_bytes", "worker_node_id", "last_used_at", "created_at",
 }
 
@@ -1777,16 +1777,19 @@ func TestPreviewStore_UpsertStartupCache(t *testing.T) {
 		OrgID:        orgID,
 		RepoID:       repoID,
 		SnapshotKey:  "lockfile:abc+commit:def+config:ghi",
+		BaseKey:      "lockfile:abc+config:ghi",
+		CommitSHA:    "def",
 		BlobPath:     "/cache/snap.tar.zst",
 		SizeBytes:    1024 * 1024,
 		WorkerNodeID: "worker-1",
 	}
 
 	mock.ExpectQuery("INSERT INTO preview_startup_cache").
-		WithArgs(previewAnyArgs(6)...).
+		WithArgs(previewAnyArgs(8)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewStartupCacheTestCols).
 				AddRow(generatedID, orgID, repoID, "lockfile:abc+commit:def+config:ghi",
+					"lockfile:abc+config:ghi", "def",
 					"/cache/snap.tar.zst", int64(1024*1024), "worker-1", now, now),
 		)
 
@@ -1818,10 +1821,10 @@ func TestPreviewStore_UpsertStartupCache_PreservesWorkerScopedConflictTarget(t *
 	}
 
 	mock.ExpectQuery(`INSERT INTO preview_startup_cache(.|\n)+ON CONFLICT \(org_id, repo_id, snapshot_key, worker_node_id\)`).
-		WithArgs(previewAnyArgs(6)...).
+		WithArgs(previewAnyArgs(8)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewStartupCacheTestCols).
-				AddRow(uuid.New(), orgID, repoID, "key", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
+				AddRow(uuid.New(), orgID, repoID, "key", "", "", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
 		)
 
 	err = store.UpsertStartupCache(context.Background(), entry)
@@ -1845,7 +1848,7 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 					WithArgs(previewAnyArgs(4)...).
 					WillReturnRows(
 						pgxmock.NewRows(previewStartupCacheTestCols).
-							AddRow(uuid.New(), uuid.New(), uuid.New(), "key",
+							AddRow(uuid.New(), uuid.New(), uuid.New(), "key", "", "",
 								"/cache/snap.tar.zst", int64(1024), "w1", now, now),
 					)
 			},
@@ -1879,6 +1882,62 @@ func TestPreviewStore_FindMatchingCache(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, entry)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestPreviewStore_FindLatestCacheByBaseKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr bool
+	}{
+		{
+			name: "returns newest base-compatible entry",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				now := time.Now()
+				mock.ExpectQuery(`SELECT .+ FROM preview_startup_cache(.|\n)+base_key = @base_key(.|\n)+commit_sha <> @exclude_commit(.|\n)+ORDER BY created_at DESC`).
+					WithArgs(previewAnyArgs(5)...).
+					WillReturnRows(
+						pgxmock.NewRows(previewStartupCacheTestCols).
+							AddRow(uuid.New(), uuid.New(), uuid.New(), "key", "base-key", "def5678",
+								"/cache/snap.tar.zst", int64(1024), "w1", now, now),
+					)
+			},
+		},
+		{
+			name: "returns error on base miss",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(`SELECT .+ FROM preview_startup_cache(.|\n)+base_key = @base_key`).
+					WithArgs(previewAnyArgs(5)...).
+					WillReturnRows(pgxmock.NewRows(previewStartupCacheTestCols))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := NewPreviewStore(mock)
+			tt.setupMock(mock)
+
+			entry, err := store.FindLatestCacheByBaseKey(context.Background(), uuid.New(), uuid.New(), "base-key", "w1", "abc1234")
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, entry)
+			require.Equal(t, "def5678", entry.CommitSHA, "base lookup should surface the entry's commit for diff computation")
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

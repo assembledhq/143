@@ -108,8 +108,18 @@ var gitCommitSHARe = regexp.MustCompile(`\A[0-9a-fA-F]{7,40}\z`)
 
 type previewStartupCache interface {
 	FindSnapshot(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string) (*CacheHit, error)
+	FindBaseSnapshot(ctx context.Context, orgID, repoID uuid.UUID, baseKey, excludeCommitSHA string) (*CacheHit, error)
 	RestoreSnapshot(ctx context.Context, sb *agent.Sandbox, hit *CacheHit) error
+	ApplyPartialInvalidation(ctx context.Context, sb *agent.Sandbox, hit *CacheHit, gitDiff []byte) error
 	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error
+}
+
+// branchPreviewStartupCacheKeys carries the cache keys computed for one branch
+// preview start. The zero value means caching is disabled for this start.
+type branchPreviewStartupCacheKeys struct {
+	SnapshotKey string
+	BaseKey     string
+	CommitSHA   string
 }
 
 // StartReservedBranchPreview completes a target-owned branch preview by
@@ -265,7 +275,15 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		MetricsSource:             string(target.SourceType),
 		MetricsRepositoryFullName: repo.FullName,
 	}
-	startupCacheKey := r.maybeRestoreBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, target.CommitSHA, sb, cfg)
+	startupCacheKeys, cacheErr := r.maybeRestoreBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, target.CommitSHA, sb, cfg)
+	if cacheErr != nil {
+		// Only unrecoverable workspace states reach here (a failed partial
+		// restore that could not be re-checked-out from git). Launching from
+		// an inconsistent tree would serve wrong code — fail the start.
+		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "startup_cache_recovery")
+		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("restore startup cache: %v", cacheErr))
+		return fmt.Errorf("restore startup cache: %w", cacheErr)
+	}
 	metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, 1)
 	defer metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, -1)
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
@@ -275,7 +293,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
-	r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKey, sb, cfg)
+	r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKeys, sb, cfg)
 	return nil
 }
 
@@ -1191,9 +1209,9 @@ func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.
 	return cfg, nil
 }
 
-func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, commitSHA string, sb *agent.Sandbox, cfg *models.PreviewConfig) string {
+func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, commitSHA string, sb *agent.Sandbox, cfg *models.PreviewConfig) (branchPreviewStartupCacheKeys, error) {
 	if r == nil || r.snapshotCache == nil || r.sandboxProvider == nil || sb == nil || cfg == nil || commitSHA == "" {
-		return ""
+		return branchPreviewStartupCacheKeys{}, nil
 	}
 	if previewConfigHasRuntimeSecretFiles(cfg) {
 		// Runtime secret files are written into the shared workspace during
@@ -1203,47 +1221,143 @@ func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context,
 		r.logger.Debug().
 			Str("repository_id", repoID.String()).
 			Msg("branch preview startup cache skipped because config delivers preview secrets as files")
-		return ""
+		return branchPreviewStartupCacheKeys{}, nil
 	}
-	snapshotKey, err := r.computeBranchPreviewStartupCacheKey(ctx, sb, cfg, commitSHA)
+	keys, err := r.computeBranchPreviewStartupCacheKeys(ctx, sb, cfg, commitSHA)
 	if err != nil {
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
 			Str("commit_sha", commitSHA).
 			Msg("branch preview startup cache key unavailable; launching cold")
-		return ""
+		return branchPreviewStartupCacheKeys{}, nil
 	}
-	hit, err := r.snapshotCache.FindSnapshot(ctx, orgID, repoID, snapshotKey)
+	hit, err := r.snapshotCache.FindSnapshot(ctx, orgID, repoID, keys.SnapshotKey)
 	if err != nil {
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
-			Str("snapshot_key", snapshotKey).
+			Str("snapshot_key", keys.SnapshotKey).
 			Msg("branch preview startup cache lookup failed; launching cold")
-		return snapshotKey
+		return keys, nil
 	}
 	if hit == nil {
 		r.logger.Debug().
 			Str("repository_id", repoID.String()).
-			Str("snapshot_key", snapshotKey).
-			Msg("branch preview startup cache miss")
-		return snapshotKey
+			Str("snapshot_key", keys.SnapshotKey).
+			Msg("branch preview startup cache exact miss; trying base snapshot")
+		return keys, r.maybeRestoreBaseSnapshot(ctx, orgID, repoID, keys, sb)
 	}
 	if err := r.snapshotCache.RestoreSnapshot(ctx, sb, hit); err != nil {
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
-			Str("snapshot_key", snapshotKey).
+			Str("snapshot_key", keys.SnapshotKey).
 			Msg("branch preview startup cache restore failed; launching cold")
-		return snapshotKey
+		return keys, nil
 	}
 	r.logger.Info().
 		Str("repository_id", repoID.String()).
-		Str("snapshot_key", snapshotKey).
+		Str("snapshot_key", keys.SnapshotKey).
 		Msg("branch preview startup cache restored")
-	return snapshotKey
+	return keys, nil
 }
 
-func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, snapshotKey string, sb *agent.Sandbox, cfg *models.PreviewConfig) {
-	if r == nil || r.snapshotCache == nil || sb == nil || snapshotKey == "" {
+// maxPartialInvalidationDiffBytes caps the git diff streamed out of the
+// sandbox for partial snapshot invalidation. Past this size, patching a base
+// snapshot stops being meaningfully cheaper than a cold build.
+const maxPartialInvalidationDiffBytes int64 = 32 * 1024 * 1024
+
+// maybeRestoreBaseSnapshot handles an exact-key miss by looking for a
+// snapshot with the same base key (lockfiles + config digest) at an older
+// commit, restoring it, and applying the git diff up to the current commit.
+// The returned error is non-nil only when the workspace was mutated and could
+// not be restored to a consistent state — the caller must fail the start.
+func (r *StartRunner) maybeRestoreBaseSnapshot(ctx context.Context, orgID, repoID uuid.UUID, keys branchPreviewStartupCacheKeys, sb *agent.Sandbox) error {
+	baseHit, err := r.snapshotCache.FindBaseSnapshot(ctx, orgID, repoID, keys.BaseKey, keys.CommitSHA)
+	if err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("base_key", keys.BaseKey).
+			Msg("branch preview base snapshot lookup failed; launching cold")
+		return nil
+	}
+	if baseHit == nil {
+		return nil
+	}
+	// Compute the diff before ApplyPartialInvalidation touches the workspace:
+	// a diff failure (e.g. the base commit was force-pushed away) then falls
+	// back to a cold start with the freshly checked-out tree intact.
+	diff, err := r.gitDiffInSandbox(ctx, sb, baseHit.Entry.CommitSHA, keys.CommitSHA)
+	if err != nil {
+		r.logger.Info().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("base_commit", baseHit.Entry.CommitSHA).
+			Str("commit_sha", keys.CommitSHA).
+			Msg("branch preview base snapshot diff unavailable; launching cold")
+		return nil
+	}
+	if err := r.snapshotCache.ApplyPartialInvalidation(ctx, sb, baseHit, diff); err != nil {
+		r.logger.Warn().Err(err).
+			Str("repository_id", repoID.String()).
+			Str("base_commit", baseHit.Entry.CommitSHA).
+			Msg("branch preview partial invalidation failed; re-checking out workspace")
+		if recoverErr := r.recoverWorkspaceFromGit(ctx, sb); recoverErr != nil {
+			return fmt.Errorf("recover workspace after failed partial restore: %w", recoverErr)
+		}
+		return nil
+	}
+	r.logger.Info().
+		Str("repository_id", repoID.String()).
+		Str("base_commit", baseHit.Entry.CommitSHA).
+		Str("commit_sha", keys.CommitSHA).
+		Int("diff_bytes", len(diff)).
+		Msg("branch preview startup cache restored from base snapshot")
+	return nil
+}
+
+// gitDiffInSandbox produces `git diff --binary old new` from the sandbox's
+// clone. Both commits must exist locally; CloneRepo performs a full clone, so
+// only history rewrites (force pushes) lose the base commit.
+func (r *StartRunner) gitDiffInSandbox(ctx context.Context, sb *agent.Sandbox, oldCommit, newCommit string) ([]byte, error) {
+	if !gitCommitSHARe.MatchString(oldCommit) || !gitCommitSHARe.MatchString(newCommit) {
+		return nil, fmt.Errorf("invalid commit sha for diff")
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	counter := &cappedCountingWriter{limit: maxPartialInvalidationDiffBytes}
+	cmd := fmt.Sprintf("cd %s && git diff --binary %s %s", shellQuote(sb.WorkDir), oldCommit, newCommit)
+	exitCode, err := r.sandboxProvider.Exec(ctx, sb, cmd, io.MultiWriter(&stdout, counter), &stderr)
+	if counter.exceeded {
+		return nil, fmt.Errorf("diff exceeds %d bytes; cold build is cheaper", maxPartialInvalidationDiffBytes)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("exec git diff: %w", err)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("git diff exited %d: %s", exitCode, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
+// recoverWorkspaceFromGit rebuilds the working tree from the sandbox's git
+// clone after a failed partial restore left stale files behind. HEAD is the
+// pinned preview commit (checked out detached earlier in the start flow).
+func (r *StartRunner) recoverWorkspaceFromGit(ctx context.Context, sb *agent.Sandbox) error {
+	cmd := fmt.Sprintf(
+		"find %s -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} + && cd %s && git checkout -f HEAD -- .",
+		shellQuote(sb.WorkDir), shellQuote(sb.WorkDir),
+	)
+	var stderr bytes.Buffer
+	exitCode, err := r.sandboxProvider.Exec(ctx, sb, cmd, io.Discard, &stderr)
+	if err != nil {
+		return fmt.Errorf("exec workspace recovery: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("workspace recovery exited %d: %s", exitCode, stderr.String())
+	}
+	return nil
+}
+
+func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, keys branchPreviewStartupCacheKeys, sb *agent.Sandbox, cfg *models.PreviewConfig) {
+	if r == nil || r.snapshotCache == nil || sb == nil || keys.SnapshotKey == "" {
 		return
 	}
 	if previewConfigHasRuntimeSecretFiles(cfg) {
@@ -1251,38 +1365,44 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 		// configs are excluded from the workspace snapshot cache.
 		r.logger.Debug().
 			Str("repository_id", repoID.String()).
-			Str("snapshot_key", snapshotKey).
+			Str("snapshot_key", keys.SnapshotKey).
 			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
 		return
 	}
 	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()
-	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, snapshotKey, SnapshotMetadata{OrgID: orgID, RepoID: repoID}); err != nil {
+	metadata := SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: keys.BaseKey, CommitSHA: keys.CommitSHA}
+	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata); err != nil {
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
-			Str("snapshot_key", snapshotKey).
+			Str("snapshot_key", keys.SnapshotKey).
 			Msg("failed to create branch preview startup cache")
 	}
 }
 
-func (r *StartRunner) computeBranchPreviewStartupCacheKey(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, commitSHA string) (string, error) {
+func (r *StartRunner) computeBranchPreviewStartupCacheKeys(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, commitSHA string) (branchPreviewStartupCacheKeys, error) {
 	lockfiles := branchPreviewStartupCacheLockfiles(cfg)
 	var lockInput bytes.Buffer
 	for _, lockfile := range lockfiles {
 		cleanPath, err := cleanBranchPreviewStartupCachePath(lockfile)
 		if err != nil {
-			return "", fmt.Errorf("preview.install.lockfiles path %q: %w", lockfile, err)
+			return branchPreviewStartupCacheKeys{}, fmt.Errorf("preview.install.lockfiles path %q: %w", lockfile, err)
 		}
 		body, err := r.sandboxProvider.ReadFile(ctx, sb, cleanPath)
 		if err != nil {
-			return "", fmt.Errorf("read preview.install lockfile %q: %w", cleanPath, err)
+			return branchPreviewStartupCacheKeys{}, fmt.Errorf("read preview.install lockfile %q: %w", cleanPath, err)
 		}
 		lockInput.WriteString(cleanPath)
 		lockInput.WriteByte(0)
 		lockInput.Write(body)
 		lockInput.WriteByte(0)
 	}
-	return ComputeSnapshotKey(lockInput.Bytes(), commitSHA, computeConfigDigest(cfg)), nil
+	configDigest := computeConfigDigest(cfg)
+	return branchPreviewStartupCacheKeys{
+		SnapshotKey: ComputeSnapshotKey(lockInput.Bytes(), commitSHA, configDigest),
+		BaseKey:     ComputeSnapshotBaseKey(lockInput.Bytes(), configDigest),
+		CommitSHA:   commitSHA,
+	}, nil
 }
 
 func branchPreviewStartupCacheLockfiles(cfg *models.PreviewConfig) []string {

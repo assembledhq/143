@@ -19,23 +19,14 @@
 # preview-start.sh does for DATABASE_URL.
 set -eu
 
+# Install normally happens in the platform-managed preview.install phase (see
+# .143/config.json), where the dependency cache can restore node_modules
+# before any command runs. Run it here too as a fallback for service restarts
+# inside a live sandbox; the lock-hash marker inside node_modules makes this
+# a no-op when the platform phase (or a cache restore) already completed.
+sh .143/preview-install-frontend.sh
+
 cd frontend
-
-# Skip the install on a hot restart only after a previous npm ci completed
-# against this exact lockfile. A killed npm ci can leave a partial
-# node_modules tree behind; treating node_modules itself as the success signal
-# lets that corrupted install poison later preview starts.
-LOCK_HASH="$(sha256sum package-lock.json | awk '{print $1}')"
-INSTALL_MARKER="node_modules/.143-npm-ci-lock"
-
-if [ ! -f "$INSTALL_MARKER" ] || [ "$(cat "$INSTALL_MARKER")" != "$LOCK_HASH" ] || [ ! -x node_modules/.bin/next ]; then
-    echo '[143-preview] installing frontend deps (npm ci)...'
-    rm -rf node_modules
-    npm ci --no-audit --no-fund
-    printf '%s\n' "$LOCK_HASH" > "$INSTALL_MARKER"
-else
-    echo '[143-preview] frontend deps already installed for current lockfile'
-fi
 
 echo '[143-preview] building next production bundle...'
 npm run build

@@ -529,6 +529,13 @@ func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {
 	require.Contains(t, cloudInitText, "mkdir -p /var/cache/143/preview-dependency-cache", "worker cloud-init should create the host dependency cache directory before first compose startup")
 	require.Contains(t, cloudInitText, "chown 1000:1000 /var/cache/143/preview-dependency-cache", "worker cloud-init should make the host dependency cache directory writable by appuser")
 	require.Contains(t, cloudInitText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker cloud-init should keep the host dependency cache directory private")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read the worker reconcile script")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, "mkdir -p /var/cache/143/preview-dependency-cache", "worker reconcile should create the host dependency cache directory so pre-#1342 hosts heal on deploy")
+	require.Contains(t, reconcileText, "chown 1000:1000 /var/cache/143/preview-dependency-cache", "worker reconcile should repair dependency cache directory ownership drift")
+	require.Contains(t, reconcileText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker reconcile should keep the dependency cache directory private")
 }
 
 func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
