@@ -1,6 +1,9 @@
 package models
 
 import (
+	"os"
+	"regexp"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -143,6 +146,69 @@ func TestPreviewStoppedReason_Validate(t *testing.T) {
 			require.NoError(t, err, "PreviewStoppedReason should accept migration check values")
 		})
 	}
+}
+
+func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000176_preview_policies.up.sql")
+	require.NoError(t, err, "migration file should be readable")
+
+	tests := []struct {
+		name       string
+		constraint string
+		expected   []string
+	}{
+		{
+			name:       "auto mode",
+			constraint: "repository_preview_policies_auto_mode_check",
+			expected: []string{
+				string(PreviewAutoModeOff),
+				string(PreviewAutoModeWarm),
+				string(PreviewAutoModeOn),
+			},
+		},
+		{
+			name:       "stopped reason",
+			constraint: "preview_instances_stopped_reason_check",
+			expected: []string{
+				string(PreviewStoppedReasonNone),
+				string(PreviewStoppedReasonUser),
+				string(PreviewStoppedReasonExpired),
+				string(PreviewStoppedReasonWarmPolicy),
+				string(PreviewStoppedReasonPRClosed),
+				string(PreviewStoppedReasonDrain),
+				string(PreviewStoppedReasonError),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			values := migrationCheckValues(t, string(body), tt.constraint)
+			sort.Strings(values)
+			sort.Strings(tt.expected)
+			require.Equal(t, tt.expected, values, "migration CHECK values should match Go enum constants")
+		})
+	}
+}
+
+func migrationCheckValues(t *testing.T, sql, constraint string) []string {
+	t.Helper()
+
+	re := regexp.MustCompile(regexp.QuoteMeta(constraint) + `(?s).*?CHECK\s*\([^)]*IN\s*\(([^)]*)\)`)
+	match := re.FindStringSubmatch(sql)
+	require.Len(t, match, 2, "migration should define the expected CHECK constraint")
+
+	valueRe := regexp.MustCompile(`'([^']*)'`)
+	matches := valueRe.FindAllStringSubmatch(match[1], -1)
+	values := make([]string, 0, len(matches))
+	for _, m := range matches {
+		values = append(values, m[1])
+	}
+	return values
 }
 
 func TestPreviewFreshnessState_Validate(t *testing.T) {

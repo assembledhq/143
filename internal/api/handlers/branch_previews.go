@@ -918,17 +918,17 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 	if mode == models.PreviewAutoModeOff {
 		return nil
 	}
-	if h.autoPreviewPoolFull(ctx, orgID) {
-		metrics.RecordPreviewAutoPoolSaturation(ctx, orgID.String())
-		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "pool_full")
-		return nil
-	}
 	owner, repoName, ok := strings.Cut(repo.FullName, "/")
 	if !ok || owner == "" || repoName == "" {
 		return fmt.Errorf("repository full name is invalid")
 	}
 	if err := h.stopPreviousAutoPullRequestPreview(ctx, orgID, repo, headRef, headSHA); err != nil {
 		return err
+	}
+	if h.autoPreviewPoolFull(ctx, orgID) {
+		metrics.RecordPreviewAutoPoolSaturation(ctx, orgID.String())
+		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "pool_full")
+		return nil
 	}
 	sourceID := fmt.Sprintf("%s#%d@%s", repo.FullName, prNumber, headSHA)
 	target, err := h.previews.GetPreviewTargetBySource(ctx, orgID, models.PreviewSourceTypePullRequest, sourceID)
@@ -960,6 +960,12 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 	}
 	if err := h.previews.UpsertPreviewLink(ctx, link); err != nil {
 		return fmt.Errorf("upsert auto preview link: %w", err)
+	}
+	if active, activeErr := h.previews.GetActivePreviewForTarget(ctx, orgID, target.ID); activeErr == nil && active != nil {
+		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "already_running")
+		return h.upsertAutoPRPreviewState(ctx, orgID, repo.ID, prNumber, target.ID)
+	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		return fmt.Errorf("load active auto preview: %w", activeErr)
 	}
 	_, startErr := h.startTargetRuntimeWithOptions(ctx, orgID, userID, repo, target, nil, false, nil, branchPreviewStartOptions{
 		Initiator:      "auto_preview",
@@ -1220,7 +1226,7 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 	var nextCursor string
 	if len(summaries) > limit {
 		last := summaries[limit-1]
-		nextCursor = encodeCursor(last.CreatedAt, last.TargetID.String())
+		nextCursor = encodeCursor(last.SortCreatedAt, last.TargetID.String())
 		summaries = summaries[:limit]
 	}
 	responses := make([]branchPreviewResponse, 0, len(summaries))

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { act } from "@testing-library/react";
 import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
@@ -14,7 +14,128 @@ function changeFieldValue(element: HTMLElement, value: string) {
   fireEvent.change(element, { target: { value } });
 }
 
+async function renderPreviewSettingsTab(tabName: "Secrets" | "API tokens") {
+  renderWithProviders(<PreviewSettingsPage />);
+  await userEvent.click(await screen.findByRole("tab", { name: tabName }));
+}
+
 describe("PreviewSettingsPage", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Assembled",
+          settings: { preview_auto_pool_max_active: 4 },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.patch("*/api/v1/settings", async ({ request }) => {
+        const body = await request.json() as { settings?: Record<string, unknown> };
+        return HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Assembled",
+            settings: { preview_auto_pool_max_active: body.settings?.preview_auto_pool_max_active ?? 4 },
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }),
+    );
+  });
+
+  it("renders auto-preview policies first and autosaves mode and pool changes", async () => {
+    let savedPolicy: unknown;
+    let savedSettings: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "off",
+            open_pr_count: 12,
+            updated_at: null,
+          },
+          {
+            repository_id: "repo-2",
+            repository_full_name: "assembledhq/docs",
+            auto_mode: "warm",
+            open_pr_count: 3,
+            updated_at: "2026-06-08T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.put("*/api/v1/repositories/repo-1/preview-policy", async ({ request }) => {
+        savedPolicy = await request.json();
+        return HttpResponse.json({ data: { id: "policy-1", auto_mode: "warm" } });
+      }),
+      http.patch("*/api/v1/settings", async ({ request }) => {
+        savedSettings = await request.json();
+        return HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Assembled",
+            settings: { preview_auto_pool_max_active: 8 },
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(await screen.findByRole("tab", { name: "Auto-preview" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("assembledhq/143")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("radio", { name: /use warm auto-preview for assembledhq\/143/i }));
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({ auto_mode: "warm" });
+    });
+
+    const poolInput = screen.getByLabelText("Concurrent auto-previews");
+    changeFieldValue(poolInput, "8");
+    await waitFor(() => {
+      expect(savedSettings).toEqual({ settings: { preview_auto_pool_max_active: 8 } });
+    });
+  });
+
+  it("keeps auto-preview rows usable in the mobile stacked layout", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            open_pr_count: 5,
+            updated_at: "2026-06-08T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    const row = (await screen.findByText("assembledhq/143")).closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("Open PRs")).toBeInTheDocument();
+    expect(within(row as HTMLElement).getByText("Updated")).toBeInTheDocument();
+  });
+
   it("renders the renamed Preview settings surface and loads bundles for the selected repository", async () => {
     const bundleRequests: string[] = [];
     server.use(
@@ -29,7 +150,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     expect(await screen.findByRole("heading", { level: 1, name: "Preview" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Runtime settings" })).toHaveAttribute("href", "/settings/runtime");
@@ -52,7 +173,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("combobox", { name: /filter by repository/i }));
     await userEvent.click(await screen.findByRole("option", { name: "assembledhq/docs" }));
@@ -81,7 +202,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "staging");
@@ -122,7 +243,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.click(screen.getByRole("combobox", { name: "Bundle repository" }));
@@ -145,7 +266,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
 
@@ -180,7 +301,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "file-only");
@@ -216,7 +337,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "mixed");
@@ -268,7 +389,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "no-outputs");
@@ -290,7 +411,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "my-bundle");
@@ -325,7 +446,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit dual-delivery/i }))[0]);
 
@@ -353,7 +474,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
 
@@ -371,7 +492,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "bad-json");
@@ -391,7 +512,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "json-file");
@@ -432,7 +553,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
     // In edit mode the key is pre-filled from the existing bundle outputs; only the value needs re-entry.
@@ -464,7 +585,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
     await userEvent.click(screen.getByLabelText("Secret value"));
@@ -503,7 +624,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
     changeFieldValue(screen.getByLabelText("Secret file path"), "development.conf.json");
@@ -548,7 +669,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
     await userEvent.click(screen.getByLabelText("Secret file contents"));
@@ -591,7 +712,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
 
@@ -627,7 +748,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle/i }))[0]);
 
@@ -655,7 +776,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle-err/i }))[0]);
 
@@ -676,7 +797,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/previews/api-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("Secrets");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
 
@@ -722,7 +843,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    renderWithProviders(<PreviewSettingsPage />);
+    await renderPreviewSettingsTab("API tokens");
 
     const apiSection = await screen.findByRole("region", { name: "Preview API tokens" });
     expect((await within(apiSection).findAllByText("CI previews"))[0]).toBeInTheDocument();

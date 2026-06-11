@@ -1519,7 +1519,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	switch event.Action {
 	case "opened", "reopened", "synchronize":
 		s.enqueuePullRequestStateSync(ctx, pr)
-		return nil
+		return s.handleAutoPreviewEvent(ctx, event)
 	case "closed":
 		// handled below
 	default:
@@ -1531,7 +1531,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	}
 
 	s.enqueuePullRequestStateSync(ctx, pr)
-	return nil
+	return s.handleAutoPreviewEvent(ctx, event)
 }
 
 func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.UUID, repo string, number int) (models.PullRequest, error) {

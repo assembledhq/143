@@ -185,6 +185,7 @@ type BranchPreviewSummary struct {
 	SourceURL             string               `db:"source_url" json:"source_url,omitempty"`
 	Status                string               `db:"status" json:"status"`
 	CreatedAt             time.Time            `db:"created_at" json:"created_at"`
+	SortCreatedAt         time.Time            `db:"sort_created_at" json:"-"`
 	ExpiresAt             *time.Time           `db:"expires_at" json:"expires_at,omitempty"`
 	StoppedAt             *time.Time           `db:"stopped_at" json:"stopped_at,omitempty"`
 	StoppedReason         PreviewStoppedReason `db:"stopped_reason" json:"stopped_reason,omitempty"`

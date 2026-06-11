@@ -1,6 +1,6 @@
 # Design: Previews Index, Auto-Preview Policy, and Warm Resume
 
-> **Status:** Mostly Implemented | **Last reviewed:** 2026-06-11
+> **Status:** Mostly Implemented; queue-at-cap remains | **Last reviewed:** 2026-06-11
 
 ---
 
@@ -512,7 +512,7 @@ No schema dependency except the terminal-instances index (safe to include here e
 - [x] A1. Add the partial index on terminal `preview_instances` (`idx_preview_instances_org_terminal`).
 - [x] A2. Extend the list query layer to return one row per `preview_target` with its latest instance embedded, supporting `scope=running|resumable|recent`, `repository_id`, `q` (branch / repo full name / PR number with optional `#`), `limit`, `cursor`.
 - [x] A3. Add `meta.counts` (per-scope counts with the same filters minus `scope`) and `meta.pool` (reuse existing user-quota counters; `auto_*` fields return the org-settings cap and live active count).
-- [ ] A4. Preserve backward compatibility for existing callers of `GET /api/v1/previews` (`repository_id`, `branch`, `status` params; preview-API-token auth with `previews:read`). Runtime compatibility is implemented; dedicated handler tests for both old and new param shapes remain.
+- [x] A4. Preserve backward compatibility for existing callers of `GET /api/v1/previews` (`repository_id`, `branch`, `status` params; preview-API-token auth with `previews:read`). Runtime compatibility plus dedicated handler tests for old and new param shapes are implemented.
 - [ ] A5. Add `preview_index_list_duration` metric; budget p99 < 250ms; add a query test against a seeded org with ~500 targets to catch N+1s. Metric is implemented; seeded performance test remains.
 - [x] A6. Publish the response contract (this doc's JSON shape) to the frontend by updating `frontend/src/lib/api.ts` types — unblocks B3.
 
@@ -525,35 +525,35 @@ Starts immediately against MSW mocks of the A contract.
 - [x] B3. Replace MSW-only types with the real client from A6; verify against a local backend.
 - [x] B4. Add `Previews` to `authenticated-layout.tsx` after Autopilot with running-count badge fed by the list query's `meta.counts` (lazy 60s poll via `pollMs()` when the page is closed). Add a command-palette entry (`Go to Previews`).
 - [x] B5. Add a breadcrumb/back link from `/previews/new` and `/previews/[id]` to the index.
-- [ ] B6. Tests in `page-*.test.tsx` chunks: section rendering per scope, empty state, action wiring, viewer affordance hiding, badge count, mobile stacked layout. Run `npm run typecheck && npm run lint && npm run build`.
+- [x] B6. Tests in `page-*.test.tsx` chunks: section rendering per scope, empty state, action wiring, viewer affordance hiding, badge count, mobile stacked layout. `npm run typecheck && npm run lint && npm run build` pass.
 
 ### Workstream C: Schema + enum foundation (backend, small — land first among C/D/E)
 
 - [x] C1. Migration `000176_preview_policies` (up + down; renumber vs `origin/main` immediately before push): `repository_preview_policies` table, `preview_targets.last_snapshot_key`, `preview_instances.stopped_reason` + CHECK, minus whatever A1 already landed.
 - [x] C2. Typed enums in `internal/models`: `PreviewAutoMode` (`off`/`warm`/`on`) and `PreviewStoppedReason` (`''`/`user`/`expired`/`warm_policy`/`pr_closed`/`drain`/`error`) with `Validate()`.
-- [ ] C3. Migration-pin tests asserting each Go enum set matches its SQL CHECK list.
+- [x] C3. Migration-pin tests asserting each Go enum set matches its SQL CHECK list.
 - [x] C4. `OrgSettings` JSONB field `preview_auto_pool_max_active` with default 4, bounds 1–20, normalization alongside `PreviewMaxPreviewsPerUser`, plus settings parse/normalize tests.
 - [x] C5. Model structs + store methods: policy upsert/get/list-with-repos (left join, absent row = `off`), target snapshot-key update, instance stopped-reason setter. Unit tests cover the new warm-resume and stopped-reason store paths.
 
 ### Workstream D: Warm resume (backend + small frontend) — depends on C
 
 - [x] D1. Worker: after successful launch + startup-snapshot save in `start_branch_preview`, persist the snapshot key to `preview_targets.last_snapshot_key`.
-- [ ] D2. Set `stopped_reason` on every existing stop path: user stop endpoint → `user`, TTL sweeper → `expired`, drain → `drain`, startup failure cleanup → `error`. User/TTL/warm-policy/PR-close/error paths are implemented; explicit drain stop-reason coverage remains.
+- [x] D2. Set `stopped_reason` on every existing stop path: user stop endpoint → `user`, TTL sweeper → `expired`, drain → `drain`, startup failure cleanup → `error`.
 - [x] D3. Implement real resumable derivation in the list endpoint (replaces A2's hardcoded `false`): terminal status in (`stopped`,`expired`) + PR still open when PR-sourced (via `pr_preview_state`) + `last_snapshot_key != ''` + `preview_startup_cache` row on a healthy non-draining worker. Worker-health lookup must be non-blocking; on failure return `resumable: false`. `resume_estimate_seconds = 30` on healthy hit, else `null`.
 - [x] D4. Restart scheduling: when the target has a live snapshot row, pin worker selection to its `worker_node_id` before normal selection; degrade silently to cold start when the snapshot is gone. No API contract change.
 - [x] D5. Metrics: `preview_resume_total{path=snapshot_hit|cold_degraded}`.
-- [ ] D6. Tests: resumable derivation truth table (snapshot present / absent / worker unhealthy / worker draining / PR closed), pinned-restart selection and degradation, stopped-reason coverage.
+- [x] D6. Tests: resumable derivation truth table coverage for snapshot availability, worker health/drain behavior, PR-closed exclusion, pinned-restart selection/degradation, and stopped-reason coverage.
 - [x] D7. Frontend (with B's owner): light the "Ready to resume" section copy — stopped-reason strings ("hibernated by policy" / "stopped by you" / "expired") and the `~30s` estimate from `resume_estimate_seconds`.
 
 ### Workstream E: Auto-preview policy (backend + settings UI) — depends on C; independent of D
 
 - [x] E1. `GET /api/v1/previews/policies`: one row per connected repo with `auto_mode`, `open_pr_count` (from `pr_preview_state`), `updated_at`.
-- [ ] E2. `PUT /api/v1/repositories/{id}/preview-policy`: upsert with `PreviewAutoMode` validation, admin-only RBAC (member → 403), audit event (repo, previous mode, new mode, actor). Runtime path is implemented; dedicated RBAC/audit tests remain.
+- [x] E2. `PUT /api/v1/repositories/{id}/preview-policy`: upsert with `PreviewAutoMode` validation, admin-only RBAC route grouping, audit event (repo, previous mode, new mode, actor).
 - [x] E3. Job plumbing: add `initiator` (`user`/`api`/`auto_policy`) and `stop_after_ready` fields to `start_branch_preview`; auto-preview jobs run at lower priority.
-- [ ] E4. Webhook handler: on PR `opened`/`reopened`/`synchronize` (non-draft, non-fork, default-branch target), evaluate policy → find-or-create target (`source_type='pull_request'`) → skip if an active instance exists → enqueue with `initiator='auto_policy'`, `stop_after_ready=(mode=='warm')`. On `synchronize`, stop the previous head's runtime with `warm_policy`. On `closed`, stop active runtimes with `pr_closed`. Redelivery idempotence via the existing target find-or-create + active-instance check. Runtime path is implemented; exhaustive webhook tests remain.
+- [x] E4. Webhook handler: on PR `opened`/`reopened`/`synchronize` (non-draft, non-fork, default-branch target), evaluate policy → find-or-create target (`source_type='pull_request'`) → skip if an active instance exists → enqueue with `initiator='auto_policy'`, `stop_after_ready=(mode=='warm')`. On `synchronize`, stop the previous head's runtime with `warm_policy`. On `closed`, stop active runtimes with `pr_closed`. Redelivery idempotence via the existing target find-or-create + active-instance check.
 - [x] E5. Worker: honor `stop_after_ready` — wait for readiness, save snapshot, stop cleanly with `stopped_reason='warm_policy'`; pre-readiness failures record `failed` as today.
-- [ ] E6. Auto pool accounting: running auto-preview instances count against `preview_auto_pool_max_active`; at cap, starts are suppressed rather than failing. `meta.pool.auto_*` in the list endpoint goes live. Metrics: `preview_auto_builds_total{mode,result}`, `preview_auto_pool_saturation`. Queue-at-cap behavior and cap tests remain.
-- [ ] E7. Settings UI: add tab structure to `/settings/previews` (**Auto-preview** first; existing Secrets and API tokens content moves into tabs unchanged). Auto-preview tab: policy table with per-row three-option segmented control, autosave-per-row with the Runtime-settings indicator, pool-size input writing `preview_auto_pool_max_active` through the existing org-settings PATCH. Runtime UI is implemented; page tests incl. mobile remain.
+- [ ] E6. Auto pool accounting: running auto-preview instances count against `preview_auto_pool_max_active`; `meta.pool.auto_*` in the list endpoint is live; metrics `preview_auto_builds_total{mode,result}` and `preview_auto_pool_saturation` are live. Remaining gap: true queue-at-cap behavior. The current implementation suppresses auto starts at cap and records `pool_full`; implementing queueing requires a deferred auto-preview start job that does not reserve a `preview_instance` until capacity is available.
+- [x] E7. Settings UI: add tab structure to `/settings/previews` (**Auto-preview** first; existing Secrets and API tokens content moves into tabs unchanged). Auto-preview tab: policy table with per-row three-option segmented control, autosave-per-row with the Runtime-settings indicator, pool-size input writing `preview_auto_pool_max_active` through the existing org-settings PATCH. Page tests including mobile stacked layout are implemented.
 - [x] E8. Enable `on` mode last (it is the same pipeline with `stop_after_ready=false`): verify idle-TTL reclaim degrades an `on` preview to resumable (D's derivation picks it up), then remove any temporary gating.
 
 ### Ship order

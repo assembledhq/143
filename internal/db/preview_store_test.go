@@ -552,12 +552,12 @@ func TestPreviewStore_ListBranchPreviewIndex_ResumableUsesWarmCachePredicate(t *
 
 	rows := pgxmock.NewRows([]string{
 		"target_id", "preview_id", "repository_id", "repository_full_name", "branch", "commit_sha", "preview_config_name",
-		"source_type", "source_id", "source_url", "status", "created_at", "expires_at", "stopped_at", "stopped_reason",
+		"source_type", "source_id", "source_url", "status", "created_at", "sort_created_at", "expires_at", "stopped_at", "stopped_reason",
 		"current_phase", "error", "resumable", "resume_estimate_seconds",
 	}).AddRow(
 		targetID, nil, repoID, "acme/app", "feature", "abc123", "",
 		models.PreviewSourceTypePullRequest, "acme/app#42@abc123", "https://github.com/acme/app/pull/42",
-		string(models.PreviewStatusStopped), now, nil, &now, string(models.PreviewStoppedReasonWarmPolicy),
+		string(models.PreviewStatusStopped), now, now, nil, &now, string(models.PreviewStoppedReasonWarmPolicy),
 		"stopped", "", true, &estimate,
 	)
 
@@ -582,6 +582,7 @@ func TestPreviewStore_ListBranchPreviewIndex_ResumableUsesWarmCachePredicate(t *
 			SourceURL:             "https://github.com/acme/app/pull/42",
 			Status:                string(models.PreviewStatusStopped),
 			CreatedAt:             now,
+			SortCreatedAt:         now,
 			StoppedAt:             &now,
 			StoppedReason:         models.PreviewStoppedReasonWarmPolicy,
 			CurrentPhase:          "stopped",
@@ -2444,7 +2445,7 @@ func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerRecordsUnavailableRea
 
 	store := NewPreviewStore(mock)
 
-	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+stopped_reason = CASE WHEN @unavailable_reason = 'deploy_drain_timeout' THEN 'drain'").
 		WithArgs(previewAnyArgs(3)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 

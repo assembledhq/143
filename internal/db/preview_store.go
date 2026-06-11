@@ -111,7 +111,8 @@ const branchPreviewSummaryColumns = `target.id AS target_id, latest.id AS previe
 	target.repository_id, repo.full_name AS repository_full_name, target.branch, target.commit_sha, target.preview_config_name,
 	target.source_type, target.source_id, target.source_url,
 	COALESCE(latest.status, 'target_created') AS status,
-	target.created_at, latest.expires_at, latest.stopped_at, COALESCE(latest.stopped_reason, '') AS stopped_reason,
+	target.created_at, COALESCE(latest.created_at, target.created_at) AS sort_created_at,
+	latest.expires_at, latest.stopped_at, COALESCE(latest.stopped_reason, '') AS stopped_reason,
 	COALESCE(latest.current_phase, '') AS current_phase, COALESCE(latest.error, '') AS error,
 	%s AS resumable, CASE WHEN %s THEN 30 ELSE NULL::integer END AS resume_estimate_seconds`
 
@@ -358,12 +359,10 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 		  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
 		  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
 		       OR repo.full_name ILIKE '%%' || @q || '%%'
-		       OR regexp_replace(target.source_id, '^.*#', '') = trim(leading '#' from @q))
+		       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
 		  AND (@cursor_id::uuid IS NULL OR (COALESCE(latest.created_at, target.created_at), target.id) < (@cursor_time, @cursor_id))
 		  AND %s
-		ORDER BY
-		  CASE WHEN latest.status = 'failed' THEN 0 ELSE 1 END,
-		  COALESCE(latest.created_at, target.created_at) DESC
+		ORDER BY COALESCE(latest.created_at, target.created_at) DESC, target.id DESC
 		LIMIT @limit`, branchPreviewSummarySelect(), scopePredicate)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":        orgID,
@@ -401,7 +400,7 @@ func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID 
 			  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
 			  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
 			       OR repo.full_name ILIKE '%%' || @q || '%%'
-			       OR regexp_replace(target.source_id, '^.*#', '') = trim(leading '#' from @q))
+			       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
 		)
 		SELECT
 			COUNT(*) FILTER (WHERE status IN %s)::int AS running,
@@ -427,11 +426,11 @@ func (s *PreviewStore) CountActiveAutoPreviews(ctx context.Context, orgID uuid.U
 	query := fmt.Sprintf(`SELECT COUNT(*)::int
 		FROM preview_instances pi
 		JOIN preview_targets target ON target.id = pi.preview_target_id AND target.org_id = pi.org_id
-		JOIN repository_preview_policies policy ON policy.org_id = target.org_id AND policy.repository_id = target.repository_id
+		LEFT JOIN repository_preview_policies policy ON policy.org_id = target.org_id AND policy.repository_id = target.repository_id
 		WHERE pi.org_id = @org_id
 		  AND pi.status IN %s
 		  AND target.source_type = 'pull_request'
-		  AND policy.auto_mode <> 'off'`, activeStatusFilter)
+		  AND (policy.id IS NULL OR policy.auto_mode <> 'off')`, activeStatusFilter)
 	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID}).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count active auto previews: %w", err)
 	}
@@ -1957,6 +1956,7 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 		SET status = 'unavailable',
 			error = @reason,
 			unavailable_reason = @unavailable_reason,
+			stopped_reason = CASE WHEN @unavailable_reason = 'deploy_drain_timeout' THEN 'drain' ELSE stopped_reason END,
 			preview_holding_container = FALSE,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()

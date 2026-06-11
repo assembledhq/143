@@ -79,7 +79,7 @@ const SECTIONS: {
 
 function sourceLabel(preview: BranchPreviewResponse): string {
   if (preview.source_type === "pull_request") {
-    const number = preview.source_id?.replace(/^.*#/, "");
+    const number = preview.source_id?.match(/#(\d+)/)?.[1];
     return number ? `PR #${number}` : "PR";
   }
   if (preview.source_type === "session") return "Session";
