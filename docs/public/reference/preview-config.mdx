@@ -166,9 +166,9 @@ Secret values do not belong in `.143/config.json`. Put public, non-secret values
 <ConfigField name="preview.resources.requests.cpu" type="string" description='CPU request, such as "500m" or "1".' />
 <ConfigField name="preview.resources.requests.memory" type="string" description='Memory request, such as "512Mi" or "1Gi".' />
 <ConfigField name="preview.resources.requests.ephemeral-storage" type="string" description='Ephemeral storage request, such as "5Gi".' />
-<ConfigField name="preview.resources.limits.cpu" type="string" description="CPU limit. Hard cap is 2 cores." />
-<ConfigField name="preview.resources.limits.memory" type="string" description="Memory limit. Hard cap is 1Gi." />
-<ConfigField name="preview.resources.limits.ephemeral-storage" type="string" description="Ephemeral storage limit. Hard cap is 10Gi." />
+<ConfigField name="preview.resources.limits.cpu" type="string" description="CPU limit. Platform hard cap is 2 cores; org admins can configure a lower max." />
+<ConfigField name="preview.resources.limits.memory" type="string" description="Memory limit. Platform hard cap is 8Gi; org admins can configure a lower max." />
+<ConfigField name="preview.resources.limits.ephemeral-storage" type="string" description="Ephemeral storage limit. Platform hard cap is 10Gi; org admins can configure a lower max." />
 
 ## Platform-injected environment
 

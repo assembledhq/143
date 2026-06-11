@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -37,16 +39,25 @@ var (
 )
 
 type EvalHandler struct {
-	taskStore        *db.EvalTaskStore
-	runStore         *db.EvalRunStore
-	batchStore       *db.EvalBatchStore
-	bootstrapStore   *db.EvalBootstrapStore
-	jobStore         *db.JobStore
-	txStarter        db.TxStarter
-	audit            *db.AuditEmitter
-	batchStreams     *cache.EvalBatchStreams
-	bootstrapStreams *cache.EvalBootstrapStreams
-	memberships      evalMembershipStore
+	taskStore          *db.EvalTaskStore
+	runStore           *db.EvalRunStore
+	batchStore         *db.EvalBatchStore
+	bootstrapStore     *db.EvalBootstrapStore
+	datasetStore       *db.EvalDatasetStore
+	releaseGateStore   *db.EvalReleaseGateStore
+	repositoryStore    *db.RepositoryStore
+	sessionStore       *db.SessionStore
+	jobStore           *db.JobStore
+	txStarter          db.TxStarter
+	audit              *db.AuditEmitter
+	batchStreams       *cache.EvalBatchStreams
+	bootstrapStreams   *cache.EvalBootstrapStreams
+	memberships        evalMembershipStore
+	candidateValidator evalCandidateValidator
+}
+
+type evalCandidateValidator interface {
+	ValidateEvalCandidate(ctx context.Context, orgID uuid.UUID, repoID uuid.UUID, candidate models.EvalBootstrapCandidate) error
 }
 
 func NewEvalHandler(taskStore *db.EvalTaskStore, runStore *db.EvalRunStore, batchStore *db.EvalBatchStore, bootstrapStore *db.EvalBootstrapStore, jobStore *db.JobStore, txStarter db.TxStarter) *EvalHandler {
@@ -82,6 +93,26 @@ func (h *EvalHandler) SetBootstrapStreams(streams *cache.EvalBootstrapStreams) {
 // EventSource (which can't send X-Active-Org-ID).
 func (h *EvalHandler) SetMembershipStore(store evalMembershipStore) {
 	h.memberships = store
+}
+
+func (h *EvalHandler) SetSessionStore(store *db.SessionStore) {
+	h.sessionStore = store
+}
+
+func (h *EvalHandler) SetDatasetStore(store *db.EvalDatasetStore) {
+	h.datasetStore = store
+}
+
+func (h *EvalHandler) SetReleaseGateStore(store *db.EvalReleaseGateStore) {
+	h.releaseGateStore = store
+}
+
+func (h *EvalHandler) SetRepositoryStore(store *db.RepositoryStore) {
+	h.repositoryStore = store
+}
+
+func (h *EvalHandler) SetCandidateValidator(validator evalCandidateValidator) {
+	h.candidateValidator = validator
 }
 
 // publishBatchSignal exists separately from the worker's identical helper
@@ -177,6 +208,241 @@ const (
 	maxPassThreshold     = 1.0
 	defaultPassThreshold = 0.7
 )
+
+// --- Eval Datasets and Release Gates ---
+
+func (h *EvalHandler) ListDatasets(w http.ResponseWriter, r *http.Request) {
+	if h.datasetStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "DATASETS_DISABLED", "eval datasets are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var repoID *uuid.UUID
+	if raw := strings.TrimSpace(r.URL.Query().Get("repository_id")); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "repository_id must be a valid UUID")
+			return
+		}
+		repoID = &parsed
+	}
+	datasets, err := h.datasetStore.ListByOrg(r.Context(), orgID, repoID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list eval datasets", err)
+		return
+	}
+	if datasets == nil {
+		datasets = []models.EvalDataset{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.EvalDataset]{Data: datasets})
+}
+
+func (h *EvalHandler) CreateDataset(w http.ResponseWriter, r *http.Request) {
+	if h.datasetStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "DATASETS_DISABLED", "eval datasets are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	var req struct {
+		RepositoryID  *uuid.UUID             `json:"repository_id"`
+		Name          string                 `json:"name"`
+		DatasetType   models.EvalDatasetType `json:"dataset_type"`
+		Description   string                 `json:"description"`
+		SourceSummary string                 `json:"source_summary"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "name is required")
+		return
+	}
+	if req.DatasetType == "" {
+		req.DatasetType = models.EvalDatasetTypeGolden
+	}
+	if err := req.DatasetType.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_DATASET_TYPE", "dataset_type must be golden, shadow, or adversarial")
+		return
+	}
+	if req.RepositoryID != nil {
+		if h.repositoryStore == nil {
+			writeError(w, r, http.StatusNotImplemented, "REPOSITORY_VALIDATION_DISABLED", "repository validation is not configured")
+			return
+		}
+		if _, err := h.repositoryStore.GetByID(r.Context(), orgID, *req.RepositoryID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository was not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to validate repository", err)
+			return
+		}
+	}
+	var createdBy *uuid.UUID
+	if user != nil {
+		createdBy = &user.ID
+	}
+	dataset := &models.EvalDataset{
+		OrgID:           orgID,
+		RepositoryID:    req.RepositoryID,
+		Name:            req.Name,
+		DatasetType:     req.DatasetType,
+		Status:          models.EvalDatasetStatusActive,
+		Description:     req.Description,
+		SourceSummary:   req.SourceSummary,
+		CreatedByUserID: createdBy,
+	}
+	if err := h.datasetStore.Create(r.Context(), dataset); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create eval dataset", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalDataset]{Data: *dataset})
+}
+
+func (h *EvalHandler) AddDatasetTask(w http.ResponseWriter, r *http.Request) {
+	if h.datasetStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "DATASETS_DISABLED", "eval datasets are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	datasetID, err := uuid.Parse(chi.URLParam(r, "datasetId"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_DATASET_ID", "dataset id must be a valid UUID")
+		return
+	}
+	var req struct {
+		TaskID   uuid.UUID `json:"task_id"`
+		SliceKey string    `json:"slice_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if req.TaskID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "task_id is required")
+		return
+	}
+	task, err := h.datasetStore.AddTask(r.Context(), orgID, datasetID, req.TaskID, strings.TrimSpace(req.SliceKey))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "DATASET_OR_TASK_NOT_FOUND", "dataset or task was not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "ADD_TASK_FAILED", "failed to add task to eval dataset", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalDatasetTask]{Data: task})
+}
+
+func (h *EvalHandler) ListReleaseGates(w http.ResponseWriter, r *http.Request) {
+	if h.releaseGateStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "RELEASE_GATES_DISABLED", "eval release gates are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	gates, err := h.releaseGateStore.ListActive(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list eval release gates", err)
+		return
+	}
+	if gates == nil {
+		gates = []models.EvalReleaseGate{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.EvalReleaseGate]{Data: gates})
+}
+
+func (h *EvalHandler) UpsertReleaseGate(w http.ResponseWriter, r *http.Request) {
+	if h.releaseGateStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "RELEASE_GATES_DISABLED", "eval release gates are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	var req struct {
+		GateName            string          `json:"gate_name"`
+		Enabled             *bool           `json:"enabled"`
+		DatasetID           *uuid.UUID      `json:"dataset_id"`
+		MinPassAt1          *float64        `json:"min_pass_at_1"`
+		MinPassAtK          *float64        `json:"min_pass_at_k"`
+		MaxPolicyViolations *int            `json:"max_policy_violations"`
+		MaxRegressionDelta  *float64        `json:"max_regression_delta"`
+		CanaryStages        json.RawMessage `json:"canary_stages"`
+		RollbackRules       json.RawMessage `json:"rollback_rules"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.GateName = strings.TrimSpace(req.GateName)
+	if req.GateName == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "gate_name is required")
+		return
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	minPassAt1 := 0.8
+	if req.MinPassAt1 != nil {
+		minPassAt1 = *req.MinPassAt1
+	}
+	minPassAtK := 0.8
+	if req.MinPassAtK != nil {
+		minPassAtK = *req.MinPassAtK
+	}
+	maxPolicyViolations := 0
+	if req.MaxPolicyViolations != nil {
+		maxPolicyViolations = *req.MaxPolicyViolations
+	}
+	maxRegressionDelta := 0.0
+	if req.MaxRegressionDelta != nil {
+		maxRegressionDelta = *req.MaxRegressionDelta
+	}
+	if minPassAt1 < 0 || minPassAt1 > 1 || minPassAtK < 0 || minPassAtK > 1 || maxPolicyViolations < 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_GATE", "release gate thresholds must be within valid ranges")
+		return
+	}
+	if req.DatasetID != nil {
+		if h.datasetStore == nil {
+			writeError(w, r, http.StatusNotImplemented, "DATASET_VALIDATION_DISABLED", "eval dataset validation is not configured")
+			return
+		}
+		if _, err := h.datasetStore.GetByID(r.Context(), orgID, *req.DatasetID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "DATASET_NOT_FOUND", "eval dataset was not found")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "DATASET_LOOKUP_FAILED", "failed to validate eval dataset", err)
+			return
+		}
+	}
+	var updatedBy *uuid.UUID
+	if user != nil {
+		updatedBy = &user.ID
+	}
+	gate := &models.EvalReleaseGate{
+		OrgID:               orgID,
+		GateName:            req.GateName,
+		Enabled:             enabled,
+		DatasetID:           req.DatasetID,
+		MinPassAt1:          minPassAt1,
+		MinPassAtK:          minPassAtK,
+		MaxPolicyViolations: maxPolicyViolations,
+		MaxRegressionDelta:  maxRegressionDelta,
+		CanaryStages:        req.CanaryStages,
+		RollbackRules:       req.RollbackRules,
+		UpdatedByUserID:     updatedBy,
+		Active:              true,
+	}
+	if err := h.releaseGateStore.Upsert(r.Context(), gate); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "UPSERT_FAILED", "failed to save eval release gate", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalReleaseGate]{Data: *gate})
+}
 
 // validateScoringCriteria validates that scoring_criteria is a well-formed JSON array
 // with valid grader_type values. Used by both CreateTask and UpdateTask.
@@ -578,7 +844,8 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify task exists and belongs to this org
-	if _, err := h.taskStore.GetByID(r.Context(), orgID, taskID); err != nil {
+	task, err := h.taskStore.GetByID(r.Context(), orgID, taskID)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "eval task not found")
 			return
@@ -629,6 +896,16 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 
 	txRunStore := db.NewEvalRunStore(tx)
 	txJobStore := db.NewJobStore(tx)
+	user := middleware.UserFromContext(r.Context())
+	var session *models.Session
+	if h.sessionStore != nil {
+		txSessionStore := db.NewSessionStore(tx)
+		session = evalRunSessionFromTask(orgID, task, req.Model, req.ConfigRef, user)
+		if err := txSessionStore.CreateInTx(ctx, tx, session); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CREATE_SESSION_FAILED", "failed to create eval run session", err)
+			return
+		}
+	}
 
 	run := models.EvalRun{
 		TaskID:           taskID,
@@ -636,6 +913,10 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 		Model:            req.Model,
 		ConfigRef:        req.ConfigRef,
 		ContextOverrides: contextOverrides,
+	}
+	if session != nil {
+		run.SessionID = &session.ID
+		run.ThreadID = session.PrimaryThreadID
 	}
 
 	if err := txRunStore.Create(ctx, &run); err != nil {
@@ -647,7 +928,18 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 		"eval_run_id": run.ID.String(),
 		"org_id":      orgID.String(),
 	}
-	jobID, err := txJobStore.Enqueue(ctx, orgID, "eval", "run_eval", payload, 5, nil)
+	queue := "eval"
+	jobType := "run_eval"
+	var dedupeKey *string
+	var enqueuePayload any = payload
+	if session != nil {
+		queue = "agent"
+		jobType = "run_agent"
+		runAgentDedupeKey := db.RunAgentDedupeKey(session.ID)
+		dedupeKey = &runAgentDedupeKey
+		enqueuePayload = db.RunAgentPayload(session)
+	}
+	jobID, err := txJobStore.Enqueue(ctx, orgID, queue, jobType, enqueuePayload, 5, dedupeKey)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", err)
 		return
@@ -665,6 +957,78 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalRun]{Data: run})
+}
+
+func evalRunAgentType(model string) models.AgentType {
+	switch model {
+	case "gemini-cli":
+		return models.AgentTypeGeminiCLI
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		return models.AgentTypeClaudeCode
+	default:
+		return models.AgentTypeCodex
+	}
+}
+
+func evalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model string, configRef *string, user *models.User) *models.Session {
+	title := "Eval: " + task.Name
+	agentType := evalRunAgentType(model)
+	baseCommitSHA := task.BaseCommitSHA
+	var modelOverride *string
+	if model != "codex" && model != "gemini-cli" {
+		modelOverride = &model
+	}
+	var createdBy *uuid.UUID
+	if user != nil {
+		createdBy = &user.ID
+	}
+	configLine := "Use the repository's default runtime configuration."
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		configLine = fmt.Sprintf("Use eval config ref %s. Apply that configuration before starting the task.", strings.TrimSpace(*configRef))
+	}
+	inputManifestMap := map[string]any{
+		"eval_task_id":    task.ID.String(),
+		"base_commit_sha": task.BaseCommitSHA,
+		"model":           model,
+	}
+	if task.SolutionCommitSHA != nil && *task.SolutionCommitSHA != "" {
+		inputManifestMap["solution_commit_sha"] = *task.SolutionCommitSHA
+	}
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		inputManifestMap["config_ref"] = strings.TrimSpace(*configRef)
+	}
+	inputManifest, err := json.Marshal(inputManifestMap)
+	if err != nil {
+		inputManifest = json.RawMessage(`{}`)
+	}
+	prompt := fmt.Sprintf(`Run this coding-agent eval exactly as specified.
+
+Repository setup:
+- Start from base commit %s before changing code.
+- %s
+- Do not inspect or apply the known solution diff.
+
+Task:
+%s
+
+When finished, leave the working tree with only the changes needed to solve the task.`, task.BaseCommitSHA, configLine, task.IssueDescription)
+	return &models.Session{
+		OrgID:             orgID,
+		Origin:            models.SessionOriginEvalRun,
+		InteractionMode:   models.SessionInteractionModeSingleRun,
+		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
+		AgentType:         agentType,
+		Status:            models.SessionStatusPending,
+		AutonomyLevel:     models.DefaultSessionAutonomy,
+		TokenMode:         models.SessionTokenModeHigh,
+		ModelOverride:     modelOverride,
+		TriggeredByUserID: createdBy,
+		Title:             &title,
+		PMApproach:        &prompt,
+		RepositoryID:      &task.RepoID,
+		BaseCommitSHA:     &baseCommitSHA,
+		InputManifest:     inputManifest,
+	}
 }
 
 func (h *EvalHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
@@ -781,6 +1145,17 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("one or more task IDs not found or do not belong to this organization (expected %d, found %d)", len(req.TaskIDs), validCount))
 		return
 	}
+	tasksByID := make(map[uuid.UUID]models.EvalTask, len(req.TaskIDs))
+	if h.sessionStore != nil {
+		for _, taskID := range req.TaskIDs {
+			task, err := h.taskStore.GetByID(r.Context(), orgID, taskID)
+			if err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch eval task", err)
+				return
+			}
+			tasksByID[taskID] = task
+		}
+	}
 
 	// Create batch + all runs + enqueue jobs atomically in a transaction
 	ctx := r.Context()
@@ -794,6 +1169,10 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 	txBatchStore := db.NewEvalBatchStore(tx)
 	txRunStore := db.NewEvalRunStore(tx)
 	txJobStore := db.NewJobStore(tx)
+	var txSessionStore *db.SessionStore
+	if h.sessionStore != nil {
+		txSessionStore = db.NewSessionStore(tx)
+	}
 
 	batch := models.EvalBatch{
 		OrgID:     orgID,
@@ -814,6 +1193,15 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 			if cfg.ContextOverrides != nil {
 				contextOverrides = cfg.ContextOverrides
 			}
+			var session *models.Session
+			if txSessionStore != nil {
+				task := tasksByID[taskID]
+				session = evalRunSessionFromTask(orgID, task, cfg.Model, cfg.ConfigRef, user)
+				if err := txSessionStore.CreateInTx(ctx, tx, session); err != nil {
+					writeError(w, r, http.StatusInternalServerError, "CREATE_SESSION_FAILED", "failed to create eval run session", err)
+					return
+				}
+			}
 
 			run := models.EvalRun{
 				TaskID:           taskID,
@@ -823,17 +1211,31 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 				ConfigRef:        cfg.ConfigRef,
 				ContextOverrides: contextOverrides,
 			}
+			if session != nil {
+				run.SessionID = &session.ID
+				run.ThreadID = session.PrimaryThreadID
+			}
 			if err := txRunStore.Create(ctx, &run); err != nil {
 				writeError(w, r, http.StatusInternalServerError, "CREATE_RUN_FAILED", "failed to create eval run", err)
 				return
 			}
 
-			payload := map[string]string{
+			queue := "eval"
+			jobType := "run_eval"
+			enqueuePayload := any(map[string]string{
 				"eval_run_id": run.ID.String(),
 				"org_id":      orgID.String(),
 				"batch_id":    batch.ID.String(),
+			})
+			var dedupeKey *string
+			if session != nil {
+				queue = "agent"
+				jobType = "run_agent"
+				runAgentDedupeKey := db.RunAgentDedupeKey(session.ID)
+				dedupeKey = &runAgentDedupeKey
+				enqueuePayload = db.RunAgentPayload(session)
 			}
-			if _, err := txJobStore.Enqueue(ctx, orgID, "eval", "run_eval", payload, 5, nil); err != nil {
+			if _, err := txJobStore.Enqueue(ctx, orgID, queue, jobType, enqueuePayload, 5, dedupeKey); err != nil {
 				writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval run", err)
 				return
 			}
@@ -857,6 +1259,56 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 	h.publishBatchSignal(r.Context(), orgID, batch.ID, batch.Status)
 
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.EvalBatch]{Data: batch})
+}
+
+func (h *EvalHandler) StartCompare(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	type compareConfig struct {
+		Model            string          `json:"model"`
+		ConfigRef        *string         `json:"config_ref"`
+		ContextOverrides json.RawMessage `json:"context_overrides"`
+	}
+	var req struct {
+		Name             string          `json:"name"`
+		TaskIDs          []uuid.UUID     `json:"task_ids"`
+		BaselineConfig   compareConfig   `json:"baseline_config"`
+		CandidateConfigs []compareConfig `json:"candidate_configs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if len(req.TaskIDs) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "task_ids is required")
+		return
+	}
+	if strings.TrimSpace(req.BaselineConfig.Model) == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "baseline_config.model is required")
+		return
+	}
+	if len(req.CandidateConfigs) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "candidate_configs is required")
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "Compare config"
+	}
+	configs := make([]compareConfig, 0, 1+len(req.CandidateConfigs))
+	configs = append(configs, req.BaselineConfig)
+	configs = append(configs, req.CandidateConfigs...)
+	body, err := json.Marshal(map[string]any{
+		"name":     name,
+		"task_ids": req.TaskIDs,
+		"configs":  configs,
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "COMPARE_BUILD_FAILED", "failed to build compare batch", err)
+		return
+	}
+	forward := r.Clone(r.Context())
+	forward.Body = io.NopCloser(bytes.NewReader(body))
+	h.StartBatch(w, forward)
 }
 
 func (h *EvalHandler) ListBatches(w http.ResponseWriter, r *http.Request) {
@@ -901,10 +1353,22 @@ func (h *EvalHandler) GetBatch(w http.ResponseWriter, r *http.Request) {
 	if runs == nil {
 		runs = []models.EvalRun{}
 	}
+	var gateDecisions []models.EvalReleaseGateDecision
+	if h.releaseGateStore != nil {
+		gateDecisions, err = h.releaseGateStore.ListDecisionsByBatch(r.Context(), orgID, batchID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list release gate decisions", err)
+			return
+		}
+	}
+	if gateDecisions == nil {
+		gateDecisions = []models.EvalReleaseGateDecision{}
+	}
 
 	detail := models.EvalBatchDetail{
-		EvalBatch: batch,
-		Runs:      runs,
+		EvalBatch:     batch,
+		Runs:          runs,
+		GateDecisions: gateDecisions,
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBatchDetail]{Data: detail})
@@ -1040,32 +1504,78 @@ func (h *EvalHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.sessionStore != nil && h.txStarter != nil {
+		h.bootstrapSessionBacked(w, r, orgID, user, req.RepoID)
+		return
+	}
+	writeError(w, r, http.StatusInternalServerError, "SESSION_BACKING_REQUIRED", "eval bootstrap requires session-backed execution")
+}
+
+func (h *EvalHandler) bootstrapSessionBacked(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, user *models.User, repoID uuid.UUID) {
+	ctx := r.Context()
+	tx, err := h.txStarter.Begin(ctx)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_FAILED", "failed to start bootstrap transaction", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txSessionStore := db.NewSessionStore(tx)
+	txBootstrapStore := db.NewEvalBootstrapStore(tx)
+	txJobStore := db.NewJobStore(tx)
+
+	title := "Bootstrap eval tasks"
+	prompt := "Analyze this repository's pull request history and add high-quality candidate eval tasks with `143-tools eval add`."
+	var createdBy *uuid.UUID
+	if user != nil {
+		createdBy = &user.ID
+	}
+	session := &models.Session{
+		OrgID:             orgID,
+		Origin:            models.SessionOriginEvalBootstrap,
+		InteractionMode:   models.SessionInteractionModeSingleRun,
+		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
+		AgentType:         models.AgentTypeCodex,
+		Status:            models.SessionStatusPending,
+		AutonomyLevel:     models.DefaultSessionAutonomy,
+		TokenMode:         models.SessionTokenModeLow,
+		TriggeredByUserID: createdBy,
+		Title:             &title,
+		PMApproach:        &prompt,
+		RepositoryID:      &repoID,
+	}
+	if err := txSessionStore.CreateInTx(ctx, tx, session); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREATE_SESSION_FAILED", "failed to create eval bootstrap session", err)
+		return
+	}
+	if session.PrimaryThreadID == nil || *session.PrimaryThreadID == uuid.Nil {
+		writeError(w, r, http.StatusInternalServerError, "CREATE_SESSION_FAILED", "failed to create eval bootstrap session thread")
+		return
+	}
+
 	run := models.EvalBootstrapRun{
 		OrgID:     orgID,
-		RepoID:    req.RepoID,
+		RepoID:    repoID,
 		Status:    models.EvalBootstrapStatusPending,
-		CreatedBy: &user.ID,
+		SessionID: &session.ID,
+		ThreadID:  session.PrimaryThreadID,
+		CreatedBy: createdBy,
 	}
-	if err := h.bootstrapStore.Create(r.Context(), &run); err != nil {
+	if err := txBootstrapStore.Create(ctx, &run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create bootstrap run", err)
 		return
 	}
-
-	// Enqueue the bootstrap job
-	_, err := h.jobStore.Enqueue(r.Context(), orgID, "eval", "run_eval_bootstrap", map[string]string{
-		"bootstrap_run_id": run.ID.String(),
-		"org_id":           orgID.String(),
-		"repo_id":          req.RepoID.String(),
-	}, 0, nil)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue bootstrap job", err)
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	if _, err := txJobStore.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue eval bootstrap session", err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TX_COMMIT_FAILED", "failed to commit eval bootstrap session", err)
 		return
 	}
 
-	// Publish the initial pending event so the bootstrap detail sheet can
-	// render an empty-but-active state without polling for the first signal.
 	h.publishBootstrapSignal(r.Context(), orgID, run.ID, run.Status, run.SessionID)
-
 	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
 }
 
@@ -1089,6 +1599,7 @@ func (h *EvalHandler) GetBootstrapCandidates(w http.ResponseWriter, r *http.Requ
 			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch bootstrap run", err)
 			return
 		}
+		h.attachNormalizedBootstrapCandidates(r.Context(), orgID, &run)
 		writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
 		return
 	}
@@ -1113,7 +1624,51 @@ func (h *EvalHandler) GetBootstrapCandidates(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch bootstrap run", err)
 		return
 	}
+	h.attachNormalizedBootstrapCandidates(r.Context(), orgID, &run)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.EvalBootstrapRun]{Data: run})
+}
+
+func (h *EvalHandler) attachNormalizedBootstrapCandidates(ctx context.Context, orgID uuid.UUID, run *models.EvalBootstrapRun) {
+	if h.bootstrapStore == nil || run == nil || run.ID == uuid.Nil {
+		return
+	}
+	rows, err := h.bootstrapStore.ListCandidatesByRun(ctx, orgID, run.ID)
+	if err != nil || len(rows) == 0 {
+		return
+	}
+	payloads := make([]json.RawMessage, 0, len(rows))
+	for _, row := range rows {
+		candidate := row.Candidate()
+		rawCandidate, err := json.Marshal(candidate)
+		if err != nil {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rawCandidate, &payload); err != nil {
+			continue
+		}
+		payload["id"] = row.ID.String()
+		payload["status"] = string(row.Status)
+		payload["candidate_index"] = row.CandidateIndex
+		if row.RejectionReason != nil {
+			payload["rejection_reason"] = *row.RejectionReason
+		}
+		if row.AcceptedTaskID != nil {
+			payload["accepted_task_id"] = row.AcceptedTaskID.String()
+			payload["created_task_id"] = row.AcceptedTaskID.String()
+		}
+		enriched, err := json.Marshal(payload)
+		if err != nil {
+			payloads = append(payloads, row.Payload)
+			continue
+		}
+		payloads = append(payloads, enriched)
+	}
+	raw, err := json.Marshal(payloads)
+	if err != nil {
+		return
+	}
+	run.Candidates = raw
 }
 
 // StreamBootstrapUpdates serves a per-bootstrap-run SSE stream that wakes
@@ -1206,8 +1761,9 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		BootstrapRunID   uuid.UUID `json:"bootstrap_run_id"`
-		CandidateIndices []int     `json:"candidate_indices"`
+		BootstrapRunID   uuid.UUID   `json:"bootstrap_run_id"`
+		CandidateIndices []int       `json:"candidate_indices"`
+		CandidateIDs     []uuid.UUID `json:"candidate_ids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
@@ -1217,8 +1773,8 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "bootstrap_run_id is required")
 		return
 	}
-	if len(req.CandidateIndices) == 0 {
-		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "candidate_indices is required (at least one index)")
+	if len(req.CandidateIndices) == 0 && len(req.CandidateIDs) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "candidate_indices or candidate_ids is required")
 		return
 	}
 
@@ -1237,18 +1793,61 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	var candidates []models.EvalBootstrapCandidate
-	if err := json.Unmarshal(run.Candidates, &candidates); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PARSE_FAILED", "failed to parse bootstrap candidates", err)
-		return
+	var candidateRows []models.EvalBootstrapCandidateRow
+	if len(req.CandidateIDs) > 0 {
+		for _, candidateID := range req.CandidateIDs {
+			row, err := h.bootstrapStore.GetCandidateByID(r.Context(), orgID, candidateID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					writeError(w, r, http.StatusBadRequest, "INVALID_CANDIDATE_ID", "candidate not found")
+					return
+				}
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to fetch candidate", err)
+				return
+			}
+			if row.BootstrapRunID != req.BootstrapRunID {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CANDIDATE_ID", "candidate does not belong to bootstrap run")
+				return
+			}
+			candidateRows = append(candidateRows, row)
+		}
+	} else if rows, err := h.bootstrapStore.ListCandidatesByRun(r.Context(), orgID, req.BootstrapRunID); err == nil && len(rows) > 0 {
+		for _, idx := range req.CandidateIndices {
+			if idx < 0 || idx >= len(rows) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_INDEX",
+					fmt.Sprintf("candidate index %d is out of range (0-%d)", idx, len(rows)-1))
+				return
+			}
+			candidateRows = append(candidateRows, rows[idx])
+		}
 	}
 
-	// Validate all indices are in range before creating anything
-	for _, idx := range req.CandidateIndices {
-		if idx < 0 || idx >= len(candidates) {
-			writeError(w, r, http.StatusBadRequest, "INVALID_INDEX",
-				fmt.Sprintf("candidate index %d is out of range (0-%d)", idx, len(candidates)-1))
+	var candidates []models.EvalBootstrapCandidate
+	if len(candidateRows) > 0 {
+		for _, row := range candidateRows {
+			if row.Status != models.EvalBootstrapCandidateStatusProposed {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CANDIDATE_STATUS", "only proposed candidates can be accepted")
+				return
+			}
+			candidates = append(candidates, row.Candidate())
+		}
+	} else {
+		var allCandidates []models.EvalBootstrapCandidate
+		if err := json.Unmarshal(run.Candidates, &candidates); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PARSE_FAILED", "failed to parse bootstrap candidates", err)
 			return
+		}
+		allCandidates = candidates
+
+		// Validate all indices are in range before creating anything
+		candidates = []models.EvalBootstrapCandidate{}
+		for _, idx := range req.CandidateIndices {
+			if idx < 0 || idx >= len(allCandidates) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_INDEX",
+					fmt.Sprintf("candidate index %d is out of range (0-%d)", idx, len(allCandidates)-1))
+				return
+			}
+			candidates = append(candidates, allCandidates[idx])
 		}
 	}
 
@@ -1264,12 +1863,21 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 	txTaskStore := db.NewEvalTaskStore(tx)
 
 	var created []models.EvalTask
-	for _, idx := range req.CandidateIndices {
-		c := candidates[idx]
+	for i, c := range candidates {
+		if err := validateBootstrapCandidateForAcceptance(c); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CANDIDATE", fmt.Sprintf("candidate %d is invalid: %s", i, err.Error()))
+			return
+		}
+		if h.candidateValidator != nil {
+			if err := h.candidateValidator.ValidateEvalCandidate(r.Context(), orgID, run.RepoID, c); err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CANDIDATE", fmt.Sprintf("candidate %d failed repository validation: %s", i, err.Error()), err)
+				return
+			}
+		}
 		criteriaJSON, err := json.Marshal(c.ScoringCriteria)
 		if err != nil {
 			writeError(w, r, http.StatusInternalServerError, "MARSHAL_FAILED",
-				fmt.Sprintf("failed to marshal scoring criteria for candidate %d", idx), err)
+				fmt.Sprintf("failed to marshal scoring criteria for candidate %d", i), err)
 			return
 		}
 		prNum := c.PRNumber
@@ -1292,8 +1900,20 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 		}
 		if err := txTaskStore.Create(ctx, &task); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED",
-				fmt.Sprintf("failed to create task from candidate %d", idx), err)
+				fmt.Sprintf("failed to create task from candidate %d", i), err)
 			return
+		}
+		if len(candidateRows) > i {
+			txBootstrapStore := db.NewEvalBootstrapStore(tx)
+			var reviewedBy *uuid.UUID
+			if user != nil {
+				reviewedBy = &user.ID
+			}
+			if err := txBootstrapStore.MarkCandidateAccepted(ctx, orgID, candidateRows[i].ID, task.ID, reviewedBy); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "UPDATE_CANDIDATE_FAILED",
+					fmt.Sprintf("failed to mark candidate %d accepted", i), err)
+				return
+			}
 		}
 		created = append(created, task)
 	}
@@ -1304,4 +1924,104 @@ func (h *EvalHandler) AcceptBootstrapCandidates(w http.ResponseWriter, r *http.R
 	}
 
 	writeJSON(w, http.StatusCreated, models.ListResponse[models.EvalTask]{Data: created})
+}
+
+func validateBootstrapCandidateForAcceptance(c models.EvalBootstrapCandidate) error {
+	if strings.TrimSpace(c.PRTitle) == "" {
+		return errors.New("pr_title is required")
+	}
+	if !validGitSHA.MatchString(strings.TrimSpace(c.BaseCommitSHA)) {
+		return errors.New("base_commit_sha must be a valid git SHA")
+	}
+	if !validGitSHA.MatchString(strings.TrimSpace(c.SolutionCommitSHA)) {
+		return errors.New("solution_commit_sha must be a valid git SHA")
+	}
+	if strings.TrimSpace(c.SolutionDiff) == "" {
+		return errors.New("solution_diff is required")
+	}
+	if strings.TrimSpace(c.IssueDescription) == "" {
+		return errors.New("issue_description is required")
+	}
+	if err := c.Complexity.Validate(); err != nil {
+		return err
+	}
+	if len(c.ScoringCriteria) == 0 {
+		return errors.New("scoring_criteria is required")
+	}
+	for i, criterion := range c.ScoringCriteria {
+		if strings.TrimSpace(criterion.Name) == "" {
+			return fmt.Errorf("scoring_criteria[%d].name is required", i)
+		}
+		if err := criterion.GraderType.Validate(); err != nil {
+			return fmt.Errorf("scoring_criteria[%d].grader_type: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// ReviewBootstrapCandidate records reviewer disposition for a single candidate without creating an eval task.
+func (h *EvalHandler) ReviewBootstrapCandidate(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	candidateID, err := uuid.Parse(chi.URLParam(r, "candidate_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid candidate ID")
+		return
+	}
+
+	var req struct {
+		Status          models.EvalBootstrapCandidateStatus `json:"status"`
+		RejectionReason *string                             `json:"rejection_reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.Status == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_FIELD", "status is required")
+		return
+	}
+	if err := req.Status.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "invalid candidate status")
+		return
+	}
+	if req.Status == models.EvalBootstrapCandidateStatusAccepted {
+		writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "use the accept endpoint to accept candidates")
+		return
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	var reviewedBy *uuid.UUID
+	if user != nil {
+		reviewedBy = &user.ID
+	}
+	if req.RejectionReason != nil {
+		reason := strings.TrimSpace(*req.RejectionReason)
+		if reason == "" {
+			req.RejectionReason = nil
+		} else {
+			req.RejectionReason = &reason
+		}
+	}
+
+	if err := h.bootstrapStore.UpdateCandidateReview(r.Context(), orgID, candidateID, req.Status, req.RejectionReason, reviewedBy); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "candidate not found or already accepted")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update candidate review", err)
+		return
+	}
+
+	type reviewCandidateResponse struct {
+		CandidateID     uuid.UUID                           `json:"candidate_id"`
+		Status          models.EvalBootstrapCandidateStatus `json:"status"`
+		RejectionReason *string                             `json:"rejection_reason,omitempty"`
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[reviewCandidateResponse]{
+		Data: reviewCandidateResponse{
+			CandidateID:     candidateID,
+			Status:          req.Status,
+			RejectionReason: req.RejectionReason,
+		},
+	})
 }

@@ -232,6 +232,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	projectCycleStore := db.NewProjectCycleStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
+	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
 
 	services := buildServices(
@@ -261,6 +262,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		integrationStore,
 		sessionMessageStore,
 		automationRunStore,
+		evalBootstrapStore,
 		snapshotStore,
 		billingMetrics,
 		agent.NewCancelRegistry(logger),
@@ -292,7 +294,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		EvalTasks:           db.NewEvalTaskStore(pool),
 		EvalRuns:            db.NewEvalRunStore(pool),
 		EvalBatches:         db.NewEvalBatchStore(pool),
-		EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+		EvalBootstraps:      evalBootstrapStore,
+		EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 		Repositories:        repoStore,
 		SessionMessages:     sessionMessageStore,
 		SessionThreads:      sessionThreadStore,

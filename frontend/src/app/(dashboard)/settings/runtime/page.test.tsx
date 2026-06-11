@@ -51,6 +51,9 @@ describe("RuntimeSettingsPage", () => {
             preview_default_tier: "small",
             allow_repo_resource_requests: false,
             preview_max_tier: "large",
+            preview_max_cpu_millis: 1500,
+            preview_max_memory_mib: 4096,
+            preview_max_ephemeral_disk_mib: 6144,
           },
         },
         created_at: "2026-05-01T12:00:00Z",
@@ -117,6 +120,9 @@ describe("RuntimeSettingsPage", () => {
     expect(screen.getByRole("combobox", { name: "Preview default tier" })).toHaveTextContent("Small");
     expect(screen.getByLabelText("Allow repo resource requests")).not.toBeChecked();
     expect(screen.getByRole("combobox", { name: "Preview max tier" })).toHaveTextContent("Large");
+    expect(screen.getByLabelText("Preview CPU request max")).toHaveValue(1500);
+    expect(screen.getByLabelText("Preview memory request max")).toHaveValue(4096);
+    expect(screen.getByLabelText("Preview ephemeral disk request max")).toHaveValue(6144);
     expect(screen.getByText("4 / 5")).toBeInTheDocument();
     expect(screen.getByText("3 / 7")).toBeInTheDocument();
     expect(screen.getByText("Limited")).toBeInTheDocument();
@@ -197,6 +203,17 @@ describe("RuntimeSettingsPage", () => {
         settings: { max_session_duration_seconds: 1800 },
       });
     });
+
+    const previewLimit = screen.getByLabelText("Active previews per user");
+    await user.click(previewLimit);
+    await user.keyboard("{Control>}a{/Control}99");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { preview_max_previews_per_user: 20 },
+      });
+    });
   });
 
   it("saves lifecycle defaults", async () => {
@@ -265,6 +282,9 @@ describe("RuntimeSettingsPage", () => {
               preview_default_tier: "small",
               allow_repo_resource_requests: false,
               preview_max_tier: "large",
+              preview_max_cpu_millis: 1500,
+              preview_max_memory_mib: 4096,
+              preview_max_ephemeral_disk_mib: 6144,
             },
           },
           created_at: "2026-05-01T12:00:00Z",
@@ -281,6 +301,9 @@ describe("RuntimeSettingsPage", () => {
               preview_default_tier: "small",
               allow_repo_resource_requests: true,
               preview_max_tier: "large",
+              preview_max_cpu_millis: 1500,
+              preview_max_memory_mib: 4096,
+              preview_max_ephemeral_disk_mib: 6144,
             },
           },
           created_at: "2026-05-01T12:00:00Z",
@@ -303,6 +326,17 @@ describe("RuntimeSettingsPage", () => {
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
         settings: { sandbox_resources: { allow_repo_resource_requests: true } },
+      });
+    });
+
+    const memoryMax = screen.getByLabelText("Preview memory request max");
+    await user.click(memoryMax);
+    await user.keyboard("{Control>}a{/Control}99999");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_resources: { preview_max_memory_mib: 8192 } },
       });
     });
   });

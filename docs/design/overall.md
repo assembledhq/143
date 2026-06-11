@@ -51,7 +51,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - First-party session upload URLs are resolved by the worker before a coding-agent turn starts, copied into the sandbox, and listed in the prompt as sandbox-local files. External attachment URLs remain textual links in v1. Detailed design: [implemented/79-session-attachment-delivery.md](implemented/79-session-attachment-delivery.md).
 - Preview browser origins should be runtime-owned by the backend rather than a build-time frontend constant. The preview status API returns the authoritative `preview_origin`, and production wildcard preview domains depend on edge DNS plus automated wildcard TLS issuance at the reverse proxy (for example, Caddy with a DNS-challenge provider module).
 - Previewed apps that depend on browser cookies should keep their browser-facing API calls on the preview origin, typically by proxying `/api/*` inside the sandbox to the local backend. Build-time public API origins must not point back at the production app origin, or preview-scoped session/CSRF cookies split from the request destination.
-- Preview readiness is a two-sided contract: the application must pass its in-sandbox readiness probe, and the worker must be able to dial the sandbox container IP/primary port before the preview is marked ready. Resource sizing is tiered by topology so single-service previews stay cheap, normal multi-service previews remain modest, and multi-service previews with managed infrastructure get enough CPU/memory to avoid starving their own dev servers without exceeding the normal sandbox slot model. Repos can declare bounded preview `resources.requests` and `resources.limits` in `.143/config.json` for CPU, memory, and ephemeral storage; resolved CPU, memory, and disk limits are persisted with preview and usage records for capacity tracking and future billing.
+- Preview readiness is a two-sided contract: the application must pass its in-sandbox readiness probe, and the worker must be able to dial the sandbox container IP/primary port before the preview is marked ready. Resource sizing is tiered by topology so single-service previews stay cheap, normal multi-service previews remain modest, and multi-service previews with managed infrastructure get enough CPU/memory to avoid starving their own dev servers without exceeding the normal sandbox slot model. Repos can declare bounded preview `resources.requests` and `resources.limits` in `.143/config.json` for CPU, memory, and ephemeral storage; org admins can lower the maximum repo-requestable preview CPU, memory, and disk below platform hard caps. Resolved CPU, memory, and disk limits are persisted with preview and usage records for capacity tracking and future billing.
 - Preview secrets should be modeled as admin-managed bundles: repos commit a named bundle reference and service scope, while 143 resolves values from managed storage or external secret sources and delivers them as env vars or generated config files inside the preview. This keeps values out of GitHub and agent diffs while supporting repos that expect files such as `.env` or `development.conf.json`; see [future/87-preview-secret-bundles.md](future/87-preview-secret-bundles.md).
 - Preview controls should treat launch, retry, and restart as one user intent to get the session running with the current workspace config, keep startup diagnostics inline, and keep lifetime adjustment bounded behind secondary actions. Detailed designs: [implemented/82-preview-lifetime-controls.md](implemented/82-preview-lifetime-controls.md), [implemented/84-preview-command-header.md](implemented/84-preview-command-header.md).
 - Session preview freshness is backend-authoritative: sessions carry a monotonically increasing workspace revision, preview launches/recycles stamp the revision they started from, and the Preview tab surfaces a compact stale-state marker plus `Refresh preview` action when newer session changes are available. Detailed design: [implemented/89-session-preview-freshness.md](implemented/89-session-preview-freshness.md).
@@ -182,6 +182,7 @@ The system aggregates issues from support, Sentry, and Linear, prioritizes them 
 - Step 4: Open PR and ship
     - Users can publish a session as a branch without opening a PR. This uses the same snapshot-backed GitHub push path as PR creation, tracks branch-only state separately from PR creation state, and keeps the session eligible for a later PR. Details: [implemented/80-session-branch-only-publish.md](implemented/80-session-branch-only-publish.md).
     - The system opens a new PR on github, using whatever Github template already exists. PR descriptions should preserve the repo template's structure and fill its existing fields as well as possible; the only content appended outside the template is a small 143.dev/session links footer. User-initiated PRs should prefer GitHub App user-to-server tokens so the PR is authored as the triggering human; unattended flows fall back to the installation token.
+    - PR description generation should treat the code diff and files changed as the source of truth. Issue/session title and summaries from visible session threads provide supporting context for intent and validation, but should not override what actually changed in the code or turn the PR into a review report.
     - Sandbox agents and automations should request PR creation through `143-tools pr create`, not direct `gh pr create` calls. The CLI uses a short-lived internal token scoped to the session repository and queues the same `open_pr` workflow as the product UI, so repo PR templates, 143 session links, Linear issue context, dedupe, and PR state tracking stay consistent across human and automation-triggered PRs. The public Fumadocs reference at `/docs/reference/agent-tools` is the human-readable API contract for the agent-facing CLI and should be updated whenever the CLI command surface changes. Agent-facing integration commands use hierarchical `143-tools <namespace> <action>` syntax; see [implemented/95-hierarchical-agent-tools-cli.md](implemented/95-hierarchical-agent-tools-cli.md).
     - Sandbox agents can coordinate with sibling session tabs through `143-tools session-tabs ...` commands when the org's coding-agent tab-tools setting is enabled. The internal API is scoped by the injected sandbox token to the current org, repository, session, and source thread, so agents can list, inspect, create, and message tabs without becoming an org-wide session browser. Detailed design: [implemented/94-agent-tab-cli-tools.md](implemented/94-agent-tab-cli-tools.md).
     - Repository-native CI/CD is responsible for validating the branch after PR creation. 143 no longer runs a separate product-owned validation stage. See [implemented/71-remove-validation-stage.md](implemented/71-remove-validation-stage.md).
@@ -522,19 +523,29 @@ Deepen the context layer based on what you've learned from real agent runs about
 
 **Milestone**: ❌ Unblocked — Phases 3-4 provide real agent runs and prioritization data to learn from.
 
-## Phase 8: Evals + Quality Gates (doc: 16) — NOT STARTED
+## Phase 8: Evals + Quality Gates (docs: 16, 42, 96) — PARTIALLY IMPLEMENTED
 
-Now that you have real production data and observed failure modes, build the evaluation system on solid ground.
+Settings -> Evals now has a session-backed task builder and execution path.
+Eval bootstrap and eval runs use normal `sessions` infrastructure with
+`sessions.origin` values of `eval_bootstrap` and `eval_run`, linked
+`eval_bootstrap_runs` / `eval_runs` rows, normal `run_agent` jobs, session logs,
+threads, sandbox lifecycle, and terminal-state finalization. Bootstrap agents
+can propose candidates through the gated `143-tools eval add` command, which is
+only exposed inside explicit eval-bootstrap sessions and persists normalized
+`eval_bootstrap_candidates` rows. The Settings -> Evals candidate review surface
+uses stable candidate IDs and status to accept selected candidates into
+`eval_tasks`. Detailed implementation: [implemented/96-session-backed-eval-tools.md](implemented/96-session-backed-eval-tools.md).
 
-No eval infrastructure tables exist. Entirely future work:
+Remaining quality-gate work:
 
-1. **Eval taxonomy + schema** — ❌ No eval tables
-2. **Dataset pipeline** — ❌ No dataset infrastructure
-3. **Grader stack** — ❌ No grader implementation
-4. **Release gates + rollout** — ❌ No release gate tables or logic
-5. **Continuous eval flywheel** — ❌ No flywheel
-
-**Milestone**: ❌ Partially unblocked — Phases 3-4 are complete, Phase 5 still needed for full production data.
+1. **Post-session grader pipeline** — deterministic checks and LLM judges should
+   run as separate jobs that consume the session snapshot/diff.
+2. **Dataset roles and slices** — golden, shadow, adversarial, and other
+   role-based reporting remain future product work.
+3. **Release gates + rollout** — gate authoring, candidate-config comparison,
+   and promotion decisions still need a dedicated workflow.
+4. **Continuous eval flywheel** — scheduled candidate discovery and regression
+   reporting remain future work.
 
 ## Future: Additional Ingestion Sources
 

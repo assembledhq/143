@@ -422,6 +422,7 @@ func main() {
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	var jobStore *db.JobStore
+	var evalBootstrapStore *db.EvalBootstrapStore
 	var workerPreviewStore *db.PreviewStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
@@ -444,6 +445,7 @@ func main() {
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
 		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
+		evalBootstrapStore = db.NewEvalBootstrapStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -495,7 +497,8 @@ func main() {
 			EvalTasks:           db.NewEvalTaskStore(pool),
 			EvalRuns:            db.NewEvalRunStore(pool),
 			EvalBatches:         db.NewEvalBatchStore(pool),
-			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+			EvalBootstraps:      evalBootstrapStore,
+			EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 			Repositories:        repoStore,
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
@@ -527,7 +530,7 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
+				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
@@ -1178,6 +1181,7 @@ func buildServices(
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	automationRunStore *db.AutomationRunStore,
+	evalBootstrapStore *db.EvalBootstrapStore,
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
@@ -1385,6 +1389,7 @@ func buildServices(
 		IdentityResolver:   identityResolver,
 		SandboxAuth:        sandboxAuthServer,
 		Users:              userStore,
+		EvalBootstraps:     evalBootstrapStore,
 		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
 		InternalAPISecret:  cfg.SessionSecret,
 		NodeID:             cfg.NodeID,
@@ -1573,6 +1578,7 @@ func buildServices(
 		SlackSummarizer: slackSummarizer,
 		LLM:             llmClient,
 		GitHub:          ghSvc,
+		Snapshots:       snapshotStore,
 		TitleService:    titleService,
 		Linear:          linearService,
 		SlackbotMetrics: workerSlackbotMetrics,

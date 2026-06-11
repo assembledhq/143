@@ -2373,6 +2373,41 @@ func TestLaunchPreview_InvalidConfig(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid preview config")
 }
 
+func TestReservePreview_UsesOrgPreviewResourcePolicy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := db.NewPreviewStore(mock)
+	mgr := NewManager(ManagerConfig{
+		Store: store,
+		OrgSettingsStore: staticOrgSettingsStore{
+			settings: json.RawMessage(`{"sandbox_resources":{"preview_max_memory_mib":4096}}`),
+		},
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+
+	cfg := validPreviewConfig()
+	cfg.Resources = models.PreviewResourceRequirements{
+		Limits: models.PreviewResourceList{Memory: "8Gi"},
+	}
+
+	_, err = mgr.ReservePreview(context.Background(), StartPreviewInput{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		Config:    cfg,
+	})
+
+	require.Error(t, err, "ReservePreview should reject repo resource limits above the org max")
+	require.Contains(t, err.Error(), "preview.resources.limits.memory must be at most 4Gi", "error should explain the effective org memory cap")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestLaunchPreview_Success(t *testing.T) {
 	t.Parallel()
 
