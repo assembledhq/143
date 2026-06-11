@@ -1,7 +1,7 @@
 # Runtime / Sandbox Settings
 
 > **Status:** Implemented
-> **Last reviewed:** 2026-06-10
+> **Last reviewed:** 2026-06-11
 
 143 currently exposes shared sandbox runtime controls across multiple settings pages. Static egress lives under Organization -> General, preview capacity lives on General, and coding-agent execution limits live under Platform -> Coding agents. That split makes each individual setting understandable in isolation, but it hides the product model: these settings all affect how 143 creates, schedules, networks, and retains sandbox runtimes for an organization.
 
@@ -50,7 +50,7 @@ The page should be admin-only, matching the current access level for General, LL
 Owns org-wide network policy for new and hydrated sandboxes.
 
 Controls:
-- `Use static egress IP for sessions and previews` switch.
+- `Static egress IP` switch.
 - Copyable public IP row.
 - Generic availability message when static egress cannot be used.
 - Optional future links to setup docs or operator diagnostics.
@@ -63,6 +63,7 @@ UI:
 - Use `section` with a compact `h2`, matching General settings.
 - Use `Card` and `CardContent`.
 - Use `Label` and `Switch` for the toggle.
+- Put explanatory copy in a question-mark tooltip next to the label.
 - Use `CopyButton` for the public IP.
 - Use semantic muted text, not warning-heavy styling, unless enabling the setting failed.
 - Use `AutosaveIndicator` in the section header.
@@ -78,19 +79,18 @@ Wireframe:
 Sandbox network                                      Saved
 
 [Card]
-  Use static egress IP for sessions and previews       [switch]
-  Uses a stable public IP for new and hydrated sandboxes.
+  Static egress IP [?]                                 [switch]
   Static egress is not currently available for new sandbox starts.
 
   Public IP   203.0.113.10                             [copy icon]
 ```
 
-### 2. Capacity Limits
+### 2. Usage Limits
 
 Owns the org-level controls that determine how many runtimes users can consume.
 
 Controls:
-- `Concurrent coding-agent runs`
+- `Concurrent agent runs`
 - `Active previews per user`
 
 Existing settings/API:
@@ -101,32 +101,32 @@ Existing settings/API:
 UI:
 - Use one `Card`.
 - Use a two-column responsive layout on desktop and stacked rows on mobile.
-- Use `Label`, `Input type="number"`, and short help text.
+- Use `Label`, `Input type="number"`, question-mark tooltips for explanations, and visible helper text only for max values.
 - Use `useAutosaveNumericField` for clamping and commit-on-blur behavior, matching existing General and Coding agents patterns.
 - Use constants from `settings-constants.ts` where available.
 
 Wireframe:
 
 ```text
-Capacity limits                                      Saved
+Usage limits                                        Saved
 
 [Card]
-  Concurrent coding-agent runs
+  Concurrent agent runs [?]
   [ 5 ]
-  Limits how many agent turns can run for the org at once.
+  Max 25
 
-  Active previews per user
+  Active previews per user [?]
   [ 4 ]
-  Limits how many previews one user can keep running at once.
+  Max 20
 ```
 
-### 3. Session Runtime
+### 3. Sessions
 
 Owns defaults that shape individual coding-agent sandbox runs.
 
 Controls:
-- `Maximum session duration`
-- `Sandbox tab tools` toggle, if product wants this to live with runtime controls instead of Coding agents.
+- `Maximum session length`
+- `Agent tab tools` toggle, if product wants this to live with runtime controls instead of Coding agents.
 
 Existing settings/API:
 - `settings.max_session_duration_seconds`
@@ -136,31 +136,30 @@ Existing settings/API:
 UI:
 - Use `Card` and `CardContent`.
 - For duration, use `Input type="number"` in minutes and write seconds to the API, matching the current Coding agents implementation.
-- For tab tools, use `Switch`, `Label`, and concise helper copy.
+- For tab tools, use `Switch`, `Label`, and a question-mark tooltip.
 - If tab tools stays on Coding agents, this section should contain only the duration control in the first pass.
 
 Wireframe:
 
 ```text
-Session runtime                                     Saved
+Sessions                                            Saved
 
 [Card]
-  Maximum session duration
+  Maximum session length [?]
   [ 25 ] minutes
-  Stops long-running turns after the configured org limit.
+  Max 120 minutes
 
-  Sandbox tab tools                                  [switch]
-  Allows agent tabs in the same session to coordinate through the 143 tools CLI.
+  Agent tab tools [?]                                [switch]
 ```
 
-### 4. Lifecycle Defaults
+### 4. Cleanup Defaults
 
 Owns cleanup and retention policies for runtime artifacts.
 
 Controls:
-- Default idle preview cleanup window.
-- Default sandbox retention after completed runs.
-- Whether previews may hold a sandbox after a session turn completes.
+- `Idle preview timeout`.
+- `Keep completed sessions for`.
+- `Keep sandbox while preview is active`.
 
 Settings shape:
 
@@ -183,6 +182,7 @@ API/schema impact:
 
 UI:
 - Use `Card`, `Input`, `Switch`, and `AutosaveIndicator`.
+- Put explanatory copy in question-mark tooltips and keep only max-value helper text below numeric inputs.
 - Do not expose worker cleanup implementation details.
 
 ### 5. Resource Defaults
@@ -221,51 +221,8 @@ API/schema impact:
 UI:
 - Use `Select` for tier choices.
 - Use `Switch` for `allow_repo_resource_requests`.
-- Use `Badge` for read-only resolved CPU/memory/disk summaries if shown.
+- Show preview CPU limits in CPU cores in the UI, while saving the existing `preview_max_cpu_millis` field.
 - Avoid raw tables unless showing a tier comparison; if a comparison is needed, use shared `Table` components.
-
-### 6. Runtime Diagnostics
-
-Provides a product-safe read-only summary that helps admins understand whether runtime features are available without exposing fleet internals.
-
-Rows:
-- Static egress: `Available` / `Unavailable`
-- Agent runs: active count against the configured org concurrency limit
-- Active previews: active count against the configured per-user limit
-- Capacity: `Normal` / `Limited`
-
-API/schema impact:
-- `GET /api/v1/settings/runtime/status` returns a sanitized org-scoped status payload:
-
-```json
-{
-  "data": {
-    "static_egress": {
-      "available": true,
-      "enabled": false,
-      "public_ip": "203.0.113.10"
-    },
-    "capacity": {
-      "state": "normal",
-      "active_agent_runs": 2,
-      "max_concurrent_agent_runs": 5,
-      "active_previews": 3,
-      "max_previews_per_user": 4
-    }
-  }
-}
-```
-
-Rules:
-- Do not include worker hostnames, node IDs, static-egress-capable counts, WireGuard state, or deployment generation.
-- Use typed string status fields in `internal/models`, with validation tests.
-- Every query behind the endpoint must be org-scoped.
-
-UI:
-- Use a compact `Card`.
-- Use `Badge` for state labels.
-- Use `Table` only if there are enough rows to scan; otherwise use stacked rows with `border-border` separators.
-- Use `EmptyState` only if diagnostics are unavailable because the feature is not configured.
 
 ## Implementation
 
@@ -274,13 +231,15 @@ UI:
 - Sandbox network static egress toggle.
 - Copyable static egress public IP.
 - Product-safe static egress availability copy that does not expose worker capability diagnostics.
-- Concurrent coding-agent run limit.
+- Concurrent agent run limit.
 - Active previews per user.
-- Maximum session duration.
-- Sandbox tab tools.
-- Lifecycle defaults for completed-session retention, idle preview TTL, and preview sandbox hold behavior.
+- Maximum session length.
+- Agent tab tools.
+- Cleanup defaults for completed-session retention, idle preview timeout, and keeping the sandbox while a preview is active.
 - Resource defaults for agent tier, preview tier, preview max tier, and repo resource request policy.
-- Sanitized runtime diagnostics for static egress and capacity.
+- Preview CPU limits shown in CPU cores while stored as millicores in `settings.sandbox_resources.preview_max_cpu_millis`.
+
+The Runtime settings page intentionally does not include a runtime diagnostics section. Current capacity and fleet state belong in operational tooling or purpose-built status surfaces, not in the editable settings page.
 
 Keep these controls where they are:
 
@@ -297,7 +256,7 @@ The implementation also:
 - Added a browser-title rule for `Runtime settings`.
 - Removed duplicated runtime controls from General and Coding agents.
 - Added compact links from Coding agents and Preview to Runtime.
-- Added focused backend and frontend coverage for the new page, old-page removals, sidebar, role guards, page title, lifecycle/resource validation, and runtime status.
+- Added focused backend and frontend coverage for the new page, old-page removals, sidebar, role guards, page title, lifecycle/resource validation, tooltip copy, and CPU unit conversion.
 
 ## Component Guidance
 
@@ -308,9 +267,7 @@ Use the same settings primitives already used by General, Coding agents, and Pre
 - Section headers outside cards using `h2 className="text-xs font-medium text-foreground"`.
 - `AutosaveIndicator` in section headers for editable sections.
 - `Card`, `CardContent`, and only use `CardHeader`/`CardTitle` when a card contains multiple independently titled subsections.
-- `Label`, `Input`, `Switch`, `Select`, `Badge`, `Button`, `CopyButton`.
-- Shared `Table` components for diagnostic tables only.
-- `EmptyState` for missing configuration states.
+- `Label`, `Input`, `Switch`, `Select`, `Button`, `Tooltip`, and `CopyButton`.
 - `AlertDialog` only for destructive lifecycle controls if future cleanup actions are added.
 
 Layout rules:
@@ -318,6 +275,7 @@ Layout rules:
 - Keep card content compact.
 - Use stacked mobile rows; do not rely on desktop-only table layouts.
 - Keep all copy operational and short.
+- Put field explanations in question-mark tooltips; keep visible helper text only for max values.
 - Avoid nested cards.
 
 ## API and Schema Summary
@@ -328,25 +286,24 @@ Reusable fields:
 
 | UI control | Existing setting/API |
 |---|---|
-| Static egress toggle | `settings.sandbox_network.static_egress_enabled` |
+| Static egress IP | `settings.sandbox_network.static_egress_enabled` |
 | Static egress public IP/status | `GET /api/v1/settings/network` |
-| Concurrent coding-agent runs | `settings.max_concurrent_runs` |
-| Maximum session duration | `settings.max_session_duration_seconds` |
+| Concurrent agent runs | `settings.max_concurrent_runs` |
+| Maximum session length | `settings.max_session_duration_seconds` |
 | Active previews per user | `settings.preview_max_previews_per_user` |
-| Sandbox tab tools | `settings.coding_agent_tab_tools_enabled` |
-| Completed session retention | `settings.sandbox_lifecycle.completed_session_retention_minutes` |
-| Idle preview TTL | `settings.sandbox_lifecycle.idle_preview_ttl_minutes` |
-| Preview holds sandbox | `settings.sandbox_lifecycle.preview_holds_sandbox` |
-| Agent default tier | `settings.sandbox_resources.agent_default_tier` |
-| Preview default tier | `settings.sandbox_resources.preview_default_tier` |
-| Repo resource request policy | `settings.sandbox_resources.allow_repo_resource_requests` |
-| Preview max tier | `settings.sandbox_resources.preview_max_tier` |
-| Preview CPU request max | `settings.sandbox_resources.preview_max_cpu_millis` |
-| Preview memory request max | `settings.sandbox_resources.preview_max_memory_mib` |
-| Preview ephemeral disk request max | `settings.sandbox_resources.preview_max_ephemeral_disk_mib` |
-| Runtime diagnostics | `GET /api/v1/settings/runtime/status` |
+| Agent tab tools | `settings.coding_agent_tab_tools_enabled` |
+| Keep completed sessions for | `settings.sandbox_lifecycle.completed_session_retention_minutes` |
+| Idle preview timeout | `settings.sandbox_lifecycle.idle_preview_ttl_minutes` |
+| Keep sandbox while preview is active | `settings.sandbox_lifecycle.preview_holds_sandbox` |
+| Agent sandbox size | `settings.sandbox_resources.agent_default_tier` |
+| Preview sandbox size | `settings.sandbox_resources.preview_default_tier` |
+| Allow repository resource requests | `settings.sandbox_resources.allow_repo_resource_requests` |
+| Largest preview size | `settings.sandbox_resources.preview_max_tier` |
+| Preview CPU limit | `settings.sandbox_resources.preview_max_cpu_millis` |
+| Preview memory limit | `settings.sandbox_resources.preview_max_memory_mib` |
+| Preview disk limit | `settings.sandbox_resources.preview_max_ephemeral_disk_mib` |
 
-Resource tiers are typed backend enum strings: `small`, `standard`, and `large`. Runtime status uses org-scoped active session and active preview counters and does not return worker internals.
+Resource tiers are typed backend enum strings: `small`, `standard`, and `large`. The UI displays CPU as cores for readability, then converts to millicores when patching the existing API field.
 
 Remaining future enhancement:
 - If repo-declared resource requests need exact CPU/memory/disk summaries in the UI, expose read-only resolved tier metadata safely from a runtime endpoint rather than duplicating infrastructure constants in the frontend.
