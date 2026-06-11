@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { SessionsPageContent } from './sessions-page-content';
+import type { SessionListItem } from '@/lib/types';
 
 const mockAuthState: {
   isAuthenticated: boolean;
@@ -26,6 +27,27 @@ vi.mock('next/navigation', () => ({
 vi.mock('@/hooks/use-auth', () => ({
   useAuth: () => mockAuthState,
 }));
+
+function makeSession(overrides: Partial<SessionListItem> = {}): SessionListItem {
+  return {
+    id: 'sess-1',
+    org_id: 'org-1',
+    agent_type: 'claude_code',
+    status: 'completed',
+    autonomy_level: 'full',
+    token_mode: 'standard',
+    current_turn: 1,
+    sandbox_state: 'snapshotted',
+    pr_creation_state: 'idle',
+    pr_push_state: 'idle',
+    created_at: '2026-02-17T07:00:00Z',
+    started_at: '2026-02-17T07:00:00Z',
+    completed_at: '2026-02-17T07:05:00Z',
+    last_activity_at: '2026-02-17T07:05:00Z',
+    result_summary: 'Test session',
+    ...overrides,
+  };
+}
 
 describe('SessionsPageContent', () => {
   beforeEach(() => {
@@ -74,5 +96,28 @@ describe('SessionsPageContent', () => {
 
     expect(await screen.findByText(/Fixed TypeError by adding null check/)).toBeInTheDocument();
     expect(teamRequestCount).toBe(0);
+  });
+
+  it('shows in-flight PR creation and push statuses in the sessions table', async () => {
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [
+            makeSession({ id: 's1', result_summary: 'Opening a pull request', pr_creation_state: 'queued' }),
+            makeSession({ id: 's2', result_summary: 'Updating an existing pull request', pr_push_state: 'pushing' }),
+          ],
+          meta: {},
+        });
+      }),
+      http.get('/api/v1/sessions/counts', () => {
+        return HttpResponse.json({ data: { all: 2, active: 0, archived: 0, cap: 100 } });
+      }),
+    );
+
+    renderWithProviders(<SessionsPageContent />);
+
+    expect(await screen.findByText('Opening a pull request')).toBeInTheDocument();
+    expect(screen.getByText('Creating PR')).toBeInTheDocument();
+    expect(screen.getByText('Pushing changes')).toBeInTheDocument();
   });
 });
