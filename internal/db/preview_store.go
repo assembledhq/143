@@ -30,6 +30,7 @@ func NewPreviewStore(db TxStarter) *PreviewStore {
 	return &PreviewStore{db: db}
 }
 
+// Configured reports whether the store has a backing database handle.
 // lint:allow-no-orgid reason="configuration guard reads no tenant data"
 func (s *PreviewStore) Configured() bool {
 	return s != nil && s.db != nil

@@ -1312,10 +1312,6 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	return nil
 }
 
-func (d *DockerPreviewProvider) savePackageManagerCacheAsync(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths, packageManagers []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver) {
-	d.savePackageManagerCache(ctx, state, install, opts, cacheKey, placementKey, paths, packageManagers, lockfiles, observer, true)
-}
-
 func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths, packageManagers []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool) {
 	pathCache, ok := d.dependencyCache.(preview.PreviewPathCache)
 	if !d.packageManagerCacheEnabled || d.dependencyCache == nil || !ok || cacheKey == "" || len(paths) == 0 {
@@ -1367,10 +1363,6 @@ func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, sta
 		return
 	}
 	save()
-}
-
-func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver) {
-	d.saveDependencyCache(ctx, state, install, opts, cacheKey, placementKey, paths, lockfiles, observer, true)
 }
 
 func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool) {
