@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -19,6 +20,15 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type errorOnCloseBody struct {
+	*strings.Reader
+	err error
+}
+
+func (b errorOnCloseBody) Close() error {
+	return b.err
 }
 
 func testPrivateKeyPEM(t *testing.T) string {
@@ -69,6 +79,42 @@ func TestNewService(t *testing.T) {
 			require.NotNil(t, svc.cache, "NewService should initialize the token cache")
 		})
 	}
+}
+
+func TestService_ListOrgMembers_ReturnsBodyCloseError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	svc := &Service{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				require.Equal(t, http.MethodGet, req.Method, "ListOrgMembers should use GET for organization members")
+				require.Equal(t, "Bearer cached-token", req.Header.Get("Authorization"), "ListOrgMembers should use the cached installation token")
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: errorOnCloseBody{
+						Reader: strings.NewReader(`[{"id":1,"login":"octocat"}]`),
+						err:    closeErr,
+					},
+					Header: make(http.Header),
+				}, nil
+			}),
+		},
+		apiBaseURL: "https://api.github.test",
+		cache: map[int64]*cachedToken{
+			42: {
+				Token:     "cached-token",
+				ExpiresAt: time.Now().Add(30 * time.Minute),
+			},
+		},
+	}
+
+	members, err := svc.ListOrgMembers(context.Background(), 42, "assembled")
+
+	require.Error(t, err, "ListOrgMembers should return response body close errors")
+	require.ErrorIs(t, err, closeErr, "ListOrgMembers should preserve the close error for callers")
+	require.Nil(t, members, "ListOrgMembers should not return members when response cleanup fails")
 }
 
 func TestService_GetInstallationToken_UsesCache(t *testing.T) {

@@ -82,8 +82,7 @@ So the design splits the two concerns:
 
 ### Database schema
 
-Migration `000170_github_org_auto_join` (renumber against origin/main
-before push):
+Migration `000176_github_org_auto_join`:
 
 ```sql
 -- Admin intent lives on the existing link row: auto-join is precisely a

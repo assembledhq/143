@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -185,9 +186,15 @@ func (s *Service) ListOrgMembers(ctx context.Context, installationID int64, orgL
 			return nil, fmt.Errorf("request org members: %w", err)
 		}
 		body, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if readErr != nil {
+			if closeErr != nil {
+				return nil, fmt.Errorf("read org members response: %w", errors.Join(readErr, closeErr))
+			}
 			return nil, fmt.Errorf("read org members response: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close org members response: %w", closeErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, &GitHubAPIError{Method: http.MethodGet, Path: nextPath, StatusCode: resp.StatusCode, Body: body}
