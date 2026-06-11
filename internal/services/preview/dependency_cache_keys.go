@@ -17,6 +17,7 @@ import (
 )
 
 const PreviewDependencyCacheRuntimeVersion = "preview-dependency-cache-v1"
+const PreviewPackageManagerCacheRuntimeVersion = "preview-package-manager-cache-v1"
 
 type PreviewInstallLockfileKey struct {
 	Path   string `json:"path"`
@@ -27,10 +28,12 @@ type previewDependencyCacheKey struct {
 	RuntimeVersion  string                      `json:"runtime_version"`
 	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
 	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	Kind            models.PreviewCacheKind     `json:"kind,omitempty"`
 	InstallCommand  []string                    `json:"install_command"`
 	InstallCwd      string                      `json:"install_cwd"`
 	Lockfiles       []PreviewInstallLockfileKey `json:"lockfiles"`
 	EffectivePaths  []string                    `json:"effective_paths"`
+	PackageManagers []string                    `json:"package_managers,omitempty"`
 }
 
 type previewDependencyCachePlacementKey struct {
@@ -50,6 +53,14 @@ type dependencyCacheKeyReader interface {
 }
 
 func ComputePreviewDependencyCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, effectivePaths []string) (string, []PreviewInstallLockfileKey, error) {
+	return computePreviewPathCacheKey(ctx, executor, sb, install, PreviewDependencyCacheRuntimeVersion, models.PreviewCacheKindInstallArtifact, effectivePaths, nil)
+}
+
+func ComputePreviewPackageManagerCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, homeRelativePaths []string, packageManagers []string) (string, []PreviewInstallLockfileKey, error) {
+	return computePreviewPathCacheKey(ctx, executor, sb, install, PreviewPackageManagerCacheRuntimeVersion, models.PreviewCacheKindPackageManager, homeRelativePaths, packageManagers)
+}
+
+func computePreviewPathCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, runtimeVersion string, kind models.PreviewCacheKind, effectivePaths []string, packageManagers []string) (string, []PreviewInstallLockfileKey, error) {
 	if executor == nil {
 		return "", nil, fmt.Errorf("dependency cache key: executor is required")
 	}
@@ -80,11 +91,13 @@ func ComputePreviewDependencyCacheKey(ctx context.Context, executor dependencyCa
 		}
 	}
 	payload := previewDependencyCacheKey{
-		RuntimeVersion: PreviewDependencyCacheRuntimeVersion,
-		InstallCommand: append([]string(nil), install.Command...),
-		InstallCwd:     cwd,
-		Lockfiles:      lockfiles,
-		EffectivePaths: sortedNormalizedDependencyPaths(effectivePaths),
+		RuntimeVersion:  runtimeVersion,
+		Kind:            kind,
+		InstallCommand:  append([]string(nil), install.Command...),
+		InstallCwd:      cwd,
+		Lockfiles:       lockfiles,
+		EffectivePaths:  sortedNormalizedDependencyPaths(effectivePaths),
+		PackageManagers: sortedNormalizedDependencyPaths(packageManagers),
 	}
 	if sb != nil {
 		payload.SandboxProvider = sb.Provider
