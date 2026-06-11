@@ -270,16 +270,12 @@ hooks-uninstall:
 # bootstrap the private repo.
 
 export SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
-# Default SECRETS_DIR to a sibling of the MAIN checkout, resolved via the
-# shared git dir. Linked worktrees (Claude Code, Codex, Conductor) share the
-# main repo's .git, so make targets find the same 143-infra checkout no
-# matter which worktree they run from.
-_GIT_MAIN_ROOT := $(patsubst %/.git,%,$(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null))
-ifneq ($(strip $(_GIT_MAIN_ROOT)),)
-export SECRETS_DIR ?= $(_GIT_MAIN_ROOT)/../143-infra
-else
-export SECRETS_DIR ?= ../143-infra
-endif
+# Default SECRETS_DIR to a sibling of the MAIN checkout, resolved
+# worktree-safely by the same helper the deploy scripts use (linked
+# worktrees — Claude Code, Codex, Conductor — share the main repo's .git).
+# Falls back to a plain sibling path if the helper can't run.
+_SECRETS_DIR_DEFAULT := $(shell ./deploy/scripts/resolve-secrets-dir.sh . 2>/dev/null)
+export SECRETS_DIR ?= $(or $(_SECRETS_DIR_DEFAULT),../143-infra)
 _SOPS_CONFIG := $(SECRETS_DIR)/.sops.yaml
 _PROD_ENC := $(SECRETS_DIR)/.env.production.enc
 ENV ?=

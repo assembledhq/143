@@ -106,16 +106,9 @@ DB_PORT="5432"
 DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
 
 # Encrypted dev secrets live in a private sibling checkout, not this repo.
-# Default: sibling of the MAIN checkout (worktree-safe via the shared git
-# dir). Override with SECRETS_DIR; see docs/secrets/README.md.
-if [ -z "${SECRETS_DIR:-}" ]; then
-  GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-  if [ -n "$GIT_COMMON_DIR" ]; then
-    SECRETS_DIR="$(dirname "$GIT_COMMON_DIR")/../143-infra"
-  else
-    SECRETS_DIR="../143-infra"
-  fi
-fi
+# Resolved worktree-safely (respects a pre-set SECRETS_DIR); see
+# deploy/scripts/resolve-secrets-dir.sh and docs/secrets/README.md.
+SECRETS_DIR="$(./deploy/scripts/resolve-secrets-dir.sh . 2>/dev/null || echo "../143-infra")"
 ENC_FILE="$SECRETS_DIR/.env.enc"
 
 NEED_ENV=false

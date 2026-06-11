@@ -221,14 +221,16 @@ decrypted at runtime
 
 **"no master key was able to decrypt the file"** — SOPS can't find your age private key. Make sure `SOPS_AGE_KEY_FILE` is exported in your shell profile and points to `~/.config/sops/age/keys.txt`. Run `source ~/.bash_profile` (or `~/.zshrc`) to pick it up in the current session.
 
-## Tier 3: Production via SOPS + Render
+## Tier 3: Production via SOPS at boot
 
-Production secrets are encrypted in `.env.production.enc` using the same SOPS + age workflow. This lets you version-control production config and deploy it through your CI/CD pipeline instead of manually editing secrets in the Render dashboard.
+Production secrets are encrypted in `.env.production.enc` using the same SOPS + age workflow. This lets you version-control production config and deploy it through your CI/CD pipeline instead of managing env vars in a dashboard.
+
+> **Note**: the bundle is no longer baked into the server image (the image is public on GHCR), so this flow requires a deploy target that can stage the file next to the container — the fleet deploy does this by bind-mounting `/opt/143/.env.production.enc` into the workdir. On image-only platforms (e.g. Render via `render.yaml`), set env vars individually in the platform dashboard instead, or bake the bundle into a private image build of your own.
 
 ### How it works
 
 1. Production secrets live in `.env.production.enc` (committed in the private secrets repo)
-2. At deploy time, Render's start command decrypts the file using an age private key stored as a single Render env var
+2. The deploy stages the bundle on the host and bind-mounts it into the container; at boot, `docker-entrypoint.sh` decrypts it using an age private key supplied as the single `SOPS_AGE_KEY` env var
 3. The decrypted values are exported as environment variables before the server starts
 
 ### Setup (one-time)
