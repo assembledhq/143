@@ -26,6 +26,15 @@ describe("SidebarSettingsSection", () => {
     expect(screen.getByRole("button", { name: /Settings/ })).toHaveClass("px-2.5", "py-3", "text-sm");
   });
 
+  it("uses mobile-sized text for nested settings links in the mobile nav drawer", () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/settings" userRole="admin" variant="mobile" />,
+    );
+
+    expect(screen.getByRole("link", { name: "Account" })).toHaveClass("py-2.5", "text-sm");
+    expect(screen.getByRole("link", { name: "General" })).toHaveClass("py-2.5", "text-sm");
+  });
+
   it("shows admin-only entries when role is admin", () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings" userRole="admin" />,
