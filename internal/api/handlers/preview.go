@@ -919,6 +919,14 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindPackageManager, PlacementKey: computedPlacementKey})
 				}
 			}
+			if paths, enabled := preview.ResolvePreviewBuildCachePaths(body.Config.Install); enabled && len(paths) > 0 {
+				buildCacheKey, keyErr := preview.ComputePreviewBuildCacheKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
+				if keyErr != nil {
+					h.logger.Warn().Err(keyErr).Str("session_id", sessionID.String()).Msg("failed to compute preview build cache placement key")
+				} else {
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindBuildArtifact, PlacementKey: buildCacheKey})
+				}
+			}
 		}
 		if len(cachePlacements) == 0 {
 			computedPlacementKey, placementErr := preview.ComputePreviewDependencyCacheRepoPlacementKey(orgID, repoID)

@@ -419,11 +419,23 @@ type PreviewInstallCacheConfig struct {
 	Paths          []string                          `json:"paths,omitempty"`
 	PackageManager *PreviewPackageManagerCacheConfig `json:"package_manager,omitempty"`
 	Prewarm        *PreviewInstallPrewarmCacheConfig `json:"prewarm,omitempty"`
+	Build          *PreviewBuildCacheConfig          `json:"build,omitempty"`
 }
 
 type PreviewPackageManagerCacheConfig struct {
 	Enabled *bool    `json:"enabled,omitempty"`
 	Include []string `json:"include,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+}
+
+// PreviewBuildCacheConfig controls caching of incremental build artifacts
+// (e.g. Turborepo's local cache) that services populate while booting. Unlike
+// the install-artifact cache, build caches are saved after services report
+// ready and use latest-wins keying: the build tool is trusted to content-hash
+// its own entries, so a stale blob degrades to partial hits rather than wrong
+// output.
+type PreviewBuildCacheConfig struct {
+	Enabled *bool    `json:"enabled,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
 }
 
@@ -436,6 +448,7 @@ type PreviewCacheKind string
 const (
 	PreviewCacheKindInstallArtifact PreviewCacheKind = "install_artifact"
 	PreviewCacheKindPackageManager  PreviewCacheKind = "package_manager"
+	PreviewCacheKindBuildArtifact   PreviewCacheKind = "build_artifact"
 )
 
 type PreviewCacheRoot string
