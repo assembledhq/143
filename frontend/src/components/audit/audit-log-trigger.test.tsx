@@ -97,6 +97,31 @@ describe('AuditLogTrigger', () => {
     expect(container.querySelector('svg')).toBeNull();
   });
 
+  it('footer variant: renders as low-priority last activity text', async () => {
+    auditLogListMock.mockResolvedValue({
+      data: [{
+        id: 'audit-footer',
+        actor_type: 'user',
+        user_id: 'user-1',
+        action: 'settings.updated',
+        created_at: new Date(Date.now() - 2 * 60000).toISOString(),
+      }],
+      meta: {},
+    });
+
+    const { container } = renderWithProviders(
+      <AuditLogTrigger filters={{ resource_type: 'settings' }} members={mockMembers} variant="footer" />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Last activity:/)).toBeInTheDocument();
+      expect(screen.getByText(/Updated.*ago by Alice/)).toBeInTheDocument();
+    });
+
+    expect(container.querySelector('footer')).not.toBeNull();
+    expect(container.querySelector('svg')).not.toBeNull();
+  });
+
   it('default variant: renders the Clock icon and no separator', async () => {
     auditLogListMock.mockResolvedValue({
       data: [{
