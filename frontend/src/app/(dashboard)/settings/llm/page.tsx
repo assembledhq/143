@@ -243,8 +243,7 @@ export default function LLMPage() {
       <div className="space-y-6">
         <PageHeader
           title="LLM"
-          description="Configure the app-level LLMs used for extra features like PR descriptions, session titles, validation, and project generation."
-          subtitle="These models are separate from the coding agents configured on the Agent page."
+          description="Configure app-level LLMs for PR descriptions, session titles, validation, and project generation. These are separate from coding agents on the Agent page."
         />
 
         {!hasPlatformLLM && (

@@ -88,9 +88,13 @@ describe("LLMPage", () => {
       expect(screen.getByRole("heading", { name: /LLM/i, level: 1 })).toBeInTheDocument();
     });
     expect(
-      screen.getByText(/Configure the app-level LLMs used for extra features like PR descriptions/i),
+      screen.getByText(
+        /Configure app-level LLMs for PR descriptions, session titles, validation, and project generation\. These are separate from coding agents on the Agent page/i,
+      ),
     ).toBeInTheDocument();
-    expect(screen.getByText(/These models are separate from the coding agents configured on the Agent page/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/These models are separate from the coding agents configured on the Agent page/i),
+    ).not.toBeInTheDocument();
   });
 
   it("renders provider keys section", async () => {
