@@ -133,6 +133,8 @@ type previewState struct {
 	wg sync.WaitGroup
 
 	primaryPort int
+
+	deferredCacheSaves []func()
 }
 
 // serviceState tracks a running application service process.
@@ -148,6 +150,24 @@ type serviceState struct {
 	// callback under d.mu and is surfaced to the observer when the service
 	// fails so the user can see why it exited.
 	outputTail []string
+}
+
+func (s *previewState) deferCacheSave(save func()) {
+	if s == nil || save == nil {
+		return
+	}
+	s.deferredCacheSaves = append(s.deferredCacheSaves, save)
+}
+
+func (s *previewState) runDeferredCacheSaves() {
+	if s == nil || len(s.deferredCacheSaves) == 0 {
+		return
+	}
+	saves := append([]func(){}, s.deferredCacheSaves...)
+	s.deferredCacheSaves = nil
+	for _, save := range saves {
+		go save()
+	}
 }
 
 // serviceTailLines is the size of the per-service stdout/stderr ring buffer
@@ -470,6 +490,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		d.cleanupState(handle)
 		return nil, err
 	}
+	state.runDeferredCacheSaves()
 
 	return &preview.PreviewHandle{
 		Handle:           handle,
@@ -1403,7 +1424,7 @@ func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, sta
 		metrics.RecordSessionPackageManagerCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
 	}
 	if async {
-		go save()
+		state.deferCacheSave(save)
 		return
 	}
 	save()
@@ -1448,7 +1469,7 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		metrics.RecordSessionDependencyCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
 	}
 	if async {
-		go save()
+		state.deferCacheSave(save)
 		return
 	}
 	save()
