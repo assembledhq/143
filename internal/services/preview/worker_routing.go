@@ -371,6 +371,12 @@ func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Conte
 	return s.selectLeastLoadedNode(ctx, nil, false, req)
 }
 
+// SelectLeastLoadedNodeExceptWithRequirements picks the least-loaded worker
+// that satisfies the requested runtime capabilities while skipping excluded IDs.
+func (s *WorkerSelector) SelectLeastLoadedNodeExceptWithRequirements(ctx context.Context, excluded map[string]struct{}, req WorkerSelectionRequirements) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, excluded, false, req)
+}
+
 // HasStaticEgressCapableWorker reports whether all active workers that can
 // claim session jobs are verified for static egress. Session jobs are claimed
 // from the generic jobs queue, so mixed-capability worker fleets cannot safely

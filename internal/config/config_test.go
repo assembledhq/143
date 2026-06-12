@@ -31,6 +31,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("PREVIEW_CACHE_PREWARM_ENABLED", "")
 	t.Setenv("PREVIEW_CACHE_PREWARM_TIMEOUT", "")
 	t.Setenv("PREVIEW_CACHE_PREWARM_PRIORITY", "")
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "")
 	// Prevent .env files from interfering with defaults
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
@@ -61,6 +62,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.False(t, cfg.PreviewCachePrewarmEnabled, "Load should disable preview cache prewarming by default")
 	require.Equal(t, 15*time.Minute, cfg.PreviewCachePrewarmTimeout, "Load should default preview cache prewarm timeout")
 	require.Equal(t, -50, cfg.PreviewCachePrewarmPriority, "Load should default preview cache prewarm to low priority")
+	require.Equal(t, 30*time.Minute, cfg.PreviewIdleTimeout, "Load should default preview idle retention to thirty minutes")
 }
 
 func TestResolvePreviewDependencyCacheLocalDir(t *testing.T) {
@@ -128,6 +130,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("WORKER_PROCESS_COUNT", "4")
 	t.Setenv("WORKER_MAX_ACTIVE_SANDBOXES", "7")
 	t.Setenv("WORKER_PREVIEW_DRAIN_TIMEOUT", "90m")
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "45m")
 	t.Setenv("GITHUB_APP_ID", "12345")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "registry.example.com/health/busybox:1.36.1")
 
@@ -146,6 +149,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 4, cfg.WorkerProcessCount, "Load should parse WORKER_PROCESS_COUNT from the environment")
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
 	require.Equal(t, 90*time.Minute, cfg.WorkerPreviewDrainTimeout, "Load should parse WORKER_PREVIEW_DRAIN_TIMEOUT from the environment")
+	require.Equal(t, 45*time.Minute, cfg.PreviewIdleTimeout, "Load should read PREVIEW_IDLE_TIMEOUT from the environment")
 	require.Equal(t, "registry.example.com/health/busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should read SANDBOX_HEALTH_CHECK_IMAGE from the environment")
 }
 

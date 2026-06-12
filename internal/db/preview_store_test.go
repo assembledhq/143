@@ -664,6 +664,27 @@ func TestPreviewStore_CountBranchPreviewIndexScopes_ResumableUsesWarmCachePredic
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_GetBranchPreviewTargetResumability_UsesWarmCachePredicate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("preview_startup_cache[\\s\\S]+JOIN nodes[\\s\\S]+n\\.status = 'active'").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"resumable"}).AddRow(true))
+
+	resumable, estimate, err := store.GetBranchPreviewTargetResumability(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "GetBranchPreviewTargetResumability should query resumability")
+	require.True(t, resumable, "target should be resumable when the warm cache predicate matches")
+	require.NotNil(t, estimate, "resumable target should include an estimate")
+	require.Equal(t, 30, *estimate, "resumable estimate should be thirty seconds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_CountBranchPreviewIndexScopes_IncludesRuntimeOnlySessionPreview(t *testing.T) {
 	t.Parallel()
 
@@ -2741,6 +2762,24 @@ func TestPreviewStore_UpdateAccessSessionActivity(t *testing.T) {
 	err = store.UpdateAccessSessionActivity(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_UpdatePreviewAccessAndExtend(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), expires_at = LEAST\\(GREATEST\\(expires_at, now\\(\\) \\+ @extension\\), created_at \\+ @max_ttl\\), updated_at = now\\(\\)").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdatePreviewAccessAndExtend(context.Background(), uuid.New(), uuid.New(), 30*time.Minute, 2*time.Hour)
+	require.NoError(t, err, "UpdatePreviewAccessAndExtend should update access and extend active preview expiry atomically")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_TouchCache(t *testing.T) {

@@ -29,6 +29,12 @@ func gatewayStringPtr(value string) *string {
 	return &value
 }
 
+func expectPreviewAccessAndExtend(mock pgxmock.PgxPoolIface) {
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+}
+
 var previewGatewayInstanceColumns = []string{
 	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
@@ -1022,9 +1028,7 @@ func TestGateway_ServeHTTP_Proxy_UsesCachedSessionForHotAssetRequests(t *testing
 				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
 			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, nil, now, now),
 		)
-	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectPreviewAccessAndExtend(mock)
 
 	firstReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
 	firstReq.Header.Set("Sec-Fetch-Dest", "document")
@@ -1088,9 +1092,7 @@ func TestGateway_ServeHTTP_Proxy_DetectsRevokedSessionAfterCacheTTLExpiry(t *tes
 				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
 			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, nil, now, now),
 		)
-	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectPreviewAccessAndExtend(mock)
 
 	firstReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
 	firstReq.Host = previewID.String() + ".preview.143.dev"
@@ -1832,9 +1834,7 @@ func TestGateway_RecordAccessThrottled(t *testing.T) {
 	manager := preview.NewManager(preview.ManagerConfig{Store: store, Logger: zerolog.Nop()})
 	gw := NewGateway(GatewayConfig{Store: store, Manager: manager, Logger: zerolog.Nop()})
 
-	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectPreviewAccessAndExtend(mock)
 
 	gw.recordAccessThrottled(context.Background(), orgID, previewID)
 	gw.accessRecordMu.Lock()
