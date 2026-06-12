@@ -213,7 +213,7 @@ describe("RuntimeSettingsPage", () => {
 
     const user = userEvent.setup();
     await user.click(
-      screen.getByRole("button", { name: "Expand advanced resource limits" }),
+      screen.getByRole("button", { name: "Show advanced resource limits" }),
     );
 
     const diskLimit = await screen.findByLabelText("Preview disk limit");
@@ -231,6 +231,59 @@ describe("RuntimeSettingsPage", () => {
     ).toBeTruthy();
     expect(sandboxDefaults).toContainElement(repositoryRequests);
     expect(advancedLimits).toContainElement(diskLimit);
+  });
+
+  it("left-aligns the public IP value with the setting copy", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const publicIPRow = await screen.findByTestId("public-ip-row");
+    const publicIPValue = screen.getByTestId("public-ip-value");
+
+    expect(publicIPRow).toContainElement(publicIPValue);
+    expect(publicIPValue).toHaveClass("self-start");
+  });
+
+  it("renders stepped number fields as one attached control", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const stepper = await screen.findByRole("group", {
+      name: "Concurrent agent runs controls",
+    });
+
+    expect(stepper).toHaveClass("rounded-md");
+    expect(stepper).toContainElement(
+      screen.getByRole("button", { name: "Decrease Concurrent agent runs" }),
+    );
+    expect(stepper).toContainElement(
+      screen.getByLabelText("Concurrent agent runs"),
+    );
+    expect(stepper).toContainElement(
+      screen.getByRole("button", { name: "Increase Concurrent agent runs" }),
+    );
+  });
+
+  it("uses a section disclosure for advanced resource settings", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const user = userEvent.setup();
+    const disclosure = await screen.findByRole("button", {
+      name: "Show advanced resource limits",
+    });
+
+    expect(disclosure).toHaveTextContent("Advanced resource limits");
+    expect(disclosure).toHaveTextContent("Show");
+    await waitFor(() => {
+      expect(disclosure).toHaveTextContent("Large max · 1.5 cores · 4 GiB");
+    });
+
+    await user.click(disclosure);
+
+    expect(
+      screen.getByRole("button", { name: "Hide advanced resource limits" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("Preview disk limit"),
+    ).toBeInTheDocument();
   });
 
   it("saves runtime settings through the existing org settings API", async () => {
@@ -349,7 +402,7 @@ describe("RuntimeSettingsPage", () => {
     const user = userEvent.setup();
     await user.click(
       await screen.findByRole("button", {
-        name: "Expand advanced resource limits",
+        name: "Show advanced resource limits",
       }),
     );
     const cpuLimit = await screen.findByLabelText("Preview CPU limit");
@@ -388,7 +441,7 @@ describe("RuntimeSettingsPage", () => {
     const user = userEvent.setup();
     await user.click(
       await screen.findByRole("button", {
-        name: "Expand advanced resource limits",
+        name: "Show advanced resource limits",
       }),
     );
     const cpuLimit = await screen.findByLabelText("Preview CPU limit");
@@ -528,7 +581,7 @@ describe("RuntimeSettingsPage", () => {
     });
 
     await user.click(
-      screen.getByRole("button", { name: "Expand advanced resource limits" }),
+      screen.getByRole("button", { name: "Show advanced resource limits" }),
     );
     const memoryMax = screen.getByLabelText("Preview memory limit");
     await user.click(memoryMax);
