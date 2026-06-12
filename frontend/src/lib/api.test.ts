@@ -993,10 +993,10 @@ describe('api client', () => {
         }),
       );
 
-      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123' });
+      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123', mergeWhenReady: true });
       expect(result.status).toBe('queued');
       expect(capturedUrl).toContain('/api/v1/sessions/session-abc/pr');
-      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123' });
+      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123', merge_when_ready: true });
     });
 
     it('throws on conflict when PR already exists', async () => {

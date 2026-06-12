@@ -539,6 +539,7 @@ type PRAuthorMode = "auto" | "user" | "app";
 type PRAuthInterceptDetails = {
   connect_url?: string;
   resume_token?: string;
+  merge_when_ready?: boolean;
   can_fallback_to_app?: boolean;
 };
 
@@ -547,7 +548,7 @@ type PRAuthInterceptDetails = {
 // interception or be synthesized from the current GitHub status before the
 // backend has rejected the action.
 type PRAuthPromptState =
-  | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | ({ purpose: "create_pr"; mergeWhenReady?: boolean } & PRAuthInterceptDetails)
   | ({ purpose: "create_branch" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
   | { purpose: "merge_pr" };
@@ -3845,6 +3846,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
         } : undefined);
       } else if (current === "failed") {
+        queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
         toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
       }
     }
@@ -4173,7 +4175,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [githubPRParam, setGithubPRParam, setResumePRParam, setResumeActionParam]);
 
   const createPRMutation = useMutation({
-    mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string }) =>
+    mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean }) =>
       api.sessions.createPR(id, options),
     onMutate: () => {
       setLocalPRActionError(null);
@@ -4194,7 +4196,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         isPRAuthInterceptDetails(err.details)) {
         setLocalPRState("idle");
         setLocalPRActionError(null);
-        setPRAuthPrompt({ ...err.details, purpose: "create_pr" });
+        setPRAuthPrompt({ ...err.details, purpose: "create_pr", mergeWhenReady: options?.mergeWhenReady || err.details.merge_when_ready === true });
         clearPRResumeParams();
         return;
       }
@@ -5243,6 +5245,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     createBranchMutation.mutate(undefined);
   }, [canCreatePR, createBranchMutation, ghBlocked, localBranchState]);
 
+  const createPRWithAutoMerge = useCallback(() => {
+    if (localPRState !== "idle" || createPRMutation.isPending || !canCreatePR) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_pr", mergeWhenReady: true });
+      return;
+    }
+    createPRMutation.mutate({ mergeWhenReady: true });
+  }, [canCreatePR, createPRMutation, ghBlocked, localPRState]);
+
   const pushChangesFromKeyboard = useCallback(() => {
     if (localPushState !== "idle" || pushChangesMutation.isPending) {
       return;
@@ -5606,6 +5619,19 @@ export function SessionDetailContent({ id }: { id: string }) {
                             <GitBranch className="h-3.5 w-3.5" />
                           )}
                           {branchActionLabel}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-xs"
+                          onClick={createPRWithAutoMerge}
+                          disabled={prActionDisabled || createPRMutation.isPending}
+                          title={prActionTitle}
+                        >
+                          {prActionSpinning ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <GitPullRequest className="h-3.5 w-3.5" />
+                          )}
+                          Create PR and enable auto-merge
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -6500,7 +6526,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onClick={(event) => {
                   event.preventDefault();
                   setPRAuthPrompt(null);
-                  createPRMutation.mutate({ authorMode: "app" });
+                  createPRMutation.mutate({ authorMode: "app", mergeWhenReady: prAuthPrompt.mergeWhenReady });
                 }}
               >
                 Create as 143

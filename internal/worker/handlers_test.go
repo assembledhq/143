@@ -1359,6 +1359,15 @@ func (c capturingStringArg) Match(v interface{}) bool {
 	return true
 }
 
+type prCreationStateArg struct {
+	state models.PRCreationState
+}
+
+func (a prCreationStateArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == string(a.state)
+}
+
 func expectWorkerLoadSamples(mock pgxmock.PgxPoolIface) {
 	mock.ExpectQuery("(?s).*WITH worker_nodes.*").
 		WillReturnRows(pgxmock.NewRows([]string{
@@ -2779,6 +2788,7 @@ type stubPRService struct {
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
+	queueMergeWhenReadyFn     func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn   func(context.Context, uuid.UUID, uuid.UUID) error
 }
 
@@ -2822,6 +2832,13 @@ func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pull
 		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
 	}
 	return nil
+}
+
+func (s *stubPRService) QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+	if s.queueMergeWhenReadyFn != nil {
+		return s.queueMergeWhenReadyFn(ctx, orgID, pullRequestID, userID)
+	}
+	return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
 }
 
 func (s *stubPRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -3412,6 +3429,101 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	err := handler(context.Background(), "open_pr", payload)
 
 	require.NoError(t, err, "open_pr handler should succeed when PR creation succeeds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOpenPRHandler_QueuesMergeWhenReadyAfterPRCreation(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	triggeredByUserID := uuid.New()
+	requestedByUserID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-merge-when-ready-success"
+	row := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(row, "triggered_by_user_id", &triggeredByUserID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStateSucceeded}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	var queuedUserID uuid.UUID
+	var queuedPRID uuid.UUID
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				require.Equal(t, sessionID, run.ID, "open_pr should pass the fetched session into PRService")
+				return &models.PullRequest{ID: prID, OrgID: orgID}, nil
+			},
+			queueMergeWhenReadyFn: func(ctx context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				require.Equal(t, orgID, gotOrgID, "merge-when-ready queue should use the job org")
+				queuedPRID = gotPRID
+				queuedUserID = gotUserID
+				return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","merge_when_ready":true,"requested_by_user_id":"` + requestedByUserID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr handler should succeed and queue merge when ready")
+	require.Equal(t, prID, queuedPRID, "merge-when-ready queue should target the created PR")
+	require.Equal(t, requestedByUserID, queuedUserID, "merge-when-ready queue should use the requesting user from the job payload")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOpenPRHandler_MergeWhenReadyFailureMarksPRCreationFailed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	requestedByUserID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-merge-when-ready-failure"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStateFailed}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return &models.PullRequest{ID: prID, OrgID: orgID}, nil
+			},
+			queueMergeWhenReadyFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				return nil, ghservice.ErrPullRequestMergeWhenReadyNotQueueable
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","merge_when_ready":true,"requested_by_user_id":"` + requestedByUserID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.Error(t, err, "open_pr handler should return the merge-when-ready queue failure")
+	require.ErrorIs(t, err, ghservice.ErrPullRequestMergeWhenReadyNotQueueable, "open_pr handler should preserve the queue failure cause")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
