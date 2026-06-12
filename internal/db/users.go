@@ -250,7 +250,7 @@ func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email
 		SELECT %s
 		FROM users
 		WHERE org_id = @org_id
-		  AND LOWER(email) = LOWER(@email)`, userSelectColumns)
+		  AND (LOWER(email) = LOWER(@email) OR LOWER(github_noreply_email) = LOWER(@email))`, userSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
 	if err != nil {

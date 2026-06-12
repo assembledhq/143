@@ -108,7 +108,7 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 				CreatorEmail: "Creator@Example.com",
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
@@ -126,7 +126,7 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 				CreatorEmail: "external@example.com",
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns))
 			},
@@ -137,7 +137,7 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 				CreatorEmail: "creator@example.com",
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnError(errors.New("connection reset by peer"))
 			},

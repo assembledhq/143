@@ -191,14 +191,16 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		setupMock func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time)
-		expectErr bool
+		name        string
+		lookupEmail string
+		setupMock   func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time)
+		expectErr   bool
 	}{
 		{
-			name: "returns org user when email matches case insensitively",
+			name:        "returns org user when primary email matches case insensitively",
+			lookupEmail: "Creator@Example.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -207,9 +209,23 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			},
 		},
 		{
-			name: "returns error when no org user matches the email",
+			name:        "returns org user when github noreply email matches",
+			lookupEmail: "12345+alice@users.noreply.github.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+				noreply := "12345+alice@users.noreply.github.com"
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, &noreply, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns error when no org user matches either email column",
+			lookupEmail: "unknown@example.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(userColumns))
 			},
@@ -231,7 +247,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			now := time.Now()
 			tt.setupMock(mock, userID, orgID, now)
 
-			user, err := store.GetByOrgAndEmail(context.Background(), orgID, "Creator@Example.com")
+			user, err := store.GetByOrgAndEmail(context.Background(), orgID, tt.lookupEmail)
 			if tt.expectErr {
 				require.Error(t, err, "GetByOrgAndEmail should return an error when the org has no matching user")
 				return
