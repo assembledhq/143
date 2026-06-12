@@ -378,7 +378,18 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
   fi
 fi
 
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+# The encrypted bundle lives in the private secrets checkout, not this
+# (public) repo. Resolved worktree-safely; see resolve-secrets-dir.sh.
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
+# Having the age key but no bundle means the private secrets checkout is
+# missing — deploying anyway would silently reuse stale /opt/143/.env and
+# skip the bundle scp. Fail loudly instead of degrading.
+if [ -n "${SOPS_AGE_KEY:-}" ] && [ ! -f "$ENC_FILE" ]; then
+  echo "ERROR: SOPS_AGE_KEY is set but $ENC_FILE does not exist." >&2
+  echo "Clone the private secrets repo next to the main checkout (see docs/secrets/README.md) or set SECRETS_DIR." >&2
+  exit 1
+fi
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Refreshing secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")

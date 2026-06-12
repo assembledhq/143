@@ -24,17 +24,23 @@ profile.cov
 go.work
 go.work.sum
 
-# env files (never commit plaintext secrets)
+# env files (never commit secrets — plaintext or encrypted)
 .env
 .env.local
 .env.pre-ngrok
 .env.staging
 .env.production
 .env.*.local
-# .env*.enc files are SOPS-encrypted — safe to commit (intentionally NOT listed here)
-# ...but the transient staging copies they're edited through (.env*.enc.XXXXXX
-# from sync-static-egress-secrets.sh) must never be committed.
+# SOPS-encrypted bundles and .sops.yaml live in the private secrets repo
+# (../143-infra), never here: ciphertext published in a public repo can't
+# be unpublished if a decryption key ever leaks. (The transient staging
+# copies sync-static-egress-secrets.sh creates next to the bundle land in
+# the private checkout, which carries its own ignore for them.)
+.env*.enc
 .env*.enc.*
+.sops.yaml
+# CI checkout location of the private secrets repo (see deploy.yml)
+.infra/
 
 # air live reload
 tmp/

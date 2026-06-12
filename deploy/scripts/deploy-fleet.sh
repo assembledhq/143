@@ -73,7 +73,8 @@ fi
 
 # Read FLEET_HOSTS from env var, or decrypt from SOPS.
 if [ -z "${FLEET_HOSTS:-}" ]; then
-  ENC_FILE="$PROJECT_DIR/.env.production.enc"
+  SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+  ENC_FILE="$SECRETS_DIR/.env.production.enc"
   if [ -f "$ENC_FILE" ]; then
     echo "Decrypting fleet hosts from .env.production.enc..."
     FLEET_HOSTS="$(sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" \
