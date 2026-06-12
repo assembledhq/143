@@ -1296,7 +1296,7 @@ func TestPRServiceEnrichPullRequestHealth(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all enrichment expectations should be met")
 }
 
-func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
+func TestPRServiceStartPullRequestRepairBlocksWhenInFlight(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1357,11 +1357,9 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 	}
 
 	resp, err := service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionTypeResolveConflicts})
-	require.NoError(t, err, "StartPullRequestRepair should reuse an active in-flight repair run")
-	require.Equal(t, sessionID, resp.SessionID, "StartPullRequestRepair should return the active repair session")
-	require.True(t, resp.ReusedInFlight, "StartPullRequestRepair should mark reused in-flight runs")
-	require.Equal(t, "existing", resp.Mode, "StartPullRequestRepair should report that it reused an existing session")
-	require.NoError(t, mock.ExpectationsWereMet(), "all repair-run reuse expectations should be met")
+	require.Nil(t, resp, "StartPullRequestRepair should not return a session when an in-flight repair is detected")
+	require.ErrorIs(t, err, ErrRepairAlreadyInProgress, "StartPullRequestRepair should return ErrRepairAlreadyInProgress when a repair session is already running")
+	require.NoError(t, mock.ExpectationsWereMet(), "all repair-run in-flight detection expectations should be met")
 }
 
 func TestPRHealthServiceHelpers(t *testing.T) {
@@ -1393,15 +1391,22 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.Equal(t, &first, firstNonNilString(nil, &first, &second), "firstNonNilString should return the first non-empty pointer")
 	require.Equal(t, "text", truncateText("text", 0), "truncateText should leave values unchanged for non-positive limits")
 	require.Equal(t, "hello world", stripWhitespace("  hello   world \n"), "stripWhitespace should collapse repeated whitespace")
-	require.Equal(t, "Please resolve the conflicts.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts), "repairPromptForAction should specialize conflict repair prompts")
-	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other"), "repairPromptForAction should provide a default prompt")
+	require.Equal(t, "Please resolve the conflicts and push changes to the pull request branch.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts, true), "repairPromptForAction should specialize conflict repair prompts that push changes")
+	require.Equal(t, "Please resolve the conflicts without pushing changes.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts, false), "repairPromptForAction should specialize conflict repair prompts that do not push changes")
+	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other", true), "repairPromptForAction should provide a default prompt")
+	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other", false), "repairPromptForAction default prompt should ignore the push flag")
+	require.True(t, repairShouldPushChanges(StartPullRequestRepairOptions{}), "repairShouldPushChanges should default omitted options to pushing changes")
+	pushTrue, pushFalse := true, false
+	require.True(t, repairShouldPushChanges(StartPullRequestRepairOptions{PushChanges: &pushTrue}), "repairShouldPushChanges should honor an explicit push=true")
+	require.False(t, repairShouldPushChanges(StartPullRequestRepairOptions{PushChanges: &pushFalse}), "repairShouldPushChanges should honor an explicit push=false")
 	require.Equal(t, models.PullRequestMergeStateBlocked, normalizeRepairMergeState(models.PullRequestMergeStateUnknown, boolPtr(false), "blocked"), "normalizeRepairMergeState should preserve non-conflict blocked states")
 	require.Equal(t, models.PullRequestMergeStateBehind, normalizeRepairMergeState(models.PullRequestMergeStateBehind, nil, ""), "normalizeRepairMergeState should fall back to the existing state when GitHub mergeability is unknown")
 	require.True(t, isSessionTerminalStatus(models.SessionStatusCompleted), "isSessionTerminalStatus should recognize completed sessions")
 	require.False(t, isSessionTerminalStatus(models.SessionStatusRunning), "isSessionTerminalStatus should reject active sessions")
 	require.True(t, isUniqueActiveRepairRunViolation(&pgconn.PgError{Code: pgerrcode.UniqueViolation, ConstraintName: "idx_pull_request_repair_runs_active"}), "isUniqueActiveRepairRunViolation should recognize the active repair-run uniqueness constraint")
 	require.False(t, isUniqueActiveRepairRunViolation(errors.New("boom")), "isUniqueActiveRepairRunViolation should reject unrelated errors")
-	require.Equal(t, "Please fix these tests.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests), "repairPromptForAction should specialize test repair prompts")
+	require.Equal(t, "Please fix these tests and push changes to the pull request branch.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests, true), "repairPromptForAction should specialize test repair prompts that push changes")
+	require.Equal(t, "Please fix these tests without pushing changes.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests, false), "repairPromptForAction should specialize test repair prompts that do not push changes")
 	require.Equal(t, "", firstNonEmpty("", "  "), "firstNonEmpty should return an empty string when every value is blank")
 	require.Nil(t, firstNonNilString(strPtr("   ")), "firstNonNilString should skip blank pointed strings")
 	require.Equal(t, "12345…", truncateText("123456", 5), "truncateText should append an ellipsis when trimming long strings")

@@ -246,18 +246,6 @@ export interface BranchPreviewConfigOptions {
   validation_errors?: string[];
 }
 
-export interface PreviewAPIToken {
-  id: string;
-  org_id: string;
-  name: string;
-  scopes: string[];
-  repository_ids: string[];
-  created_by_user_id: string;
-  last_used_at?: string;
-  revoked_at?: string;
-  created_at: string;
-}
-
 export interface Integration {
   id: string;
   org_id: string;
@@ -935,6 +923,7 @@ export interface PullRequestActiveRepair {
 
 export interface PullRequestRepairRequest {
   thread_id?: string;
+  push_changes?: boolean;
 }
 
 export type PullRequestMergeWhenReadyState =

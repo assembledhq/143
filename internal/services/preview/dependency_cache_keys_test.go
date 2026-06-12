@@ -178,3 +178,38 @@ func TestBuildDependencyCacheTarValidationCommand(t *testing.T) {
 	require.Contains(t, cmd, "bad=1", "extract validation should reject entries outside effective cache paths")
 	require.Contains(t, cmd, "tar xzf", "extract command should still extract after validation")
 }
+
+func TestComputePreviewBuildCacheKey_LatestWinsAcrossLockfileContents(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	install := &models.PreviewInstallConfig{
+		Command:   []string{"npm", "ci"},
+		Lockfiles: []string{"package-lock.json"},
+	}
+	paths := []string{"node_modules/.cache/turbo", ".turbo/cache"}
+
+	key1, err := ComputePreviewBuildCacheKey(orgID, repoID, "app", "digest-a", install, paths)
+	require.NoError(t, err, "build cache key should compute")
+	require.NotEmpty(t, key1, "build cache key should not be empty")
+
+	// Same inputs must produce the same slot: the key intentionally ignores
+	// lockfile contents so one latest-wins blob is reused across dependency
+	// bumps.
+	key2, err := ComputePreviewBuildCacheKey(orgID, repoID, "app", "digest-a", install, paths)
+	require.NoError(t, err, "build cache key should recompute")
+	require.Equal(t, key1, key2, "identical inputs should map to the same latest-wins slot")
+
+	differentPaths, err := ComputePreviewBuildCacheKey(orgID, repoID, "app", "digest-a", install, []string{"frontend/.turbo/cache"})
+	require.NoError(t, err, "build cache key should compute for different paths")
+	require.NotEqual(t, key1, differentPaths, "different effective paths should map to a different slot")
+
+	differentDigest, err := ComputePreviewBuildCacheKey(orgID, repoID, "app", "digest-b", install, paths)
+	require.NoError(t, err, "build cache key should compute for different config digest")
+	require.NotEqual(t, key1, differentDigest, "config changes should map to a different slot")
+
+	placementKey, err := ComputePreviewDependencyCachePlacementKey(orgID, repoID, "app", "digest-a", install, paths)
+	require.NoError(t, err, "dependency placement key should compute")
+	require.NotEqual(t, key1, placementKey, "build cache keys must not collide with dependency placement keys")
+}
