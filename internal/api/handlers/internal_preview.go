@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/auth"
@@ -20,6 +22,19 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// runtimeAuthEntry caches the active runtime identity used to validate proxy
+// token claims, so the per-request DB check in authorizePreviewAction only
+// fires once per TTL per preview.
+type runtimeAuthEntry struct {
+	validUntil   time.Time
+	runtimeID    uuid.UUID
+	runtimeEpoch int
+	workerNodeID string
+}
+
+// runtimeAuthCacheTTL bounds how long a cached runtime identity is trusted.
+const runtimeAuthCacheTTL = 5 * time.Second
+
 // InternalPreviewHandler handles authenticated app->worker preview RPC.
 type InternalPreviewHandler struct {
 	preview   *PreviewHandler
@@ -29,15 +44,27 @@ type InternalPreviewHandler struct {
 	nodeID    string
 	secret    string
 	logger    zerolog.Logger
+
+	// runtimeAuthCache short-circuits the per-request active-runtime check.
+	runtimeAuthMu    sync.RWMutex
+	runtimeAuthCache map[uuid.UUID]*runtimeAuthEntry
+
+	// previewTransports pools upstream connections into preview containers,
+	// keyed by preview ID. Without pooling, every proxied request resolved
+	// the preview from the DB and dialed a fresh container connection.
+	transportMu       sync.Mutex
+	previewTransports map[uuid.UUID]*http.Transport
 }
 
 func NewInternalPreviewHandler(preview *PreviewHandler, manager *previewsvc.Manager, nodeID, secret string, logger zerolog.Logger) *InternalPreviewHandler {
 	return &InternalPreviewHandler{
-		preview: preview,
-		manager: manager,
-		nodeID:  nodeID,
-		secret:  secret,
-		logger:  logger,
+		preview:           preview,
+		manager:           manager,
+		nodeID:            nodeID,
+		secret:            secret,
+		logger:            logger,
+		runtimeAuthCache:  make(map[uuid.UUID]*runtimeAuthEntry),
+		previewTransports: make(map[uuid.UUID]*http.Transport),
 	}
 }
 
@@ -137,6 +164,7 @@ func (h *InternalPreviewHandler) StopPreview(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
 		return
 	}
+	h.evictPreviewTransport(previewID)
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "stopped"}})
 }
 
@@ -171,6 +199,7 @@ func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.R
 		writePreviewHTTPError(w, r, previewErr)
 		return
 	}
+	h.evictPreviewTransport(previewID)
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
 }
 
@@ -428,16 +457,49 @@ func (h *InternalPreviewHandler) authorizePreviewAction(w http.ResponseWriter, r
 		return uuid.Nil, nil, false
 	}
 	if action == "proxy" && h.preview != nil && h.preview.store != nil {
-		runtime, err := h.preview.store.GetActivePreviewRuntime(r.Context(), claims.OrgID, previewID)
-		if err != nil ||
-			runtime.ID != *claims.RuntimeID ||
-			runtime.RuntimeEpoch != claims.RuntimeEpoch ||
-			runtime.WorkerNodeID != claims.TargetNodeID {
+		if !h.runtimeClaimsValid(r.Context(), claims, previewID) {
 			writeError(w, r, http.StatusForbidden, "PREVIEW_RUNTIME_MISMATCH", "preview token does not match an active runtime")
 			return uuid.Nil, nil, false
 		}
 	}
 	return previewID, claims, true
+}
+
+// runtimeClaimsValid checks proxy token claims against the active runtime
+// through a short TTL cache. A cached match is trusted; a miss or mismatch
+// always re-resolves from the DB before rejecting, so a freshly recycled
+// preview (new runtime epoch) is never penalized by a stale cache entry.
+func (h *InternalPreviewHandler) runtimeClaimsValid(ctx context.Context, claims *auth.PreviewTokenClaims, previewID uuid.UUID) bool {
+	matches := func(entry *runtimeAuthEntry) bool {
+		return entry.runtimeID == *claims.RuntimeID &&
+			entry.runtimeEpoch == claims.RuntimeEpoch &&
+			entry.workerNodeID == claims.TargetNodeID
+	}
+	now := time.Now()
+	h.runtimeAuthMu.RLock()
+	entry, ok := h.runtimeAuthCache[previewID]
+	h.runtimeAuthMu.RUnlock()
+	if ok && now.Before(entry.validUntil) && matches(entry) {
+		return true
+	}
+	runtime, err := h.preview.store.GetActivePreviewRuntime(ctx, claims.OrgID, previewID)
+	if err != nil {
+		return false
+	}
+	entry = &runtimeAuthEntry{
+		validUntil:   now.Add(runtimeAuthCacheTTL),
+		runtimeID:    runtime.ID,
+		runtimeEpoch: runtime.RuntimeEpoch,
+		workerNodeID: runtime.WorkerNodeID,
+	}
+	h.runtimeAuthMu.Lock()
+	if len(h.runtimeAuthCache) > 4096 {
+		// Safety valve against unbounded growth across short-lived previews.
+		h.runtimeAuthCache = make(map[uuid.UUID]*runtimeAuthEntry)
+	}
+	h.runtimeAuthCache[previewID] = entry
+	h.runtimeAuthMu.Unlock()
+	return matches(entry)
 }
 
 func (h *InternalPreviewHandler) Proxy(w http.ResponseWriter, r *http.Request) {
@@ -471,11 +533,7 @@ func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.
 			req.Header.Del("Authorization")
 			stripPreviewAccessCookies(req)
 		},
-		Transport: &internalPreviewTransport{
-			manager:   h.manager,
-			orgID:     orgID,
-			previewID: previewID,
-		},
+		Transport: h.previewTransport(orgID, previewID),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), originalReq, orgID, previewID, claims, backendPath).
 				Msg("internal preview proxy error")
@@ -483,6 +541,60 @@ func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// previewTransport returns the pooled upstream transport for a preview,
+// creating it on first use. Pooled connections are keyed per preview so
+// container streams are reused across requests instead of dialed fresh each
+// time. Connections to a torn-down container close on the container side and
+// fall out of the pool, so a recycle converges on the new container without
+// explicit invalidation; eviction hooks just tighten the window.
+func (h *InternalPreviewHandler) previewTransport(orgID, previewID uuid.UUID) http.RoundTripper {
+	h.transportMu.Lock()
+	defer h.transportMu.Unlock()
+	if transport, ok := h.previewTransports[previewID]; ok {
+		return transport
+	}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			conn, err := h.manager.DialPreview(ctx, orgID, previewID)
+			if err != nil {
+				return nil, fmt.Errorf("dial preview: %w", err)
+			}
+			return conn, nil
+		},
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 128,
+		IdleConnTimeout:     60 * time.Second,
+		// Preserve end-to-end content negotiation: the browser's own
+		// Accept-Encoding is forwarded by the gateway, and the previous
+		// raw-conn transport never decompressed bodies.
+		DisableCompression: true,
+	}
+	if len(h.previewTransports) > 1024 {
+		// Safety valve against unbounded growth across short-lived previews.
+		for id, old := range h.previewTransports {
+			old.CloseIdleConnections()
+			delete(h.previewTransports, id)
+		}
+	}
+	h.previewTransports[previewID] = transport
+	return transport
+}
+
+// evictPreviewTransport drops the pooled transport for a preview and closes
+// its idle connections. Called when the preview is stopped or recycled on
+// this worker.
+func (h *InternalPreviewHandler) evictPreviewTransport(previewID uuid.UUID) {
+	h.transportMu.Lock()
+	transport, ok := h.previewTransports[previewID]
+	if ok {
+		delete(h.previewTransports, previewID)
+	}
+	h.transportMu.Unlock()
+	if ok {
+		transport.CloseIdleConnections()
+	}
 }
 
 func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims) {
@@ -575,44 +687,6 @@ func addInternalPreviewProxyLogFields(event *zerolog.Event, r *http.Request, org
 		event = event.Str("runtime_id", claims.RuntimeID.String())
 	}
 	return event
-}
-
-type internalPreviewTransport struct {
-	manager   *previewsvc.Manager
-	orgID     uuid.UUID
-	previewID uuid.UUID
-}
-
-type connClosingBody struct {
-	io.ReadCloser
-	conn net.Conn
-}
-
-func (b *connClosingBody) Close() error {
-	bodyErr := b.ReadCloser.Close()
-	connErr := b.conn.Close()
-	if bodyErr != nil {
-		return bodyErr
-	}
-	return connErr
-}
-
-func (t *internalPreviewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	conn, err := t.manager.DialPreview(req.Context(), t.orgID, t.previewID)
-	if err != nil {
-		return nil, fmt.Errorf("dial preview: %w", err)
-	}
-	if err := req.Write(conn); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	resp.Body = &connClosingBody{ReadCloser: resp.Body, conn: conn}
-	return resp, nil
 }
 
 func cloneWebSocketRequestForInternalProxy(req *http.Request, previewID uuid.UUID) *http.Request {

@@ -1423,3 +1423,252 @@ func TestBranchPreviewExpiresAt_ExactMaximumPassesThrough(t *testing.T) {
 	require.False(t, got.Before(lo), "exact maximum TTL should pass through (lower bound)")
 	require.False(t, got.After(hi), "exact maximum TTL should pass through (upper bound)")
 }
+
+type fakeSessionPreviewRestarter struct {
+	instance   *models.PreviewInstance
+	action     string
+	err        *previewHTTPError
+	gotOrg     uuid.UUID
+	gotUser    uuid.UUID
+	gotSession uuid.UUID
+	calls      int
+}
+
+func (f *fakeSessionPreviewRestarter) RestartSessionPreview(_ context.Context, orgID, userID, sessionID uuid.UUID, _ startPreviewRequest) (*models.PreviewInstance, string, *previewHTTPError) {
+	f.calls++
+	f.gotOrg, f.gotUser, f.gotSession = orgID, userID, sessionID
+	if f.err != nil {
+		return nil, "", f.err
+	}
+	return f.instance, f.action, nil
+}
+
+func sessionPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, stoppedAt *time.Time) []any {
+	return []any{
+		previewID, sessionID, (*uuid.UUID)(nil), orgID, userID, "", "", status,
+		"", "", "", "", 0,
+		"", "", now, now, stoppedAt,
+		"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+		(*int64)(nil), (*time.Time)(nil), "",
+		false,
+	}
+}
+
+func TestBranchPreviewHandler_RestartDelegatesSessionPreviews(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	oldPreviewID := uuid.New()
+	newPreviewID := uuid.New()
+	now := time.Now()
+	stoppedAt := now.Add(-10 * time.Minute)
+
+	// resolveTargetRepoAndActive: GetPreviewInstance → stopped session preview
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			sessionPreviewInstanceRow(oldPreviewID, sessionID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+		))
+
+	restarter := &fakeSessionPreviewRestarter{
+		instance: &models.PreviewInstance{
+			ID:        newPreviewID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.PreviewStatusStarting,
+			ExpiresAt: now.Add(30 * time.Minute),
+		},
+		action: "started",
+	}
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: "abc123"},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	handler.SetSessionPreviewRestarter(restarter)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/"+oldPreviewID.String()+"/restart", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("preview_id", oldPreviewID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Restart(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Restart should delegate session previews to the session restart flow")
+	require.Equal(t, 1, restarter.calls, "the session restarter should be invoked exactly once")
+	require.Equal(t, sessionID, restarter.gotSession, "the restarter should receive the preview's session ID")
+	require.Equal(t, userID, restarter.gotUser, "the restarter should receive the requesting user")
+
+	var resp models.SingleResponse[branchPreviewResponse]
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "Restart should return a preview response")
+	require.NotNil(t, resp.Data.PreviewID, "Restart should return the resulting instance ID")
+	require.Equal(t, newPreviewID, *resp.Data.PreviewID, "Restart should surface the fresh instance so pollers can follow it")
+	require.Equal(t, string(models.PreviewStatusStarting), resp.Data.Status, "Restart should surface the fresh instance status")
+	require.NotNil(t, resp.Data.PreviewURL, "Restart should include the new preview URL")
+	require.Contains(t, *resp.Data.PreviewURL, newPreviewID.String(), "the preview URL should point at the fresh instance host")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_RestartSessionPreviewWithoutRestarterConflicts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			sessionPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStopped, now, nil)...,
+		))
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: "abc123"},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/"+previewID.String()+"/restart", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("preview_id", previewID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Restart(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, "Restart without a wired session restarter should keep the no-target conflict")
+	require.Contains(t, rr.Body.String(), "PREVIEW_HAS_NO_TARGET", "the conflict should carry the no-target code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_RestartSessionPreviewRejectsPreviewAPIToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			sessionPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusStopped, now, nil)...,
+		))
+
+	restarter := &fakeSessionPreviewRestarter{}
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: "abc123"},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	handler.SetSessionPreviewRestarter(restarter)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/"+previewID.String()+"/restart", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("preview_id", previewID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithPreviewAPIToken(ctx, &models.PreviewAPIToken{
+		OrgID:  orgID,
+		Scopes: []string{"previews:read", "previews:create", "previews:stop"},
+	})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Restart(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "preview API tokens must not drive session preview restarts")
+	require.Equal(t, 0, restarter.calls, "the session restarter should not be invoked for token-authenticated requests")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_GetFollowsActiveSessionPreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	oldPreviewID := uuid.New()
+	newPreviewID := uuid.New()
+	now := time.Now()
+	stoppedAt := now.Add(-10 * time.Minute)
+
+	// Get: GetPreviewInstance → old stopped session preview
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			sessionPreviewInstanceRow(oldPreviewID, sessionID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+		))
+	// Get: GetActivePreviewForSession → fresh starting instance for the session
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			sessionPreviewInstanceRow(newPreviewID, sessionID, orgID, userID, models.PreviewStatusStarting, now, nil)...,
+		))
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: "abc123"},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/"+oldPreviewID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("preview_id", oldPreviewID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Get(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Get should succeed for a stopped session preview")
+	var resp models.SingleResponse[branchPreviewResponse]
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "Get should return a preview response")
+	require.NotNil(t, resp.Data.PreviewID, "Get should return an instance ID")
+	require.Equal(t, newPreviewID, *resp.Data.PreviewID, "Get should follow the session's current active preview so pollers converge on the replacement")
+	require.Equal(t, string(models.PreviewStatusStarting), resp.Data.Status, "Get should surface the replacement's status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

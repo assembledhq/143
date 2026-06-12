@@ -61,6 +61,16 @@ type BranchPreviewHandler struct {
 	// same immutable SHA so a burst of requests for an uncached SHA results in
 	// exactly one GitHub API call rather than N.
 	configFetchGroup singleflight.Group
+	// sessionRestarter serves restart/start-latest for previews without a
+	// branch target (session previews), which the branch-target flow rejects.
+	sessionRestarter sessionPreviewRestarter
+}
+
+// sessionPreviewRestarter restarts the preview attached to a session. It is
+// implemented by PreviewHandler and wired in by the router so the generic
+// preview restart endpoints can serve session previews (no branch target).
+type sessionPreviewRestarter interface {
+	RestartSessionPreview(ctx context.Context, orgID, userID, sessionID uuid.UUID, body startPreviewRequest) (*models.PreviewInstance, string, *previewHTTPError)
 }
 
 func NewBranchPreviewHandler(previews *db.PreviewStore, repos *db.RepositoryStore, github branchPreviewGitHub, manager *preview.Manager, baseURL, previewOriginTemplate string) *BranchPreviewHandler {
@@ -77,6 +87,10 @@ func NewBranchPreviewHandler(previews *db.PreviewStore, repos *db.RepositoryStor
 func (h *BranchPreviewHandler) SetWorkerRuntime(jobs *db.JobStore, selector *preview.WorkerSelector) {
 	h.jobs = jobs
 	h.selector = selector
+}
+
+func (h *BranchPreviewHandler) SetSessionPreviewRestarter(restarter sessionPreviewRestarter) {
+	h.sessionRestarter = restarter
 }
 
 func (h *BranchPreviewHandler) SetPreviewCachePrewarm(enabled bool, priority int) {
@@ -909,20 +923,22 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview", err)
 		return
 	}
-	resp := branchPreviewResponse{
-		TargetID:     previewTargetIDValue(instance.PreviewTargetID),
-		PreviewID:    &instance.ID,
-		Status:       string(instance.Status),
-		CurrentPhase: instance.CurrentPhase,
-		StableURL:    h.stableURL(instance.ID.String()),
-		ExpiresAt:    &instance.ExpiresAt,
-		StoppedAt:    instance.StoppedAt,
+	if instance.PreviewTargetID == nil && instance.SessionID != uuid.Nil && !instance.Status.IsActive() {
+		// Restarting a stopped session preview starts a fresh instance under
+		// the same session. Follow the session's current active preview so
+		// clients polling the old instance ID converge on the replacement.
+		current, currentErr := h.previews.GetActivePreviewForSession(r.Context(), orgID, instance.SessionID)
+		if currentErr != nil && !errors.Is(currentErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview", currentErr)
+			return
+		}
+		if currentErr == nil && current != nil {
+			instance = current
+		}
 	}
+	resp := h.previewInstanceResponse(instance)
 	if instance.PreviewTargetID != nil {
 		resp.StableURL = h.stableURL(instance.PreviewTargetID.String())
-	}
-	if url := h.previewURL(instance.ID); url != "" {
-		resp.PreviewURL = &url
 	}
 	if instance.PreviewTargetID != nil {
 		target, targetErr := h.previews.GetPreviewTarget(r.Context(), orgID, *instance.PreviewTargetID)
@@ -1134,6 +1150,10 @@ func (h *BranchPreviewHandler) Restart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if target == nil {
+		h.restartSessionPreviewInstance(w, r, orgID, userID, active)
+		return
+	}
 	if !previewTokenAllows(r.Context(), "previews:create", target.RepositoryID) {
 		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to restart this preview")
 		return
@@ -1167,8 +1187,12 @@ func (h *BranchPreviewHandler) StartLatest(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
-	target, repo, _, ok := h.resolveTargetRepoAndActive(w, r, orgID)
+	target, repo, active, ok := h.resolveTargetRepoAndActive(w, r, orgID)
 	if !ok {
+		return
+	}
+	if target == nil {
+		h.restartSessionPreviewInstance(w, r, orgID, userID, active)
 		return
 	}
 	if !previewTokenAllows(r.Context(), "previews:create", target.RepositoryID) {
@@ -1289,6 +1313,62 @@ func (h *BranchPreviewHandler) MintBootstrapToken(w http.ResponseWriter, r *http
 	}})
 }
 
+// previewInstanceResponse builds the instance-derived fields of a preview
+// response. Callers with a branch target layer the target fields (repository,
+// branch, stable URL slug) on top; for session previews this is the complete
+// response.
+func (h *BranchPreviewHandler) previewInstanceResponse(instance *models.PreviewInstance) branchPreviewResponse {
+	resp := branchPreviewResponse{
+		TargetID:     previewTargetIDValue(instance.PreviewTargetID),
+		PreviewID:    &instance.ID,
+		Status:       string(instance.Status),
+		Error:        instance.Error,
+		CurrentPhase: instance.CurrentPhase,
+		StableURL:    h.stableURL(instance.ID.String()),
+		ExpiresAt:    &instance.ExpiresAt,
+		StoppedAt:    instance.StoppedAt,
+	}
+	if url := h.previewURL(instance.ID); url != "" {
+		resp.PreviewURL = &url
+	}
+	return resp
+}
+
+// restartSessionPreviewInstance handles restart/start-latest for a preview
+// instance that is not attached to a branch target (a session preview): it
+// restarts the session's preview — starting a fresh instance when the old one
+// is stopped — and responds with the resulting instance so pollers can follow
+// its ID.
+func (h *BranchPreviewHandler) restartSessionPreviewInstance(w http.ResponseWriter, r *http.Request, orgID, userID uuid.UUID, instance *models.PreviewInstance) {
+	// Preview API tokens are scoped to branch previews; do not let them drive
+	// session restarts.
+	if middleware.PreviewAPITokenFromContext(r.Context()) != nil {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API tokens cannot restart session previews")
+		return
+	}
+	if h.sessionRestarter == nil || instance.SessionID == uuid.Nil {
+		writeError(w, r, http.StatusConflict, "PREVIEW_HAS_NO_TARGET", "preview is not attached to a branch target")
+		return
+	}
+	// Starting a preview hydrates a sandbox and waits for readiness (same
+	// WriteTimeout-overrun risk as the session-scoped restart endpoint).
+	clearWriteDeadline(w, r)
+	restarted, _, restartErr := h.sessionRestarter.RestartSessionPreview(r.Context(), orgID, userID, instance.SessionID, startPreviewRequest{})
+	if restartErr != nil {
+		writePreviewHTTPError(w, r, restartErr)
+		return
+	}
+	resp := h.previewInstanceResponse(restarted)
+	h.decoratePreviewResponse(r.Context(), orgID, &resp)
+	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
+}
+
+// resolveTargetRepoAndActive resolves the {preview_id} route param — an
+// instance ID or a stable target ID — to its branch target, repository, and
+// active instance, writing the error response itself when resolution fails.
+// Special case: for a session preview (an instance with no branch target) it
+// returns ok=true with a nil target and the instance; callers must route that
+// to the session restart flow instead of dereferencing the target.
 func (h *BranchPreviewHandler) resolveTargetRepoAndActive(w http.ResponseWriter, r *http.Request, orgID uuid.UUID) (*models.PreviewTarget, models.Repository, *models.PreviewInstance, bool) {
 	id, err := uuid.Parse(chi.URLParam(r, "preview_id"))
 	if err != nil {
@@ -1301,8 +1381,9 @@ func (h *BranchPreviewHandler) resolveTargetRepoAndActive(w http.ResponseWriter,
 	if instanceErr == nil {
 		active = instance
 		if instance.PreviewTargetID == nil {
-			writeError(w, r, http.StatusConflict, "PREVIEW_HAS_NO_TARGET", "preview is not attached to a branch target")
-			return nil, models.Repository{}, nil, false
+			// Session preview (no branch target): hand the instance back with
+			// a nil target so the caller can route to the session restart flow.
+			return nil, models.Repository{}, instance, true
 		}
 		target, err = h.previews.GetPreviewTarget(r.Context(), orgID, *instance.PreviewTargetID)
 	} else if errors.Is(instanceErr, pgx.ErrNoRows) {
