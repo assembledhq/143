@@ -434,8 +434,8 @@ type Stores struct {
 	EvalReleaseGates    *db.EvalReleaseGateStore // nil-safe: eval release gates
 	Repositories        *db.RepositoryStore      // nil-safe: needed for eval repo lookup
 	GitHubInstallations *db.GitHubInstallationStore
-	SessionMessages     *db.SessionMessageStore  // nil-safe: needed for title regeneration
-	SessionThreads      *db.SessionThreadStore   // nil-safe: needed for thread-scoped continuation status
+	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
+	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
 	HumanInputRequests  *db.SessionHumanInputRequestStore
 	ThreadFileEvents    *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
 	SandboxHolders      *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
@@ -490,6 +490,7 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
 	// snapshot uploads (spawned by CreatePR) have either promoted or
@@ -837,7 +838,8 @@ func newAutoPreviewDeferredHandler(stores *Stores, services *Services, logger ze
 		}
 
 		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode); err != nil {
-			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)		}
+			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)
+		}
 		return nil
 	}
 }
@@ -6392,11 +6394,13 @@ func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logg
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID       string `json:"session_id"`
-			OrgID           string `json:"org_id"`
-			IssueSnapshotID string `json:"issue_snapshot_id,omitempty"`
-			Draft           *bool  `json:"draft,omitempty"`
-			AuthorMode      string `json:"author_mode,omitempty"`
+			SessionID         string `json:"session_id"`
+			OrgID             string `json:"org_id"`
+			IssueSnapshotID   string `json:"issue_snapshot_id,omitempty"`
+			Draft             *bool  `json:"draft,omitempty"`
+			AuthorMode        string `json:"author_mode,omitempty"`
+			MergeWhenReady    bool   `json:"merge_when_ready,omitempty"`
+			RequestedByUserID string `json:"requested_by_user_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
@@ -6487,7 +6491,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
 		}
 
-		_, createErr := services.PR.CreatePR(ctx, &run, params...)
+		pr, createErr := services.PR.CreatePR(ctx, &run, params...)
 		if createErr != nil {
 			// ErrNoChanges is a benign terminal outcome (session ran fine
 			// but produced no diff), so log at info to keep `open_pr failed`
@@ -6525,6 +6529,28 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return createErr
 		}
 
+		if input.MergeWhenReady {
+			if pr == nil {
+				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+				}
+				return fmt.Errorf("open_pr merge_when_ready requested but PRService returned nil pull request")
+			}
+			requestedByUserID, err := uuid.Parse(input.RequestedByUserID)
+			if err != nil {
+				queueErr := fmt.Errorf("parse merge_when_ready requesting user id: %w", err)
+				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+				}
+				return queueErr
+			}
+			if _, err := services.PR.QueueMergeWhenReady(ctx, orgID, pr.ID, requestedByUserID); err != nil {
+				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+				}
+				return fmt.Errorf("queue merge when ready after open_pr: %w", err)
+			}
+		}
 		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
