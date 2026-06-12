@@ -5,6 +5,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/assembledhq/143/internal/agentdiagnostics"
 	"github.com/google/uuid"
 )
 
@@ -50,13 +51,14 @@ type SessionTimelineResponseEntry struct {
 
 func NewSessionLogResponse(log SessionLog) SessionLogResponse {
 	message, truncated := previewSessionLogMessage(log.Message)
+	metadata := responseSessionLogMetadata(log)
 	return SessionLogResponse{
 		ID:               log.ID,
 		SessionID:        log.SessionID,
 		ThreadID:         log.ThreadID,
 		Level:            log.Level,
 		Message:          message,
-		Metadata:         log.Metadata,
+		Metadata:         metadata,
 		TurnNumber:       log.TurnNumber,
 		CreatedAt:        log.Timestamp,
 		MessageBytes:     len([]byte(log.Message)),
@@ -72,7 +74,7 @@ func NewSessionLogDetailResponse(log SessionLog) SessionLogDetailResponse {
 		ThreadID:     log.ThreadID,
 		Level:        log.Level,
 		Message:      log.Message,
-		Metadata:     log.Metadata,
+		Metadata:     responseSessionLogMetadata(log),
 		TurnNumber:   log.TurnNumber,
 		CreatedAt:    log.Timestamp,
 		MessageBytes: len([]byte(log.Message)),
@@ -136,4 +138,36 @@ func previewSessionLogMessage(message string) (string, bool) {
 		preview = preview[:len(preview)-1]
 	}
 	return preview, true
+}
+
+func responseSessionLogMetadata(log SessionLog) json.RawMessage {
+	kind, _, ok := agentdiagnostics.ClassifyBenignCodexDiagnostic(log.Message)
+	if !ok {
+		return log.Metadata
+	}
+
+	var metadata map[string]any
+	if len(log.Metadata) > 0 {
+		if err := json.Unmarshal(log.Metadata, &metadata); err != nil {
+			metadata = nil
+		}
+	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata["visibility"] = "hidden"
+	if _, exists := metadata["diagnostic_class"]; !exists {
+		metadata["diagnostic_class"] = "benign_runtime_diagnostic"
+	}
+	if _, exists := metadata["diagnostic_source"]; !exists {
+		metadata["diagnostic_source"] = "codex"
+	}
+	if _, exists := metadata["diagnostic_kind"]; !exists {
+		metadata["diagnostic_kind"] = kind
+	}
+	out, err := json.Marshal(metadata)
+	if err != nil {
+		return log.Metadata
+	}
+	return out
 }
