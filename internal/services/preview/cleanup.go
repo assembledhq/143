@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/rs/zerolog"
 )
 
@@ -84,7 +85,7 @@ func (w *CleanupWorker) cleanup() {
 		w.logger.Warn().Err(err).Msg("cleanup: failed to list expired previews")
 	} else {
 		for _, p := range expired {
-			if stopErr := w.manager.StopPreview(ctx, p.OrgID, p.ID); stopErr != nil {
+			if stopErr := w.manager.StopPreviewWithReason(ctx, p.OrgID, p.ID, models.PreviewStoppedReasonExpired); stopErr != nil {
 				w.logger.Warn().Err(stopErr).
 					Str("preview_id", p.ID.String()).
 					Msg("cleanup: failed to stop expired preview")
@@ -101,7 +102,7 @@ func (w *CleanupWorker) cleanup() {
 		w.logger.Warn().Err(err).Msg("cleanup: failed to list idle previews")
 	} else {
 		for _, p := range idle {
-			if stopErr := w.manager.StopPreview(ctx, p.OrgID, p.ID); stopErr != nil {
+			if stopErr := w.manager.StopPreviewWithReason(ctx, p.OrgID, p.ID, models.PreviewStoppedReasonExpired); stopErr != nil {
 				w.logger.Warn().Err(stopErr).
 					Str("preview_id", p.ID.String()).
 					Msg("cleanup: failed to stop idle preview")

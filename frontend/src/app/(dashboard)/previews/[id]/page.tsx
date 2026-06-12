@@ -1,9 +1,10 @@
 "use client";
 
 import { use, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, GitBranch, GitPullRequest, KeyRound, Loader2, RotateCw, Square } from "lucide-react";
+import { AlertTriangle, ArrowLeft, GitBranch, GitPullRequest, KeyRound, Loader2, RotateCw, Square } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -226,6 +227,12 @@ export function PreviewLandingContent({ id }: { id: string }) {
   return (
     <PageContainer size="default">
       <div className="space-y-4">
+        <Button asChild variant="ghost" size="sm" className="w-fit">
+          <Link href="/previews">
+            <ArrowLeft className="h-4 w-4" />
+            Previews
+          </Link>
+        </Button>
         <PageHeader
           title={title}
           description={preview?.branch ? `Branch preview for ${preview.branch}` : "Branch preview"}

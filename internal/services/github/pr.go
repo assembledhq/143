@@ -53,6 +53,13 @@ type PreviewStopper interface {
 	StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error
 }
 
+// AutoPreviewStarter starts or warms a branch preview for a GitHub PR. The
+// concrete implementation lives in the API/preview layer so this package can
+// own webhook policy decisions without importing the preview package.
+type AutoPreviewStarter interface {
+	StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error
+}
+
 type sessionThreadLister interface {
 	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
 }
@@ -79,6 +86,7 @@ type PRService struct {
 	prTemplates             *db.PRTemplateStore
 	previews                *db.PreviewStore
 	previewStopper          PreviewStopper
+	autoPreviewStarter      AutoPreviewStarter
 	redisClient             *cache.Client
 	prHealthStreams         *cache.PullRequestStreams
 	llmClient               llm.Client
@@ -244,6 +252,12 @@ func (s *PRService) PRTemplateStore() *db.PRTemplateStore {
 func (s *PRService) SetPreviewTeardown(previews *db.PreviewStore, stopper PreviewStopper) {
 	s.previews = previews
 	s.previewStopper = stopper
+}
+
+// SetAutoPreviewStarter wires the runtime starter used by repository
+// auto-preview policies.
+func (s *PRService) SetAutoPreviewStarter(starter AutoPreviewStarter) {
+	s.autoPreviewStarter = starter
 }
 
 // SetSandboxPushDeps wires the sandbox provider and snapshot store used by the
@@ -1471,16 +1485,26 @@ type PullRequestEvent struct {
 	OwnerOrgID *uuid.UUID `json:"-"`
 	PR         struct {
 		Merged         bool   `json:"merged"`
+		Draft          bool   `json:"draft"`
 		HTMLURL        string `json:"html_url"`
 		MergedAt       string `json:"merged_at"`
 		MergeCommitSHA string `json:"merge_commit_sha"`
 		Head           struct {
-			SHA string `json:"sha"`
+			SHA  string `json:"sha"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				FullName string `json:"full_name"`
+				Fork     bool   `json:"fork"`
+			} `json:"repo"`
 		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	} `json:"pull_request"`
 	Repository struct {
-		ID       int64  `json:"id"`
-		FullName string `json:"full_name"`
+		ID            int64  `json:"id"`
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
 	} `json:"repository"`
 }
 
@@ -1488,14 +1512,14 @@ type PullRequestEvent struct {
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
 	if err != nil {
-		// Not a 143-generated PR — ignore.
-		return nil
+		// Not a 143-generated PR; repository auto-preview policies still apply.
+		return s.handleAutoPreviewEvent(ctx, event)
 	}
 
 	switch event.Action {
 	case "opened", "reopened", "synchronize":
 		s.enqueuePullRequestStateSync(ctx, pr)
-		return nil
+		return s.handleAutoPreviewEvent(ctx, event)
 	case "closed":
 		// handled below
 	default:
@@ -1507,7 +1531,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	}
 
 	s.enqueuePullRequestStateSync(ctx, pr)
-	return nil
+	return s.handleAutoPreviewEvent(ctx, event)
 }
 
 func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.UUID, repo string, number int) (models.PullRequest, error) {
@@ -1515,6 +1539,108 @@ func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.
 		return s.pullRequests.GetByOrgRepoAndNumber(ctx, *ownerOrgID, repo, number)
 	}
 	return s.pullRequests.GetByRepoAndNumber(ctx, repo, number)
+}
+
+func (s *PRService) handleAutoPreviewEvent(ctx context.Context, event PullRequestEvent) error {
+	if s == nil || s.previews == nil || s.repos == nil || s.autoPreviewStarter == nil {
+		return nil
+	}
+	switch event.Action {
+	case "opened", "reopened", "synchronize":
+		// handled below
+	case "closed":
+		return s.teardownAutoPreview(ctx, event)
+	default:
+		return nil
+	}
+	if event.PR.Draft || event.PR.Head.Repo.Fork {
+		return nil
+	}
+	defaultBranch := strings.TrimSpace(event.Repository.DefaultBranch)
+	if defaultBranch != "" && strings.TrimSpace(event.PR.Base.Ref) != "" && event.PR.Base.Ref != defaultBranch {
+		return nil
+	}
+	if event.PR.Head.SHA == "" || event.PR.Head.Ref == "" {
+		return nil
+	}
+	if event.PR.Head.Repo.FullName != "" && event.PR.Head.Repo.FullName != event.Repository.FullName {
+		return nil
+	}
+
+	repo, err := s.repositoryFromPullRequestEvent(ctx, event)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).
+				Int64("github_repo_id", event.Repository.ID).
+				Str("repo", event.Repository.FullName).
+				Msg("failed to resolve repository for auto preview")
+		}
+		return nil
+	}
+	policy, err := s.previews.GetRepositoryPreviewPolicy(ctx, repo.OrgID, repo.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("load repository preview policy: %w", err)
+		}
+		return nil
+	}
+	if policy.AutoMode == models.PreviewAutoModeOff {
+		return nil
+	}
+	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode)
+}
+
+func (s *PRService) repositoryFromPullRequestEvent(ctx context.Context, event PullRequestEvent) (models.Repository, error) {
+	if event.OwnerOrgID != nil {
+		return s.repos.GetByFullName(ctx, *event.OwnerOrgID, event.Repository.FullName)
+	}
+	owner, err := s.repos.GetActiveOwnerByGitHubID(ctx, event.Repository.ID)
+	if err != nil {
+		return models.Repository{}, err
+	}
+	return s.repos.GetByID(ctx, owner.OrgID, owner.RepositoryID)
+}
+
+func (s *PRService) teardownAutoPreview(ctx context.Context, event PullRequestEvent) error {
+	repo, err := s.repositoryFromPullRequestEvent(ctx, event)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).
+				Int64("github_repo_id", event.Repository.ID).
+				Str("repo", event.Repository.FullName).
+				Msg("failed to resolve repository for auto preview teardown")
+		}
+		return nil
+	}
+	state, err := s.previews.GetPRPreviewState(ctx, repo.OrgID, repo.ID, event.Number)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).
+				Str("repo", repo.FullName).
+				Int("pr_number", event.Number).
+				Msg("failed to load pr preview state for auto preview teardown")
+		}
+		return nil
+	}
+	if state.LastPreviewInstanceID != nil && s.previewStopper != nil {
+		if stopErr := s.previewStopper.StopPreview(ctx, repo.OrgID, *state.LastPreviewInstanceID); stopErr != nil {
+			s.logger.Warn().Err(stopErr).
+				Str("preview_id", state.LastPreviewInstanceID.String()).
+				Msg("failed to stop auto preview on PR close")
+		} else if reasonErr := s.previews.UpdatePreviewStoppedReason(ctx, repo.OrgID, *state.LastPreviewInstanceID, models.PreviewStoppedReasonPRClosed); reasonErr != nil {
+			s.logger.Warn().Err(reasonErr).
+				Str("preview_id", state.LastPreviewInstanceID.String()).
+				Msg("failed to record auto preview stop reason")
+		}
+	}
+	nextStatus := models.PRPreviewStatusClosed
+	if event.PR.Merged {
+		nextStatus = models.PRPreviewStatusMerged
+	}
+	if err := s.previews.UpdatePRPreviewStatus(ctx, repo.OrgID, state.ID, nextStatus); err != nil {
+		return fmt.Errorf("update auto preview status: %w", err)
+	}
+	return nil
 }
 
 // applyClosedPRTransition flips a PR's status to merged/closed and runs the
@@ -1726,6 +1852,11 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 				Str("preview_id", state.LastPreviewInstanceID.String()).
 				Str("pr_id", pr.ID.String()).
 				Msg("failed to stop preview on PR close")
+		} else if reasonErr := s.previews.UpdatePreviewStoppedReason(ctx, pr.OrgID, *state.LastPreviewInstanceID, models.PreviewStoppedReasonPRClosed); reasonErr != nil {
+			s.logger.Warn().Err(reasonErr).
+				Str("preview_id", state.LastPreviewInstanceID.String()).
+				Str("pr_id", pr.ID.String()).
+				Msg("failed to record preview stop reason on PR close")
 		}
 	}
 
