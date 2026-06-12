@@ -1658,6 +1658,90 @@ describe("PreviewPanel component", () => {
     expect(screen.queryByRole("button", { name: "Retry preview" })).not.toBeInTheDocument();
   });
 
+  it("shows live updated freshness as quiet metadata without refresh action", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        runtime_workspace_revision: 5,
+        runtime_workspace_revision_updated_at: "2026-05-28T16:18:30Z",
+        runtime_workspace_revision_source: "hmr",
+      }),
+      freshness: {
+        state: "live_updated",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        runtime_workspace_revision: 5,
+        runtime_workspace_revision_source: "hmr",
+        reason: "preview_live_updated",
+        restart_required: false,
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Updated live")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("preview-freshness-callout")).not.toBeInTheDocument();
+  });
+
+  it("promotes restart preview when restart is required", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "restart_required",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        restart_required: true,
+        restart_reasons: [
+          {
+            kind: "dependency_changed",
+            path: "frontend/package.json",
+            detail: "Dependencies changed. Restart to install and apply them.",
+          },
+        ],
+        reason: "restart_required",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Restart required")).toBeInTheDocument();
+    expect(screen.getByText("Dependencies changed. Restart to install and apply them.")).toBeInTheDocument();
+    const restartButton = screen.getByRole("button", { name: "Restart preview" });
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+
+    await user.click(restartButton);
+
+    await waitFor(() => {
+      expect(mockEnsure).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows startup estimate while preview is starting", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({ status: "starting" }),
+      startup_estimate: {
+        label: "Usually ready in ~25s",
+        p50_seconds: 25,
+        sample_count: 8,
+        confidence: "medium",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Usually ready in ~25s")).toBeInTheDocument();
+  });
+
   it("shows unknown freshness as quiet metadata instead of a callout", async () => {
     mockGet.mockResolvedValue({
       ...makePreviewStatus({ status: "ready" }),

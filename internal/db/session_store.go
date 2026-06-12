@@ -598,6 +598,29 @@ func (s *SessionStore) GetDiffByID(ctx context.Context, orgID, sessionID uuid.UU
 	return payload, nil
 }
 
+func (s *SessionStore) GetLatestDiffSnapshot(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionDiffSnapshot, error) {
+	query := `
+		SELECT id, session_id, org_id, turn_number, sequence_number, source,
+		       base_commit_sha, head_commit_sha, workspace_dirty, working_branch,
+		       target_branch, diff, files_changed, lines_added, lines_removed, captured_at
+		FROM session_diff_snapshots
+		WHERE org_id = @org_id AND session_id = @session_id
+		ORDER BY captured_at DESC, sequence_number DESC
+		LIMIT 1`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.SessionDiffSnapshot{}, fmt.Errorf("query latest session diff snapshot: %w", err)
+	}
+	snapshot, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionDiffSnapshot])
+	if err != nil {
+		return models.SessionDiffSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	tx, err := s.Begin(ctx)
 	if err != nil {
