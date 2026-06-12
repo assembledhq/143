@@ -53,6 +53,14 @@ describe("SplitDiffHunk", () => {
     expect(elements.length).toBe(2);
   });
 
+  it("uses compact line-number gutters so split panes keep more code visible", () => {
+    const hunk = makeHunk([contextLine]);
+    render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const lineNumbers = screen.getAllByText("1");
+    expect(lineNumbers[0]).toHaveClass("w-[42px]", "pr-1");
+    expect(lineNumbers[1]).toHaveClass("w-[42px]", "pr-1");
+  });
+
   it("renders remove+add pair side by side", () => {
     const hunk = makeHunk([removeLine, addLine]);
     render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);

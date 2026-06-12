@@ -133,6 +133,9 @@ describe("DiffHunk", () => {
     expect(container.querySelector('[data-testid="inline-comment-composer-anchor"]')).toHaveClass(
       "sticky"
     );
+    expect(container.querySelector('[data-testid="inline-comment-composer-anchor"]')).toHaveClass(
+      "pl-[100px]"
+    );
   });
 
   it("does not render comment input when activeCommentLine does not match", () => {
