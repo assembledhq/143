@@ -135,6 +135,15 @@ type previewState struct {
 	primaryPort int
 
 	deferredCacheSaves []func()
+
+	// Build-artifact cache slot for this launch. The fields are written once
+	// during the install phase (before service goroutines start) and read by
+	// the post-ready save, so they need no locking. buildCacheSaveOnce
+	// guarantees a single save regardless of which readiness path triggers it.
+	buildCacheKey              string
+	buildCachePaths            []string
+	buildCacheRestoredChecksum string
+	buildCacheSaveOnce         sync.Once
 }
 
 // serviceState tracks a running application service process.
@@ -327,6 +336,12 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			return phaseErr
 		}
 
+		// Phase 4.5: Restore boot-time build caches (e.g. turbo's local cache)
+		// after install — install commands like `npm ci` wipe node_modules and
+		// would delete a tree restored earlier — and before services start so
+		// boot-time builds get cache hits. Failures degrade to a cold build.
+		d.restorePreviewBuildCache(ctx, state, cfg.Install, opts, observer)
+
 		// Phase 5: Write generated runtime secret files after install so install
 		// hooks cannot read preview-runtime app secrets.
 		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
@@ -451,6 +466,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					}
 					cancel()
 				}
+				// All services finished their readiness window: boot-time
+				// builds are done, so capture the build cache now.
+				d.savePreviewBuildCache(svcCtx, state, cfg.Install, opts, observer)
 			}()
 			return nil
 		}
@@ -485,6 +503,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.warmPrimaryRoute(svcCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath)
 			}
 		}
+		// All services are ready: boot-time builds are done, so capture the
+		// build cache now.
+		d.savePreviewBuildCache(svcCtx, state, cfg.Install, opts, observer)
 		return nil
 	}(); err != nil {
 		d.cleanupState(handle)
@@ -1454,11 +1475,30 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		LockfileHashes: lockHashes,
 		Lockfiles:      lockfiles,
 	}
+	// Build caches (e.g. turbo's dir inside node_modules) belong to the
+	// build_artifact kind: keeping them out of install-artifact blobs avoids
+	// archiving a concurrently-restored subtree and keeps the two kinds'
+	// invalidation independent.
+	excludePaths, _ := preview.ResolvePreviewBuildCachePaths(install)
 	save := func() {
 		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 		defer cancel()
 		started := time.Now()
-		result, err := d.dependencyCache.Save(saveCtx, state.sandbox, cacheKey, paths, metadata)
+		pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
+		var result preview.DependencyCacheSaveResult
+		var err error
+		if hasPathCache {
+			result, err = pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
+				Kind:         models.PreviewCacheKindInstallArtifact,
+				Root:         models.PreviewCacheRootWorkDir,
+				CacheKey:     cacheKey,
+				Paths:        paths,
+				Metadata:     metadata,
+				ExcludePaths: excludePaths,
+			})
+		} else {
+			result, err = d.dependencyCache.Save(saveCtx, state.sandbox, cacheKey, paths, metadata)
+		}
 		if err != nil {
 			notifyDependencyCacheSave(observer, "save_failed", cacheKey, 0, err)
 			metrics.RecordSessionDependencyCacheSave(saveCtx, opts.OrgID.String(), "save_failed", time.Since(started))
@@ -1473,6 +1513,136 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 		return
 	}
 	save()
+}
+
+// restorePreviewBuildCache restores the latest build-artifact blob (e.g.
+// Turborepo's local cache) into the sandbox workdir. It runs after the install
+// phase so install commands that wipe node_modules cannot delete the restored
+// tree, and before services start so boot-time builds get cache hits.
+func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
+	pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
+	if d.dependencyCache == nil || !hasPathCache || opts.OrgID == uuid.Nil || opts.RepositoryID == uuid.Nil {
+		notifyBuildCacheRestore(observer, "disabled", "", 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
+		}
+		return
+	}
+	paths, enabled := preview.ResolvePreviewBuildCachePaths(install)
+	if !enabled {
+		notifyBuildCacheRestore(observer, "disabled", "", 0, nil)
+		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
+		return
+	}
+	configDigest := opts.ConfigDigest
+	if configDigest == "" {
+		if digest, digestErr := preview.ComputePreviewConfigDigest(state.config); digestErr == nil {
+			configDigest = digest
+		}
+	}
+	cacheKey, err := preview.ComputePreviewBuildCacheKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, paths)
+	if err != nil {
+		notifyBuildCacheRestore(observer, "key_failed", "", 0, err)
+		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "key_failed", 0)
+		d.logger.Warn().Err(err).Msg("preview build cache key unavailable; continuing cold")
+		return
+	}
+	state.buildCacheKey = cacheKey
+	state.buildCachePaths = paths
+
+	lookupStarted := time.Now()
+	notifyPhaseStart(observer, "build_cache_lookup")
+	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
+	notifyPhaseEnd(observer, "build_cache_lookup", findErr)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_lookup", time.Since(lookupStarted))
+	if findErr != nil {
+		notifyBuildCacheRestore(observer, "restore_failed", cacheKey, 0, findErr)
+		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(lookupStarted))
+		d.logger.Warn().Err(findErr).Str("cache_key", cacheKey).Msg("preview build cache lookup failed; continuing cold")
+		return
+	}
+	if hit == nil {
+		notifyBuildCacheRestore(observer, "miss", cacheKey, 0, nil)
+		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(lookupStarted))
+		d.logger.Info().Str("cache_key", cacheKey).Msg("preview build cache miss")
+		return
+	}
+	restoreStarted := time.Now()
+	notifyPhaseStart(observer, "build_cache_restore")
+	restoreErr := pathCache.RestorePathCache(ctx, state.sandbox, hit, models.PreviewCacheRootWorkDir)
+	notifyPhaseEnd(observer, "build_cache_restore", restoreErr)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_restore", time.Since(restoreStarted))
+	if restoreErr != nil {
+		notifyBuildCacheRestore(observer, "restore_failed", cacheKey, hit.Entry.SizeBytes, restoreErr)
+		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(restoreStarted))
+		d.logger.Warn().Err(restoreErr).Str("cache_key", cacheKey).Msg("preview build cache restore failed; continuing cold")
+		return
+	}
+	var restoredMeta preview.DependencyCacheMetadata
+	if err := json.Unmarshal(hit.Entry.Metadata, &restoredMeta); err == nil {
+		state.buildCacheRestoredChecksum = restoredMeta.ChecksumSHA256
+	}
+	notifyBuildCacheRestore(observer, "restored", cacheKey, hit.Entry.SizeBytes, nil)
+	metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "restored", time.Since(restoreStarted))
+	d.logger.Info().Str("cache_key", cacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview build cache restored")
+}
+
+// savePreviewBuildCache archives the build-artifact paths once services have
+// reported ready — the only point in a launch where boot-time builds (turbo
+// and friends) have populated their caches. The key is latest-wins: each save
+// overwrites the same slot, and the build tool's own content hashing makes a
+// stale blob degrade to partial hits rather than wrong output. SkipIfChecksum
+// avoids re-uploading when the tree is byte-identical to what was restored.
+func (d *DockerPreviewProvider) savePreviewBuildCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
+	state.buildCacheSaveOnce.Do(func() {
+		pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
+		if d.dependencyCache == nil || !hasPathCache || install == nil || state.buildCacheKey == "" || len(state.buildCachePaths) == 0 {
+			notifyBuildCacheSave(observer, "skipped", state.buildCacheKey, 0, nil)
+			if opts.OrgID != uuid.Nil {
+				metrics.RecordSessionBuildCacheSave(context.Background(), opts.OrgID.String(), "skipped", 0)
+			}
+			return
+		}
+		metadata := preview.DependencyCacheMetadata{
+			Kind:           models.PreviewCacheKindBuildArtifact,
+			Root:           models.PreviewCacheRootWorkDir,
+			OrgID:          opts.OrgID,
+			RepoID:         opts.RepositoryID,
+			SessionID:      opts.SessionID,
+			PlacementKey:   state.buildCacheKey,
+			InstallCommand: append([]string(nil), install.Command...),
+			EffectivePaths: append([]string(nil), state.buildCachePaths...),
+		}
+		go func() {
+			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+			defer cancel()
+			started := time.Now()
+			result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
+				Kind:           models.PreviewCacheKindBuildArtifact,
+				Root:           models.PreviewCacheRootWorkDir,
+				CacheKey:       state.buildCacheKey,
+				Paths:          state.buildCachePaths,
+				Metadata:       metadata,
+				SkipIfChecksum: state.buildCacheRestoredChecksum,
+			})
+			switch {
+			case err != nil:
+				notifyBuildCacheSave(observer, "save_failed", state.buildCacheKey, 0, err)
+				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "save_failed", time.Since(started))
+				d.logger.Warn().Err(err).Str("cache_key", state.buildCacheKey).Msg("preview build cache save failed")
+			case result.Unchanged:
+				notifyBuildCacheSave(observer, "unchanged", state.buildCacheKey, result.SizeBytes, nil)
+				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "unchanged", time.Since(started))
+			case result.SizeBytes == 0:
+				notifyBuildCacheSave(observer, "skipped_no_paths", state.buildCacheKey, 0, nil)
+				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "skipped_no_paths", time.Since(started))
+			default:
+				notifyBuildCacheSave(observer, "saved", state.buildCacheKey, result.SizeBytes, nil)
+				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
+				d.logger.Info().Str("cache_key", state.buildCacheKey).Int64("size_bytes", result.SizeBytes).Msg("preview build cache saved")
+			}
+		}()
+	})
 }
 
 func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Context, sb *agent.Sandbox, install *models.PreviewInstallConfig) (string, error) {
@@ -1699,6 +1869,22 @@ func notifyPackageManagerCacheSave(observer preview.ServiceObserver, status stri
 		return
 	}
 	cacheObserver.OnPackageManagerCacheSave(status, cacheKey, sizeBytes, err)
+}
+
+func notifyBuildCacheRestore(observer preview.ServiceObserver, status string, cacheKey string, sizeBytes int64, err error) {
+	cacheObserver, ok := observer.(preview.CacheObserver)
+	if !ok || cacheObserver == nil {
+		return
+	}
+	cacheObserver.OnBuildCacheRestore(status, cacheKey, sizeBytes, err)
+}
+
+func notifyBuildCacheSave(observer preview.ServiceObserver, status string, cacheKey string, sizeBytes int64, err error) {
+	cacheObserver, ok := observer.(preview.CacheObserver)
+	if !ok || cacheObserver == nil {
+		return
+	}
+	cacheObserver.OnBuildCacheSave(status, cacheKey, sizeBytes, err)
 }
 
 // =============================================================================
