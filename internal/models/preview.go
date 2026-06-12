@@ -120,6 +120,27 @@ type PreviewTarget struct {
 	CreatedAt            time.Time         `db:"created_at" json:"created_at"`
 }
 
+// RepositoryPreviewPolicy stores the per-repository auto-preview mode.
+type RepositoryPreviewPolicy struct {
+	ID              uuid.UUID       `db:"id" json:"id"`
+	OrgID           uuid.UUID       `db:"org_id" json:"org_id"`
+	RepositoryID    uuid.UUID       `db:"repository_id" json:"repository_id"`
+	AutoMode        PreviewAutoMode `db:"auto_mode" json:"auto_mode"`
+	UpdatedByUserID uuid.UUID       `db:"updated_by_user_id" json:"updated_by_user_id"`
+	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
+}
+
+// RepositoryPreviewPolicySummary is the settings-page view of repository
+// policy with repository identity and PR volume.
+type RepositoryPreviewPolicySummary struct {
+	RepositoryID       uuid.UUID       `db:"repository_id" json:"repository_id"`
+	RepositoryFullName string          `db:"repository_full_name" json:"repository_full_name"`
+	AutoMode           PreviewAutoMode `db:"auto_mode" json:"auto_mode"`
+	OpenPRCount        int             `db:"open_pr_count" json:"open_pr_count"`
+	UpdatedAt          *time.Time      `db:"updated_at" json:"updated_at,omitempty"`
+}
+
 // PreviewLink is a stable app-owned URL mapping to a branch preview target.
 type PreviewLink struct {
 	ID              uuid.UUID       `db:"id" json:"id"`
@@ -152,19 +173,26 @@ type PreviewAPIToken struct {
 // BranchPreviewSummary is the list/get shape for stable branch-preview targets
 // plus their latest active runtime, when one exists.
 type BranchPreviewSummary struct {
-	TargetID           uuid.UUID         `db:"target_id" json:"target_id"`
-	PreviewID          *uuid.UUID        `db:"preview_id" json:"preview_id,omitempty"`
-	RepositoryID       uuid.UUID         `db:"repository_id" json:"repository_id"`
-	RepositoryFullName string            `db:"repository_full_name" json:"repository_full_name,omitempty"`
-	Branch             string            `db:"branch" json:"branch"`
-	CommitSHA          string            `db:"commit_sha" json:"commit_sha"`
-	PreviewConfigName  string            `db:"preview_config_name" json:"preview_config_name,omitempty"`
-	SourceType         PreviewSourceType `db:"source_type" json:"source_type"`
-	SourceID           string            `db:"source_id" json:"source_id,omitempty"`
-	SourceURL          string            `db:"source_url" json:"source_url,omitempty"`
-	Status             string            `db:"status" json:"status"`
-	CreatedAt          time.Time         `db:"created_at" json:"created_at"`
-	ExpiresAt          *time.Time        `db:"expires_at" json:"expires_at,omitempty"`
+	TargetID              uuid.UUID            `db:"target_id" json:"target_id"`
+	PreviewID             *uuid.UUID           `db:"preview_id" json:"preview_id,omitempty"`
+	RepositoryID          uuid.UUID            `db:"repository_id" json:"repository_id"`
+	RepositoryFullName    string               `db:"repository_full_name" json:"repository_full_name,omitempty"`
+	Branch                string               `db:"branch" json:"branch"`
+	CommitSHA             string               `db:"commit_sha" json:"commit_sha"`
+	PreviewConfigName     string               `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	SourceType            PreviewSourceType    `db:"source_type" json:"source_type"`
+	SourceID              string               `db:"source_id" json:"source_id,omitempty"`
+	SourceURL             string               `db:"source_url" json:"source_url,omitempty"`
+	Status                string               `db:"status" json:"status"`
+	CreatedAt             time.Time            `db:"created_at" json:"created_at"`
+	SortCreatedAt         time.Time            `db:"sort_created_at" json:"-"`
+	ExpiresAt             *time.Time           `db:"expires_at" json:"expires_at,omitempty"`
+	StoppedAt             *time.Time           `db:"stopped_at" json:"stopped_at,omitempty"`
+	StoppedReason         PreviewStoppedReason `db:"stopped_reason" json:"stopped_reason,omitempty"`
+	CurrentPhase          string               `db:"current_phase" json:"current_phase,omitempty"`
+	Error                 string               `db:"error" json:"error,omitempty"`
+	Resumable             bool                 `db:"resumable" json:"resumable"`
+	ResumeEstimateSeconds *int                 `db:"resume_estimate_seconds" json:"resume_estimate_seconds,omitempty"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.

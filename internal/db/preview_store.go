@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -99,6 +100,9 @@ const previewAccessSessionColumns = `id, org_id, user_id, preview_instance_id,
 const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, base_key, commit_sha, blob_path,
 	size_bytes, worker_node_id, last_used_at, created_at`
 
+const repositoryPreviewPolicyColumns = `id, org_id, repository_id, auto_mode,
+	updated_by_user_id, created_at, updated_at`
+
 const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
 	blob_key, size_bytes, metadata, last_used_at, created_at`
 
@@ -113,11 +117,40 @@ const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id
 	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
 	base_snapshot_key, status, created_at, updated_at`
 
-const branchPreviewSummaryColumns = `target.id AS target_id, active.id AS preview_id,
+const branchPreviewSummaryColumns = `target.id AS target_id, latest.id AS preview_id,
 	target.repository_id, repo.full_name AS repository_full_name, target.branch, target.commit_sha, target.preview_config_name,
 	target.source_type, target.source_id, target.source_url,
-	COALESCE(active.status, 'target_created') AS status,
-	target.created_at, active.expires_at`
+	COALESCE(latest.status, 'target_created') AS status,
+	target.created_at, COALESCE(latest.created_at, target.created_at) AS sort_created_at,
+	latest.expires_at, latest.stopped_at, COALESCE(latest.stopped_reason, '') AS stopped_reason,
+	COALESCE(latest.current_phase, '') AS current_phase, COALESCE(latest.error, '') AS error,
+	%s AS resumable, CASE WHEN %s THEN 30 ELSE NULL::integer END AS resume_estimate_seconds`
+
+const branchPreviewResumablePredicate = `(latest.status IN ('stopped', 'expired')
+	AND COALESCE(target.last_snapshot_key, '') <> ''
+	AND EXISTS (
+		SELECT 1
+		FROM preview_startup_cache cache
+		JOIN nodes n ON n.id = cache.worker_node_id
+		WHERE cache.org_id = target.org_id
+		  AND cache.repo_id = target.repository_id
+		  AND cache.snapshot_key = target.last_snapshot_key
+		  AND n.status = 'active'
+		  AND n.mode IN ('worker', 'all')
+	)
+	AND NOT EXISTS (
+		SELECT 1
+		FROM pr_preview_state prs
+		WHERE target.source_type = 'pull_request'
+		  AND prs.org_id = target.org_id
+		  AND prs.repo_id = target.repository_id
+		  AND prs.pr_number = ((regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1])::int
+		  AND prs.status IN ('closed', 'merged')
+	))`
+
+func branchPreviewSummarySelect() string {
+	return fmt.Sprintf(branchPreviewSummaryColumns, branchPreviewResumablePredicate, branchPreviewResumablePredicate)
+}
 
 // =============================================================================
 // Preview Instance CRUD
@@ -264,40 +297,154 @@ func (s *PreviewStore) UpdatePreviewTargetConfigDigest(ctx context.Context, orgI
 	return nil
 }
 
+// UpdatePreviewTargetSnapshotKey records the worker-local startup snapshot key
+// that can make a later restart resumable.
+func (s *PreviewStore) UpdatePreviewTargetSnapshotKey(ctx context.Context, orgID, targetID uuid.UUID, snapshotKey string) error {
+	tag, err := s.db.Exec(ctx, `UPDATE preview_targets
+		SET last_snapshot_key = @snapshot_key
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": targetID, "org_id": orgID, "snapshot_key": snapshotKey})
+	if err != nil {
+		return fmt.Errorf("update preview target snapshot key: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview target not found")
+	}
+	return nil
+}
+
 // ListBranchPreviewSummaries returns recent preview targets with their latest
 // active runtime when one exists.
 func (s *PreviewStore) ListBranchPreviewSummaries(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, branch, status string, limit int) ([]models.BranchPreviewSummary, error) {
+	return s.ListBranchPreviewIndex(ctx, orgID, BranchPreviewIndexFilters{
+		RepositoryID: repositoryID,
+		Branch:       branch,
+		Status:       status,
+		Limit:        limit,
+	})
+}
+
+type BranchPreviewIndexFilters struct {
+	RepositoryID *uuid.UUID
+	Branch       string
+	Status       string
+	Scope        string
+	Query        string
+	CursorTime   *time.Time
+	CursorID     *uuid.UUID
+	Limit        int
+}
+
+// ListBranchPreviewIndex returns one row per preview target with the newest
+// runtime attempt embedded. Scope filters are applied after the latest-runtime
+// selection so rows remain target-oriented rather than attempt-oriented.
+func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UUID, filters BranchPreviewIndexFilters) ([]models.BranchPreviewSummary, error) {
+	limit := filters.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 50
+	}
+	scopePredicate := "TRUE"
+	switch filters.Scope {
+	case "running":
+		scopePredicate = fmt.Sprintf("latest.status IN %s", activeStatusFilter)
+	case "resumable":
+		scopePredicate = branchPreviewResumablePredicate
+	case "recent":
+		scopePredicate = fmt.Sprintf("latest.status IN %s AND NOT %s AND latest.created_at >= now() - interval '7 days'", terminalStatusFilter, branchPreviewResumablePredicate)
 	}
 	query := fmt.Sprintf(`SELECT %s
 		FROM preview_targets target
 		JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
 		LEFT JOIN LATERAL (
-			SELECT id, status, expires_at
+			SELECT id, status, expires_at, stopped_at, stopped_reason, current_phase, error, created_at
 			FROM preview_instances
 			WHERE org_id = target.org_id
 			  AND preview_target_id = target.id
 			ORDER BY created_at DESC
 			LIMIT 1
-		) active ON TRUE
+		) latest ON TRUE
 		WHERE target.org_id = @org_id
 		  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
 		  AND (@branch = '' OR target.branch = @branch)
-		  AND (@status = '' OR COALESCE(active.status, 'target_created') = @status)
-		ORDER BY target.created_at DESC
-		LIMIT @limit`, branchPreviewSummaryColumns)
+		  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
+		  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
+		       OR repo.full_name ILIKE '%%' || @q || '%%'
+		       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
+		  AND (@cursor_id::uuid IS NULL OR (COALESCE(latest.created_at, target.created_at), target.id) < (@cursor_time, @cursor_id))
+		  AND %s
+		ORDER BY COALESCE(latest.created_at, target.created_at) DESC, target.id DESC
+		LIMIT @limit`, branchPreviewSummarySelect(), scopePredicate)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":        orgID,
-		"repository_id": repositoryID,
-		"branch":        branch,
-		"status":        status,
+		"repository_id": filters.RepositoryID,
+		"branch":        filters.Branch,
+		"status":        filters.Status,
+		"q":             strings.TrimSpace(filters.Query),
+		"cursor_time":   filters.CursorTime,
+		"cursor_id":     filters.CursorID,
 		"limit":         limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list branch preview summaries: %w", err)
+		return nil, fmt.Errorf("list branch preview index: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
+}
+
+func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID uuid.UUID, filters BranchPreviewIndexFilters) (map[string]int, error) {
+	query := fmt.Sprintf(`WITH latest_targets AS (
+			SELECT target.id, target.org_id, target.repository_id, target.source_type, target.source_id, target.last_snapshot_key,
+			       latest.status, latest.created_at
+			FROM preview_targets target
+			JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
+			LEFT JOIN LATERAL (
+				SELECT status, created_at
+				FROM preview_instances
+				WHERE org_id = target.org_id
+				  AND preview_target_id = target.id
+				ORDER BY created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE target.org_id = @org_id
+			  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
+			  AND (@branch = '' OR target.branch = @branch)
+			  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
+			  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
+			       OR repo.full_name ILIKE '%%' || @q || '%%'
+			       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE status IN %s)::int AS running,
+			COUNT(*) FILTER (WHERE %s)::int AS resumable,
+			COUNT(*) FILTER (WHERE status IN %s AND NOT %s AND created_at >= now() - interval '7 days')::int AS recent
+		FROM latest_targets target
+		LEFT JOIN LATERAL (SELECT target.status, target.created_at) latest ON TRUE`, activeStatusFilter, branchPreviewResumablePredicate, terminalStatusFilter, branchPreviewResumablePredicate)
+	var running, resumable, recent int
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": filters.RepositoryID,
+		"branch":        filters.Branch,
+		"status":        filters.Status,
+		"q":             strings.TrimSpace(filters.Query),
+	}).Scan(&running, &resumable, &recent); err != nil {
+		return nil, fmt.Errorf("count branch preview index scopes: %w", err)
+	}
+	return map[string]int{"running": running, "resumable": resumable, "recent": recent}, nil
+}
+
+func (s *PreviewStore) CountActiveAutoPreviews(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	query := fmt.Sprintf(`SELECT COUNT(*)::int
+		FROM preview_instances pi
+		JOIN preview_targets target ON target.id = pi.preview_target_id AND target.org_id = pi.org_id
+		LEFT JOIN repository_preview_policies policy ON policy.org_id = target.org_id AND policy.repository_id = target.repository_id
+		WHERE pi.org_id = @org_id
+		  AND pi.status IN %s
+		  AND target.source_type = 'pull_request'
+		  AND (policy.id IS NULL OR policy.auto_mode <> 'off')`, activeStatusFilter)
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID}).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active auto previews: %w", err)
+	}
+	return count, nil
 }
 
 // GetLatestPreviewTargetForBranch returns the newest target for a repository
@@ -326,6 +473,90 @@ func (s *PreviewStore) GetLatestPreviewTargetForBranch(ctx context.Context, orgI
 		return nil, fmt.Errorf("get latest preview target for branch: %w", err)
 	}
 	return &row, nil
+}
+
+// UpsertRepositoryPreviewPolicy stores the auto-preview mode for one repository.
+func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, mode models.PreviewAutoMode) (*models.RepositoryPreviewPolicy, error) {
+	if err := mode.Validate(); err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`
+		INSERT INTO repository_preview_policies (
+			org_id, repository_id, auto_mode, updated_by_user_id
+		) VALUES (
+			@org_id, @repository_id, @auto_mode, @updated_by_user_id
+		)
+		ON CONFLICT (org_id, repository_id)
+		DO UPDATE SET
+			auto_mode = EXCLUDED.auto_mode,
+			updated_by_user_id = EXCLUDED.updated_by_user_id,
+			updated_at = now()
+		RETURNING %s`, repositoryPreviewPolicyColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":             orgID,
+		"repository_id":      repositoryID,
+		"auto_mode":          mode,
+		"updated_by_user_id": userID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upsert repository preview policy: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicy])
+	if err != nil {
+		return nil, fmt.Errorf("scan repository preview policy: %w", err)
+	}
+	return &row, nil
+}
+
+// GetRepositoryPreviewPolicy returns the stored policy or "off" when no row
+// exists. Absence-as-off keeps connected repositories lightweight.
+func (s *PreviewStore) GetRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID uuid.UUID) (*models.RepositoryPreviewPolicy, error) {
+	query := fmt.Sprintf(`SELECT %s FROM repository_preview_policies
+		WHERE org_id = @org_id AND repository_id = @repository_id`, repositoryPreviewPolicyColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID})
+	if err != nil {
+		return nil, fmt.Errorf("query repository preview policy: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicy])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &models.RepositoryPreviewPolicy{
+			OrgID:        orgID,
+			RepositoryID: repositoryID,
+			AutoMode:     models.PreviewAutoModeOff,
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get repository preview policy: %w", err)
+	}
+	return &row, nil
+}
+
+// ListRepositoryPreviewPolicies returns one row per connected repository, with
+// missing policy rows represented as auto_mode=off.
+func (s *PreviewStore) ListRepositoryPreviewPolicies(ctx context.Context, orgID uuid.UUID) ([]models.RepositoryPreviewPolicySummary, error) {
+	query := `SELECT
+			repo.id AS repository_id,
+			repo.full_name AS repository_full_name,
+			COALESCE(policy.auto_mode, 'off') AS auto_mode,
+			COALESCE(open_prs.open_pr_count, 0)::int AS open_pr_count,
+			policy.updated_at
+		FROM repositories repo
+		LEFT JOIN repository_preview_policies policy
+		  ON policy.org_id = repo.org_id AND policy.repository_id = repo.id
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS open_pr_count
+			FROM pull_requests pr
+			WHERE pr.org_id = repo.org_id
+			  AND pr.github_repo = repo.full_name
+			  AND pr.status = 'open'
+		) open_prs ON TRUE
+		WHERE repo.org_id = @org_id AND repo.status = 'active'
+		ORDER BY repo.full_name`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list repository preview policies: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicySummary])
 }
 
 // GetActivePreviewForTarget returns the currently active runtime for a branch
@@ -951,7 +1182,9 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	var query string
 	phase := previewPhaseForStatus(status)
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error,
+				stopped_reason = CASE WHEN @status = 'failed' THEN 'error' WHEN @status = 'expired' THEN 'expired' ELSE stopped_reason END,
+				preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	} else {
 		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
@@ -1010,7 +1243,9 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	if status.IsTerminal() {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
+		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error,
+				stopped_reason = CASE WHEN @status = 'failed' THEN 'error' WHEN @status = 'expired' THEN 'expired' ELSE stopped_reason END,
+				preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -1128,6 +1363,58 @@ func (s *PreviewStore) StopPreview(ctx context.Context, orgID, id uuid.UUID) err
 		pgx.NamedArgs{"id": id, "org_id": orgID},
 	); err != nil {
 		return fmt.Errorf("stop preview runtimes: %w", err)
+	}
+	return nil
+}
+
+// StopPreviewWithReason sets status to stopped and records the stop cause. It
+// otherwise mirrors StopPreview and should be used by callers that know why the
+// runtime is being stopped.
+func (s *PreviewStore) StopPreviewWithReason(ctx context.Context, orgID, id uuid.UUID, reason models.PreviewStoppedReason) error {
+	if err := reason.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_instances SET status = @new_status, stopped_reason = @reason, stopped_at = now(), updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"id": id, "org_id": orgID, "new_status": models.PreviewStatusStopped, "reason": reason},
+	)
+	if err != nil {
+		return fmt.Errorf("stop preview: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found or already stopped")
+	}
+	if err := s.cascadeChildrenToTerminal(ctx, orgID, id, models.PreviewStatusStopped, ""); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_runtimes
+		 SET status = 'stopped', stopped_at = COALESCE(stopped_at, now()), updated_at = now()
+		 WHERE preview_instance_id = @id AND org_id = @org_id AND status IN %s`, activeRuntimeStatusFilter),
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	); err != nil {
+		return fmt.Errorf("stop preview runtimes: %w", err)
+	}
+	return nil
+}
+
+// UpdatePreviewStoppedReason records a terminal stop cause after another
+// component has already stopped the runtime.
+func (s *PreviewStore) UpdatePreviewStoppedReason(ctx context.Context, orgID, id uuid.UUID, reason models.PreviewStoppedReason) error {
+	if err := reason.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.db.Exec(ctx,
+		`UPDATE preview_instances SET stopped_reason = @reason, updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND status IN ('stopped', 'failed', 'expired')`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "reason": reason},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview stopped reason: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found or not terminal")
 	}
 	return nil
 }
@@ -1679,6 +1966,7 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 		SET status = 'unavailable',
 			error = @reason,
 			unavailable_reason = @unavailable_reason,
+			stopped_reason = CASE WHEN @unavailable_reason = 'deploy_drain_timeout' THEN 'drain' ELSE stopped_reason END,
 			preview_holding_container = FALSE,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
@@ -2420,6 +2708,33 @@ func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid
 	return &row, nil
 }
 
+func (s *PreviewStore) FindWarmResumeStartupCacheForTarget(ctx context.Context, orgID, targetID uuid.UUID) (*models.PreviewStartupCache, error) {
+	query := `SELECT cache.id, cache.org_id, cache.repo_id, cache.snapshot_key, cache.base_key, cache.commit_sha, cache.blob_path,
+			cache.size_bytes, cache.worker_node_id, cache.last_used_at, cache.created_at
+		FROM preview_startup_cache cache
+		JOIN preview_targets target
+		  ON target.org_id = cache.org_id
+		 AND target.repository_id = cache.repo_id
+		 AND target.last_snapshot_key = cache.snapshot_key
+		JOIN nodes n ON n.id = cache.worker_node_id
+		WHERE target.org_id = @org_id
+		  AND target.id = @target_id
+		  AND n.status = 'active'
+		  AND n.mode IN ('worker', 'all')
+		ORDER BY cache.last_used_at DESC
+		LIMIT 1`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "target_id": targetID})
+	if err != nil {
+		return nil, fmt.Errorf("query warm resume startup cache: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewStartupCache])
+	if err != nil {
+		return nil, fmt.Errorf("find warm resume startup cache: %w", err)
+	}
+	return &row, nil
+}
+
 // FindLatestCacheByBaseKey returns the newest startup cache entry on a worker
 // whose base key (lockfiles + config digest, commit-independent) matches but
 // whose commit differs from excludeCommitSHA. Used for partial invalidation:
@@ -2889,6 +3204,12 @@ func (s *PreviewStore) UpdatePRPreviewStatus(ctx context.Context, orgID, id uuid
 // StopPreviewWithRevocation atomically stops a preview and revokes all its
 // access sessions in a single transaction.
 func (s *PreviewStore) StopPreviewWithRevocation(ctx context.Context, orgID, previewID uuid.UUID) error {
+	return s.StopPreviewWithRevocationAndReason(ctx, orgID, previewID, models.PreviewStoppedReasonNone)
+}
+
+// StopPreviewWithRevocationAndReason atomically stops a preview, records a
+// reason when supplied, and revokes all access sessions in a single transaction.
+func (s *PreviewStore) StopPreviewWithRevocationAndReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -2897,8 +3218,14 @@ func (s *PreviewStore) StopPreviewWithRevocation(ctx context.Context, orgID, pre
 
 	txStore := s.WithTx(tx)
 
-	if err := txStore.StopPreview(ctx, orgID, previewID); err != nil {
-		return err
+	if reason == models.PreviewStoppedReasonNone {
+		if err := txStore.StopPreview(ctx, orgID, previewID); err != nil {
+			return err
+		}
+	} else {
+		if err := txStore.StopPreviewWithReason(ctx, orgID, previewID, reason); err != nil {
+			return err
+		}
 	}
 	if err := txStore.RevokeAllForPreview(ctx, orgID, previewID); err != nil {
 		return fmt.Errorf("revoke access sessions: %w", err)
