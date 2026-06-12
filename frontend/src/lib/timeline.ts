@@ -37,15 +37,8 @@ function metadataString(metadata: SessionLog["metadata"] | null | undefined, key
   return typeof value === "string" ? value : undefined;
 }
 
-function isRecoverableCodexRouterDiagnostic(message: string): boolean {
-  return message.includes("codex_core::tools::router:") && (
-    message.includes("write_stdin failed: stdin is closed for this session") ||
-    message.includes("apply_patch verification failed: Failed to find expected lines")
-  );
-}
-
 function isHiddenLog(log: SessionLog): boolean {
-  return metadataString(log.metadata, "visibility") === "hidden" || isRecoverableCodexRouterDiagnostic(log.message);
+  return metadataString(log.metadata, "visibility") === "hidden";
 }
 
 function isToolResultLog(item: TaggedTimelineItem | undefined): item is Extract<TaggedTimelineItem, { source: "log" }> {
