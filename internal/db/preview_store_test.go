@@ -1978,7 +1978,7 @@ func TestPreviewStore_FindWarmResumeStartupCacheForTarget_RequiresActiveWorker(t
 		WithArgs(previewAnyArgs(2)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewStartupCacheTestCols).
-				AddRow(uuid.New(), uuid.New(), uuid.New(), "key", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
+				AddRow(uuid.New(), uuid.New(), uuid.New(), "key", "base-key", "abc1234", "/cache/snap.tar.zst", int64(1024), "worker-1", now, now),
 		)
 
 	cache, err := store.FindWarmResumeStartupCacheForTarget(context.Background(), uuid.New(), uuid.New())

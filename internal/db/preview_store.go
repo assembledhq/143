@@ -2709,7 +2709,7 @@ func (s *PreviewStore) FindMatchingCache(ctx context.Context, orgID, repoID uuid
 }
 
 func (s *PreviewStore) FindWarmResumeStartupCacheForTarget(ctx context.Context, orgID, targetID uuid.UUID) (*models.PreviewStartupCache, error) {
-	query := `SELECT cache.id, cache.org_id, cache.repo_id, cache.snapshot_key, cache.blob_path,
+	query := `SELECT cache.id, cache.org_id, cache.repo_id, cache.snapshot_key, cache.base_key, cache.commit_sha, cache.blob_path,
 			cache.size_bytes, cache.worker_node_id, cache.last_used_at, cache.created_at
 		FROM preview_startup_cache cache
 		JOIN preview_targets target
