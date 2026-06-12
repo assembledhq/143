@@ -236,11 +236,13 @@ func (m *mockCodingCredentialProvider) MarkAuthRejected(id uuid.UUID) {
 
 // mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
 type mockClaudeCodeAuthProvider struct {
-	sub       *models.AnthropicSubscription
-	credID    *uuid.UUID
-	hasSub    bool
-	hasSubErr error
-	tokenErr  error
+	sub           *models.AnthropicSubscription
+	credID        *uuid.UUID
+	hasSub        bool
+	hasSubErr     error
+	tokenErr      error
+	invalidSub    bool
+	invalidSubErr error
 }
 
 func (m *mockClaudeCodeAuthProvider) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error) {
@@ -252,6 +254,10 @@ func (m *mockClaudeCodeAuthProvider) GetValidToken(ctx context.Context, orgID uu
 		return nil, nil, m.tokenErr
 	}
 	return m.sub, m.credID, nil
+}
+
+func (m *mockClaudeCodeAuthProvider) HasInvalidSubscription(ctx context.Context, scope models.Scope) (bool, error) {
+	return m.invalidSub, m.invalidSubErr
 }
 
 type mockCredentialProvider struct {
@@ -5765,6 +5771,55 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	failures := d.sessions.getFailureUpdates()
 	require.Len(t, failures, 1)
 	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
+}
+
+func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	// No usable credential anywhere, but the org holds a Claude subscription
+	// row that was marked invalid after a rejected token refresh. The run
+	// must fail with the reconnect guidance, not the misleading "no
+	// credentials are configured".
+	d.creds = &mockCredentialProvider{}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{invalidSub: true}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "claude subscription invalid for claude code agent")
+
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
+	require.Contains(t, failures[0].explanation, "no longer valid",
+		"the explanation should say the subscription was invalidated")
+	require.Contains(t, failures[0].explanation, "Reconnect",
+		"the explanation should tell the user to reconnect")
+	require.NotContains(t, failures[0].explanation, "No Claude Code credentials are configured",
+		"a user who connected a subscription must not be told nothing is configured")
+}
+
+func TestRunAgent_InvalidSubscriptionProbeErrorFallsBackToGenericFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{invalidSubErr: errors.New("db down")}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no credentials for claude code agent",
+		"a failed probe should fall back to the generic missing-credentials failure")
 }
 
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {

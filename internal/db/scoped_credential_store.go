@@ -160,6 +160,15 @@ func (s *ScopedCredentialStore) UpdateStatusByID(ctx context.Context, scope mode
 	return s.coding.UpdateStatus(ctx, scope, id, status)
 }
 
+// WithRefreshLock serializes OAuth token refreshes for one credential across
+// processes via the unified store's Postgres advisory lock. Satisfies the
+// auth services' optional RefreshLocker interface.
+//
+// lint:allow-no-orgid reason="advisory lock keyed by credential ID only; it reads/writes no rows — scope is enforced by every store call fn makes while holding it"
+func (s *ScopedCredentialStore) WithRefreshLock(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error {
+	return s.coding.WithRefreshLock(ctx, credID, fn)
+}
+
 // ExistsForProviderByID is used by Disconnect to verify an id belongs to the
 // caller's scope before disabling. Includes disabled rows to distinguish
 // "not yours" from "already disconnected".

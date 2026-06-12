@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"testing"
@@ -1322,4 +1323,65 @@ func TestMoveCodingCredentialInputValidate(t *testing.T) {
 			t.Errorf("%s: expected error, got nil", tc.name)
 		}
 	}
+}
+
+func TestWithRefreshLockRunsFnUnderAdvisoryLock(t *testing.T) {
+	t.Parallel()
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit()
+
+	ran := false
+	err := store.WithRefreshLock(context.Background(), uuid.New(), func(ctx context.Context) error {
+		ran = true
+		return nil
+	})
+	require.NoError(t, err, "WithRefreshLock should succeed when fn succeeds")
+	require.True(t, ran, "fn should run while the advisory lock is held")
+	require.NoError(t, mock.ExpectationsWereMet(), "lock should be taken inside a committed transaction")
+}
+
+func TestWithRefreshLockReturnsFnErrorUnwrapped(t *testing.T) {
+	t.Parallel()
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectRollback()
+
+	sentinel := errors.New("refresh token revoked (status 401)")
+	err := store.WithRefreshLock(context.Background(), uuid.New(), func(ctx context.Context) error {
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel, "fn errors must pass through unwrapped so callers' errors.Is checks still work")
+	require.NoError(t, mock.ExpectationsWereMet(), "a failed fn should roll the lock transaction back")
+}
+
+func TestWithRefreshLockSwallowsCommitError(t *testing.T) {
+	t.Parallel()
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs(codingAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit().WillReturnError(errors.New("connection reset"))
+	mock.ExpectRollback()
+
+	// fn's writes land on other connections, so a commit failure on the
+	// lock-only transaction must not surface as a refresh failure — the
+	// caller could react by invalidating a credential that was refreshed.
+	err := store.WithRefreshLock(context.Background(), uuid.New(), func(ctx context.Context) error {
+		return nil
+	})
+	require.NoError(t, err, "commit failure on the lock-only transaction should be swallowed")
 }

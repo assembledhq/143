@@ -1995,3 +1995,236 @@ func TestInitiateOAuth_SameLabelAcrossScopes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, orgRow.ID, personalRow.ID, "org and personal rows must be distinct credentials despite sharing the label")
 }
+
+// lockTrackingStore wraps the mock store with a RefreshLocker implementation
+// so tests can assert the service serializes refreshes through the store's
+// cross-host lock when it is available.
+type lockTrackingStore struct {
+	*mockCredentialStore
+	lockCalls int
+}
+
+func (s *lockTrackingStore) WithRefreshLock(_ context.Context, _ uuid.UUID, fn func(ctx context.Context) error) error {
+	s.lockCalls++
+	return fn(context.Background())
+}
+
+func TestRefreshTokenByID_UsesStoreRefreshLock(t *testing.T) {
+	t.Parallel()
+	store := &lockTrackingStore{mockCredentialStore: newMockCredentialStore()}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store.mockCredentialStore, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.NoError(t, err, "refresh should succeed under the store lock")
+	require.Equal(t, "new-access", newSub.AccessToken)
+	require.Equal(t, 1, store.lockCalls, "the refresh should run inside the store's cross-host lock")
+}
+
+func TestRefreshTokenByID_RefreshLockErrorsPassThrough(t *testing.T) {
+	t.Parallel()
+	store := &lockTrackingStore{mockCredentialStore: newMockCredentialStore()}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store.mockCredentialStore, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.Error(t, err, "a real revocation should still fail under the store lock")
+	require.Contains(t, err.Error(), "refresh token revoked", "the revocation error must pass through the lock unwrapped")
+	require.Equal(t, models.CredentialStatusInvalid, store.creds[credID].Status, "an unrotated rejected token should still mark the credential invalid")
+}
+
+func TestRefreshTokenByID_StaleInvalidGrantRetriesWithRotatedToken(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	var requests int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]string
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			require.Equal(t, "old-refresh", req["refresh_token"], "first attempt should send the originally stored token")
+			// Simulate a sandbox harvest landing mid-flight: the stored
+			// refresh token rotates while Anthropic rejects the old one.
+			// The rotated access token is also expired so the retry has
+			// to do a real refresh rather than short-circuiting.
+			store.creds[credID].Config = models.AnthropicSubscriptionConfig{
+				AccessToken:  "rotated-access",
+				RefreshToken: "rotated-refresh",
+				ExpiresAt:    time.Now().Add(-time.Minute),
+				AccountType:  "claude_max",
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+		default:
+			require.Equal(t, "rotated-refresh", req["refresh_token"], "retry should send the rotated token")
+			_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+		}
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.NoError(t, err, "a stale rejection should retry with the rotated token instead of failing")
+	require.Equal(t, "new-access", newSub.AccessToken)
+	require.Equal(t, 2, requests, "exactly one retry should happen")
+	require.Equal(t, models.CredentialStatusActive, store.creds[credID].Status, "the credential must not be invalidated by a stale rejection")
+}
+
+func TestRefreshTokenByID_RotatedFreshTokenShortCircuits(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	var requests int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		// The harvested rotation carries a still-fresh access token, so the
+		// retry loop's re-read should return it without a second HTTP call.
+		store.creds[credID].Config = models.AnthropicSubscriptionConfig{
+			AccessToken:  "harvested-access",
+			RefreshToken: "harvested-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+			AccountType:  "claude_max",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.NoError(t, err, "a fresh harvested token should be returned without another refresh")
+	require.Equal(t, "harvested-access", newSub.AccessToken)
+	require.Equal(t, 1, requests, "the fresh harvested token must short-circuit the retry's HTTP call")
+	require.Equal(t, models.CredentialStatusActive, store.creds[credID].Status, "the credential must stay active")
+}
+
+func TestRefreshTokenByID_ReusedTokenRetriesWithRotatedToken(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	orgID := uuid.New()
+	credID := seedActiveSub(t, store, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(-time.Minute))
+
+	var requests int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch requests {
+		case 1:
+			store.creds[credID].Config = models.AnthropicSubscriptionConfig{
+				AccessToken:  "rotated-access",
+				RefreshToken: "rotated-refresh",
+				ExpiresAt:    time.Now().Add(-time.Minute),
+				AccountType:  "claude_max",
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"refresh_token_reused"}`))
+		default:
+			_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`))
+		}
+	}))
+	defer ts.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetTokenURL(ts.URL)
+	svc.SetProfileURL("")
+
+	newSub, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, credID)
+	require.NoError(t, err, "a reuse rejection with a rotated stored token should retry instead of failing")
+	require.Equal(t, "new-access", newSub.AccessToken)
+	require.Equal(t, 2, requests)
+}
+
+func TestHasInvalidSubscription(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+
+	orgID := uuid.New()
+	scope := models.Scope{OrgID: orgID}
+
+	invalid, err := svc.HasInvalidSubscription(context.Background(), scope)
+	require.NoError(t, err)
+	require.False(t, invalid, "an empty scope has no invalid subscription")
+
+	credID := seedActiveSub(t, store, orgID, "team-a", "access", "refresh", time.Now().Add(time.Hour))
+	invalid, err = svc.HasInvalidSubscription(context.Background(), scope)
+	require.NoError(t, err)
+	require.False(t, invalid, "an active subscription is not invalid")
+
+	store.creds[credID].Status = models.CredentialStatusInvalid
+	invalid, err = svc.HasInvalidSubscription(context.Background(), scope)
+	require.NoError(t, err)
+	require.True(t, invalid, "an invalid subscription row should be reported")
+
+	otherOrg := models.Scope{OrgID: uuid.New()}
+	invalid, err = svc.HasInvalidSubscription(context.Background(), otherOrg)
+	require.NoError(t, err)
+	require.False(t, invalid, "another org's invalid row must not leak across scopes")
+}
+
+func TestStoreTokenByID_UsesStoreRefreshLock(t *testing.T) {
+	t.Parallel()
+	store := &lockTrackingStore{mockCredentialStore: newMockCredentialStore()}
+
+	profileTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}`))
+	}))
+	defer profileTS.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetProfileURL(profileTS.URL)
+
+	orgID := uuid.New()
+	scope := models.Scope{OrgID: orgID}
+	credID := seedActiveSub(t, store.mockCredentialStore, orgID, "team-a", "old-access", "old-refresh", time.Now().Add(time.Hour))
+
+	stored, err := svc.StoreTokenByID(context.Background(), scope, credID, models.AnthropicSubscription{
+		AccessToken:  "harvested-access",
+		RefreshToken: "harvested-refresh",
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+	})
+	require.NoError(t, err, "harvest write-back should succeed under the store lock")
+	require.True(t, stored)
+	require.Equal(t, 1, store.lockCalls, "harvest write-backs rotate the refresh token, so they must take the cross-host lock")
+}

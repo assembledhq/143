@@ -697,9 +697,8 @@ func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, cred
 			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
 			return nil, wrapAuthInvalid(fmt.Errorf("refresh token already used by another client"))
 		}
-		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); err != nil {
-			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
-		}
+		s.markCredentialInvalid(ctx, scope, credID,
+			fmt.Sprintf("token endpoint rejected refresh (status %d)", resp.StatusCode))
 		return nil, wrapAuthInvalid(fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode))
 	}
 
@@ -833,9 +832,18 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 // caller's tried-map breaks the loop before lower-priority healthy
 // credentials are reached. Best-effort: a failed update is logged, not fatal.
 func (s *Service) markCredentialInvalid(ctx context.Context, scope models.Scope, credID uuid.UUID, reason string) {
-	s.logger.Warn().Str("cred_id", credID.String()).Str("reason", reason).Msg("marking codex credential invalid")
+	// Error-level on purpose: invalidation takes the credential out of
+	// rotation, so every session that depended on it starts failing. This
+	// line is the breadcrumb operators search for when a user reports
+	// "Codex auth suddenly stopped working".
+	s.logger.Error().
+		Str("org_id", scope.OrgID.String()).
+		Bool("personal", scope.IsPersonal()).
+		Str("cred_id", credID.String()).
+		Str("reason", reason).
+		Msg("marking codex credential invalid")
 	if statusErr := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); statusErr != nil {
-		s.logger.Warn().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
+		s.logger.Error().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
 	}
 }
 
