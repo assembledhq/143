@@ -76,12 +76,19 @@ var (
 	//     ...
 	//   );
 	inlineEscapeRE = regexp.MustCompile(`--[^\n]*lint:no-org-id\s+reason="[^"]+"`)
+
+	// Hot-table FK opt-out: allows a table with org_id NOT NULL to omit the
+	// REFERENCES organizations(id) FK. The reason="..." clause is required.
+	// Use only for reviewed high-write tables where the write path validates
+	// parent ownership in code. See docs/design/96-foreign-key-policy-and-hot-table-audit.md.
+	hotTableFKMarkerRE = regexp.MustCompile(`--[^\n]*lint:allow-hot-table-no-fk\s+reason="[^"]+"`)
 )
 
 type violation struct {
-	file  string
-	line  int
-	table string
+	file   string
+	line   int
+	table  string
+	detail string
 }
 
 func main() {
@@ -116,14 +123,14 @@ func main() {
 
 	fmt.Fprintln(os.Stderr, "lint-schema: multi-tenancy violations")
 	for _, v := range violations {
-		fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q is missing org_id column\n", v.file, v.line, v.table)
+		fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q: %s\n", v.file, v.line, v.table, v.detail)
 	}
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Every new tenant-scoped table MUST have `org_id uuid NOT NULL`.")
-	fmt.Fprintln(os.Stderr, "Use `REFERENCES organizations(id)` by default; reviewed hot tables may omit the FK.")
-	fmt.Fprintln(os.Stderr, "To exempt a table, add it to allowedNoOrgID in cmd/lint-schema/main.go")
-	fmt.Fprintln(os.Stderr, "with a justification, or add `-- lint:no-org-id reason=\"...\"` (the reason")
-	fmt.Fprintln(os.Stderr, "clause is required) on the CREATE TABLE line.")
+	fmt.Fprintln(os.Stderr, "Every new tenant-scoped table MUST have `org_id uuid NOT NULL REFERENCES organizations(id)`.")
+	fmt.Fprintln(os.Stderr, "For reviewed hot/append-only tables that intentionally omit the FK, add")
+	fmt.Fprintln(os.Stderr, "`-- lint:allow-hot-table-no-fk reason=\"...\"` inside the CREATE TABLE statement.")
+	fmt.Fprintln(os.Stderr, "To exempt a table from org_id entirely, add it to allowedNoOrgID in")
+	fmt.Fprintln(os.Stderr, "cmd/lint-schema/main.go or use `-- lint:no-org-id reason=\"...\"` on the CREATE TABLE line.")
 	os.Exit(1)
 }
 
@@ -161,15 +168,25 @@ func scan(file, src string) []violation {
 		}
 
 		body := src[openParen+1 : closeParen]
-		if hasRequiredOrgIDColumn(body) {
+		if !hasRequiredOrgIDColumn(body) {
+			out = append(out, violation{
+				file:   file,
+				line:   lineOf(src, start),
+				table:  table,
+				detail: "missing org_id uuid NOT NULL column",
+			})
 			continue
 		}
 
-		out = append(out, violation{
-			file:  file,
-			line:  lineOf(src, start),
-			table: table,
-		})
+		if !hasOrgIDForeignKey(body) && !hasHotTableFKMarker(statement) && !hasOrgIDAlterFK(src, table) {
+			out = append(out, violation{
+				file:   file,
+				line:   lineOf(src, start),
+				table:  table,
+				detail: "org_id is present but missing REFERENCES organizations(id) — add the FK for ordinary tables, or add `-- lint:allow-hot-table-no-fk reason=\"...\"` for reviewed hot tables",
+			})
+			continue
+		}
 	}
 	return out
 }
@@ -212,6 +229,31 @@ var orgIDColumnRE = regexp.MustCompile(`(?is)(?:^|,)\s*org_id\s+uuid\b[^,]*\bnot
 
 func hasRequiredOrgIDColumn(body string) bool {
 	return orgIDColumnRE.MatchString(body)
+}
+
+// hasOrgIDForeignKey returns true if the org_id column declaration includes
+// REFERENCES organizations(...), i.e. a DB-backed FK to the parent table.
+var orgIDFKRE = regexp.MustCompile(`(?is)(?:^|,)\s*org_id\s+uuid\b[^,]*\bREFERENCES\s+organizations\b`)
+
+func hasOrgIDForeignKey(body string) bool {
+	return orgIDFKRE.MatchString(body)
+}
+
+func hasHotTableFKMarker(statement string) bool {
+	return hotTableFKMarkerRE.MatchString(statement)
+}
+
+// hasOrgIDAlterFK returns true if the migration source adds a FK on org_id to
+// organizations for the named table via ALTER TABLE ADD CONSTRAINT in the same
+// file. This handles the common pattern of partitioned-table migrations that
+// separate CREATE TABLE from ALTER TABLE ADD CONSTRAINT.
+func hasOrgIDAlterFK(src, table string) bool {
+	q := regexp.QuoteMeta(table)
+	re := regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?` +
+		`(?:[a-zA-Z_][a-zA-Z0-9_]*\s*\.\s*)?` +
+		`"?` + q + `"?` +
+		`\b[^;]+\bFOREIGN\s+KEY\s*\(\s*org_id\s*\)\s*REFERENCES\s+organizations\b`)
+	return re.MatchString(src)
 }
 
 func findLineEnd(s string, i int) int {

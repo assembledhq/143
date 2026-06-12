@@ -44,8 +44,19 @@ func TestScan(t *testing.T) {
 			wantName: "widgets",
 		},
 		{
-			name: "accepts org_id without foreign key",
+			name: "flags org_id NOT NULL without FK or hot-table marker",
 			sql: `CREATE TABLE hot_events (
+    id     uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    name   text NOT NULL
+);`,
+			wantLen:  1,
+			wantName: "hot_events",
+		},
+		{
+			name: "accepts org_id NOT NULL without FK when hot-table marker is present",
+			sql: `CREATE TABLE hot_events (
+    -- lint:allow-hot-table-no-fk reason="append-only runtime events; session ownership checked before insert"
     id     uuid PRIMARY KEY,
     org_id uuid NOT NULL,
     name   text NOT NULL
@@ -100,7 +111,7 @@ func TestScan(t *testing.T) {
 			name: "matches org_id regardless of case",
 			sql: `CREATE TABLE widgets (
     id     UUID PRIMARY KEY,
-    ORG_ID UUID NOT NULL
+    ORG_ID UUID NOT NULL REFERENCES organizations(id)
 );`,
 			wantLen: 0,
 		},
