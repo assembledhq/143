@@ -590,13 +590,6 @@ func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {
 	})
 }
 
-func (g *Gateway) accessSessionMatchesTargetHost(r *http.Request, sess *models.PreviewAccessSession, hostID uuid.UUID) bool {
-	if sess == nil {
-		return false
-	}
-	return g.accessSessionMatchesTargetHostIDs(r, sess.OrgID, sess.PreviewInstanceID, hostID)
-}
-
 func (g *Gateway) accessSessionMatchesTargetHostIDs(r *http.Request, orgID, runtimePreviewID, hostID uuid.UUID) bool {
 	if g.store == nil {
 		return false
