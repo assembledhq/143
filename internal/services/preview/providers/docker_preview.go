@@ -1180,6 +1180,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	}
 
 	dependencyPaths, dependencyCacheEnabled := preview.ResolvePreviewInstallCachePaths(install)
+	cacheRestorableVerifyPaths := preview.CacheRestorablePreviewInstallVerifyPaths(install.VerifyPaths)
 	packageManagerPaths, packageManagers, packageManagerCacheEnabled := preview.ResolvePreviewInstallPackageManagerCachePaths(install)
 	var dependencyCacheKey string
 	var dependencyLockfiles []preview.PreviewInstallLockfileKey
@@ -1307,7 +1308,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 			}
 			notifyPhaseEnd(observer, "dependency_cache_key", nil)
 			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_key", time.Since(keyStarted))
-			if !markerExists && len(install.VerifyPaths) == 0 {
+			if !markerExists && len(cacheRestorableVerifyPaths) == 0 {
 				// Without declared verify_paths there is no contract proving a
 				// restored tree reproduces install output, and commands like
 				// `npm ci` wipe restored paths anyway — restoring first would
@@ -1354,7 +1355,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 							// image. When the repo's declared verify_paths are
 							// all present after restore, writing the marker
 							// lets the install phase skip entirely.
-							if d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, install.VerifyPaths) {
+							if d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, cacheRestorableVerifyPaths) {
 								if markerErr := d.writePreviewInstallMarker(ctx, state.sandbox, markerPath); markerErr != nil {
 									d.logger.Warn().Err(markerErr).Str("marker", markerPath).Msg("preview dependency cache restore satisfied verify_paths but marker write failed; running install")
 								} else {
@@ -1383,7 +1384,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	// cold starts will run preview.install and clean_paths may wipe restored
 	// files before the install command can use them. With a marker present,
 	// restore can satisfy verify_paths and skip preview.install entirely.
-	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
+	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, cacheRestorableVerifyPaths) {
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
 		if dependencyRestoredThisLaunch {
 			// The blob for this exact key was just extracted into the
@@ -1416,6 +1417,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 			outputTail = outputTail[1:]
 		}
 		outputTail = append(outputTail, text)
+		notifyInstallOutput(observer, text)
 		d.logger.Debug().Str("output", text).Msg("preview install output")
 	}
 	installCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1943,6 +1945,19 @@ func notifyServiceOutput(observer preview.ServiceObserver, name, line string) {
 		return
 	}
 	observer.OnServiceOutput(name, line)
+}
+
+type installOutputObserver interface {
+	OnInstallOutput(line string)
+}
+
+func notifyInstallOutput(observer preview.ServiceObserver, line string) {
+	if observer == nil {
+		return
+	}
+	if installObserver, ok := observer.(installOutputObserver); ok {
+		installObserver.OnInstallOutput(line)
+	}
 }
 
 // notifyServiceReady invokes observer.OnServiceReady when observer is non-nil.

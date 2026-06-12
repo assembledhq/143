@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/assembledhq/143/internal/agentdiagnostics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
@@ -248,13 +249,7 @@ func metadataType(log *models.SessionLog) string {
 }
 
 func isHiddenLog(log *models.SessionLog) bool {
-	return parseMetadata(log.Metadata).Visibility == "hidden" || isRecoverableCodexRouterDiagnostic(log.Message)
-}
-
-func isRecoverableCodexRouterDiagnostic(message string) bool {
-	return strings.Contains(message, "codex_core::tools::router:") &&
-		(strings.Contains(message, "write_stdin failed: stdin is closed for this session") ||
-			strings.Contains(message, "apply_patch verification failed: Failed to find expected lines"))
+	return parseMetadata(log.Metadata).Visibility == "hidden" || agentdiagnostics.IsBenignCodexDiagnostic(log.Message)
 }
 
 func parseMetadata(raw json.RawMessage) logMetadata {

@@ -105,7 +105,7 @@ describe("buildTimeline", () => {
     expect(result[0].kind).toBe("log");
   });
 
-  it("keeps recoverable Codex apply_patch diagnostics behind the log toggle", () => {
+  it("does not classify raw Codex-looking errors without backend visibility metadata", () => {
     const logs = [
       makeLog({
         id: 1,
@@ -116,21 +116,43 @@ describe("buildTimeline", () => {
     ];
     const result = buildTimeline([], logs);
     expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
+    expect(result[0].kind).toBe("error");
   });
 
-  it("keeps recoverable Codex apply_patch diagnostics with top-level context behind the log toggle", () => {
+  it("keeps backend-classified Codex diagnostics behind the log toggle", () => {
     const logs = [
       makeLog({
         id: 1,
         created_at: "2026-01-01T00:00:01Z",
         level: "error",
         message: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/db/autopilot_queue.go:\nfunc ptrTime(t time.Time) *time.Time {\n\treturn &t\n}",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
+      }),
+      makeLog({
+        id: 2,
+        created_at: "2026-01-01T00:00:02Z",
+        level: "error",
+        message: "Reconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: Try again)",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
+      }),
+      makeLog({
+        id: 3,
+        created_at: "2026-01-01T00:00:03Z",
+        level: "error",
+        message: "2026-06-12T08:54:38.209896Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: Try again, url: wss://chatgpt.com/backend-api/codex/responses",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
+      }),
+      makeLog({
+        id: 4,
+        created_at: "2026-01-01T00:00:04Z",
+        level: "error",
+        message: "2026-06-12T02:31:46.399958Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
       }),
     ];
     const result = buildTimeline([], logs);
-    expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
+    expect(result).toHaveLength(4);
+    expect(result.map((entry) => entry.kind)).toEqual(["log", "log", "log", "log"]);
   });
 
   it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {

@@ -3363,6 +3363,57 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "install failure observer should persist an install preview log without touching service rows")
 }
 
+func TestManagerServiceObserver_OnInstallOutput_PersistsInstallLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "[install] npm ci: added 120 packages", json.RawMessage(`{"batched":true}`), time.Now()))
+
+	obs.OnInstallOutput("npm ci: added 120 packages")
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "install output should be persisted as preview install logs")
+}
+
+func TestManagerServiceObserver_OnPhaseStart_PersistsPreviewLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	mock.ExpectExec("UPDATE preview_instances SET current_phase").
+		WithArgs(pgx.NamedArgs{"id": previewID, "org_id": orgID, "phase": "dependency_cache_restore"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "preview startup phase started: dependency_cache_restore", json.RawMessage(`{}`), time.Now()))
+
+	obs.OnPhaseStart("dependency_cache_restore")
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "phase starts should be persisted as preview logs")
+}
+
 func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatuses(t *testing.T) {
 	t.Parallel()
 

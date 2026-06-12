@@ -887,6 +887,7 @@ const lifecycleLogBufferSize = 256
 type previewServiceOutput struct {
 	name string
 	line string
+	step models.PreviewLogStep
 }
 
 type previewLifecycleLog struct {
@@ -914,13 +915,26 @@ func (o *managerServiceObserver) OnServiceOutput(name, line string) {
 	if o.outputClosed {
 		return
 	}
+	o.enqueueOutputLocked(previewServiceOutput{name: name, line: line, step: models.PreviewLogStepStart})
+}
+
+func (o *managerServiceObserver) OnInstallOutput(line string) {
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	if o.outputClosed {
+		return
+	}
+	o.enqueueOutputLocked(previewServiceOutput{name: "install", line: line, step: models.PreviewLogStepInstall})
+}
+
+func (o *managerServiceObserver) enqueueOutputLocked(output previewServiceOutput) {
 	select {
-	case o.outputCh <- previewServiceOutput{name: name, line: line}:
+	case o.outputCh <- output:
 	default:
 		o.manager.logger.Warn().
 			Str("preview_id", o.previewID.String()).
-			Str("service", name).
-			Msg("observer: dropping preview service output because the buffer is full")
+			Str("source", output.name).
+			Msg("observer: dropping preview output because the buffer is full")
 	}
 }
 
@@ -941,13 +955,15 @@ func (o *managerServiceObserver) runServiceOutputWriter() {
 	ticker := time.NewTicker(serviceOutputFlushInterval)
 	defer ticker.Stop()
 
-	batch := make([]string, 0, serviceOutputBatchLines)
+	batches := make(map[models.PreviewLogStep][]string)
 	flush := func() {
-		if len(batch) == 0 {
-			return
+		for step, batch := range batches {
+			if len(batch) == 0 {
+				continue
+			}
+			o.writeOutputLog(step, strings.Join(batch, "\n"))
+			delete(batches, step)
 		}
-		o.writeServiceOutputLog(strings.Join(batch, "\n"))
-		batch = batch[:0]
 	}
 
 	for {
@@ -961,8 +977,12 @@ func (o *managerServiceObserver) runServiceOutputWriter() {
 			if msg == "" {
 				continue
 			}
-			batch = append(batch, msg)
-			if len(batch) >= serviceOutputBatchLines {
+			step := output.step
+			if step == "" {
+				step = models.PreviewLogStepStart
+			}
+			batches[step] = append(batches[step], msg)
+			if len(batches[step]) >= serviceOutputBatchLines {
 				flush()
 			}
 		case <-ticker.C:
@@ -978,14 +998,14 @@ func (o *managerServiceObserver) runLifecycleLogWriter() {
 	}
 }
 
-func (o *managerServiceObserver) writeServiceOutputLog(msg string) {
+func (o *managerServiceObserver) writeOutputLog(step models.PreviewLogStep, msg string) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
 	defer cancel()
 	logEntry := &models.PreviewLog{
 		PreviewInstanceID: o.previewID,
 		OrgID:             o.orgID,
 		Level:             "info",
-		Step:              models.PreviewLogStepStart,
+		Step:              step,
 		Message:           msg,
 		Metadata:          json.RawMessage(`{"batched":true}`),
 	}
