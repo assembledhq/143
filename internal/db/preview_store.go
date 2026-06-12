@@ -69,7 +69,9 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
-	source_workspace_revision, source_workspace_revision_updated_at, unavailable_reason, preview_holding_container`
+	source_workspace_revision, source_workspace_revision_updated_at,
+	runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source,
+	unavailable_reason, preview_holding_container`
 
 const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, worker_node_id,
 	endpoint_url, preview_handle, primary_port, status, lease_expires_at,
@@ -711,40 +713,45 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
 			last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
-			current_phase, request_id, source_workspace_revision, source_workspace_revision_updated_at
+			current_phase, request_id, source_workspace_revision, source_workspace_revision_updated_at,
+			runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source
 		) VALUES (
 			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
 			@last_path, @memory_limit_mb, @cpu_limit_millis, @disk_limit_mb, @recycle_config, @recycle_sandbox,
-			@current_phase, @request_id, @source_workspace_revision, @source_workspace_revision_updated_at
+			@current_phase, @request_id, @source_workspace_revision, @source_workspace_revision_updated_at,
+			@runtime_workspace_revision, @runtime_workspace_revision_updated_at, @runtime_workspace_revision_source
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"session_id":                           p.SessionID,
-		"org_id":                               p.OrgID,
-		"user_id":                              p.UserID,
-		"profile_name":                         p.ProfileName,
-		"name":                                 p.Name,
-		"status":                               p.Status,
-		"provider":                             p.Provider,
-		"worker_node_id":                       p.WorkerNodeID,
-		"preview_handle":                       p.PreviewHandle,
-		"primary_service":                      p.PrimaryService,
-		"port":                                 p.Port,
-		"config_digest":                        p.ConfigDigest,
-		"base_commit_sha":                      p.BaseCommitSHA,
-		"expires_at":                           p.ExpiresAt,
-		"last_path":                            p.LastPath,
-		"memory_limit_mb":                      p.MemoryLimitMB,
-		"cpu_limit_millis":                     p.CPULimitMillis,
-		"disk_limit_mb":                        p.DiskLimitMB,
-		"recycle_config":                       p.RecycleConfig,
-		"recycle_sandbox":                      p.RecycleSandbox,
-		"current_phase":                        p.CurrentPhase,
-		"request_id":                           p.RequestID,
-		"source_workspace_revision":            p.SourceWorkspaceRevision,
-		"source_workspace_revision_updated_at": p.SourceWorkspaceRevisionUpdatedAt,
+		"session_id":                            p.SessionID,
+		"org_id":                                p.OrgID,
+		"user_id":                               p.UserID,
+		"profile_name":                          p.ProfileName,
+		"name":                                  p.Name,
+		"status":                                p.Status,
+		"provider":                              p.Provider,
+		"worker_node_id":                        p.WorkerNodeID,
+		"preview_handle":                        p.PreviewHandle,
+		"primary_service":                       p.PrimaryService,
+		"port":                                  p.Port,
+		"config_digest":                         p.ConfigDigest,
+		"base_commit_sha":                       p.BaseCommitSHA,
+		"expires_at":                            p.ExpiresAt,
+		"last_path":                             p.LastPath,
+		"memory_limit_mb":                       p.MemoryLimitMB,
+		"cpu_limit_millis":                      p.CPULimitMillis,
+		"disk_limit_mb":                         p.DiskLimitMB,
+		"recycle_config":                        p.RecycleConfig,
+		"recycle_sandbox":                       p.RecycleSandbox,
+		"current_phase":                         p.CurrentPhase,
+		"request_id":                            p.RequestID,
+		"source_workspace_revision":             p.SourceWorkspaceRevision,
+		"source_workspace_revision_updated_at":  p.SourceWorkspaceRevisionUpdatedAt,
+		"runtime_workspace_revision":            p.RuntimeWorkspaceRevision,
+		"runtime_workspace_revision_updated_at": p.RuntimeWorkspaceRevisionUpdatedAt,
+		"runtime_workspace_revision_source":     p.RuntimeWorkspaceRevisionSource,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview instance: %w", err)
@@ -1187,7 +1194,12 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 				preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	} else {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
+		query = `UPDATE preview_instances
+			SET status = @status,
+			    current_phase = @phase,
+			    error = @error,
+			    ready_at = CASE WHEN @status IN ('ready', 'partially_ready') THEN COALESCE(ready_at, now()) ELSE ready_at END,
+			    updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -1240,7 +1252,12 @@ func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, i
 
 func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	phase := previewPhaseForStatus(status)
-	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
+	query := `UPDATE preview_instances
+		SET status = @status,
+		    current_phase = @phase,
+		    error = @error,
+		    ready_at = CASE WHEN @status IN ('ready', 'partially_ready') THEN COALESCE(ready_at, now()) ELSE ready_at END,
+		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	if status.IsTerminal() {
 		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error,
@@ -1278,6 +1295,98 @@ func (s *PreviewStore) UpdatePreviewSourceWorkspaceRevision(ctx context.Context,
 		return fmt.Errorf("preview instance not found")
 	}
 	return nil
+}
+
+func (s *PreviewStore) UpdatePreviewRuntimeWorkspaceRevision(ctx context.Context, orgID, id uuid.UUID, revision int64, revisionUpdatedAt time.Time, source models.PreviewRuntimeRevisionSource) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE preview_instances
+		SET runtime_workspace_revision = @workspace_revision,
+		    runtime_workspace_revision_updated_at = @workspace_revision_updated_at,
+		    runtime_workspace_revision_source = @workspace_revision_source,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{
+			"id":                            id,
+			"org_id":                        orgID,
+			"workspace_revision":            revision,
+			"workspace_revision_updated_at": revisionUpdatedAt,
+			"workspace_revision_source":     source,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview runtime workspace revision: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found")
+	}
+	return nil
+}
+
+const minPreviewStartupEstimateSamples = 5
+
+func (s *PreviewStore) GetPreviewStartupEstimate(ctx context.Context, orgID, previewID uuid.UUID, configDigest string) (*models.PreviewStartupEstimate, error) {
+	if strings.TrimSpace(configDigest) == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT EXTRACT(EPOCH FROM (ready_at - created_at))::int AS startup_seconds
+		FROM preview_instances
+		WHERE org_id = @org_id
+		  AND id <> @preview_id
+		  AND config_digest = @config_digest
+		  AND ready_at IS NOT NULL
+		  AND ready_at >= created_at
+		  AND created_at >= now() - interval '30 days'
+		ORDER BY startup_seconds ASC
+		LIMIT 50`,
+		pgx.NamedArgs{
+			"org_id":        orgID,
+			"preview_id":    previewID,
+			"config_digest": configDigest,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query preview startup estimate samples: %w", err)
+	}
+	samples, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (int, error) {
+		var seconds int
+		if err := row.Scan(&seconds); err != nil {
+			return 0, err
+		}
+		return seconds, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("collect preview startup estimate samples: %w", err)
+	}
+	if len(samples) < minPreviewStartupEstimateSamples {
+		return nil, nil
+	}
+
+	p50 := samples[(len(samples)-1)/2]
+	return &models.PreviewStartupEstimate{
+		Label:       fmt.Sprintf("Usually ready in ~%ds", roundStartupEstimateSeconds(p50)),
+		P50Seconds:  p50,
+		SampleCount: len(samples),
+		Confidence:  startupEstimateConfidence(len(samples)),
+	}, nil
+}
+
+func roundStartupEstimateSeconds(seconds int) int {
+	if seconds <= 10 {
+		return seconds
+	}
+	return ((seconds + 4) / 5) * 5
+}
+
+func startupEstimateConfidence(sampleCount int) string {
+	switch {
+	case sampleCount >= 30:
+		return "high"
+	case sampleCount >= 10:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 func previewPhaseForStatus(status models.PreviewStatus) string {

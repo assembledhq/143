@@ -219,6 +219,8 @@ func TestPreviewFreshnessState_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "current is valid", state: PreviewFreshnessCurrent},
+		{name: "live updated is valid", state: PreviewFreshnessLiveUpdated},
+		{name: "restart required is valid", state: PreviewFreshnessRestartRequired},
 		{name: "out of date is valid", state: PreviewFreshnessOutOfDate},
 		{name: "updating is valid", state: PreviewFreshnessUpdating},
 		{name: "unknown is valid", state: PreviewFreshnessUnknown},
@@ -229,6 +231,57 @@ func TestPreviewFreshnessState_Validate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			err := tt.state.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPreviewRuntimeRevisionSource_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		source  PreviewRuntimeRevisionSource
+		wantErr bool
+	}{
+		{name: "none is valid", source: PreviewRuntimeRevisionSourceNone},
+		{name: "launch is valid", source: PreviewRuntimeRevisionSourceLaunch},
+		{name: "recycle is valid", source: PreviewRuntimeRevisionSourceRecycle},
+		{name: "hmr is valid", source: PreviewRuntimeRevisionSourceHMR},
+		{name: "file event is valid", source: PreviewRuntimeRevisionSourceFileEvent},
+		{name: "bogus is invalid", source: "bogus", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.source.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPreviewRestartReasonKind_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		kind    PreviewRestartReasonKind
+		wantErr bool
+	}{
+		{name: "dependency changed is valid", kind: PreviewRestartReasonDependencyChanged},
+		{name: "preview config changed is valid", kind: PreviewRestartReasonPreviewConfigChanged},
+		{name: "build config changed is valid", kind: PreviewRestartReasonBuildConfigChanged},
+		{name: "environment config changed is valid", kind: PreviewRestartReasonEnvironmentConfigChanged},
+		{name: "database schema changed is valid", kind: PreviewRestartReasonDatabaseSchemaChanged},
+		{name: "bogus is invalid", kind: "bogus", wantErr: true},
+		{name: "empty is invalid", kind: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.kind.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
