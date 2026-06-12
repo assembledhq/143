@@ -844,32 +844,37 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // even if the request context has already been canceled.
 func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo string) *managerServiceObserver {
 	observer := &managerServiceObserver{
-		manager:     m,
-		orgID:       orgID,
-		previewID:   previewID,
-		source:      strings.TrimSpace(metricsSource),
-		repository:  strings.TrimSpace(metricsRepo),
-		phaseStarts: make(map[string]time.Time),
-		outputCh:    make(chan previewServiceOutput, serviceOutputBufferSize),
-		outputDone:  make(chan struct{}),
+		manager:       m,
+		orgID:         orgID,
+		previewID:     previewID,
+		source:        strings.TrimSpace(metricsSource),
+		repository:    strings.TrimSpace(metricsRepo),
+		phaseStarts:   make(map[string]time.Time),
+		outputCh:      make(chan previewServiceOutput, serviceOutputBufferSize),
+		outputDone:    make(chan struct{}),
+		lifecycleCh:   make(chan previewLifecycleLog, lifecycleLogBufferSize),
+		lifecycleDone: make(chan struct{}),
 	}
 	go observer.runServiceOutputWriter()
+	go observer.runLifecycleLogWriter()
 	return observer
 }
 
 type managerServiceObserver struct {
-	manager      *Manager
-	orgID        uuid.UUID
-	previewID    uuid.UUID
-	source       string
-	repository   string
-	phaseMu      sync.Mutex
-	phaseStarts  map[string]time.Time
-	outputCh     chan previewServiceOutput
-	outputDone   chan struct{}
-	outputMu     sync.Mutex
-	outputClosed bool
-	closeOnce    sync.Once
+	manager       *Manager
+	orgID         uuid.UUID
+	previewID     uuid.UUID
+	source        string
+	repository    string
+	phaseMu       sync.Mutex
+	phaseStarts   map[string]time.Time
+	outputCh      chan previewServiceOutput
+	outputDone    chan struct{}
+	lifecycleCh   chan previewLifecycleLog
+	lifecycleDone chan struct{}
+	outputMu      sync.Mutex
+	outputClosed  bool
+	closeOnce     sync.Once
 }
 
 const observerWriteTimeout = 5 * time.Second
@@ -877,11 +882,19 @@ const maxPersistedServiceOutputRunes = 4000
 const serviceOutputBufferSize = 512
 const serviceOutputFlushInterval = 250 * time.Millisecond
 const serviceOutputBatchLines = 50
+const lifecycleLogBufferSize = 256
 
 type previewServiceOutput struct {
 	name string
 	line string
 	step models.PreviewLogStep
+}
+
+type previewLifecycleLog struct {
+	level    string
+	step     models.PreviewLogStep
+	message  string
+	metadata json.RawMessage
 }
 
 func previewServiceOutputMessage(name, line string) string {
@@ -930,8 +943,10 @@ func (o *managerServiceObserver) Close() {
 		o.outputMu.Lock()
 		o.outputClosed = true
 		close(o.outputCh)
+		close(o.lifecycleCh)
 		o.outputMu.Unlock()
 		<-o.outputDone
+		<-o.lifecycleDone
 	})
 }
 
@@ -976,6 +991,13 @@ func (o *managerServiceObserver) runServiceOutputWriter() {
 	}
 }
 
+func (o *managerServiceObserver) runLifecycleLogWriter() {
+	defer close(o.lifecycleDone)
+	for entry := range o.lifecycleCh {
+		o.persistLifecycleLog(entry)
+	}
+}
+
 func (o *managerServiceObserver) writeOutputLog(step models.PreviewLogStep, msg string) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
 	defer cancel()
@@ -1011,7 +1033,10 @@ func (o *managerServiceObserver) OnPhaseStart(name string) {
 			Str("phase", name).
 			Msg("observer: failed to update preview phase")
 	}
-	o.writePhaseLog(name)
+	o.enqueueLifecycleLog("info", previewLogStepForPhase(name), fmt.Sprintf("preview phase started: %s", name), map[string]any{
+		"phase":  name,
+		"status": "started",
+	})
 }
 
 func (o *managerServiceObserver) OnPhaseEnd(name string, phaseErr error) {
@@ -1026,42 +1051,24 @@ func (o *managerServiceObserver) OnPhaseEnd(name string, phaseErr error) {
 		delete(o.phaseStarts, name)
 	}
 	o.phaseMu.Unlock()
-	if !ok || o.source == "" || o.repository == "" {
-		return
+	metadata := map[string]any{
+		"phase":  name,
+		"status": "completed",
 	}
-	metrics.RecordBranchPreviewPhaseDuration(context.Background(), o.orgID.String(), o.source, o.repository, name, time.Since(started))
-}
-
-func (o *managerServiceObserver) writePhaseLog(name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
-	defer cancel()
-	metadata, _ := json.Marshal(map[string]any{"phase": name})
-	logEntry := &models.PreviewLog{
-		PreviewInstanceID: o.previewID,
-		OrgID:             o.orgID,
-		Level:             "info",
-		Step:              previewPhaseLogStep(name),
-		Message:           "preview startup phase started: " + name,
-		Metadata:          metadata,
+	if ok {
+		metadata["duration_ms"] = time.Since(started).Milliseconds()
 	}
-	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
-		o.manager.logger.Warn().Err(err).
-			Str("preview_id", o.previewID.String()).
-			Str("phase", name).
-			Msg("observer: failed to write preview phase log")
+	level := "info"
+	message := fmt.Sprintf("preview phase completed: %s", name)
+	if phaseErr != nil {
+		level = "warn"
+		message = fmt.Sprintf("preview phase failed: %s: %v", name, phaseErr)
+		metadata["status"] = "failed"
+		metadata["error"] = phaseErr.Error()
 	}
-}
-
-func previewPhaseLogStep(name string) models.PreviewLogStep {
-	switch {
-	case strings.Contains(name, "build"):
-		return models.PreviewLogStepBuild
-	case strings.Contains(name, "install") || strings.Contains(name, "cache"):
-		return models.PreviewLogStepInstall
-	case strings.Contains(name, "service") || name == "readiness":
-		return models.PreviewLogStepStart
-	default:
-		return models.PreviewLogStepInit
+	o.enqueueLifecycleLog(level, previewLogStepForPhase(name), message, metadata)
+	if ok && o.source != "" && o.repository != "" {
+		metrics.RecordBranchPreviewPhaseDuration(context.Background(), o.orgID.String(), o.source, o.repository, name, time.Since(started))
 	}
 }
 
@@ -1150,11 +1157,18 @@ func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKe
 }
 
 func (o *managerServiceObserver) OnDependencyCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
-	if status != "save_failed" {
+	switch status {
+	case "saved", "skipped", "skipped_fresh_restore", "skipped_no_paths", "unchanged", "save_failed":
+	default:
 		return
 	}
-	msg := fmt.Sprintf("preview dependency cache save failed: %v", err)
-	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
+	level := "info"
+	msg := fmt.Sprintf("preview dependency cache save %s", status)
+	if err != nil || status == "save_failed" {
+		level = "warn"
+		msg = fmt.Sprintf("preview dependency cache save failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
 func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
@@ -1173,11 +1187,18 @@ func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cac
 }
 
 func (o *managerServiceObserver) OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
-	if status != "save_failed" {
+	switch status {
+	case "saved", "skipped", "skipped_no_paths", "unchanged", "save_failed":
+	default:
 		return
 	}
-	msg := fmt.Sprintf("preview package-manager cache save failed: %v", err)
-	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
+	level := "info"
+	msg := fmt.Sprintf("preview package-manager cache save %s", status)
+	if err != nil || status == "save_failed" {
+		level = "warn"
+		msg = fmt.Sprintf("preview package-manager cache save failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
 func (o *managerServiceObserver) OnBuildCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
@@ -1196,11 +1217,18 @@ func (o *managerServiceObserver) OnBuildCacheRestore(status string, cacheKey str
 }
 
 func (o *managerServiceObserver) OnBuildCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
-	if status != "save_failed" {
+	switch status {
+	case "saved", "skipped", "skipped_no_paths", "unchanged", "save_failed":
+	default:
 		return
 	}
-	msg := fmt.Sprintf("preview build cache save failed: %v", err)
-	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
+	level := "info"
+	msg := fmt.Sprintf("preview build cache save %s", status)
+	if err != nil || status == "save_failed" {
+		level = "warn"
+		msg = fmt.Sprintf("preview build cache save failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
 func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey string, sizeBytes int64) {
@@ -1210,16 +1238,82 @@ func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey st
 		"cache_key":  cacheKey,
 		"size_bytes": sizeBytes,
 	})
+	step := models.PreviewLogStepInstall
+	if strings.Contains(msg, "build cache") {
+		step = models.PreviewLogStepBuild
+	}
 	logEntry := &models.PreviewLog{
 		PreviewInstanceID: o.previewID,
 		OrgID:             o.orgID,
 		Level:             level,
-		Step:              models.PreviewLogStepInstall,
+		Step:              step,
 		Message:           msg,
 		Metadata:          metadata,
 	}
 	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
 		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to write preview dependency cache log")
+	}
+}
+
+func (o *managerServiceObserver) enqueueLifecycleLog(level string, step models.PreviewLogStep, msg string, metadata map[string]any) {
+	rawMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to marshal preview lifecycle log metadata")
+		rawMetadata = json.RawMessage(`{}`)
+	}
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	if o.outputClosed {
+		return
+	}
+	entry := previewLifecycleLog{
+		level:    level,
+		step:     step,
+		message:  msg,
+		metadata: rawMetadata,
+	}
+	select {
+	case o.lifecycleCh <- entry:
+	default:
+		o.manager.logger.Warn().
+			Str("preview_id", o.previewID.String()).
+			Str("phase", fmt.Sprint(metadata["phase"])).
+			Msg("observer: dropping preview lifecycle log because the buffer is full")
+	}
+}
+
+func (o *managerServiceObserver) persistLifecycleLog(entry previewLifecycleLog) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: o.previewID,
+		OrgID:             o.orgID,
+		Level:             entry.level,
+		Step:              entry.step,
+		Message:           entry.message,
+		Metadata:          entry.metadata,
+	}
+	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
+		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to write preview lifecycle log")
+	}
+}
+
+func previewLogStepForPhase(phase string) models.PreviewLogStep {
+	switch {
+	case strings.Contains(phase, "install"),
+		strings.Contains(phase, "dependency_cache"),
+		strings.Contains(phase, "package_manager_cache"):
+		return models.PreviewLogStepInstall
+	case strings.Contains(phase, "build_cache"):
+		return models.PreviewLogStepBuild
+	case strings.Contains(phase, "infra"),
+		strings.Contains(phase, "init"):
+		return models.PreviewLogStepInit
+	case strings.Contains(phase, "service"),
+		strings.Contains(phase, "readiness"):
+		return models.PreviewLogStepStart
+	default:
+		return models.PreviewLogStepBuild
 	}
 }
 
