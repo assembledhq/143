@@ -49,7 +49,9 @@ type PRHealthBannerProps = {
   mergeAuthRequired?: boolean;
   mergeWhenReadyPending?: boolean;
   onFixTests: () => void;
+  onFixTestsWithoutPushing?: () => void;
   onResolveConflicts: () => void;
+  onResolveConflictsWithoutPushing?: () => void;
   onMerge: () => void;
   onQueueMergeWhenReady?: () => void;
   onCancelMergeWhenReady?: () => void;
@@ -67,7 +69,9 @@ export function PRHealthBanner({
   mergeAuthRequired = false,
   mergeWhenReadyPending = false,
   onFixTests,
+  onFixTestsWithoutPushing,
   onResolveConflicts,
+  onResolveConflictsWithoutPushing,
   onMerge,
   onQueueMergeWhenReady,
   onCancelMergeWhenReady,
@@ -267,38 +271,88 @@ export function PRHealthBanner({
                   )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={pendingAction !== null}
-                        title={pendingAction !== null ? "Wait for the current PR action to finish" : "Resolve conflicts (p r)"}
-                        onClick={onResolveConflicts}
-                      >
-                        {pendingAction === "resolve_conflicts" ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                      <span className="inline-flex">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={onResolveConflictsWithoutPushing ? "rounded-r-none" : undefined}
+                          disabled={pendingAction !== null}
+                          title={pendingAction !== null ? "Wait for the current PR action to finish" : "Resolve conflicts (p r)"}
+                          onClick={onResolveConflicts}
+                        >
+                          {pendingAction === "resolve_conflicts" ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
+                        </Button>
+                        {onResolveConflictsWithoutPushing && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7 rounded-l-none border-l-0"
+                                disabled={pendingAction !== null}
+                                title={pendingAction !== null ? "Wait for the current PR action to finish" : "More resolve conflicts actions"}
+                                aria-label="More resolve conflicts actions"
+                              >
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={onResolveConflictsWithoutPushing} disabled={pendingAction !== null}>
+                                <Wrench className="h-3.5 w-3.5" />
+                                Resolve without pushing changes
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         )}
-                        {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
-                      </Button>
+                      </span>
                     </DisabledTooltip>
                   )}
                   {canShowFixTestsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={pendingAction !== null}
-                        title={pendingAction !== null ? "Wait for the current PR action to finish" : "Fix tests (p t)"}
-                        onClick={onFixTests}
-                      >
-                        {pendingAction === "fix_tests" ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                      <span className="inline-flex">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={onFixTestsWithoutPushing ? "rounded-r-none" : undefined}
+                          disabled={pendingAction !== null}
+                          title={pendingAction !== null ? "Wait for the current PR action to finish" : "Fix tests (p t)"}
+                          onClick={onFixTests}
+                        >
+                          {pendingAction === "fix_tests" ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
+                        </Button>
+                        {onFixTestsWithoutPushing && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7 rounded-l-none border-l-0"
+                                disabled={pendingAction !== null}
+                                title={pendingAction !== null ? "Wait for the current PR action to finish" : "More fix tests actions"}
+                                aria-label="More fix tests actions"
+                              >
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={onFixTestsWithoutPushing} disabled={pendingAction !== null}>
+                                <Wrench className="h-3.5 w-3.5" />
+                                Fix without pushing changes
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         )}
-                        {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
-                      </Button>
+                      </span>
                     </DisabledTooltip>
                   )}
                   {reviewAction && (
