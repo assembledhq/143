@@ -294,11 +294,6 @@ export default function TeamSettingsPage() {
           title="Team"
           description="Manage your team members and roles."
         />
-        <AuditLogTrigger
-          filters={{ resource_type: "team_member" }}
-          members={members}
-          title="Team activity"
-        />
       {actionError && (
         <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {actionError}
@@ -520,6 +515,13 @@ export default function TeamSettingsPage() {
 
       {/* CLI install links (admin-only: creating one hands out membership) */}
       {canManageTeam && <CLIJoinTokensCard />}
+
+      <AuditLogTrigger
+        filters={{ resource_type: "team_member" }}
+        members={members}
+        title="Team activity"
+        variant="footer"
+      />
 
       {/* Invite Member Dialog */}
       {canManageTeam && (

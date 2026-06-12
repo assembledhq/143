@@ -138,7 +138,7 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('uses the audit activity row as the only updated timestamp', async () => {
+  it('uses a low-priority activity footer as the only updated timestamp', async () => {
     settingsGetMock.mockResolvedValue({
       data: {
         id: 'org-1',
@@ -163,7 +163,8 @@ describe('SettingsPage', () => {
 
     renderWithProviders(<SettingsPage />);
 
-    expect(await screen.findByText(/Updated .* ago by System/)).toBeInTheDocument();
+    expect(await screen.findByText(/Last activity:/)).toBeInTheDocument();
+    expect(screen.getByText(/Updated .* ago by System/)).toBeInTheDocument();
     expect(screen.queryByText(/Updated at .*May 1, 2026.*12:00 PM UTC/)).not.toBeInTheDocument();
   });
 

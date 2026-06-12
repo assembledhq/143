@@ -140,10 +140,6 @@ export default function SettingsPage() {
           title="General settings"
           description="Manage your organization."
         />
-        <AuditLogTrigger
-          filters={{ resource_type: "settings" }}
-          title="Settings activity"
-        />
 
         <section className="space-y-3">
           <div className="flex items-center justify-between">
@@ -167,6 +163,12 @@ export default function SettingsPage() {
         </section>
 
         {user?.role === "admin" && <PRAuthorshipSettings />}
+
+        <AuditLogTrigger
+          filters={{ resource_type: "settings" }}
+          title="Settings activity"
+          variant="footer"
+        />
       </div>
     </PageContainer>
   );
