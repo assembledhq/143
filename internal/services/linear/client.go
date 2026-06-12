@@ -62,6 +62,7 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 			state { id name type }
 			priority
 			assignee { name }
+			creator { id name email }
 			team { id key name organization { urlKey } }
 			project { id }
 			labels(first: 50) {
@@ -92,6 +93,11 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 				Assignee struct {
 					Name string `json:"name"`
 				} `json:"assignee"`
+				Creator *struct {
+					ID    string `json:"id"`
+					Name  string `json:"name"`
+					Email string `json:"email"`
+				} `json:"creator"`
 				Team struct {
 					ID           string `json:"id"`
 					Key          string `json:"key"`
@@ -169,6 +175,14 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 	if issue.Project != nil {
 		projectID = issue.Project.ID
 	}
+	creatorID := ""
+	creatorName := ""
+	creatorEmail := ""
+	if issue.Creator != nil {
+		creatorID = issue.Creator.ID
+		creatorName = issue.Creator.Name
+		creatorEmail = issue.Creator.Email
+	}
 
 	return &FetchedIssue{
 		ID:            issue.ID,
@@ -181,6 +195,9 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 		StateType:     issue.State.Type,
 		Priority:      mapLinearPriorityName(issue.Priority),
 		AssigneeName:  issue.Assignee.Name,
+		CreatorID:     creatorID,
+		CreatorName:   creatorName,
+		CreatorEmail:  creatorEmail,
 		TeamID:        issue.Team.ID,
 		TeamKey:       issue.Team.Key,
 		TeamName:      issue.Team.Name,

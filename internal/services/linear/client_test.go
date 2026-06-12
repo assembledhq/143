@@ -75,6 +75,7 @@ func TestGraphQLClientFetchIssue(t *testing.T) {
 					"state": {"id": "state-1", "name": "In Progress", "type": "started"},
 					"priority": 2,
 					"assignee": {"name": "Ada"},
+					"creator": {"id": "lin-user-1", "name": "Creator User", "email": "creator@example.com"},
 					"team": {"id": "team-1", "key": "ACS", "name": "Core", "organization": {"urlKey": "acme"}},
 					"comments": {"nodes": [
 						{"body": "first", "user": {"name": "Grace"}, "createdAt": "2026-04-27T10:11:12Z"},
@@ -101,6 +102,9 @@ func TestGraphQLClientFetchIssue(t *testing.T) {
 		StateType:     "started",
 		Priority:      "high",
 		AssigneeName:  "Ada",
+		CreatorID:     "lin-user-1",
+		CreatorName:   "Creator User",
+		CreatorEmail:  "creator@example.com",
 		TeamID:        "team-1",
 		TeamKey:       "ACS",
 		TeamName:      "Core",

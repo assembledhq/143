@@ -187,6 +187,63 @@ func TestUserStore_GetByEmail(t *testing.T) {
 	}
 }
 
+func TestUserStore_GetByOrgAndEmail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time)
+		expectErr bool
+	}{
+		{
+			name: "returns org user when email matches case insensitively",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name: "returns error when matching email is outside org",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(userColumns))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			orgID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, userID, orgID, now)
+
+			user, err := store.GetByOrgAndEmail(context.Background(), orgID, "Creator@Example.com")
+			if tt.expectErr {
+				require.Error(t, err, "GetByOrgAndEmail should return an error when the org has no matching user")
+				return
+			}
+			require.NoError(t, err, "GetByOrgAndEmail should return the matching org user")
+			require.Equal(t, userID, user.ID, "GetByOrgAndEmail should return the expected user ID")
+			require.Equal(t, orgID, user.OrgID, "GetByOrgAndEmail should keep the lookup scoped to the requested org")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestUserStore_GetByGoogleID(t *testing.T) {
 	t.Parallel()
 

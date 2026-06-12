@@ -287,6 +287,9 @@ type FetchedIssue struct {
 	StateID       string
 	Priority      string
 	AssigneeName  string
+	CreatorID     string
+	CreatorName   string
+	CreatorEmail  string
 	TeamID        string
 	TeamKey       string
 	TeamName      string

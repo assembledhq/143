@@ -245,6 +245,20 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, 
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email string) (models.User, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM users
+		WHERE org_id = @org_id
+		  AND LOWER(email) = LOWER(@email)`, userSelectColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
+	if err != nil {
+		return models.User{}, fmt.Errorf("query user by org and email: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
 // GetByGoogleID looks up a user by Google subject ID.
 // lint:allow-no-orgid reason="pre-auth login lookup; Google subject id is globally unique"
 func (s *UserStore) GetByGoogleID(ctx context.Context, googleID string) (models.User, error) {
