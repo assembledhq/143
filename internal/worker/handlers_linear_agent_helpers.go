@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -108,8 +109,10 @@ func applyLinearCreatorAttribution(ctx context.Context, users *db.UserStore, ses
 	}
 	user, err := users.GetByOrgAndEmail(ctx, session.OrgID, email)
 	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup linear creator user: %w", err)
+		}
 		logger.Debug().
-			Err(err).
 			Str("creator_email", email).
 			Str("org_id", session.OrgID.String()).
 			Msg("linear_agent_event: no 143 org user matched Linear creator email")

@@ -96,11 +96,11 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		fetched     *linear.FetchedIssue
-		setupMock   func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time)
-		expectUser  bool
-		expectQuery bool
+		name       string
+		fetched    *linear.FetchedIssue
+		setupMock  func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time)
+		expectUser bool
+		expectErr  bool
 	}{
 		{
 			name: "sets triggering user from matching Linear creator email",
@@ -114,14 +114,11 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
 					))
 			},
-			expectUser:  true,
-			expectQuery: true,
+			expectUser: true,
 		},
 		{
 			name: "leaves system fallback when Linear creator email is absent",
-			fetched: &linear.FetchedIssue{
-				CreatorName: "Creator User",
-			},
+			fetched: &linear.FetchedIssue{},
 		},
 		{
 			name: "leaves system fallback when creator email has no org user",
@@ -133,7 +130,18 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns))
 			},
-			expectQuery: true,
+		},
+		{
+			name: "propagates infrastructure DB error rather than silently skipping attribution",
+			fetched: &linear.FetchedIssue{
+				CreatorEmail: "creator@example.com",
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnError(errors.New("connection reset by peer"))
+			},
+			expectErr: true,
 		},
 	}
 
@@ -155,12 +163,17 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 
 			err = applyLinearCreatorAttribution(context.Background(), db.NewUserStore(mock), session, tt.fetched, zerolog.Nop())
 
-			require.NoError(t, err, "creator attribution should be best-effort and never fail session creation")
-			if tt.expectUser {
-				require.NotNil(t, session.TriggeredByUserID, "matched creator should populate the session triggering user")
-				require.Equal(t, userID, *session.TriggeredByUserID, "matched creator should become the session triggering user")
+			if tt.expectErr {
+				require.Error(t, err, "infrastructure DB errors should propagate so the job can be retried")
+				require.Nil(t, session.TriggeredByUserID, "failed attribution should leave the session without a triggering user")
 			} else {
-				require.Nil(t, session.TriggeredByUserID, "unmatched creator should leave the session attributed to the system fallback")
+				require.NoError(t, err, "not-found and missing-email cases should never fail session creation")
+				if tt.expectUser {
+					require.NotNil(t, session.TriggeredByUserID, "matched creator should populate the session triggering user")
+					require.Equal(t, userID, *session.TriggeredByUserID, "matched creator should become the session triggering user")
+				} else {
+					require.Nil(t, session.TriggeredByUserID, "unmatched creator should leave the session attributed to the system fallback")
+				}
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})

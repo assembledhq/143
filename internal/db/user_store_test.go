@@ -207,7 +207,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			},
 		},
 		{
-			name: "returns error when matching email is outside org",
+			name: "returns error when no org user matches the email",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
 				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+LOWER\(email\)`).
 					WithArgs(orgID, pgxmock.AnyArg()).
