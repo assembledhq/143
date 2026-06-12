@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -1330,15 +1331,18 @@ func (s *PreviewStore) GetPreviewStartupEstimate(ctx context.Context, orgID, pre
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT EXTRACT(EPOCH FROM (ready_at - created_at))::int AS startup_seconds
-		FROM preview_instances
-		WHERE org_id = @org_id
-		  AND id <> @preview_id
-		  AND config_digest = @config_digest
-		  AND ready_at IS NOT NULL
-		  AND ready_at >= created_at
-		  AND created_at >= now() - interval '30 days'
-		ORDER BY startup_seconds ASC
-		LIMIT 50`,
+		FROM (
+			SELECT created_at, ready_at
+			FROM preview_instances
+			WHERE org_id = @org_id
+			  AND id <> @preview_id
+			  AND config_digest = @config_digest
+			  AND ready_at IS NOT NULL
+			  AND ready_at >= created_at
+			  AND created_at >= now() - interval '30 days'
+			ORDER BY ready_at DESC
+			LIMIT 50
+		) recent_previews`,
 		pgx.NamedArgs{
 			"org_id":        orgID,
 			"preview_id":    previewID,
@@ -1362,6 +1366,7 @@ func (s *PreviewStore) GetPreviewStartupEstimate(ctx context.Context, orgID, pre
 		return nil, nil
 	}
 
+	sort.Ints(samples)
 	p50 := samples[(len(samples)-1)/2]
 	return &models.PreviewStartupEstimate{
 		Label:       fmt.Sprintf("Usually ready in ~%ds", roundStartupEstimateSeconds(p50)),

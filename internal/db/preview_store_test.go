@@ -408,6 +408,16 @@ func TestPreviewStore_GetPreviewStartupEstimate(t *testing.T) {
 			},
 		},
 		{
+			name:    "computes p50 from recent samples rather than row order",
+			samples: []int{90, 10, 80, 20, 70},
+			expected: &models.PreviewStartupEstimate{
+				Label:       "Usually ready in ~70s",
+				P50Seconds:  70,
+				SampleCount: 5,
+				Confidence:  "low",
+			},
+		},
+		{
 			name:     "omits estimate with too few samples",
 			samples:  []int{21, 23, 25, 31},
 			expected: nil,
@@ -428,7 +438,7 @@ func TestPreviewStore_GetPreviewStartupEstimate(t *testing.T) {
 				rows.AddRow(sample)
 			}
 
-			mock.ExpectQuery("SELECT EXTRACT\\(EPOCH FROM \\(ready_at - created_at\\)\\)::int AS startup_seconds").
+			mock.ExpectQuery("ORDER BY ready_at DESC").
 				WithArgs(previewAnyArgs(3)...).
 				WillReturnRows(rows)
 
