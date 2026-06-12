@@ -2018,3 +2018,101 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 		dir = parent
 	}
 }
+
+func TestResolvePreviewBuildCachePaths(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		want    []string
+		enabled bool
+	}{
+		{
+			name:    "nil install disables build caching",
+			install: nil,
+			enabled: false,
+		},
+		{
+			name: "infers turbo cache dirs from root javascript lockfile",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+			},
+			want:    []string{".turbo/cache", "node_modules/.cache/turbo"},
+			enabled: true,
+		},
+		{
+			name: "infers turbo cache dirs next to nested lockfile",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"frontend/pnpm-lock.yaml"},
+			},
+			want:    []string{"frontend/.turbo/cache", "frontend/node_modules/.cache/turbo"},
+			enabled: true,
+		},
+		{
+			name: "non javascript lockfiles infer nothing",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod", "poetry.lock"},
+			},
+			enabled: false,
+		},
+		{
+			name: "explicit build paths are added and deduplicated",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{
+						Paths: []string{".next/cache", "node_modules/.cache/turbo"},
+					},
+				},
+			},
+			want:    []string{".next/cache", ".turbo/cache", "node_modules/.cache/turbo"},
+			enabled: true,
+		},
+		{
+			name: "cache disabled flag disables build caching",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Enabled: &disabled},
+			},
+			enabled: false,
+		},
+		{
+			name: "build disabled flag disables build caching",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{Enabled: &disabled},
+				},
+			},
+			enabled: false,
+		},
+		{
+			name: "platform cache paths are excluded",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{
+						Paths: []string{".143/cache/turbo", "target/debug/incremental"},
+					},
+				},
+			},
+			want:    []string{"target/debug/incremental"},
+			enabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, enabled := ResolvePreviewBuildCachePaths(tt.install)
+			require.Equal(t, tt.enabled, enabled, "enabled flag should match")
+			if tt.enabled {
+				require.Equal(t, tt.want, got, "effective build cache paths should match")
+			} else {
+				require.Empty(t, got, "disabled build caching should resolve no paths")
+			}
+		})
+	}
+}

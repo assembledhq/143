@@ -778,10 +778,22 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 				errs = append(errs, validatePreviewPackageManagerCachePath(field, path)...)
 			}
 		}
+		if install.Cache.Build != nil {
+			for i, path := range install.Cache.Build.Paths {
+				field := fmt.Sprintf("preview.install.cache.build.paths[%d]", i)
+				errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
+			}
+		}
 	}
 	if paths, enabled := ResolvePreviewInstallCachePaths(install); enabled {
 		for i, path := range paths {
 			field := fmt.Sprintf("preview.install effective cache path[%d]", i)
+			errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
+		}
+	}
+	if paths, enabled := ResolvePreviewBuildCachePaths(install); enabled {
+		for i, path := range paths {
+			field := fmt.Sprintf("preview.install effective build cache path[%d]", i)
 			errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
 		}
 	}
@@ -919,6 +931,75 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 	}
 	sort.Strings(paths)
 	return paths, len(paths) > 0
+}
+
+// ResolvePreviewBuildCachePaths returns the effective build-artifact cache
+// paths and whether build caching is enabled for this install config. Build
+// caching is default-on when dependency caching is on and a path can be
+// inferred: JS lockfiles imply Turborepo's local cache locations next to the
+// lockfile. Explicit paths come from preview.install.cache.build.paths.
+func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]string, bool) {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Build != nil && install.Cache.Build.Enabled != nil && !*install.Cache.Build.Enabled {
+		return nil, false
+	}
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(raw string) {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+		if clean == "" || clean == "." {
+			return
+		}
+		if dependencyCachePathTargetsPreviewInstallMarkers(clean) || dependencyCachePathTargetsPlatformCache(clean) {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	if install.Cache != nil && install.Cache.Build != nil {
+		for _, path := range install.Cache.Build.Paths {
+			add(path)
+		}
+	}
+	for _, lockfile := range install.Lockfiles {
+		for _, inferred := range inferPreviewBuildCachePaths(lockfile) {
+			add(inferred)
+		}
+	}
+	sort.Strings(paths)
+	return paths, len(paths) > 0
+}
+
+// inferPreviewBuildCachePaths maps a JS lockfile to the Turborepo local cache
+// directories used by turbo >=1.9 (node_modules/.cache/turbo) and older or
+// explicitly configured setups (.turbo/cache), rooted at the lockfile's
+// directory.
+func inferPreviewBuildCachePaths(lockfile string) []string {
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(lockfile)))
+	if clean == "" || clean == "." {
+		return nil
+	}
+	switch filepath.Base(clean) {
+	case "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb":
+	default:
+		return nil
+	}
+	dir := pathDir(clean)
+	join := func(p string) string {
+		if dir == "." {
+			return p
+		}
+		return dir + "/" + p
+	}
+	return []string{join("node_modules/.cache/turbo"), join(".turbo/cache")}
 }
 
 func ResolvePreviewInstallPackageManagerCachePaths(install *models.PreviewInstallConfig) ([]string, []string, bool) {

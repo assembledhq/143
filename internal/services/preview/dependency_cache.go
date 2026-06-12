@@ -50,6 +50,10 @@ type DependencyCacheHit struct {
 
 type DependencyCacheSaveResult struct {
 	SizeBytes int64
+	// Unchanged reports that the staged archive's checksum matched
+	// PreviewPathCacheSaveSpec.SkipIfChecksum, so upload and DB upsert were
+	// skipped because the stored blob already holds identical content.
+	Unchanged bool
 }
 
 type DependencyCacheMetadata struct {
@@ -77,6 +81,14 @@ type PreviewPathCacheSaveSpec struct {
 	CacheKey string
 	Paths    []string
 	Metadata DependencyCacheMetadata
+	// ExcludePaths are subtrees omitted from the archive. Used to keep paths
+	// owned by another cache kind (e.g. build caches living inside
+	// node_modules) out of this kind's blobs.
+	ExcludePaths []string
+	// SkipIfChecksum short-circuits the save when the staged archive hashes to
+	// this value: the caller restored a blob with this checksum earlier in the
+	// same launch, so re-uploading would store identical bytes.
+	SkipIfChecksum string
 }
 
 type DependencyCacheConfig struct {
@@ -349,13 +361,30 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	for _, p := range existing {
 		args = append(args, dependencyCacheShellPathArg(p))
 	}
-	archiveCmd := fmt.Sprintf("cd %s && tar czf - -- %s", shellQuote(rootDir), strings.Join(args, " "))
+	excludeArgs := make([]string, 0, len(spec.ExcludePaths))
+	for _, p := range sortedNormalizedDependencyPaths(spec.ExcludePaths) {
+		clean, err := cleanDependencyCachePathForRoot(spec.Root, p, true)
+		if err != nil {
+			continue
+		}
+		// Quote the whole flag so glob patterns reach tar literally instead of
+		// being expanded by the shell.
+		excludeArgs = append(excludeArgs, shellQuote("--exclude="+filepath.ToSlash(clean)))
+	}
+	excludeExpr := ""
+	if len(excludeArgs) > 0 {
+		excludeExpr = strings.Join(excludeArgs, " ") + " "
+	}
+	archiveCmd := fmt.Sprintf("cd %s && tar czf - %s-- %s", shellQuote(rootDir), excludeExpr, strings.Join(args, " "))
 	var stderr bytes.Buffer
 	staged, err := c.stageSandboxArchive(ctx, sb, archiveCmd, &stderr)
 	if err != nil {
 		return DependencyCacheSaveResult{}, err
 	}
 	defer staged.cleanup()
+	if spec.SkipIfChecksum != "" && staged.checksum == spec.SkipIfChecksum {
+		return DependencyCacheSaveResult{SizeBytes: staged.sizeBytes, Unchanged: true}, nil
+	}
 	stats, err := validateDependencyCacheArchive(staged.path, existing)
 	if err != nil {
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: validate archive: %w", err)
@@ -379,6 +408,14 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: marshal metadata: %w", err)
 	}
 	blobKey := c.blobKeyForChecksum(metadata.OrgID, metadata.RepoID, spec.Kind, spec.CacheKey, staged.checksum)
+	// Snapshot the entry being replaced so its checksum-addressed blob can be
+	// deleted after the upsert. Latest-wins kinds (build_artifact) overwrite
+	// the same row on every content change, which would otherwise leak one
+	// orphaned blob per save.
+	var priorBlobKey string
+	if prior, err := c.store.FindDependencyCache(ctx, metadata.OrgID, metadata.RepoID, spec.Kind, spec.CacheKey); err == nil && prior != nil {
+		priorBlobKey = prior.BlobKey
+	}
 	// Concurrent saves for the same key are intentionally lock-free. Blob
 	// objects are checksum-addressed so each DB upsert points at the exact
 	// payload whose checksum is recorded in metadata.
@@ -408,6 +445,16 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	}
 	if err := c.store.UpsertDependencyCache(ctx, entry); err != nil {
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: upsert db: %w", err)
+	}
+	if priorBlobKey != "" && priorBlobKey != blobKey {
+		// Best-effort: a concurrent restore of the replaced blob on another
+		// worker may fail mid-download and fall back to a cold start.
+		if err := c.blobStore.Delete(ctx, priorBlobKey); err != nil && !errors.Is(err, storage.ErrSnapshotNotFound) {
+			c.logger.Warn().Err(err).Str("blob_key", priorBlobKey).Msg("failed to delete superseded dependency cache blob")
+		}
+		if err := c.blobStore.Delete(ctx, priorBlobKey+".sha256"); err != nil && !errors.Is(err, storage.ErrSnapshotNotFound) {
+			c.logger.Warn().Err(err).Str("blob_key", priorBlobKey+".sha256").Msg("failed to delete superseded dependency cache checksum")
+		}
 	}
 	c.writeLocalBlobFromFile(ctx, &DependencyCacheHit{Entry: *entry, BlobKey: blobKey}, staged.path, staged.sizeBytes, staged.checksum)
 	return DependencyCacheSaveResult{SizeBytes: staged.sizeBytes}, nil
