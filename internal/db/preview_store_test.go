@@ -594,6 +594,57 @@ func TestPreviewStore_ListBranchPreviewIndex_ResumableUsesWarmCachePredicate(t *
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_ListBranchPreviewIndex_IncludesRuntimeOnlySessionPreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	rows := pgxmock.NewRows(branchPreviewSummaryTestCols()).AddRow(
+		previewID, &previewID, repoID, "acme/app", "feature/session-preview", "abc123", "",
+		models.PreviewSourceTypeSession, sessionID.String(), "",
+		string(models.PreviewStatusReady), now, now, &now, (*time.Time)(nil), "",
+		"ready", "", false, (*int)(nil),
+	)
+
+	mock.ExpectQuery("session_previews[\\s\\S]+pi\\.preview_target_id IS NULL[\\s\\S]+preview_index\\.status IN").
+		WithArgs(previewAnyArgs(8)...).
+		WillReturnRows(rows)
+
+	summaries, err := store.ListBranchPreviewIndex(context.Background(), orgID, BranchPreviewIndexFilters{
+		Scope: "running",
+		Limit: 20,
+	})
+	require.NoError(t, err, "ListBranchPreviewIndex should return runtime-only session previews")
+	require.Equal(t, []models.BranchPreviewSummary{
+		{
+			TargetID:           previewID,
+			PreviewID:          &previewID,
+			RepositoryID:       repoID,
+			RepositoryFullName: "acme/app",
+			Branch:             "feature/session-preview",
+			CommitSHA:          "abc123",
+			SourceType:         models.PreviewSourceTypeSession,
+			SourceID:           sessionID.String(),
+			Status:             string(models.PreviewStatusReady),
+			CreatedAt:          now,
+			SortCreatedAt:      now,
+			ExpiresAt:          &now,
+			CurrentPhase:       "ready",
+			Resumable:          false,
+		},
+	}, summaries, "runtime-only session previews should be projected into preview index rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_CountBranchPreviewIndexScopes_ResumableUsesWarmCachePredicate(t *testing.T) {
 	t.Parallel()
 
@@ -631,6 +682,25 @@ func TestPreviewStore_GetBranchPreviewTargetResumability_UsesWarmCachePredicate(
 	require.True(t, resumable, "target should be resumable when the warm cache predicate matches")
 	require.NotNil(t, estimate, "resumable target should include an estimate")
 	require.Equal(t, 30, *estimate, "resumable estimate should be thirty seconds")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CountBranchPreviewIndexScopes_IncludesRuntimeOnlySessionPreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("session_previews[\\s\\S]+pi\\.preview_target_id IS NULL[\\s\\S]+COUNT\\(\\*\\) FILTER \\(WHERE status IN").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "recent"}).AddRow(1, 0, 0))
+
+	counts, err := store.CountBranchPreviewIndexScopes(context.Background(), uuid.New(), BranchPreviewIndexFilters{})
+	require.NoError(t, err, "CountBranchPreviewIndexScopes should count runtime-only session previews")
+	require.Equal(t, map[string]int{"running": 1, "resumable": 0, "recent": 0}, counts, "running count should include active session previews without targets")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

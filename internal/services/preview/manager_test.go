@@ -3488,6 +3488,126 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 	}
 }
 
+func TestManagerServiceObserver_OnPhaseStartAndEnd_PersistsLifecycleLogs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	mock.ExpectExec("UPDATE preview_instances SET current_phase").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	for i := 0; i < 2; i++ {
+		logID := uuid.New()
+		mock.ExpectQuery("INSERT INTO preview_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+			}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+	}
+
+	obs.OnPhaseStart("install_command")
+	obs.OnPhaseEnd("install_command", nil)
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "phase observer should persist start and completion logs")
+}
+
+func TestManagerServiceObserver_OnPhaseStart_DoesNotBlockOnLifecycleLogWrite(t *testing.T) {
+	t.Parallel()
+
+	blockingDB := &blockingPreviewLogDB{
+		queryStarted: make(chan struct{}),
+		releaseQuery: make(chan struct{}),
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(blockingDB),
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+
+	done := make(chan struct{})
+	go func() {
+		obs.OnPhaseStart("install_command")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("OnPhaseStart should not block on preview lifecycle log database writes")
+	}
+
+	select {
+	case <-blockingDB.queryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background preview lifecycle log writer should eventually attempt the database write")
+	}
+	close(blockingDB.releaseQuery)
+	obs.Close()
+}
+
+func TestManagerServiceObserver_OnCacheSave_PersistsSuccessfulStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		notify func(*managerServiceObserver, string)
+	}{
+		{
+			name: "dependency saved",
+			notify: func(obs *managerServiceObserver, cacheKey string) {
+				obs.OnDependencyCacheSave("saved", cacheKey, 123, nil)
+			},
+		},
+		{
+			name: "package manager saved",
+			notify: func(obs *managerServiceObserver, cacheKey string) {
+				obs.OnPackageManagerCacheSave("saved", cacheKey, 456, nil)
+			},
+		},
+		{
+			name: "build unchanged",
+			notify: func(obs *managerServiceObserver, cacheKey string) {
+				obs.OnBuildCacheSave("unchanged", cacheKey, 789, nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+			orgID := uuid.New()
+			previewID := uuid.New()
+			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+			cacheKey := strings.Repeat("c", 64)
+
+			logID := uuid.New()
+			mock.ExpectQuery("INSERT INTO preview_logs").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+				}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+			tt.notify(obs, cacheKey)
+			require.NoError(t, mock.ExpectationsWereMet(), "successful cache save status should be persisted")
+		})
+	}
+}
+
 func TestManagerServiceObserver_OnServiceOutput_PersistsStartupLog(t *testing.T) {
 	t.Parallel()
 

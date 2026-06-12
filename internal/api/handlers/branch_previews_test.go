@@ -1184,7 +1184,7 @@ func TestBranchPreviewHandler_ListSupportsLegacyAndIndexParams(t *testing.T) {
 			mock.ExpectQuery("FROM preview_targets target[\\s\\S]+LIMIT @limit").
 				WithArgs(previewHandlerAnyArgs(8)...).
 				WillReturnRows(pgxmock.NewRows(branchPreviewSummaryTestCols()))
-			mock.ExpectQuery("WITH latest_targets AS").
+			mock.ExpectQuery("WITH target_previews AS").
 				WithArgs(previewHandlerAnyArgs(5)...).
 				WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "recent"}).AddRow(0, 0, 0))
 			mock.ExpectQuery("COUNT\\(\\*\\)[\\s\\S]+user_id = @user_id").

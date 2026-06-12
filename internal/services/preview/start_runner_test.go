@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -131,6 +132,32 @@ func TestStartRunnerReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig, "invalid committed preview config should use the shared invalid-config sentinel")
 	require.Contains(t, err.Error(), repoconfig.ConfigPath, "invalid config error should name the repo config path")
 	require.Nil(t, cfg, "invalid committed preview config should not return a fallback config")
+}
+
+func TestStartRunnerCreateStartupLog_PersistsPreviewLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "build", "Creating preview sandbox", json.RawMessage(`{}`), time.Now()))
+
+	runner := &StartRunner{
+		previews: db.NewPreviewStore(mock),
+		logger:   zerolog.Nop(),
+	}
+	runner.createStartupLog(context.Background(), orgID, previewID, "info", models.PreviewLogStepBuild, "Creating preview sandbox", map[string]any{
+		"phase": "sandbox_create",
+	})
+	require.NoError(t, mock.ExpectationsWereMet(), "startup log helper should persist preview log rows")
 }
 
 func TestStartRunnerApplyBranchPreviewSandboxNetworkUsesStaticEgress(t *testing.T) {

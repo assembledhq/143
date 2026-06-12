@@ -331,12 +331,16 @@ func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing
 	require.NoError(t, err, "Save should upload dependency cache")
 
 	var existenceProbeCount int
+	var probeCmd string
 	for _, call := range exec.calls() {
 		if strings.Contains(call, "test -e ") || strings.Contains(call, "find ") {
 			existenceProbeCount++
+			probeCmd = call
 		}
 	}
 	require.Equal(t, 1, existenceProbeCount, "Save should batch effective-path existence checks into one sandbox exec")
+	require.NotContains(t, probeCmd, "fi if", "batched existence probe should separate shell if statements")
+	require.Contains(t, probeCmd, "fi; if", "batched existence probe should use shell statement separators")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
