@@ -58,6 +58,9 @@ type SnapshotExecutor interface {
 
 	// WriteFile writes data to a file inside the sandbox filesystem.
 	WriteFile(ctx context.Context, sb *agent.Sandbox, path string, data []byte) error
+
+	// WriteFileFromReader streams data to a file inside the sandbox filesystem.
+	WriteFileFromReader(ctx context.Context, sb *agent.Sandbox, path string, reader io.Reader, sizeBytes int64) error
 }
 
 // =============================================================================
@@ -453,23 +456,20 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	if fi.Size() > maxRestoreBlobBytes {
 		return fmt.Errorf("snapshot restore: blob too large (%d bytes, max %d)", fi.Size(), maxRestoreBlobBytes)
 	}
-	tarData, err := os.ReadFile(hit.BlobPath) // #nosec G304 -- BlobPath validated via blobPath()
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Warn().Str("blob_path", hit.BlobPath).Msg("snapshot blob missing, likely evicted between find and restore")
-			_ = os.Remove(hit.BlobPath + ".sha256")
-			_ = sc.store.DeleteCache(ctx, hit.Entry.OrgID, hit.Entry.ID)
-			return fmt.Errorf("snapshot restore: blob evicted (key=%s), fall back to full build", hit.Entry.SnapshotKey)
-		}
-		return fmt.Errorf("snapshot restore: read blob: %w", err)
-	}
-
 	// Verify SHA-256 checksum if a checksum file exists alongside the blob.
 	checksumPath := hit.BlobPath + ".sha256"
 	expectedHex, readErr := os.ReadFile(checksumPath) // #nosec G304 -- checksumPath is derived from validated BlobPath with a fixed suffix
 	if readErr == nil {
-		actualSum := sha256.Sum256(tarData)
-		actualHex := hex.EncodeToString(actualSum[:])
+		actualHex, checksumErr := checksumFile(hit.BlobPath)
+		if checksumErr != nil {
+			if os.IsNotExist(checksumErr) {
+				log.Warn().Str("blob_path", hit.BlobPath).Msg("snapshot blob missing, likely evicted during checksum")
+				_ = os.Remove(checksumPath)
+				_ = sc.store.DeleteCache(ctx, hit.Entry.OrgID, hit.Entry.ID)
+				return fmt.Errorf("snapshot restore: blob evicted (key=%s), fall back to full build", hit.Entry.SnapshotKey)
+			}
+			return fmt.Errorf("snapshot restore: checksum blob: %w", checksumErr)
+		}
 		if actualHex != strings.TrimSpace(string(expectedHex)) {
 			log.Error().
 				Str("expected", strings.TrimSpace(string(expectedHex))).
@@ -483,8 +483,23 @@ func (sc *SnapshotCache) RestoreSnapshot(
 	}
 
 	// 2. Write the tar.gz into the sandbox.
-	if err := sc.executor.WriteFile(ctx, sb, snapshotTmpFile, tarData); err != nil {
-		return fmt.Errorf("snapshot restore: write tar to sandbox: %w", err)
+	blob, err := os.Open(hit.BlobPath) // #nosec G304 -- BlobPath was validated by lookup and stat above
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Warn().Str("blob_path", hit.BlobPath).Msg("snapshot blob missing, likely evicted before stream")
+			_ = os.Remove(checksumPath)
+			_ = sc.store.DeleteCache(ctx, hit.Entry.OrgID, hit.Entry.ID)
+			return fmt.Errorf("snapshot restore: blob evicted (key=%s), fall back to full build", hit.Entry.SnapshotKey)
+		}
+		return fmt.Errorf("snapshot restore: open blob: %w", err)
+	}
+	defer func() {
+		if closeErr := blob.Close(); closeErr != nil {
+			log.Warn().Err(closeErr).Str("blob_path", hit.BlobPath).Msg("failed to close snapshot blob")
+		}
+	}()
+	if err := sc.executor.WriteFileFromReader(ctx, sb, snapshotTmpFile, blob, fi.Size()); err != nil {
+		return fmt.Errorf("snapshot restore: stream tar to sandbox: %w", err)
 	}
 
 	// 3. Remove existing workspace files (except .git which is excluded from
@@ -716,6 +731,20 @@ func totalSize(entries []models.PreviewStartupCache) int64 {
 		total += e.SizeBytes
 	}
 	return total
+}
+
+func checksumFile(path string) (string, error) {
+	f, err := os.Open(path) // #nosec G304 -- callers pass cache-managed blob paths
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // cappedCountingWriter is an io.Writer that counts bytes written and fails
