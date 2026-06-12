@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -43,10 +44,35 @@ type sessionCacheEntry struct {
 // sessionCache is a simple TTL cache for access session lookups.
 const sessionCacheTTL = 10 * time.Second
 
+// accessSessionTTL is the sliding lifetime of a preview access session. Each
+// extension pushes expires_at this far out. The initial (bootstrap-token)
+// expiry minted by the manager is intentionally shorter; the first proxied
+// request after exchange extends it to the full sliding window.
+const accessSessionTTL = 30 * time.Minute
+
 // expiryExtendThreshold controls how often we extend the DB session expiry.
 // We only extend when the remaining time is below this threshold, avoiding
 // a DB write on every single request.
-const expiryExtendThreshold = 2 * time.Minute
+const expiryExtendThreshold = 10 * time.Minute
+
+// runtimeCacheEntry caches the active preview runtime so an asset burst does
+// not issue a DB query per proxied request. Entries are evicted on upstream
+// proxy errors and runtime mismatches so a recycled preview re-resolves
+// promptly.
+type runtimeCacheEntry struct {
+	validUntil time.Time
+	runtime    *models.PreviewRuntime
+}
+
+// runtimeCacheTTL bounds how long a cached runtime is trusted. Kept short so
+// a recycle (new runtime epoch) is picked up within one TTL even if no
+// eviction signal fires.
+const runtimeCacheTTL = 5 * time.Second
+
+// accessRecordInterval throttles preview last-access writes. Idle-timeout
+// tracking only needs coarse granularity; without the throttle every proxied
+// asset request issued an UPDATE on preview_instances.
+const accessRecordInterval = 15 * time.Second
 
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
@@ -66,6 +92,20 @@ type Gateway struct {
 	// sessionCache avoids a DB round-trip on every proxied request.
 	sessionCacheMu sync.RWMutex
 	sessionCache   map[uuid.UUID]*sessionCacheEntry
+
+	// runtimeCache avoids resolving the active runtime per proxied request.
+	runtimeCacheMu sync.RWMutex
+	runtimeCache   map[uuid.UUID]*runtimeCacheEntry
+
+	// accessRecordedAt throttles last-access writes per preview.
+	accessRecordMu   sync.Mutex
+	accessRecordedAt map[uuid.UUID]time.Time
+
+	// proxyTransport is shared across proxied requests so upstream worker
+	// connections are kept alive and reused. http.DefaultTransport caps idle
+	// connections at 2 per host, which serializes the ~80-request asset burst
+	// of a dev-server page load.
+	proxyTransport http.RoundTripper
 }
 
 // GatewayConfig holds initialization options.
@@ -108,19 +148,76 @@ func (g *Gateway) putCachedSession(id uuid.UUID, entry *sessionCacheEntry) {
 	g.sessionCache[id] = entry
 }
 
+// cachedActiveRuntime resolves the active runtime for a preview through a
+// short TTL cache. The previewID alone is a safe cache key: it is bound to
+// the org by the HMAC-verified session cookie before this is called.
+func (g *Gateway) cachedActiveRuntime(ctx context.Context, orgID, previewID uuid.UUID) (*models.PreviewRuntime, error) {
+	now := time.Now()
+	g.runtimeCacheMu.RLock()
+	entry, ok := g.runtimeCache[previewID]
+	g.runtimeCacheMu.RUnlock()
+	if ok && now.Before(entry.validUntil) {
+		return entry.runtime, nil
+	}
+	runtime, err := g.store.GetActivePreviewRuntime(ctx, orgID, previewID)
+	if err != nil {
+		return nil, err
+	}
+	g.runtimeCacheMu.Lock()
+	if len(g.runtimeCache) > 4096 {
+		// Safety valve against unbounded growth across many short-lived
+		// previews; entries repopulate on the next request.
+		g.runtimeCache = make(map[uuid.UUID]*runtimeCacheEntry)
+	}
+	g.runtimeCache[previewID] = &runtimeCacheEntry{validUntil: now.Add(runtimeCacheTTL), runtime: runtime}
+	g.runtimeCacheMu.Unlock()
+	return runtime, nil
+}
+
+// evictCachedRuntime drops a cached runtime so the next request re-resolves.
+func (g *Gateway) evictCachedRuntime(previewID uuid.UUID) {
+	g.runtimeCacheMu.Lock()
+	defer g.runtimeCacheMu.Unlock()
+	delete(g.runtimeCache, previewID)
+}
+
+// recordAccessThrottled records preview activity for idle-timeout tracking at
+// most once per accessRecordInterval per preview.
+func (g *Gateway) recordAccessThrottled(ctx context.Context, orgID, previewID uuid.UUID) {
+	now := time.Now()
+	g.accessRecordMu.Lock()
+	last, ok := g.accessRecordedAt[previewID]
+	if ok && now.Sub(last) < accessRecordInterval {
+		g.accessRecordMu.Unlock()
+		return
+	}
+	if len(g.accessRecordedAt) > 4096 {
+		g.accessRecordedAt = make(map[uuid.UUID]time.Time)
+	}
+	g.accessRecordedAt[previewID] = now
+	g.accessRecordMu.Unlock()
+
+	if err := g.manager.RecordAccess(ctx, orgID, previewID); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+	}
+}
+
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
 	return &Gateway{
-		store:        cfg.Store,
-		manager:      cfg.Manager,
-		workerSelect: cfg.WorkerSelector,
-		hmrWatcher:   cfg.HMRWatcher,
-		logger:       cfg.Logger,
-		appOrigin:    cfg.AppOrigin,
-		cookieSecret: cfg.CookieSecret,
-		tokenSecret:  cfg.PreviewTokenSecret,
-		secureCookie: strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
-		sessionCache: make(map[uuid.UUID]*sessionCacheEntry),
+		store:            cfg.Store,
+		manager:          cfg.Manager,
+		workerSelect:     cfg.WorkerSelector,
+		hmrWatcher:       cfg.HMRWatcher,
+		logger:           cfg.Logger,
+		appOrigin:        cfg.AppOrigin,
+		cookieSecret:     cfg.CookieSecret,
+		tokenSecret:      cfg.PreviewTokenSecret,
+		secureCookie:     strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
+		sessionCache:     make(map[uuid.UUID]*sessionCacheEntry),
+		runtimeCache:     make(map[uuid.UUID]*runtimeCacheEntry),
+		accessRecordedAt: make(map[uuid.UUID]time.Time),
+		proxyTransport:   newGatewayProxyTransport(),
 		cspHeader: strings.Join([]string{
 			"default-src 'self' blob: data:",
 			"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -132,9 +229,19 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 			"object-src 'none'",
 			"base-uri 'none'",
 			"frame-ancestors " + cfg.AppOrigin,
-			"worker-src 'none'",
+			"worker-src 'self' blob:",
 		}, "; "),
 	}
+}
+
+// newGatewayProxyTransport builds the shared upstream transport for worker
+// proxying with a per-host idle pool sized for dev-server asset bursts.
+func newGatewayProxyTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 128
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
 }
 
 // ServeHTTP implements http.Handler. Each request is routed based on the Host
@@ -299,6 +406,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// Read and validate the session cookie.
 	cookie, err := r.Cookie(g.cookieName())
 	if err != nil {
+		if !isNavigationRequest(r) {
+			writePreviewSessionExpired(w)
+			return
+		}
 		g.servePreviewControlOverlay(w, r, previewID)
 		return
 	}
@@ -353,7 +464,7 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// Only extend the DB session expiry when close to expiration, avoiding
 	// a DB write on every single request.
 	if time.Until(cached.expiresAt) < expiryExtendThreshold {
-		newExpiry := now.Add(5 * time.Minute)
+		newExpiry := now.Add(accessSessionTTL)
 		if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
 			if errors.Is(err, db.ErrSessionRevoked) {
 				// Session was revoked between cache fill and extend — evict
@@ -379,17 +490,13 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// URL does not overwrite last_path (which is used for navigation restore).
 	if r.URL.Path == previewHeartbeatPath {
 		// Still record access for idle timeout tracking.
-		if err := g.manager.RecordAccess(r.Context(), orgID, runtimePreviewID); err != nil {
-			g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record access")
-		}
+		g.recordAccessThrottled(r.Context(), orgID, runtimePreviewID)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	// Record activity for idle timeout tracking.
-	if err := g.manager.RecordAccess(r.Context(), orgID, runtimePreviewID); err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record access")
-	}
+	g.recordAccessThrottled(r.Context(), orgID, runtimePreviewID)
 	if shouldRecordPreviewLastPath(r) {
 		if err := g.manager.RecordLastPath(r.Context(), orgID, runtimePreviewID, r.URL.Path); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record last path")
@@ -406,7 +513,43 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 // auth error.
 func (g *Gateway) serveStaleSessionOverlay(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
 	g.clearPreviewSessionCookie(w)
+	if !isNavigationRequest(r) {
+		// Fetch/XHR and asset loads can neither render the overlay nor follow
+		// a cross-origin redirect to it; HTML-instead-of-JSON silently wedges
+		// SPAs. Fail loudly so the app (or its error handling) reloads.
+		writePreviewSessionExpired(w)
+		return
+	}
 	g.servePreviewControlOverlay(w, r, previewID)
+}
+
+// isNavigationRequest reports whether a request is a browser navigation
+// (top-level document or frame) that can meaningfully receive the HTML
+// control overlay or follow a redirect to the launcher.
+func isNavigationRequest(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Dest") {
+	case "document", "iframe", "frame":
+		return true
+	case "":
+		// Non-browser clients and very old browsers: sniff the Accept header.
+		return acceptsHTMLDocument(r.Header.Get("Accept"))
+	default:
+		return false
+	}
+}
+
+// writePreviewSessionExpired responds with a JSON 401 for non-navigation
+// requests whose preview access session is missing or no longer honorable.
+func writePreviewSessionExpired(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Code:    "PREVIEW_SESSION_EXPIRED",
+			Message: "preview session is no longer valid; reload the page to reconnect",
+		},
+	})
 }
 
 func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {
@@ -807,8 +950,16 @@ func acceptsHTMLDocument(accept string) bool {
 
 func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
 	originalReq := r
-	runtime, err := g.store.GetActivePreviewRuntime(r.Context(), orgID, previewID)
+	runtime, err := g.cachedActiveRuntime(r.Context(), orgID, previewID)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) && isNavigationRequest(r) {
+			// The session cookie outlives the preview's idle timeout: a
+			// returning visitor with a valid session can land on a stopped
+			// preview. Serve the control overlay (restart/relaunch) instead
+			// of a raw runtime-unavailable error.
+			g.servePreviewControlOverlay(w, r, previewID)
+			return
+		}
 		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, nil, "").
 			Msg("failed to resolve active preview runtime")
 		writeRuntimeUnavailable(w)
@@ -839,6 +990,7 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 	}
 
 	proxy := &httputil.ReverseProxy{
+		Transport: g.proxyTransport,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = targetURL.Scheme
 			req.URL.Host = targetURL.Host
@@ -850,6 +1002,9 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if translateWorkerRuntimeMismatch(resp) {
+				// The worker no longer recognizes this runtime epoch; drop
+				// the cached runtime so the next request re-resolves.
+				g.evictCachedRuntime(previewID)
 				return nil
 			}
 
@@ -872,6 +1027,7 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			g.evictCachedRuntime(previewID)
 			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
 				Msg("proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
