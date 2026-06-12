@@ -21,7 +21,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import type { GitHubOrgAutoJoin, GitHubOrgAutoJoinResponse, ListResponse, OrganizationDomain } from "@/lib/types";
+import type { GitHubInviteStatus, GitHubOrgAutoJoin, GitHubOrgAutoJoinResponse, ListResponse, OrganizationDomain, SingleResponse } from "@/lib/types";
 
 // copyText writes to the clipboard, falling back to the legacy
 // execCommand path when the async Clipboard API is unavailable —
@@ -100,6 +100,11 @@ export function VerifiedDomainsSection() {
     queryFn: () => api.team.listGitHubOrgs(),
   });
   const githubOrgs = githubOrgData?.github_orgs ?? [];
+  const { data: githubStatusData } = useQuery<SingleResponse<GitHubInviteStatus>>({
+    queryKey: ["team-github-status"],
+    queryFn: () => api.team.githubInviteStatus(),
+  });
+  const githubConnected = githubStatusData?.data.connected ?? false;
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.team.domains });
@@ -188,7 +193,11 @@ export function VerifiedDomainsSection() {
             ) : githubOrgs.length === 0 ? (
               <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
                 <Github className="h-3.5 w-3.5" />
-                <span>Connect GitHub to enable organization-based auto-join.</span>
+                <span>
+                  {githubConnected
+                    ? "Install the GitHub App on a GitHub organization to enable organization-based auto-join."
+                    : "Connect GitHub to enable organization-based auto-join."}
+                </span>
               </div>
             ) : (
               githubOrgs.map((org) => {
@@ -255,7 +264,7 @@ export function VerifiedDomainsSection() {
               aria-label="Domain to verify"
             />
             <Button
-              size="sm"
+              className="h-9"
               onClick={handleAdd}
               disabled={addMutation.isPending || !newDomain.trim()}
             >
