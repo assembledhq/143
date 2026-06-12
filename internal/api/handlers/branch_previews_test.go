@@ -871,12 +871,6 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-// previewAPITokenTestCols mirrors the column order in previewAPITokenColumns.
-var previewAPITokenTestCols = []string{
-	"id", "org_id", "name", "token_hash", "scopes", "repository_ids",
-	"created_by_user_id", "last_used_at", "revoked_at", "created_at",
-}
-
 func TestBranchPreviewHandler_APITokenManagementEndpointsAreDeprecated(t *testing.T) {
 	t.Parallel()
 
