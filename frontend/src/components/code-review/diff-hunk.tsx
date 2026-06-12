@@ -85,7 +85,7 @@ export function DiffHunk({
             {lineComments && lineComments.length > 0 && onUpdateComment && onDeleteComment && (
               <div
                 data-testid="inline-comment-thread-anchor"
-                className="sticky left-0 pl-[120px] pr-2"
+                className="sticky left-0 pl-[100px] pr-2"
               >
                 <CommentThread
                   comments={lineComments}
@@ -100,7 +100,7 @@ export function DiffHunk({
             {showInlineCommentComposer && isActiveCommentLine && onSubmitComment && onCancelComment && (
               <div
                 data-testid="inline-comment-composer-anchor"
-                className="sticky left-0 pl-[120px] pr-2"
+                className="sticky left-0 pl-[100px] pr-2"
               >
                 <CommentInput
                   className="max-w-[min(42rem,calc(100cqw-10rem))]"

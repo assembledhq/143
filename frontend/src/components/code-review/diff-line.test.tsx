@@ -26,6 +26,12 @@ describe("DiffLineRow", () => {
     expect(screen.getByText("12")).toBeInTheDocument();
   });
 
+  it("uses compact line-number gutters so code has more horizontal room", () => {
+    render(<DiffLineRow line={makeLine({ oldLineNumber: 10, newLineNumber: 12 })} />);
+    expect(screen.getByText("10")).toHaveClass("w-[42px]", "pr-1");
+    expect(screen.getByText("12")).toHaveClass("w-[42px]", "pr-1");
+  });
+
   it("renders add line with + prefix", () => {
     const { container } = render(
       <DiffLineRow line={makeLine({ type: "add", oldLineNumber: null, newLineNumber: 3 })} />
