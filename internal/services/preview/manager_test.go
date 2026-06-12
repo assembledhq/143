@@ -157,7 +157,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -208,7 +208,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", stringPtr("req-1"), "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil),
+		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
 		"",
 		false,
 	}
@@ -468,12 +468,29 @@ func TestGetStatus_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInfraTestCols))
 
+	mock.ExpectQuery("SELECT EXTRACT\\(EPOCH FROM \\(ready_at - created_at\\)\\)::int AS startup_seconds").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"startup_seconds"}).
+				AddRow(21).
+				AddRow(23).
+				AddRow(25).
+				AddRow(31).
+				AddRow(42),
+		)
+
 	resp, err := mgr.GetStatus(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.Equal(t, previewID, resp.Instance.ID)
 	require.Equal(t, "https://"+previewID.String()+".preview.143.dev", resp.PreviewOrigin, "status response should expose the runtime preview origin")
 	require.Len(t, resp.Services, 1)
 	require.Len(t, resp.Infrastructure, 0)
+	require.Equal(t, &models.PreviewStartupEstimate{
+		Label:       "Usually ready in ~25s",
+		P50Seconds:  25,
+		SampleCount: 5,
+		Confidence:  "low",
+	}, resp.StartupEstimate, "status response should include a startup estimate when enough samples exist")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -2051,9 +2068,14 @@ func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID
 }
 
 func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, revision *int64, revisionUpdatedAt *time.Time) {
-	args := previewAnyArgs(24)
+	args := previewAnyArgs(27)
 	args[22] = revision
 	args[23] = revisionUpdatedAt
+	args[24] = revision
+	args[25] = revisionUpdatedAt
+	if revision != nil {
+		args[26] = models.PreviewRuntimeRevisionSourceLaunch
+	}
 	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)
 	for i, column := range previewInstanceTestCols {
 		switch column {
@@ -2061,6 +2083,14 @@ func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface,
 			row[i] = revision
 		case "source_workspace_revision_updated_at":
 			row[i] = revisionUpdatedAt
+		case "runtime_workspace_revision":
+			row[i] = revision
+		case "runtime_workspace_revision_updated_at":
+			row[i] = revisionUpdatedAt
+		case "runtime_workspace_revision_source":
+			if revision != nil {
+				row[i] = models.PreviewRuntimeRevisionSourceLaunch
+			}
 		}
 	}
 	mock.ExpectQuery("INSERT INTO preview_instances").

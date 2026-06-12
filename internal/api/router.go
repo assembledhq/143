@@ -656,8 +656,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		hmrWatcher, hmrErr = preview.NewHMRWatcher(preview.HMRWatcherConfig{
 			Inspector: previewInspector,
 			Store:     previewStore,
-			Logger:    logger,
-			BlobDir:   cfg.PreviewHMRBlobDir,
+			RuntimeStamper: preview.DBPreviewRuntimeRevisionStamper{
+				PreviewStore: previewStore,
+				SessionStore: sessionStore,
+			},
+			Logger:  logger,
+			BlobDir: cfg.PreviewHMRBlobDir,
 		})
 		if hmrErr != nil {
 			logger.Warn().Err(hmrErr).Msg("failed to initialize HMR watcher — auto-screenshot disabled")
