@@ -36,6 +36,48 @@ func TestGenerateAndValidatePreviewToken(t *testing.T) {
 	require.Equal(t, "proxy", claims.Action, "validated claims should preserve the action")
 }
 
+func TestPreviewTokenKeyring_SignsWithFirstSecretAndValidatesAllSecrets(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	keyring, err := NewPreviewTokenKeyring([]string{"new-secret", "old-secret"})
+	require.NoError(t, err, "NewPreviewTokenKeyring should accept multiple non-empty secrets")
+
+	token, err := keyring.Generate(PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: "worker-1",
+		Action:       "proxy",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	})
+	require.NoError(t, err, "PreviewTokenKeyring.Generate should sign with the first configured secret")
+
+	_, err = ValidatePreviewToken("old-secret", token)
+	require.Error(t, err, "tokens signed by the first configured secret should not validate with secondary secrets")
+
+	claims, err := keyring.Validate(token)
+	require.NoError(t, err, "PreviewTokenKeyring.Validate should accept a token signed by any configured secret")
+	require.Equal(t, orgID, claims.OrgID, "validated keyring claims should preserve org scope")
+
+	oldToken, err := GeneratePreviewToken("old-secret", PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: "worker-1",
+		Action:       "proxy",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	})
+	require.NoError(t, err, "GeneratePreviewToken should create a legacy signed token")
+
+	claims, err = keyring.Validate(oldToken)
+	require.NoError(t, err, "PreviewTokenKeyring.Validate should accept tokens signed by secondary secrets during rotation")
+	require.Equal(t, orgID, claims.OrgID, "validated secondary-secret claims should preserve org scope")
+}
+
+func TestNewPreviewTokenKeyring_RejectsEmptySecrets(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewPreviewTokenKeyring([]string{"", "  "})
+	require.Error(t, err, "NewPreviewTokenKeyring should reject an empty effective secret list")
+}
+
 func TestValidatePreviewToken_InvalidSignature(t *testing.T) {
 	t.Parallel()
 
