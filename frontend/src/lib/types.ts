@@ -2142,6 +2142,11 @@ export interface UsageBreakdownRow {
 export type AutomationScheduleType = 'interval' | 'cron';
 export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
 export type AutomationIdentityScope = 'org' | 'personal';
+export type AutomationGitHubEvent =
+  | 'github.pull_request.opened'
+  | 'github.issue_comment.created'
+  | 'github.pull_request_review.submitted'
+  | 'github.pull_request_review_comment.created';
 
 export interface Automation {
   id: string;
@@ -2165,6 +2170,7 @@ export interface Automation {
   interval_unit?: 'hours' | 'days' | 'weeks';
   interval_run_at?: string;
   cron_expression?: string;
+  github_event_triggers?: AutomationGitHubEvent[];
   timezone: string;
   next_run_at?: string;
   last_run_at?: string;
@@ -2181,7 +2187,7 @@ export interface AutomationRun {
   id: string;
   automation_id: string;
   triggered_at: string;
-  triggered_by: 'schedule' | 'manual';
+  triggered_by: 'schedule' | 'manual' | 'github';
   triggered_by_user_id?: string;
   scheduled_time?: string;
   goal_snapshot: string;
