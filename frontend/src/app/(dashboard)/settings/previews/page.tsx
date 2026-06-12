@@ -1,11 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
-import { Copy, Eye, HelpCircle, KeyRound, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  Copy,
+  Eye,
+  HelpCircle,
+  KeyRound,
+  MonitorPlay,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -40,24 +56,48 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { useOrgSettingsAutosave } from "@/hooks/use-org-settings-autosave";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api, ApiError } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { pollMs } from "@/lib/poll-intervals";
 import { queryKeys } from "@/lib/query-keys";
+import {
+  DEFAULT_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+  MAX_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+  MIN_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+  clampNumber,
+} from "@/lib/settings-constants";
 import type {
   ListResponse,
+  Organization,
+  OrgSettings,
   PreviewAPIToken,
+  PreviewPolicySummary,
   PreviewSecretBundleRevealResult,
   PreviewSecretBundleOutput,
   PreviewSecretBundlePatchRequest,
   PreviewSecretBundleSummary,
   PreviewSecretBundleUpsertRequest,
   Repository,
+  SingleResponse,
 } from "@/lib/types";
 
 const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
@@ -93,10 +133,17 @@ type BundleFormState = {
 
 type RevealTarget =
   | { type: "file"; bundle: PreviewSecretBundleSummary }
-  | { type: "env"; bundle: PreviewSecretBundleSummary; rowId: string; key: string };
+  | {
+      type: "env";
+      bundle: PreviewSecretBundleSummary;
+      rowId: string;
+      key: string;
+    };
 
 /** Creates a new blank row with a stable unique ID for React reconciliation. */
-function makeRow(overrides?: Partial<Omit<SecretValueRow, "rowId">>): SecretValueRow {
+function makeRow(
+  overrides?: Partial<Omit<SecretValueRow, "rowId">>,
+): SecretValueRow {
   return { rowId: crypto.randomUUID(), key: "", value: "", ...overrides };
 }
 
@@ -118,32 +165,242 @@ export default function PreviewSettingsPage() {
   return (
     <PageContainer size="default">
       <div className="space-y-8">
-        <PageHeader title="Preview" description="Configure preview secrets and API access." />
-        <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
-          <p className="text-xs text-muted-foreground">
-            Shared sandbox networking, lifecycle, and capacity controls live in Runtime.
-          </p>
-          <Button asChild variant="outline" size="sm">
-            <Link href="/settings/runtime">Runtime settings</Link>
-          </Button>
-        </div>
-        <PreviewSecretsSection />
-        <PreviewAPISection />
+        <PageHeader
+          title="Preview"
+          description="Configure preview secrets and API access."
+        />
+        <Tabs defaultValue="auto-preview" className="space-y-5">
+          <TabsList>
+            <TabsTrigger value="auto-preview">Auto-preview</TabsTrigger>
+            <TabsTrigger value="secrets">Secrets</TabsTrigger>
+            <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
+          </TabsList>
+          <TabsContent value="auto-preview" className="space-y-4">
+            <AutoPreviewSection />
+          </TabsContent>
+          <TabsContent value="secrets" className="space-y-4">
+            <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
+              <p className="text-xs text-muted-foreground">
+                Shared sandbox networking, lifecycle, and capacity controls live
+                in Runtime.
+              </p>
+              <Button asChild variant="outline" size="sm">
+                <Link href="/settings/runtime">Runtime settings</Link>
+              </Button>
+            </div>
+            <PreviewSecretsSection />
+          </TabsContent>
+          <TabsContent value="api-tokens" className="space-y-4">
+            <PreviewAPISection />
+          </TabsContent>
+        </Tabs>
       </div>
     </PageContainer>
+  );
+}
+
+function AutoPreviewSection() {
+  const queryClient = useQueryClient();
+  const autosave = useOrgSettingsAutosave();
+  const policiesQuery = useQuery<ListResponse<PreviewPolicySummary>>({
+    queryKey: ["preview-policies"],
+    queryFn: () => api.previews.policies.list(),
+  });
+  const settingsQuery = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+  const settings = (settingsQuery.data?.data.settings ?? {}) as OrgSettings;
+  const poolValue =
+    settings.preview_auto_pool_max_active ??
+    DEFAULT_PREVIEW_AUTO_POOL_MAX_ACTIVE;
+
+  const policyMutation = useMutation({
+    mutationFn: ({
+      repositoryId,
+      mode,
+    }: {
+      repositoryId: string;
+      mode: PreviewPolicySummary["auto_mode"];
+    }) => api.previews.policies.update(repositoryId, { auto_mode: mode }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["preview-policies"] });
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Preview policy could not be saved.",
+      );
+    },
+  });
+
+  const policies = policiesQuery.data?.data ?? [];
+
+  return (
+    <section className="space-y-4" aria-labelledby="auto-preview-heading">
+      <div className="space-y-1">
+        <h2
+          id="auto-preview-heading"
+          className="text-sm font-semibold text-foreground"
+        >
+          Auto-preview
+        </h2>
+        <p className="text-xs text-muted-foreground">
+          Build previews for open pull requests. Warm mode hibernates after a
+          successful build so the PR link resumes quickly.
+        </p>
+      </div>
+
+      <div className="overflow-hidden rounded-md border border-border">
+        <Table>
+          <TableHeader className="hidden md:table-header-group">
+            <TableRow>
+              <TableHead>Repository</TableHead>
+              <TableHead>Mode</TableHead>
+              <TableHead>Open PRs</TableHead>
+              <TableHead>Updated</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {policiesQuery.isLoading ? (
+              <TableRow>
+                <TableCell
+                  colSpan={4}
+                  className="py-6 text-sm text-muted-foreground"
+                >
+                  Loading preview policies...
+                </TableCell>
+              </TableRow>
+            ) : policies.length ? (
+              policies.map((policy) => (
+                <TableRow
+                  key={policy.repository_id}
+                  className="block border-b p-3 md:table-row md:p-0"
+                >
+                  <TableCell className="block px-0 py-1 md:table-cell md:px-4 md:py-3">
+                    <div className="flex items-center gap-2 font-medium text-foreground">
+                      <MonitorPlay className="h-4 w-4 text-muted-foreground" />
+                      {policy.repository_full_name}
+                    </div>
+                  </TableCell>
+                  <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
+                    <ToggleGroup
+                      type="single"
+                      value={policy.auto_mode}
+                      onValueChange={(value) => {
+                        if (!value || value === policy.auto_mode) return;
+                        policyMutation.mutate({
+                          repositoryId: policy.repository_id,
+                          mode: value as PreviewPolicySummary["auto_mode"],
+                        });
+                      }}
+                      className="justify-start"
+                    >
+                      <ToggleGroupItem
+                        value="off"
+                        aria-label={`Turn off auto-preview for ${policy.repository_full_name}`}
+                      >
+                        Off
+                      </ToggleGroupItem>
+                      <ToggleGroupItem
+                        value="warm"
+                        aria-label={`Use warm auto-preview for ${policy.repository_full_name}`}
+                      >
+                        Warm
+                      </ToggleGroupItem>
+                      <ToggleGroupItem
+                        value="on"
+                        aria-label={`Keep auto-preview on for ${policy.repository_full_name}`}
+                      >
+                        On
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                  </TableCell>
+                  <TableCell className="block px-0 py-1 text-sm md:table-cell md:px-4 md:py-3">
+                    <span className="mr-2 font-medium md:hidden">Open PRs</span>
+                    {policy.open_pr_count}
+                  </TableCell>
+                  <TableCell className="block px-0 py-1 text-sm text-muted-foreground md:table-cell md:px-4 md:py-3">
+                    <span className="mr-2 font-medium text-foreground md:hidden">
+                      Updated
+                    </span>
+                    {policy.updated_at
+                      ? new Date(policy.updated_at).toLocaleDateString()
+                      : "-"}
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow>
+                <TableCell colSpan={4} className="py-6">
+                  <EmptyState
+                    icon={MonitorPlay}
+                    title="No connected repositories"
+                    description="Connect a repository before configuring auto-preview policy."
+                    variant="inline"
+                  />
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+
+      <div className="space-y-3 rounded-md border border-border p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-medium text-foreground">
+              Auto-preview pool
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Warm and hibernated previews do not count against this pool.
+            </p>
+          </div>
+          <AutosaveIndicator status={autosave.status} />
+        </div>
+        <div className="max-w-xs space-y-2">
+          <Label htmlFor="preview-auto-pool">Concurrent auto-previews</Label>
+          <Input
+            id="preview-auto-pool"
+            inputMode="numeric"
+            value={poolValue}
+            onChange={(event) => {
+              const nextValue = clampNumber(
+                Number(
+                  event.target.value || DEFAULT_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+                ),
+                MIN_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+                MAX_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+              );
+              autosave.save({
+                settings: { preview_auto_pool_max_active: nextValue },
+              });
+            }}
+          />
+        </div>
+      </div>
+    </section>
   );
 }
 
 function PreviewSecretsSection() {
   const queryClient = useQueryClient();
   const [repoParam, setRepoParam] = useQueryState("repo");
-  const [selectedRepositoryId, setSelectedRepositoryId] = useState(repoParam ?? "");
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState(
+    repoParam ?? "",
+  );
   const [dialogMode, setDialogMode] = useState<BundleDialogMode | null>(null);
   const [form, setForm] = useState<BundleFormState>(makeEmptyBundleForm);
   const [formError, setFormError] = useState<string | null>(null);
-  const [jsonValidationError, setJSONValidationError] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<PreviewSecretBundleSummary | null>(null);
-  const [revealedEnvRowIds, setRevealedEnvRowIds] = useState<Map<string, string>>(() => new Map());
+  const [jsonValidationError, setJSONValidationError] = useState<string | null>(
+    null,
+  );
+  const [deleteTarget, setDeleteTarget] =
+    useState<PreviewSecretBundleSummary | null>(null);
+  const [revealedEnvRowIds, setRevealedEnvRowIds] = useState<
+    Map<string, string>
+  >(() => new Map());
 
   const repositoriesQuery = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
@@ -151,15 +408,19 @@ function PreviewSecretsSection() {
   });
 
   const activeRepositories = useMemo(
-    () => (repositoriesQuery.data?.data ?? []).filter((repo) => repo.status === "active"),
+    () =>
+      (repositoriesQuery.data?.data ?? []).filter(
+        (repo) => repo.status === "active",
+      ),
     [repositoriesQuery.data?.data],
   );
   // selectedRepositoryId is initialized from repoParam, so the first find already
   // handles the URL-param case. The fallback to activeRepositories[0] picks the
   // first active repo when no explicit selection has been made.
-  const selectedRepository = activeRepositories.find((repo) => repo.id === selectedRepositoryId)
-    ?? activeRepositories[0]
-    ?? null;
+  const selectedRepository =
+    activeRepositories.find((repo) => repo.id === selectedRepositoryId) ??
+    activeRepositories[0] ??
+    null;
   const effectiveSelectedRepositoryId = selectedRepository?.id ?? "";
 
   useEffect(() => {
@@ -173,62 +434,100 @@ function PreviewSecretsSection() {
 
   const bundlesQuery = useQuery<ListResponse<PreviewSecretBundleSummary>>({
     queryKey: effectiveSelectedRepositoryId
-      ? queryKeys.repositories.previewSecretBundles(effectiveSelectedRepositoryId)
+      ? queryKeys.repositories.previewSecretBundles(
+          effectiveSelectedRepositoryId,
+        )
       : queryKeys.repositories.previewSecretBundles("none"),
-    queryFn: () => api.repositories.previewSecretBundles.list(effectiveSelectedRepositoryId),
+    queryFn: () =>
+      api.repositories.previewSecretBundles.list(effectiveSelectedRepositoryId),
     enabled: Boolean(effectiveSelectedRepositoryId),
   });
 
   const bundles = bundlesQuery.data?.data ?? [];
 
   const saveMutation = useMutation({
-    mutationFn: ({ mode, body, repositoryId }: {
+    mutationFn: ({
+      mode,
+      body,
+      repositoryId,
+    }: {
       mode: BundleDialogMode;
       body: PreviewSecretBundlePatchRequest | PreviewSecretBundleUpsertRequest;
       repositoryId: string;
     }) => {
       if (mode.type === "edit") {
-        return api.repositories.previewSecretBundles.patch(mode.bundle.id, body);
+        return api.repositories.previewSecretBundles.patch(
+          mode.bundle.id,
+          body,
+        );
       }
-      return api.repositories.previewSecretBundles.upsert(repositoryId, body as PreviewSecretBundleUpsertRequest);
+      return api.repositories.previewSecretBundles.upsert(
+        repositoryId,
+        body as PreviewSecretBundleUpsertRequest,
+      );
     },
     onSuccess: (_data, { repositoryId }) => {
       toast.success("Preview secret bundle saved");
       setSelectedRepositoryId(repositoryId);
       void setRepoParam(repositoryId);
       closeBundleDialog();
-      void queryClient.invalidateQueries({ queryKey: queryKeys.repositories.previewSecretBundles(repositoryId) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.repositories.previewSecretBundles(repositoryId),
+      });
     },
     onError: (error) => {
-      setFormError(error instanceof ApiError ? error.message : "Preview secret bundle could not be saved.");
+      setFormError(
+        error instanceof ApiError
+          ? error.message
+          : "Preview secret bundle could not be saved.",
+      );
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: (bundle: PreviewSecretBundleSummary) =>
-      api.repositories.previewSecretBundles.delete(bundle.repository_id, bundle.name),
+      api.repositories.previewSecretBundles.delete(
+        bundle.repository_id,
+        bundle.name,
+      ),
     onSuccess: (_response, bundle) => {
       toast.success("Preview secret bundle deleted");
       setDeleteTarget(null);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.repositories.previewSecretBundles(bundle.repository_id) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.repositories.previewSecretBundles(
+          bundle.repository_id,
+        ),
+      });
     },
     onError: (error) => {
-      toast.error(error instanceof ApiError ? error.message : "Could not delete preview secret bundle");
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Could not delete preview secret bundle",
+      );
     },
   });
 
   const revealMutation = useMutation({
     mutationFn: async (target: RevealTarget) => {
-      const response = await api.repositories.previewSecretBundles.reveal(target.bundle.id);
+      const response = await api.repositories.previewSecretBundles.reveal(
+        target.bundle.id,
+      );
       return { response, target };
     },
     onSuccess: ({ response, target }) => {
-      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== target.bundle.id) return;
+      if (
+        dialogMode?.type !== "edit" ||
+        dialogMode.bundle.id !== target.bundle.id
+      )
+        return;
       const content = getRevealedSecretValue(response.data, target);
       if (content === null) {
-        setFormError(target.type === "file"
-          ? "Could not find stored file contents for this bundle."
-          : `Could not find stored value for ${target.key}.`);
+        setFormError(
+          target.type === "file"
+            ? "Could not find stored file contents for this bundle."
+            : `Could not find stored value for ${target.key}.`,
+        );
         return;
       }
       if (target.type === "file") {
@@ -236,16 +535,28 @@ function PreviewSecretsSection() {
       } else {
         setForm((current) => ({
           ...current,
-          rows: current.rows.map((row) => row.rowId === target.rowId ? { ...row, value: content } : row),
+          rows: current.rows.map((row) =>
+            row.rowId === target.rowId ? { ...row, value: content } : row,
+          ),
         }));
-        setRevealedEnvRowIds((current) => new Map(current).set(target.rowId, target.key));
+        setRevealedEnvRowIds((current) =>
+          new Map(current).set(target.rowId, target.key),
+        );
       }
       setFormError(null);
       setJSONValidationError(null);
     },
     onError: (error, target) => {
-      if (dialogMode?.type !== "edit" || dialogMode.bundle.id !== target.bundle.id) return;
-      setFormError(error instanceof ApiError ? error.message : "Secret contents could not be revealed.");
+      if (
+        dialogMode?.type !== "edit" ||
+        dialogMode.bundle.id !== target.bundle.id
+      )
+        return;
+      setFormError(
+        error instanceof ApiError
+          ? error.message
+          : "Secret contents could not be revealed.",
+      );
     },
   });
 
@@ -263,7 +574,8 @@ function PreviewSecretsSection() {
     setForm({
       repositoryId: bundle.repository_id,
       name: bundle.name,
-      deliveryMode: fileOuts.length > 0 && envRows.length === 0 ? "file" : "env",
+      deliveryMode:
+        fileOuts.length > 0 && envRows.length === 0 ? "file" : "env",
       rows: envRows.length > 0 ? envRows : [makeRow()],
       filePath: fileOuts[0]?.path ?? "",
       fileFormat: fileOuts[0]?.format === "json" ? "json" : "raw",
@@ -303,7 +615,9 @@ function PreviewSecretsSection() {
   function updateRow(index: number, patch: Partial<SecretValueRow>) {
     setForm((current) => ({
       ...current,
-      rows: current.rows.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch } : row),
+      rows: current.rows.map((row, rowIndex) =>
+        rowIndex === index ? { ...row, ...patch } : row,
+      ),
     }));
   }
 
@@ -315,9 +629,10 @@ function PreviewSecretsSection() {
     const removed = form.rows[index];
     setForm((current) => ({
       ...current,
-      rows: current.rows.length === 1
-        ? [makeRow()]
-        : current.rows.filter((_, rowIndex) => rowIndex !== index),
+      rows:
+        current.rows.length === 1
+          ? [makeRow()]
+          : current.rows.filter((_, rowIndex) => rowIndex !== index),
     }));
     if (removed) {
       setRevealedEnvRowIds((ids) => {
@@ -348,17 +663,32 @@ function PreviewSecretsSection() {
     }
     setFormError(null);
     setJSONValidationError(null);
-    saveMutation.mutate({ mode: dialogMode, body, repositoryId: form.repositoryId });
+    saveMutation.mutate({
+      mode: dialogMode,
+      body,
+      repositoryId: form.repositoryId,
+    });
   }
 
   return (
     <section className="space-y-4" aria-labelledby="preview-secrets-heading">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1">
-          <h2 id="preview-secrets-heading" className="text-sm font-semibold text-foreground">Preview secrets</h2>
-          <p className="text-xs text-muted-foreground">Repo-scoped secret bundles used at preview runtime.</p>
+          <h2
+            id="preview-secrets-heading"
+            className="text-sm font-semibold text-foreground"
+          >
+            Preview secrets
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            Repo-scoped secret bundles used at preview runtime.
+          </p>
         </div>
-        <Button type="button" onClick={openCreateDialog} disabled={activeRepositories.length === 0}>
+        <Button
+          type="button"
+          onClick={openCreateDialog}
+          disabled={activeRepositories.length === 0}
+        >
           <Plus className="h-4 w-4" />
           New bundle
         </Button>
@@ -375,11 +705,19 @@ function PreviewSecretsSection() {
           disabled={activeRepositories.length === 0}
         >
           <SelectTrigger id="preview-repository-select">
-            <SelectValue placeholder={repositoriesQuery.isLoading ? "Loading repositories..." : "No active repositories"} />
+            <SelectValue
+              placeholder={
+                repositoriesQuery.isLoading
+                  ? "Loading repositories..."
+                  : "No active repositories"
+              }
+            />
           </SelectTrigger>
           <SelectContent>
             {activeRepositories.map((repo) => (
-              <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+              <SelectItem key={repo.id} value={repo.id}>
+                {repo.full_name}
+              </SelectItem>
             ))}
           </SelectContent>
         </Select>
@@ -420,24 +758,33 @@ function PreviewSecretsSection() {
         onRowAdd={addRow}
         onRowRemove={removeRow}
         onReveal={(target) => revealMutation.mutate(target)}
-        revealingTarget={revealMutation.isPending ? revealMutation.variables ?? null : null}
+        revealingTarget={
+          revealMutation.isPending ? (revealMutation.variables ?? null) : null
+        }
         revealedEnvRowIds={revealedEnvRowIds}
         onSubmit={handleSave}
       />
 
-      <AlertDialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+      <AlertDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete preview secret bundle?</AlertDialogTitle>
             <AlertDialogDescription>
-              Delete {deleteTarget?.name} from {selectedRepository?.full_name ?? "this repository"}. Previews that reference this bundle may fail to start.
+              Delete {deleteTarget?.name} from{" "}
+              {selectedRepository?.full_name ?? "this repository"}. Previews
+              that reference this bundle may fail to start.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
-              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget)}
+              onClick={() =>
+                deleteTarget && deleteMutation.mutate(deleteTarget)
+              }
               disabled={deleteMutation.isPending}
             >
               Delete bundle
@@ -478,9 +825,17 @@ function BundleInventory({
         <EmptyState
           icon={KeyRound}
           title="No preview secret bundles"
-          description={repositoryName ? `Create the first bundle for ${repositoryName}.` : "Choose a repository to manage preview secrets."}
+          description={
+            repositoryName
+              ? `Create the first bundle for ${repositoryName}.`
+              : "Choose a repository to manage preview secrets."
+          }
           variant="inline"
-          action={repositoryName ? { label: "New bundle", onClick: onCreate } : undefined}
+          action={
+            repositoryName
+              ? { label: "New bundle", onClick: onCreate }
+              : undefined
+          }
         />
       </div>
     );
@@ -503,8 +858,12 @@ function BundleInventory({
               <TableRow key={bundle.id}>
                 <TableCell>
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-foreground">{bundle.name}</p>
-                    <p className="text-xs text-muted-foreground">{bundle.source_type}</p>
+                    <p className="truncate font-medium text-foreground">
+                      {bundle.name}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {bundle.source_type}
+                    </p>
                   </div>
                 </TableCell>
                 <TableCell>
@@ -512,7 +871,12 @@ function BundleInventory({
                 </TableCell>
                 <TableCell>{formatDate(bundle.created_at)}</TableCell>
                 <TableCell>
-                  <BundleActions bundle={bundle} onEdit={onEdit} onDelete={onDelete} align="end" />
+                  <BundleActions
+                    bundle={bundle}
+                    onEdit={onEdit}
+                    onDelete={onDelete}
+                    align="end"
+                  />
                 </TableCell>
               </TableRow>
             ))}
@@ -525,12 +889,24 @@ function BundleInventory({
           <div key={bundle.id} className="rounded-md border border-border p-3">
             <div className="space-y-3">
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-foreground">{bundle.name}</p>
-                <p className="text-xs text-muted-foreground">{bundle.source_type}</p>
+                <p className="truncate text-sm font-medium text-foreground">
+                  {bundle.name}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {bundle.source_type}
+                </p>
               </div>
-              <LabeledMobileValue label="Outputs"><OutputBadges bundle={bundle} /></LabeledMobileValue>
-              <LabeledMobileValue label="Last changed">{formatDate(bundle.created_at)}</LabeledMobileValue>
-              <BundleActions bundle={bundle} onEdit={onEdit} onDelete={onDelete} />
+              <LabeledMobileValue label="Outputs">
+                <OutputBadges bundle={bundle} />
+              </LabeledMobileValue>
+              <LabeledMobileValue label="Last changed">
+                {formatDate(bundle.created_at)}
+              </LabeledMobileValue>
+              <BundleActions
+                bundle={bundle}
+                onEdit={onEdit}
+                onDelete={onDelete}
+              />
             </div>
           </div>
         ))}
@@ -551,12 +927,27 @@ function BundleActions({
   align?: "start" | "end";
 }) {
   return (
-    <div className={`flex flex-wrap gap-2${align === "end" ? " justify-end" : ""}`}>
-      <Button type="button" variant="outline" size="sm" onClick={() => onEdit(bundle)} aria-label={`Edit ${bundle.name}`}>
+    <div
+      className={`flex flex-wrap gap-2${align === "end" ? " justify-end" : ""}`}
+    >
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onEdit(bundle)}
+        aria-label={`Edit ${bundle.name}`}
+      >
         <Pencil className="h-4 w-4" />
         Edit
       </Button>
-      <Button type="button" variant="outline" size="sm" onClick={() => onDelete(bundle)} aria-label={`Delete ${bundle.name}`} title={`Delete ${bundle.name}`}>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onDelete(bundle)}
+        aria-label={`Delete ${bundle.name}`}
+        title={`Delete ${bundle.name}`}
+      >
         <Trash2 className="h-4 w-4" />
         Delete
       </Button>
@@ -599,26 +990,39 @@ function BundleDialog({
 }) {
   const isEdit = mode?.type === "edit";
   const editBundle = mode?.type === "edit" ? mode.bundle : null;
-  const editHasFileOutputs = editBundle ? editBundle.outputs.some((o) => o.type === "file") : false;
-  const existingEnvNames = new Set(editBundle ? envNamesFromBundle(editBundle) : []);
+  const editHasFileOutputs = editBundle
+    ? editBundle.outputs.some((o) => o.type === "file")
+    : false;
+  const existingEnvNames = new Set(
+    editBundle ? envNamesFromBundle(editBundle) : [],
+  );
   const hasEnvOutput = form.rows.some((row) => {
     const key = row.key.trim();
     return key && (Boolean(row.value) || (isEdit && existingEnvNames.has(key)));
   });
-  const wantsFileOutput = Boolean(form.filePath.trim()) || Boolean(form.fileContent);
-  const canPreserveFileContent = isEdit && editHasFileOutputs && Boolean(form.filePath.trim()) && !form.fileContent;
-  const hasFileOutput = Boolean(form.filePath.trim()) && (Boolean(form.fileContent) || canPreserveFileContent);
-  const canSave = Boolean(form.repositoryId)
-    && Boolean(form.name.trim())
-    && (hasEnvOutput || hasFileOutput)
-    && (!wantsFileOutput || hasFileOutput);
-  const saveTooltip = form.fileContent && !form.filePath.trim()
-    ? "Add the secret file path before saving"
-    : form.filePath.trim() && !form.fileContent && !canPreserveFileContent
-      ? "Paste the secret file contents before saving"
-      : !hasEnvOutput && !hasFileOutput
-        ? "Add at least one environment variable or secret file"
-        : undefined;
+  const wantsFileOutput =
+    Boolean(form.filePath.trim()) || Boolean(form.fileContent);
+  const canPreserveFileContent =
+    isEdit &&
+    editHasFileOutputs &&
+    Boolean(form.filePath.trim()) &&
+    !form.fileContent;
+  const hasFileOutput =
+    Boolean(form.filePath.trim()) &&
+    (Boolean(form.fileContent) || canPreserveFileContent);
+  const canSave =
+    Boolean(form.repositoryId) &&
+    Boolean(form.name.trim()) &&
+    (hasEnvOutput || hasFileOutput) &&
+    (!wantsFileOutput || hasFileOutput);
+  const saveTooltip =
+    form.fileContent && !form.filePath.trim()
+      ? "Add the secret file path before saving"
+      : form.filePath.trim() && !form.fileContent && !canPreserveFileContent
+        ? "Paste the secret file contents before saving"
+        : !hasEnvOutput && !hasFileOutput
+          ? "Add at least one environment variable or secret file"
+          : undefined;
 
   return (
     <Dialog open={Boolean(mode)} onOpenChange={onOpenChange}>
@@ -626,7 +1030,8 @@ function BundleDialog({
         <DialogHeader>
           <DialogTitle>{isEdit ? "Edit bundle" : "New bundle"}</DialogTitle>
           <DialogDescription>
-            Secret values are not shown again after creation. Add one or more environment variables and optionally one generated file.
+            Secret values are not shown again after creation. Add one or more
+            environment variables and optionally one generated file.
             {editHasFileOutputs
               ? " Leave the file contents blank to keep the encrypted file already stored, or paste new contents to replace it."
               : null}
@@ -635,13 +1040,21 @@ function BundleDialog({
         <form className="space-y-5" onSubmit={onSubmit}>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label htmlFor={isEdit ? "bundle-repository" : "bundle-repository-select"}>Bundle repository</Label>
+              <Label
+                htmlFor={
+                  isEdit ? "bundle-repository" : "bundle-repository-select"
+                }
+              >
+                Bundle repository
+              </Label>
               {isEdit ? (
                 <Input id="bundle-repository" value={repositoryName} disabled />
               ) : (
                 <Select
                   value={form.repositoryId}
-                  onValueChange={(repositoryId) => onFormChange({ ...form, repositoryId })}
+                  onValueChange={(repositoryId) =>
+                    onFormChange({ ...form, repositoryId })
+                  }
                   disabled={repositories.length === 0}
                 >
                   <SelectTrigger id="bundle-repository-select">
@@ -649,7 +1062,9 @@ function BundleDialog({
                   </SelectTrigger>
                   <SelectContent>
                     {repositories.map((repo) => (
-                      <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                      <SelectItem key={repo.id} value={repo.id}>
+                        {repo.full_name}
+                      </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -660,7 +1075,9 @@ function BundleDialog({
               <Input
                 id="bundle-name"
                 value={form.name}
-                onChange={(event) => onFormChange({ ...form, name: event.target.value })}
+                onChange={(event) =>
+                  onFormChange({ ...form, name: event.target.value })
+                }
                 placeholder="assembled-dev"
                 autoComplete="off"
               />
@@ -669,9 +1086,17 @@ function BundleDialog({
 
           <Tabs
             value={form.deliveryMode}
-            onValueChange={(value) => onFormChange({ ...form, deliveryMode: value as BundleDeliveryMode })}
+            onValueChange={(value) =>
+              onFormChange({
+                ...form,
+                deliveryMode: value as BundleDeliveryMode,
+              })
+            }
           >
-            <TabsList aria-label="Bundle output editor" className="w-full sm:w-fit">
+            <TabsList
+              aria-label="Bundle output editor"
+              className="w-full sm:w-fit"
+            >
               <TabsTrigger value="env">Environment variables</TabsTrigger>
               <TabsTrigger value="file">Secret file</TabsTrigger>
             </TabsList>
@@ -694,7 +1119,9 @@ function BundleDialog({
                 form={form}
                 canReveal={isEdit && editHasFileOutputs}
                 revealing={revealingTarget?.type === "file"}
-                onReveal={() => editBundle && onReveal({ type: "file", bundle: editBundle })}
+                onReveal={() =>
+                  editBundle && onReveal({ type: "file", bundle: editBundle })
+                }
                 onFormChange={onFormChange}
               />
             </TabsContent>
@@ -704,7 +1131,9 @@ function BundleDialog({
 
           <DialogFooter>
             <DialogClose asChild>
-              <Button type="button" variant="outline" disabled={saving}>Cancel</Button>
+              <Button type="button" variant="outline" disabled={saving}>
+                Cancel
+              </Button>
             </DialogClose>
             <SaveButton disabled={!canSave || saving} tooltip={saveTooltip}>
               <KeyRound className="h-4 w-4" />
@@ -731,16 +1160,21 @@ function SecretFileFields({
   onFormChange: (form: BundleFormState) => void;
 }) {
   const [isReplacingFileContent, setIsReplacingFileContent] = useState(false);
-  const isMaskedFileContent = canReveal && !form.fileContent && !isReplacingFileContent;
-  const contentValue = isMaskedFileContent ? MASKED_SECRET_FILE_PLACEHOLDER : form.fileContent;
-  const contentPlaceholder = form.fileFormat === "json"
-    ? '{\n  "token": "paste-secret-value-here"\n}'
-    : "Paste the file contents here";
+  const isMaskedFileContent =
+    canReveal && !form.fileContent && !isReplacingFileContent;
+  const contentValue = isMaskedFileContent
+    ? MASKED_SECRET_FILE_PLACEHOLDER
+    : form.fileContent;
+  const contentPlaceholder =
+    form.fileFormat === "json"
+      ? '{\n  "token": "paste-secret-value-here"\n}'
+      : "Paste the file contents here";
 
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
-        Paste the exact file that the preview app expects. 143 stores it encrypted and writes it into the preview workspace at runtime.
+        Paste the exact file that the preview app expects. 143 stores it
+        encrypted and writes it into the preview workspace at runtime.
       </p>
       <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_12rem]">
         <div className="space-y-1.5">
@@ -748,7 +1182,9 @@ function SecretFileFields({
           <Input
             id="secret-file-path"
             value={form.filePath}
-            onChange={(event) => onFormChange({ ...form, filePath: event.target.value })}
+            onChange={(event) =>
+              onFormChange({ ...form, filePath: event.target.value })
+            }
             placeholder="development.conf.json"
             autoComplete="off"
           />
@@ -757,7 +1193,12 @@ function SecretFileFields({
           <Label htmlFor="secret-file-type">Secret file type</Label>
           <Select
             value={form.fileFormat}
-            onValueChange={(fileFormat) => onFormChange({ ...form, fileFormat: fileFormat as BundleFormState["fileFormat"] })}
+            onValueChange={(fileFormat) =>
+              onFormChange({
+                ...form,
+                fileFormat: fileFormat as BundleFormState["fileFormat"],
+              })
+            }
           >
             <SelectTrigger id="secret-file-type">
               <SelectValue />
@@ -795,10 +1236,12 @@ function SecretFileFields({
               event.currentTarget.select();
             }
           }}
-          onChange={(event) => onFormChange({
-            ...form,
-            fileContent: event.target.value,
-          })}
+          onChange={(event) =>
+            onFormChange({
+              ...form,
+              fileContent: event.target.value,
+            })
+          }
           placeholder={contentPlaceholder}
           aria-label="Secret file contents"
           className={`min-h-40 font-mono text-xs${isMaskedFileContent ? " [-webkit-text-security:disc]" : ""}`}
@@ -832,7 +1275,9 @@ function StoredSecretsFields({
   onRowRemove: (index: number) => void;
   onReveal: (target: RevealTarget) => void;
 }) {
-  const [replacingRowIds, setReplacingRowIds] = useState<Set<string>>(() => new Set());
+  const [replacingRowIds, setReplacingRowIds] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   return (
     <div className="space-y-2">
@@ -849,34 +1294,54 @@ function StoredSecretsFields({
       <div className="space-y-2">
         {rows.map((row, index) => {
           const key = row.key.trim();
-          const canRevealRow = canReveal && Boolean(revealBundle) && Boolean(key);
+          const canRevealRow =
+            canReveal && Boolean(revealBundle) && Boolean(key);
           const isRevealed = revealedEnvRowIds.get(row.rowId) === key;
-          const isMaskedValue = canRevealRow && !isRevealed && !row.value && !replacingRowIds.has(row.rowId);
+          const isMaskedValue =
+            canRevealRow &&
+            !isRevealed &&
+            !row.value &&
+            !replacingRowIds.has(row.rowId);
           const value = isMaskedValue ? MASKED_SECRET_PLACEHOLDER : row.value;
 
           return (
-            <div key={row.rowId} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+            <div
+              key={row.rowId}
+              className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]"
+            >
               <Input
                 value={row.key}
-                onChange={(event) => onRowChange(index, { key: normalizeEnvKey(event.target.value) })}
+                onChange={(event) =>
+                  onRowChange(index, {
+                    key: normalizeEnvKey(event.target.value),
+                  })
+                }
                 placeholder="API_TOKEN"
-                aria-label={index === 0 ? "Secret name" : `Secret name ${index + 1}`}
+                aria-label={
+                  index === 0 ? "Secret name" : `Secret name ${index + 1}`
+                }
                 autoComplete="off"
               />
               <Input
                 value={value}
                 onFocus={(event) => {
                   if (isMaskedValue) {
-                    setReplacingRowIds((current) => new Set(current).add(row.rowId));
+                    setReplacingRowIds((current) =>
+                      new Set(current).add(row.rowId),
+                    );
                     event.currentTarget.select();
                   }
                 }}
-                onChange={(event) => onRowChange(index, {
-                  value: event.target.value,
-                })}
+                onChange={(event) =>
+                  onRowChange(index, {
+                    value: event.target.value,
+                  })
+                }
                 placeholder="Secret value"
                 type={isRevealed ? "text" : "password"}
-                aria-label={index === 0 ? "Secret value" : `Secret value ${index + 1}`}
+                aria-label={
+                  index === 0 ? "Secret value" : `Secret value ${index + 1}`
+                }
                 autoComplete="new-password"
               />
               {canRevealRow ? (
@@ -884,15 +1349,30 @@ function StoredSecretsFields({
                   type="button"
                   variant="outline"
                   size="icon"
-                  onClick={() => onReveal({ type: "env", bundle: revealBundle!, rowId: row.rowId, key })}
+                  onClick={() =>
+                    onReveal({
+                      type: "env",
+                      bundle: revealBundle!,
+                      rowId: row.rowId,
+                      key,
+                    })
+                  }
                   disabled={Boolean(revealingTarget)}
                   aria-label={`Reveal secret value ${key}`}
                   title={`Reveal secret value ${key}`}
                 >
                   <Eye className="h-4 w-4" />
                 </Button>
-              ) : <span />}
-              <Button type="button" variant="outline" size="icon" onClick={() => onRowRemove(index)} aria-label={`Remove secret row ${index + 1}`}>
+              ) : (
+                <span />
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => onRowRemove(index)}
+                aria-label={`Remove secret row ${index + 1}`}
+              >
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
@@ -907,7 +1387,15 @@ function StoredSecretsFields({
   );
 }
 
-function SaveButton({ disabled, tooltip, children }: { disabled: boolean; tooltip?: string; children: ReactNode }) {
+function SaveButton({
+  disabled,
+  tooltip,
+  children,
+}: {
+  disabled: boolean;
+  tooltip?: string;
+  children: ReactNode;
+}) {
   const button = (
     <Button type="submit" disabled={disabled}>
       {children}
@@ -953,29 +1441,46 @@ function PreviewAPISection() {
   const tokens = tokensQuery.data?.data ?? [];
 
   const createToken = useMutation({
-    mutationFn: () => api.previews.apiTokens.create({ name: name.trim(), scopes, repository_ids: repositoryIDs }),
+    mutationFn: () =>
+      api.previews.apiTokens.create({
+        name: name.trim(),
+        scopes,
+        repository_ids: repositoryIDs,
+      }),
     onSuccess: (response) => {
       setCreatedToken(response.data.token);
       setName("");
       setScopes([...SCOPES]);
       setRepositoryIDs([]);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.previews.apiTokens });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.previews.apiTokens,
+      });
     },
   });
 
   const revokeToken = useMutation({
     mutationFn: (id: string) => api.previews.apiTokens.revoke(id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.previews.apiTokens });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.previews.apiTokens,
+      });
     },
   });
 
   function toggleScope(scope: string) {
-    setScopes((current) => current.includes(scope) ? current.filter((item) => item !== scope) : [...current, scope]);
+    setScopes((current) =>
+      current.includes(scope)
+        ? current.filter((item) => item !== scope)
+        : [...current, scope],
+    );
   }
 
   function toggleRepository(id: string) {
-    setRepositoryIDs((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+    setRepositoryIDs((current) =>
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id],
+    );
   }
 
   function resetTokenDialog(open: boolean) {
@@ -991,7 +1496,8 @@ function PreviewAPISection() {
 
   function copyCreatedToken() {
     if (!createdToken) return;
-    void navigator.clipboard?.writeText(createdToken)
+    void navigator.clipboard
+      ?.writeText(createdToken)
       .then(() => toast.success("Preview API token copied"))
       .catch(() => toast.error("Could not copy preview API token"));
   }
@@ -1000,10 +1506,22 @@ function PreviewAPISection() {
     <section className="space-y-4" aria-labelledby="preview-api-heading">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-1">
-          <h2 id="preview-api-heading" className="text-sm font-semibold text-foreground">Preview API tokens</h2>
-          <p className="text-xs text-muted-foreground">Legacy preview-only tokens. Prefer external API clients for new session, automation, and preview integrations.</p>
+          <h2
+            id="preview-api-heading"
+            className="text-sm font-semibold text-foreground"
+          >
+            Preview API tokens
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            Legacy preview-only tokens. Prefer external API clients for new
+            session, automation, and preview integrations.
+          </p>
         </div>
-        <Button type="button" variant="outline" onClick={() => resetTokenDialog(true)}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => resetTokenDialog(true)}
+        >
           <Plus className="h-4 w-4" />
           Create token
         </Button>
@@ -1021,20 +1539,34 @@ function PreviewAPISection() {
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Create token</DialogTitle>
-            <DialogDescription>The token value is shown once after creation.</DialogDescription>
+            <DialogDescription>
+              The token value is shown once after creation.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-5">
             <div className="space-y-1.5">
               <Label htmlFor="preview-token-name">Name</Label>
-              <Input id="preview-token-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="CI previews" />
+              <Input
+                id="preview-token-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="CI previews"
+              />
             </div>
 
             <div className="space-y-2">
               <Label>Scopes</Label>
               <div className="grid gap-2 md:grid-cols-3">
                 {SCOPES.map((scope) => (
-                  <Label key={scope} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                    <Checkbox id={`scope-${scope}`} checked={scopes.includes(scope)} onCheckedChange={() => toggleScope(scope)} />
+                  <Label
+                    key={scope}
+                    className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
+                  >
+                    <Checkbox
+                      id={`scope-${scope}`}
+                      checked={scopes.includes(scope)}
+                      onCheckedChange={() => toggleScope(scope)}
+                    />
                     {scope}
                   </Label>
                 ))}
@@ -1045,21 +1577,41 @@ function PreviewAPISection() {
               <Label>Repository access</Label>
               <div className="grid max-h-56 gap-2 overflow-auto rounded-md border border-border p-2 md:grid-cols-2">
                 {repositories.map((repo) => (
-                  <Label key={repo.id} htmlFor={`repo-${repo.id}`} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm">
-                    <Checkbox id={`repo-${repo.id}`} checked={repositoryIDs.includes(repo.id)} onCheckedChange={() => toggleRepository(repo.id)} />
+                  <Label
+                    key={repo.id}
+                    htmlFor={`repo-${repo.id}`}
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"
+                  >
+                    <Checkbox
+                      id={`repo-${repo.id}`}
+                      checked={repositoryIDs.includes(repo.id)}
+                      onCheckedChange={() => toggleRepository(repo.id)}
+                    />
                     <span className="truncate">{repo.full_name}</span>
                   </Label>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground">Leave every repository unchecked to allow all repositories.</p>
+              <p className="text-xs text-muted-foreground">
+                Leave every repository unchecked to allow all repositories.
+              </p>
             </div>
 
             {createdToken ? (
               <div className="space-y-1.5 rounded-md border border-border bg-muted/30 p-3">
-                <p className="text-xs font-medium text-foreground">One-time token</p>
+                <p className="text-xs font-medium text-foreground">
+                  One-time token
+                </p>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="break-all font-mono text-xs text-foreground">{createdToken}</p>
-                  <Button type="button" variant="outline" size="sm" onClick={copyCreatedToken} aria-label="Copy token">
+                  <p className="break-all font-mono text-xs text-foreground">
+                    {createdToken}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={copyCreatedToken}
+                    aria-label="Copy token"
+                  >
                     <Copy className="h-4 w-4" />
                     Copy
                   </Button>
@@ -1067,14 +1619,26 @@ function PreviewAPISection() {
               </div>
             ) : null}
             {createToken.isError ? (
-              <p className="text-sm text-destructive">{createToken.error instanceof Error ? createToken.error.message : "Token could not be created."}</p>
+              <p className="text-sm text-destructive">
+                {createToken.error instanceof Error
+                  ? createToken.error.message
+                  : "Token could not be created."}
+              </p>
             ) : null}
           </div>
           <DialogFooter>
             <DialogClose asChild>
-              <Button type="button" variant="outline">Cancel</Button>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
             </DialogClose>
-            <Button type="button" onClick={() => createToken.mutate()} disabled={!name.trim() || scopes.length === 0 || createToken.isPending}>
+            <Button
+              type="button"
+              onClick={() => createToken.mutate()}
+              disabled={
+                !name.trim() || scopes.length === 0 || createToken.isPending
+              }
+            >
               <KeyRound className="h-4 w-4" />
               Create token
             </Button>
@@ -1138,13 +1702,33 @@ function TokenInventory({
                 <TableCell className="font-medium">{token.name}</TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
-                    {token.scopes.map((scope) => <Badge key={scope} variant="secondary">{scope}</Badge>)}
+                    {token.scopes.map((scope) => (
+                      <Badge key={scope} variant="secondary">
+                        {scope}
+                      </Badge>
+                    ))}
                   </div>
                 </TableCell>
-                <TableCell><RepositoryAccessBadge token={token} repositories={repositories} /></TableCell>
-                <TableCell>{token.last_used_at ? formatDate(token.last_used_at) : "Never"}</TableCell>
+                <TableCell>
+                  <RepositoryAccessBadge
+                    token={token}
+                    repositories={repositories}
+                  />
+                </TableCell>
+                <TableCell>
+                  {token.last_used_at
+                    ? formatDate(token.last_used_at)
+                    : "Never"}
+                </TableCell>
                 <TableCell className="text-right">
-                  <Button type="button" variant="outline" size="sm" onClick={() => onRevoke(token)} disabled={revoking} aria-label={`Revoke ${token.name}`}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => onRevoke(token)}
+                    disabled={revoking}
+                    aria-label={`Revoke ${token.name}`}
+                  >
                     <Trash2 className="h-4 w-4" />
                     Revoke
                   </Button>
@@ -1159,17 +1743,35 @@ function TokenInventory({
         {tokens.map((token) => (
           <div key={token.id} className="rounded-md border border-border p-3">
             <div className="space-y-3">
-              <p className="truncate text-sm font-medium text-foreground">{token.name}</p>
+              <p className="truncate text-sm font-medium text-foreground">
+                {token.name}
+              </p>
               <LabeledMobileValue label="Scopes">
                 <div className="flex flex-wrap gap-1">
-                  {token.scopes.map((scope) => <Badge key={scope} variant="secondary">{scope}</Badge>)}
+                  {token.scopes.map((scope) => (
+                    <Badge key={scope} variant="secondary">
+                      {scope}
+                    </Badge>
+                  ))}
                 </div>
               </LabeledMobileValue>
               <LabeledMobileValue label="Repository access">
-                <RepositoryAccessBadge token={token} repositories={repositories} />
+                <RepositoryAccessBadge
+                  token={token}
+                  repositories={repositories}
+                />
               </LabeledMobileValue>
-              <LabeledMobileValue label="Last used">{token.last_used_at ? formatDate(token.last_used_at) : "Never"}</LabeledMobileValue>
-              <Button type="button" variant="outline" size="sm" onClick={() => onRevoke(token)} disabled={revoking} aria-label={`Revoke ${token.name}`}>
+              <LabeledMobileValue label="Last used">
+                {token.last_used_at ? formatDate(token.last_used_at) : "Never"}
+              </LabeledMobileValue>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => onRevoke(token)}
+                disabled={revoking}
+                aria-label={`Revoke ${token.name}`}
+              >
                 <Trash2 className="h-4 w-4" />
                 Revoke
               </Button>
@@ -1181,7 +1783,13 @@ function TokenInventory({
   );
 }
 
-function LabeledMobileValue({ label, children }: { label: string; children: ReactNode }) {
+function LabeledMobileValue({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
@@ -1190,12 +1798,24 @@ function LabeledMobileValue({ label, children }: { label: string; children: Reac
   );
 }
 
-function HelpTooltip({ label, content }: { label: string; content: ReactNode }) {
+function HelpTooltip({
+  label,
+  content,
+}: {
+  label: string;
+  content: ReactNode;
+}) {
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
         <TooltipTrigger asChild>
-          <Button type="button" variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" aria-label={label}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 text-muted-foreground"
+            aria-label={label}
+          >
             <HelpCircle className="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -1211,9 +1831,15 @@ function OutputBadges({ bundle }: { bundle: PreviewSecretBundleSummary }) {
   const outputs = bundle.outputs.flatMap(formatOutputSummary);
   return (
     <div className="flex flex-wrap gap-1">
-      {outputs.length > 0
-        ? outputs.map((output, idx) => <Badge key={`${output}-${idx}`} variant="secondary">{output}</Badge>)
-        : <Badge variant="secondary">No outputs</Badge>}
+      {outputs.length > 0 ? (
+        outputs.map((output, idx) => (
+          <Badge key={`${output}-${idx}`} variant="secondary">
+            {output}
+          </Badge>
+        ))
+      ) : (
+        <Badge variant="secondary">No outputs</Badge>
+      )}
     </div>
   );
 }
@@ -1229,13 +1855,18 @@ function buildBundleRequest(
 
   const sourceValues: Record<string, string> = {};
   const outputs: PreviewSecretBundleOutput[] = [];
-  const existingEnvNames = new Set(mode.type === "edit" ? envNamesFromBundle(mode.bundle) : []);
+  const existingEnvNames = new Set(
+    mode.type === "edit" ? envNamesFromBundle(mode.bundle) : [],
+  );
   const envValues: Record<string, string> = {};
 
   for (const row of form.rows) {
     const key = row.key.trim();
     if (!key && !row.value) continue;
-    if (!key || (!row.value && (mode.type === "create" || !existingEnvNames.has(key)))) {
+    if (
+      !key ||
+      (!row.value && (mode.type === "create" || !existingEnvNames.has(key)))
+    ) {
       return new Error("Each new secret value needs both a key and a value.");
     }
     envValues[key] = `secret:${key}`;
@@ -1259,9 +1890,10 @@ function buildBundleRequest(
       format: form.fileFormat,
       value: `secret:${SECRET_FILE_KEY}`,
     };
-    const canPreserveFileContent = mode.type === "edit"
-      && fileOutputsFromBundle(mode.bundle).length > 0
-      && !form.fileContent;
+    const canPreserveFileContent =
+      mode.type === "edit" &&
+      fileOutputsFromBundle(mode.bundle).length > 0 &&
+      !form.fileContent;
     if (!form.fileContent && !canPreserveFileContent) {
       return new Error("Secret file contents are required.");
     }
@@ -1279,10 +1911,14 @@ function buildBundleRequest(
   }
 
   if (outputs.length === 0) {
-    return new Error("At least one environment variable or secret file is required.");
+    return new Error(
+      "At least one environment variable or secret file is required.",
+    );
   }
 
-  const body: PreviewSecretBundlePatchRequest | PreviewSecretBundleUpsertRequest = {
+  const body:
+    | PreviewSecretBundlePatchRequest
+    | PreviewSecretBundleUpsertRequest = {
     name,
     outputs,
     exposure_policy: "preview_runtime",
@@ -1294,10 +1930,18 @@ function buildBundleRequest(
 }
 
 function envNamesFromBundle(bundle: PreviewSecretBundleSummary): string[] {
-  return Array.from(new Set(bundle.outputs.flatMap((output) => output.type === "env" ? output.env ?? [] : [])));
+  return Array.from(
+    new Set(
+      bundle.outputs.flatMap((output) =>
+        output.type === "env" ? (output.env ?? []) : [],
+      ),
+    ),
+  );
 }
 
-function fileOutputsFromBundle(bundle: PreviewSecretBundleSummary): PreviewSecretBundleOutput[] {
+function fileOutputsFromBundle(
+  bundle: PreviewSecretBundleSummary,
+): PreviewSecretBundleOutput[] {
   // The list-API summary includes path and format but omits `content` (the resolver
   // reference map). Users editing a bundle with file outputs must re-enter the
   // content field. The dialog description calls this out when file outputs are present.
@@ -1310,23 +1954,35 @@ function fileOutputsFromBundle(bundle: PreviewSecretBundleSummary): PreviewSecre
     }));
 }
 
-function getRevealedSecretValue(reveal: PreviewSecretBundleRevealResult, target: RevealTarget): string | null {
-  const sourceKey = target.type === "file"
-    ? getRevealedFileSourceKey(reveal)
-    : getRevealedEnvSourceKey(reveal, target.key);
+function getRevealedSecretValue(
+  reveal: PreviewSecretBundleRevealResult,
+  target: RevealTarget,
+): string | null {
+  const sourceKey =
+    target.type === "file"
+      ? getRevealedFileSourceKey(reveal)
+      : getRevealedEnvSourceKey(reveal, target.key);
   if (!sourceKey) return null;
   return reveal.source.values[sourceKey] ?? null;
 }
 
-function getRevealedFileSourceKey(reveal: PreviewSecretBundleRevealResult): string | null {
-  const fileOutputs = reveal.outputs.filter((output) => output.type === "file" && output.value?.startsWith("secret:"));
+function getRevealedFileSourceKey(
+  reveal: PreviewSecretBundleRevealResult,
+): string | null {
+  const fileOutputs = reveal.outputs.filter(
+    (output) => output.type === "file" && output.value?.startsWith("secret:"),
+  );
   if (fileOutputs.length !== 1) return null;
   return fileOutputs[0].value!.slice("secret:".length) || null;
 }
 
-function getRevealedEnvSourceKey(reveal: PreviewSecretBundleRevealResult, envName: string): string | null {
+function getRevealedEnvSourceKey(
+  reveal: PreviewSecretBundleRevealResult,
+  envName: string,
+): string | null {
   for (const output of reveal.outputs) {
-    const reference = output.type === "env" ? output.values?.[envName] : undefined;
+    const reference =
+      output.type === "env" ? output.values?.[envName] : undefined;
     if (reference?.startsWith("secret:")) {
       return reference.slice("secret:".length) || null;
     }
@@ -1334,9 +1990,13 @@ function getRevealedEnvSourceKey(reveal: PreviewSecretBundleRevealResult, envNam
   return Object.hasOwn(reveal.source.values, envName) ? envName : null;
 }
 
-function formatOutputSummary(output: PreviewSecretBundleSummary["outputs"][number]): string[] {
+function formatOutputSummary(
+  output: PreviewSecretBundleSummary["outputs"][number],
+): string[] {
   if (output.type === "env") {
-    return (output.env?.length ? output.env : ["values"]).map((name) => `env ${name}`);
+    return (output.env?.length ? output.env : ["values"]).map(
+      (name) => `env ${name}`,
+    );
   }
   if (output.type === "file") {
     return [`${output.format || "raw"} ${output.path || "file"}`];
@@ -1344,7 +2004,10 @@ function formatOutputSummary(output: PreviewSecretBundleSummary["outputs"][numbe
   return [output.type];
 }
 
-function repositoryAccessLabel(token: PreviewAPIToken, repositories: Repository[]): string {
+function repositoryAccessLabel(
+  token: PreviewAPIToken,
+  repositories: Repository[],
+): string {
   if (token.repository_ids.length === 0) return "All repositories";
   // Fall back to the raw ID for any repo that has been deleted so the label
   // stays accurate even when repositories are no longer in the fetched list.
@@ -1357,8 +2020,18 @@ function repositoryAccessLabel(token: PreviewAPIToken, repositories: Repository[
   return `${token.repository_ids.length} repositories`;
 }
 
-function RepositoryAccessBadge({ token, repositories }: { token: PreviewAPIToken; repositories: Repository[] }) {
-  return <Badge variant="secondary">{repositoryAccessLabel(token, repositories)}</Badge>;
+function RepositoryAccessBadge({
+  token,
+  repositories,
+}: {
+  token: PreviewAPIToken;
+  repositories: Repository[];
+}) {
+  return (
+    <Badge variant="secondary">
+      {repositoryAccessLabel(token, repositories)}
+    </Badge>
+  );
 }
 
 function normalizeEnvKey(value: string): string {
@@ -1366,5 +2039,9 @@ function normalizeEnvKey(value: string): string {
 }
 
 function formatDate(value: string): string {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
 }

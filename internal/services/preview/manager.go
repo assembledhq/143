@@ -1257,6 +1257,12 @@ func (m *Manager) pollSupportServiceStatus(stopCh <-chan struct{}, orgID, previe
 
 // StopPreview stops a preview and revokes all access sessions.
 func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error {
+	return m.StopPreviewWithReason(ctx, orgID, previewID, models.PreviewStoppedReasonNone)
+}
+
+// StopPreviewWithReason stops a preview, records a stop cause when supplied,
+// and revokes all access sessions.
+func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
 		return fmt.Errorf("get preview instance: %w", err)
@@ -1286,7 +1292,7 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	}
 
 	// Atomically stop + revoke access sessions.
-	if err := m.store.StopPreviewWithRevocation(ctx, orgID, previewID); err != nil {
+	if err := m.store.StopPreviewWithRevocationAndReason(ctx, orgID, previewID, reason); err != nil {
 		return fmt.Errorf("stop preview: %w", err)
 	}
 	if instance.PreviewTargetID != nil {
@@ -1429,7 +1435,10 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 		UserID:            userID,
 		PreviewInstanceID: previewID,
 		SessionTokenHash:  tokenHash,
-		ExpiresAt:         time.Now().Add(5 * time.Minute),
+		// Deliberately short: this initial window only needs to cover token
+		// redemption. The gateway extends the session to its full sliding
+		// lifetime (accessSessionTTL) on the first proxied request.
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 
 	if err := m.store.CreateAccessSession(ctx, sess); err != nil {

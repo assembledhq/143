@@ -505,6 +505,47 @@ func TestParseOrgSettings_PreviewMaxPreviewsPerUser(t *testing.T) {
 	}
 }
 
+func TestParseOrgSettings_PreviewAutoPoolMaxActive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected int
+	}{
+		{
+			name:     "zero defaults",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":0}`),
+			expected: DefaultPreviewAutoPoolMaxActive,
+		},
+		{
+			name:     "custom value passes through",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":7}`),
+			expected: 7,
+		},
+		{
+			name:     "below minimum clamps up",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":-1}`),
+			expected: MinPreviewAutoPoolMaxActive,
+		},
+		{
+			name:     "above maximum clamps down",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":999}`),
+			expected: MaxPreviewAutoPoolMaxActive,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept auto-preview pool settings")
+			require.Equal(t, tt.expected, s.PreviewAutoPoolMaxActive, "auto-preview pool capacity should be normalized")
+		})
+	}
+}
+
 func TestParseOrgSettings_SandboxLifecycleDefaultsAndOverrides(t *testing.T) {
 	t.Parallel()
 

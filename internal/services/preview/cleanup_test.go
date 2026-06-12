@@ -114,8 +114,8 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 				AddRow(newPreviewInstanceRow(expiredID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-exp", now)...),
 		)
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_reason.+stopped_at.+updated_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -147,8 +147,8 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 				AddRow(newPreviewInstanceRow(idleID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-idle", now)...),
 		)
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_at.+updated_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE preview_instances SET status.+stopped_reason.+stopped_at.+updated_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_services SET").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

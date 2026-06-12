@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronDown, ExternalLink, MonitorPlay, Play } from "lucide-react";
+import { ArrowLeft, ChevronDown, ExternalLink, MonitorPlay, Play } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -123,6 +124,14 @@ export default function NewPreviewPage() {
         <PageHeader
           title="Create preview"
           description="Start from a repository branch and pin the commit that should run."
+          action={
+            <Button asChild variant="outline" size="sm">
+              <Link href="/previews">
+                <ArrowLeft className="h-4 w-4" />
+                Previews
+              </Link>
+            </Button>
+          }
         />
 
         <Card>

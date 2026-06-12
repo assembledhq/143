@@ -170,11 +170,14 @@ func (h *PreviewHandler) isLocalWorker(worker preview.WorkerNode) bool {
 }
 
 func (h *PreviewHandler) writeWorkerClientError(w http.ResponseWriter, r *http.Request, err error) {
+	writePreviewHTTPError(w, r, workerClientHTTPError(err))
+}
+
+func workerClientHTTPError(err error) *previewHTTPError {
 	if reqErr, ok := preview.AsWorkerRequestError(err); ok {
-		writeError(w, r, reqErr.StatusCode, reqErr.Code, reqErr.Message)
-		return
+		return newPreviewHTTPError(reqErr.StatusCode, reqErr.Code, reqErr.Message, nil)
 	}
-	writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
+	return newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
 }
 
 // =============================================================================
@@ -1337,55 +1340,84 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 		writePreviewHTTPError(w, r, reqErr)
 		return
 	}
-	instance, activeErr := h.lookupActivePreviewForRequest(r.Context(), orgID, sessionID)
-	if activeErr != nil {
-		writePreviewHTTPError(w, r, activeErr)
+	userID, ok := previewRequestUserID(r.Context(), middleware.UserFromContext(r.Context()))
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
+	}
+	instance, action, restartErr := h.RestartSessionPreview(r.Context(), orgID, userID, sessionID, body)
+	if restartErr != nil {
+		writePreviewHTTPError(w, r, restartErr)
+		return
+	}
+	switch action {
+	case sessionPreviewRestartStarted, sessionPreviewRestartAlreadyStarting:
+		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
+			Data: ensurePreviewResponse{Action: action, Instance: instance},
+		})
+	default:
+		writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
+	}
+}
+
+// Actions returned by RestartSessionPreview.
+const (
+	sessionPreviewRestartStarted         = "started"
+	sessionPreviewRestartAlreadyStarting = "already_starting"
+	sessionPreviewRestartRestarting      = "restarting"
+)
+
+// RestartSessionPreview restarts the preview for a session regardless of its
+// current state: with no active instance (stopped, failed, expired, or never
+// started) a fresh preview is started — re-hydrating the sandbox if needed —
+// while an active instance is recycled in place. It returns the resulting
+// instance and the action taken. Used by the session-scoped restart endpoint
+// and by the generic preview restart endpoint for previews without a branch
+// target.
+func (h *PreviewHandler) RestartSessionPreview(ctx context.Context, orgID, userID, sessionID uuid.UUID, body startPreviewRequest) (*models.PreviewInstance, string, *previewHTTPError) {
+	if h.manager == nil {
+		return nil, "", newPreviewHTTPError(http.StatusNotImplemented, "PREVIEW_NOT_AVAILABLE", "preview manager is not configured on this worker", nil)
+	}
+	instance, activeErr := h.lookupActivePreviewForRequest(ctx, orgID, sessionID)
+	if activeErr != nil {
+		return nil, "", activeErr
 	}
 	if instance == nil {
-		user := middleware.UserFromContext(r.Context())
-		started, _, startErr := h.startPreviewFromRequest(r.Context(), orgID, user.ID, sessionID, body)
+		started, _, startErr := h.startPreviewFromRequest(ctx, orgID, userID, sessionID, body)
 		if startErr != nil {
-			writePreviewHTTPError(w, r, startErr)
-			return
+			return nil, "", startErr
 		}
-		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: "started", Instance: started},
-		})
-		return
+		return started, sessionPreviewRestartStarted, nil
 	}
 	if instance.Status == models.PreviewStatusStarting {
-		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: "already_starting", Instance: instance},
-		})
-		return
+		return instance, sessionPreviewRestartAlreadyStarting, nil
 	}
 
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
 		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
-			return
+			return nil, "", newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
 		}
 		if h.isLocalWorker(worker) {
-			if recycleErr := h.recyclePreviewInstance(r.Context(), orgID, instance, body); recycleErr != nil {
-				writePreviewHTTPError(w, r, recycleErr)
-				return
+			if recycleErr := h.recyclePreviewInstance(ctx, orgID, instance, body); recycleErr != nil {
+				return nil, "", recycleErr
 			}
 		} else {
-			if err := h.workerClient.RecyclePreview(r.Context(), worker, orgID, instance.ID, body.Config); err != nil {
-				h.writeWorkerClientError(w, r, err)
-				return
+			if err := h.workerClient.RecyclePreview(ctx, worker, orgID, instance.ID, body.Config); err != nil {
+				return nil, "", workerClientHTTPError(err)
 			}
 		}
 	} else {
-		if recycleErr := h.recyclePreviewInstance(r.Context(), orgID, instance, body); recycleErr != nil {
-			writePreviewHTTPError(w, r, recycleErr)
-			return
+		if recycleErr := h.recyclePreviewInstance(ctx, orgID, instance, body); recycleErr != nil {
+			return nil, "", recycleErr
 		}
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
+	// Re-read so callers that render the instance see the post-recycle state.
+	if refreshed, err := h.store.GetPreviewInstance(ctx, orgID, instance.ID); err == nil {
+		instance = refreshed
+	}
+	return instance, sessionPreviewRestartRestarting, nil
 }
 
 // =============================================================================
