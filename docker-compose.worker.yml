@@ -158,7 +158,9 @@ services:
       # Provisioning must stage this file before the first `docker compose up`.
       # If the bind source is missing, Docker creates a directory at the host
       # path and later deploy-time scp of the encrypted env file fails.
-      - .env.production.enc:/.env.production.enc:ro
+      # Mounted at /app (the workdir) — docker-entrypoint.sh resolves the
+      # bundle relative to the workdir; the image itself carries no secrets.
+      - .env.production.enc:/app/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
       interval: 15s
