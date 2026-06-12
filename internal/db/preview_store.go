@@ -413,9 +413,9 @@ func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID 
 			       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
 		)
 		SELECT
-			COUNT(*) FILTER (WHERE status IN %s)::int AS running,
+			COUNT(*) FILTER (WHERE latest.status IN %s)::int AS running,
 			COUNT(*) FILTER (WHERE %s)::int AS resumable,
-			COUNT(*) FILTER (WHERE status IN %s AND NOT %s AND created_at >= now() - interval '7 days')::int AS recent
+			COUNT(*) FILTER (WHERE latest.status IN %s AND NOT %s AND latest.created_at >= now() - interval '7 days')::int AS recent
 		FROM latest_targets target
 		LEFT JOIN LATERAL (SELECT target.status, target.created_at) latest ON TRUE`, activeStatusFilter, branchPreviewResumablePredicate, terminalStatusFilter, branchPreviewResumablePredicate)
 	var running, resumable, recent int

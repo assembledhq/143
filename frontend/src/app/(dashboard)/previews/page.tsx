@@ -129,6 +129,8 @@ function SectionRows({
   scope,
   previews,
   isLoading,
+  isError,
+  onRetry,
   canMutate,
   onStop,
   onRestart,
@@ -137,11 +139,27 @@ function SectionRows({
   scope: PreviewScope;
   previews: BranchPreviewResponse[];
   isLoading: boolean;
+  isError: boolean;
+  onRetry: () => void;
   canMutate: boolean;
   onStop: (preview: BranchPreviewResponse) => void;
   onRestart: (preview: BranchPreviewResponse) => void;
   onStartLatest: (preview: BranchPreviewResponse) => void;
 }) {
+  if (isError) {
+    return (
+      <Card>
+        <CardContent className="flex items-center justify-between gap-2 py-5 text-sm">
+          <span className="text-destructive">Failed to load previews.</span>
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            <RotateCw className="h-4 w-4" />
+            Retry
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (isLoading) {
     return (
       <Card>
@@ -429,8 +447,20 @@ export default function PreviewsPage() {
   const sectionQueries = [runningQuery, resumableQuery, recentQuery];
 
   const firstMeta = sectionQueries.find((item) => item.data?.meta)?.data?.meta;
+  // A query that has only ever errored holds no data, and React Query resets
+  // no-data queries to pending (clearing the error) on every interval refetch.
+  // isError alone would therefore blink off for the duration of each poll —
+  // treat "errored and still no data" as a stable failed state instead.
+  // Sections that already hold rows keep showing them through refetch
+  // failures: stale-but-real previews beat an error card, and the poll loop
+  // refreshes them as soon as the backend recovers.
+  const sectionFailed = (query: (typeof sectionQueries)[number]) =>
+    query.data === undefined && (query.isError || query.errorUpdateCount > 0);
+  // Only successfully settled, genuinely empty sections count toward the
+  // page-level empty state; loading or failed sections must not flip the page
+  // to "No previews yet".
   const allEmpty = sectionQueries.every(
-    (item) => !item.isLoading && (item.data?.data.length ?? 0) === 0,
+    (item) => item.data !== undefined && item.data.data.length === 0,
   );
   const repositories = useMemo(
     () => repositoriesQuery.data?.data ?? [],
@@ -568,7 +598,9 @@ export default function PreviewsPage() {
                   <SectionRows
                     scope={section.scope}
                     previews={section.scope === "recent" ? recentPreviews : (sectionQuery.data?.data ?? [])}
-                    isLoading={sectionQuery.isLoading}
+                    isLoading={sectionQuery.isLoading && !sectionFailed(sectionQuery)}
+                    isError={sectionFailed(sectionQuery)}
+                    onRetry={() => sectionQuery.refetch()}
                     canMutate={canMutate}
                     onStop={(preview) => stopPreview.mutate(preview)}
                     onRestart={(preview) => restartPreview.mutate(preview)}
