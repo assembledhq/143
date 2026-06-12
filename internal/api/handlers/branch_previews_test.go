@@ -877,67 +877,65 @@ var previewAPITokenTestCols = []string{
 	"created_by_user_id", "last_used_at", "revoked_at", "created_at",
 }
 
-func TestBranchPreviewHandler_ListAPITokensReturnsEmpty(t *testing.T) {
+func TestBranchPreviewHandler_APITokenManagementEndpointsAreDeprecated(t *testing.T) {
 	t.Parallel()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		handler func(*BranchPreviewHandler, http.ResponseWriter, *http.Request)
+	}{
+		{
+			name:    "list tokens",
+			method:  http.MethodGet,
+			path:    "/api/v1/previews/api-tokens",
+			handler: (*BranchPreviewHandler).ListAPITokens,
+		},
+		{
+			name:    "create token",
+			method:  http.MethodPost,
+			path:    "/api/v1/previews/api-tokens",
+			handler: (*BranchPreviewHandler).CreateAPIToken,
+		},
+		{
+			name:    "revoke token",
+			method:  http.MethodDelete,
+			path:    "/api/v1/previews/api-tokens/" + uuid.NewString(),
+			handler: (*BranchPreviewHandler).RevokeAPIToken,
+		},
+	}
 
-	orgID := uuid.New()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	mock.ExpectQuery("SELECT .+ FROM preview_api_tokens").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows(previewAPITokenTestCols))
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
 
-	handler := NewBranchPreviewHandler(
-		db.NewPreviewStore(mock),
-		db.NewRepositoryStore(mock),
-		fakeBranchPreviewGitHub{},
-		nil,
-		"https://app.143.dev",
-		"https://{id}.preview.143.dev",
-	)
-	handler.SetAPITokenStore(db.NewPreviewAPITokenStore(mock))
+			handler := NewBranchPreviewHandler(
+				db.NewPreviewStore(mock),
+				db.NewRepositoryStore(mock),
+				fakeBranchPreviewGitHub{},
+				nil,
+				"https://app.143.dev",
+				"https://{id}.preview.143.dev",
+			)
+			handler.SetAPITokenStore(db.NewPreviewAPITokenStore(mock))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/api-tokens", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
-	rr := httptest.NewRecorder()
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(`{"name":"ci-token","scopes":["previews:read"]}`))
+			req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+			rr := httptest.NewRecorder()
 
-	handler.ListAPITokens(rr, req)
+			tt.handler(handler, rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code)
-	var resp models.ListResponse[models.PreviewAPIToken]
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	require.Empty(t, resp.Data)
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestBranchPreviewHandler_ListAPITokensReturnsUnavailableWhenStoreNil(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	handler := NewBranchPreviewHandler(
-		db.NewPreviewStore(mock),
-		db.NewRepositoryStore(mock),
-		fakeBranchPreviewGitHub{},
-		nil,
-		"https://app.143.dev",
-		"https://{id}.preview.143.dev",
-	)
-	// apiTokens deliberately not set
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/api-tokens", nil)
-	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
-	rr := httptest.NewRecorder()
-
-	handler.ListAPITokens(rr, req)
-
-	require.Equal(t, http.StatusInternalServerError, rr.Code)
-	require.Contains(t, rr.Body.String(), "PREVIEW_API_TOKENS_UNAVAILABLE")
+			require.Equal(t, http.StatusGone, rr.Code, "deprecated preview token management endpoint should return 410")
+			require.Contains(t, rr.Body.String(), "PREVIEW_API_TOKENS_DEPRECATED", "response should identify the deprecation")
+			require.Contains(t, rr.Body.String(), "External API", "response should direct callers to external API tokens")
+			require.NoError(t, mock.ExpectationsWereMet(), "deprecated endpoint should not query the preview token store")
+		})
+	}
 }
 
 func TestBranchPreviewHandler_UpdatePolicyEmitsAudit(t *testing.T) {
@@ -1001,159 +999,6 @@ func repositoryTestCols() []string {
 		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description",
 		"clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
 	}
-}
-
-func TestBranchPreviewHandler_CreateAPITokenRejectsMissingName(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	userID := uuid.New()
-
-	handler := NewBranchPreviewHandler(
-		db.NewPreviewStore(mock),
-		db.NewRepositoryStore(mock),
-		fakeBranchPreviewGitHub{},
-		nil,
-		"https://app.143.dev",
-		"https://{id}.preview.143.dev",
-	)
-	handler.SetAPITokenStore(db.NewPreviewAPITokenStore(mock))
-
-	body := bytes.NewBufferString(`{"name":"","scopes":["previews:read"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/api-tokens", body)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
-	req = req.WithContext(ctx)
-	rr := httptest.NewRecorder()
-
-	handler.CreateAPIToken(rr, req)
-
-	require.Equal(t, http.StatusBadRequest, rr.Code, "CreateAPIToken should reject an empty name")
-	require.Contains(t, rr.Body.String(), "INVALID_PREVIEW_API_TOKEN")
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestBranchPreviewHandler_CreateAPITokenRejectsInvalidScope(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	userID := uuid.New()
-
-	handler := NewBranchPreviewHandler(
-		db.NewPreviewStore(mock),
-		db.NewRepositoryStore(mock),
-		fakeBranchPreviewGitHub{},
-		nil,
-		"https://app.143.dev",
-		"https://{id}.preview.143.dev",
-	)
-	handler.SetAPITokenStore(db.NewPreviewAPITokenStore(mock))
-
-	body := bytes.NewBufferString(`{"name":"ci-token","scopes":["previews:admin"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/api-tokens", body)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
-	req = req.WithContext(ctx)
-	rr := httptest.NewRecorder()
-
-	handler.CreateAPIToken(rr, req)
-
-	require.Equal(t, http.StatusBadRequest, rr.Code, "CreateAPIToken should reject unrecognised scopes")
-	require.Contains(t, rr.Body.String(), "INVALID_PREVIEW_API_TOKEN_SCOPE")
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestBranchPreviewHandler_CreateAPITokenInsertsAndReturnsPlaintext(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	userID := uuid.New()
-	tokenID := uuid.New()
-	now := time.Now()
-
-	mock.ExpectQuery("INSERT INTO preview_api_tokens").
-		WithArgs(branchPreviewAnyArgs(6)...).
-		WillReturnRows(pgxmock.NewRows(previewAPITokenTestCols).AddRow(
-			tokenID, orgID, "ci-token", "sha256:abc", []string{"previews:read"}, []uuid.UUID{},
-			userID, nil, nil, now,
-		))
-
-	handler := NewBranchPreviewHandler(
-		db.NewPreviewStore(mock),
-		db.NewRepositoryStore(mock),
-		fakeBranchPreviewGitHub{},
-		nil,
-		"https://app.143.dev",
-		"https://{id}.preview.143.dev",
-	)
-	handler.SetAPITokenStore(db.NewPreviewAPITokenStore(mock))
-
-	body := bytes.NewBufferString(`{"name":"ci-token","scopes":["previews:read"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/api-tokens", body)
-	ctx := middleware.WithOrgID(req.Context(), orgID)
-	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
-	req = req.WithContext(ctx)
-	rr := httptest.NewRecorder()
-
-	handler.CreateAPIToken(rr, req)
-
-	require.Equal(t, http.StatusCreated, rr.Code)
-	var resp models.SingleResponse[createPreviewAPITokenResponse]
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	require.NotEmpty(t, resp.Data.Token, "CreateAPIToken should return the plaintext token exactly once")
-	require.Contains(t, resp.Data.Token, "143_prev_", "plaintext token should have the expected prefix")
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestBranchPreviewHandler_RevokeAPITokenRevokes(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
-	orgID := uuid.New()
-	tokenID := uuid.New()
-
-	mock.ExpectExec("UPDATE preview_api_tokens SET revoked_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-	handler := NewBranchPreviewHandler(
-		db.NewPreviewStore(mock),
-		db.NewRepositoryStore(mock),
-		fakeBranchPreviewGitHub{},
-		nil,
-		"https://app.143.dev",
-		"https://{id}.preview.143.dev",
-	)
-	handler.SetAPITokenStore(db.NewPreviewAPITokenStore(mock))
-
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/previews/api-tokens/"+tokenID.String(), nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("token_id", tokenID.String())
-	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
-	ctx = middleware.WithOrgID(ctx, orgID)
-	req = req.WithContext(ctx)
-	rr := httptest.NewRecorder()
-
-	handler.RevokeAPIToken(rr, req)
-
-	require.Equal(t, http.StatusOK, rr.Code, "RevokeAPIToken should return 200 on success")
-	require.Contains(t, rr.Body.String(), "revoked")
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestBranchPreviewHandler_GetConfigOptionsRejectsPreviewTokenWithoutReadScope(t *testing.T) {
