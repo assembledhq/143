@@ -431,6 +431,33 @@ func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID 
 	return map[string]int{"running": running, "resumable": resumable, "recent": recent}, nil
 }
 
+func (s *PreviewStore) GetBranchPreviewTargetResumability(ctx context.Context, orgID, targetID uuid.UUID) (bool, *int, error) {
+	query := fmt.Sprintf(`SELECT EXISTS (
+			SELECT 1
+			FROM preview_targets target
+			LEFT JOIN LATERAL (
+				SELECT status, created_at
+				FROM preview_instances
+				WHERE org_id = target.org_id
+				  AND preview_target_id = target.id
+				ORDER BY created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE target.org_id = @org_id
+			  AND target.id = @target_id
+			  AND %s
+		) AS resumable`, branchPreviewResumablePredicate)
+	var resumable bool
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID, "target_id": targetID}).Scan(&resumable); err != nil {
+		return false, nil, fmt.Errorf("get branch preview target resumability: %w", err)
+	}
+	if !resumable {
+		return false, nil, nil
+	}
+	estimate := 30
+	return true, &estimate, nil
+}
+
 func (s *PreviewStore) CountActiveAutoPreviews(ctx context.Context, orgID uuid.UUID) (int, error) {
 	var count int
 	query := fmt.Sprintf(`SELECT COUNT(*)::int
@@ -1307,6 +1334,22 @@ func (s *PreviewStore) UpdatePreviewAccess(ctx context.Context, orgID, id uuid.U
 	)
 	if err != nil {
 		return fmt.Errorf("update preview access: %w", err)
+	}
+	return nil
+}
+
+// UpdatePreviewAccessAndExtend updates activity and slides active preview expiry
+// without shortening an already farther-out lifetime.
+func (s *PreviewStore) UpdatePreviewAccessAndExtend(ctx context.Context, orgID, id uuid.UUID, extension, maxTTL time.Duration) error {
+	_, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_instances SET last_accessed_at = now(),
+			expires_at = LEAST(GREATEST(expires_at, now() + @extension), created_at + @max_ttl),
+			updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"id": id, "org_id": orgID, "extension": extension, "max_ttl": maxTTL},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview access and extend expiry: %w", err)
 	}
 	return nil
 }

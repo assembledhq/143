@@ -921,18 +921,41 @@ func TestRecordAccess_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mgr := newTestManager(mock, &mockProvider{})
+	mgr := NewManager(ManagerConfig{
+		Store:              db.NewPreviewStore(mock),
+		Provider:           &mockProvider{},
+		Logger:             zerolog.Nop(),
+		PreviewIdleTimeout: 45 * time.Minute,
+	})
 
 	orgID := uuid.New()
 	previewID := uuid.New()
 
-	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at.+expires_at").
+		WithArgs(previewAnyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = mgr.RecordAccess(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRecordAccess_DefaultsPreviewIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at.+expires_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = mgr.RecordAccess(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "RecordAccess should use the default idle extension when not configured")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // =============================================================================

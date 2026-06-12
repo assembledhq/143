@@ -34,7 +34,7 @@ const (
 	DefaultMaxPreviewsPerOrg    = 5
 	DefaultMaxPreviewsPerWorker = 3
 
-	DefaultIdleTimeout = 15 * time.Minute
+	DefaultIdleTimeout = 30 * time.Minute
 	DefaultHardTTL     = 30 * time.Minute
 	DefaultMaxTTL      = 2 * time.Hour
 	MinLifetimeTTL     = 1 * time.Minute
@@ -110,6 +110,8 @@ type Manager struct {
 	maxPerUser   int
 	maxPerOrg    int
 	maxPerWorker int
+
+	previewIdleTimeout time.Duration
 }
 
 type OrgSettingsStore interface {
@@ -140,6 +142,10 @@ type ManagerConfig struct {
 	MaxPerUser   int
 	MaxPerOrg    int
 	MaxPerWorker int
+
+	// PreviewIdleTimeout is the sliding retention window applied when a live
+	// preview receives real gateway traffic. Zero falls back to DefaultIdleTimeout.
+	PreviewIdleTimeout time.Duration
 
 	// PreviewOriginTemplate is the URL template used to compute the public
 	// origin each preview is served from, with "{id}" replaced by the preview
@@ -175,6 +181,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		maxPerUser:             cfg.MaxPerUser,
 		maxPerOrg:              cfg.MaxPerOrg,
 		maxPerWorker:           cfg.MaxPerWorker,
+		previewIdleTimeout:     cfg.PreviewIdleTimeout,
 	}
 	if m.maxPerUser <= 0 {
 		m.maxPerUser = DefaultMaxPreviewsPerUser
@@ -184,6 +191,9 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if m.maxPerWorker <= 0 {
 		m.maxPerWorker = DefaultMaxPreviewsPerWorker
+	}
+	if m.previewIdleTimeout <= 0 {
+		m.previewIdleTimeout = DefaultIdleTimeout
 	}
 	return m
 }
@@ -1612,7 +1622,7 @@ func (m *Manager) SetLifetime(ctx context.Context, orgID, previewID uuid.UUID, d
 
 // RecordAccess updates the last_accessed_at timestamp for activity-aware timeouts.
 func (m *Manager) RecordAccess(ctx context.Context, orgID, previewID uuid.UUID) error {
-	return m.store.UpdatePreviewAccess(ctx, orgID, previewID)
+	return m.store.UpdatePreviewAccessAndExtend(ctx, orgID, previewID, m.previewIdleTimeout, DefaultMaxTTL)
 }
 
 // =============================================================================
