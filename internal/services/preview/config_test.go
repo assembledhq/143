@@ -785,6 +785,14 @@ func TestValidateConfig_PreviewInstall(t *testing.T) {
 			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, TimeoutSeconds: MaxInstallTimeoutSeconds + 1},
 			wantErrSub: "preview.install.timeout_seconds",
 		},
+		{
+			name: "platform cache verify path",
+			install: &models.PreviewInstallConfig{
+				Command:     []string{"npm", "ci"},
+				Lockfiles:   []string{"package-lock.json"},
+				VerifyPaths: []string{".143/cache/bin/webserver"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2115,4 +2123,17 @@ func TestResolvePreviewBuildCachePaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCacheRestorablePreviewInstallVerifyPaths(t *testing.T) {
+	t.Parallel()
+
+	got := CacheRestorablePreviewInstallVerifyPaths([]string{
+		"node_modules/.bin/next",
+		".143/cache/bin/webserver",
+		"node_modules/.bin/next",
+		" .143/cache/preview-install/abc.done ",
+	})
+
+	require.Equal(t, []string{"node_modules/.bin/next"}, got, "cache-restorable verify paths should exclude platform cache paths and deduplicate workspace artifacts")
 }
