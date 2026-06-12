@@ -266,6 +266,87 @@ describe("PreviewsPage", () => {
     ).toHaveAttribute("href", "/previews/new");
   });
 
+  it("shows a stable per-section error state instead of the empty state when the list API fails", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({ data: repositories, meta: {} }),
+      ),
+      http.get("*/api/v1/previews", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "PREVIEW_LIST_FAILED",
+              message: "failed to count previews",
+            },
+          },
+          { status: 500 },
+        ),
+      ),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+
+    expect(await screen.findAllByText("Failed to load previews.")).toHaveLength(
+      3,
+    );
+    expect(screen.queryByText("No previews yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading previews...")).not.toBeInTheDocument();
+
+    // Once the backend recovers, a manual retry repopulates the sections.
+    installPreviewHandlers({
+      running: [preview({ branch: "feature/recovered" })],
+      resumable: [],
+      recent: [],
+    });
+    await userEvent.click(screen.getAllByRole("button", { name: /retry/i })[0]);
+    expect(await screen.findAllByText("feature/recovered")).toHaveLength(2);
+  });
+
+  it("keeps previously loaded rows visible when interval refetches start failing", async () => {
+    let failing = false;
+    const failedRequests: string[] = [];
+    server.use(
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({ data: repositories, meta: {} }),
+      ),
+      http.get("*/api/v1/previews", ({ request }) => {
+        const url = new URL(request.url);
+        if (failing) {
+          failedRequests.push(url.search);
+          return HttpResponse.json(
+            {
+              error: {
+                code: "PREVIEW_LIST_FAILED",
+                message: "failed to count previews",
+              },
+            },
+            { status: 500 },
+          );
+        }
+        const scope = url.searchParams.get("scope");
+        return HttpResponse.json({
+          data:
+            scope === "running"
+              ? [preview({ branch: "feature/sticky-rows" })]
+              : [],
+          meta,
+        });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+    expect(await screen.findAllByText("feature/sticky-rows")).toHaveLength(2);
+
+    failing = true;
+    // Two failed polls guarantee the first error has settled into the query
+    // cache; stale rows must survive it rather than yield to an error card.
+    await waitFor(() => expect(failedRequests.length).toBeGreaterThanOrEqual(2));
+    expect(screen.getAllByText("feature/sticky-rows")).toHaveLength(2);
+    expect(
+      screen.queryByText("Failed to load previews."),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps mobile stacked row metadata available alongside the desktop table", async () => {
     installPreviewHandlers({
       running: [],
