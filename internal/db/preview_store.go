@@ -346,33 +346,61 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 	scopePredicate := "TRUE"
 	switch filters.Scope {
 	case "running":
-		scopePredicate = fmt.Sprintf("latest.status IN %s", activeStatusFilter)
+		scopePredicate = fmt.Sprintf("preview_index.status IN %s", activeStatusFilter)
 	case "resumable":
-		scopePredicate = branchPreviewResumablePredicate
+		scopePredicate = "preview_index.resumable"
 	case "recent":
-		scopePredicate = fmt.Sprintf("latest.status IN %s AND NOT %s AND latest.created_at >= now() - interval '7 days'", terminalStatusFilter, branchPreviewResumablePredicate)
+		scopePredicate = fmt.Sprintf("preview_index.status IN %s AND NOT preview_index.resumable AND preview_index.sort_created_at >= now() - interval '7 days'", terminalStatusFilter)
 	}
-	query := fmt.Sprintf(`SELECT %s
-		FROM preview_targets target
-		JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
-		LEFT JOIN LATERAL (
-			SELECT id, status, expires_at, stopped_at, stopped_reason, current_phase, error, created_at
-			FROM preview_instances
-			WHERE org_id = target.org_id
-			  AND preview_target_id = target.id
-			ORDER BY created_at DESC
-			LIMIT 1
-		) latest ON TRUE
-		WHERE target.org_id = @org_id
-		  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
-		  AND (@branch = '' OR target.branch = @branch)
-		  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
-		  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
-		       OR repo.full_name ILIKE '%%' || @q || '%%'
-		       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
-		  AND (@cursor_id::uuid IS NULL OR (COALESCE(latest.created_at, target.created_at), target.id) < (@cursor_time, @cursor_id))
+	query := fmt.Sprintf(`WITH target_previews AS (
+			SELECT %s
+			FROM preview_targets target
+			JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
+			LEFT JOIN LATERAL (
+				SELECT id, status, expires_at, stopped_at, stopped_reason, current_phase, error, created_at
+				FROM preview_instances
+				WHERE org_id = target.org_id
+				  AND preview_target_id = target.id
+				ORDER BY created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE target.org_id = @org_id
+		),
+		session_previews AS (
+			SELECT pi.id AS target_id, pi.id AS preview_id,
+				sess.repository_id, repo.full_name AS repository_full_name,
+				COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+				COALESCE(NULLIF(pi.base_commit_sha, ''), sess.base_commit_sha, '') AS commit_sha,
+				'' AS preview_config_name,
+				'session' AS source_type, sess.id::text AS source_id, '' AS source_url,
+				pi.status AS status,
+				pi.created_at, pi.created_at AS sort_created_at,
+				pi.expires_at, pi.stopped_at, COALESCE(pi.stopped_reason, '') AS stopped_reason,
+				COALESCE(pi.current_phase, '') AS current_phase, COALESCE(pi.error, '') AS error,
+				false AS resumable, NULL::integer AS resume_estimate_seconds
+			FROM preview_instances pi
+			JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+			JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+			WHERE pi.org_id = @org_id
+			  AND pi.preview_target_id IS NULL
+			  AND pi.session_id IS NOT NULL
+		),
+		preview_index AS (
+			SELECT * FROM target_previews
+			UNION ALL
+			SELECT * FROM session_previews
+		)
+		SELECT *
+		FROM preview_index
+		WHERE (@repository_id::uuid IS NULL OR preview_index.repository_id = @repository_id)
+		  AND (@branch = '' OR preview_index.branch = @branch)
+		  AND (@status = '' OR preview_index.status = @status)
+		  AND (@q = '' OR preview_index.branch ILIKE '%%' || @q || '%%'
+		       OR preview_index.repository_full_name ILIKE '%%' || @q || '%%'
+		       OR (regexp_match(preview_index.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
+		  AND (@cursor_id::uuid IS NULL OR (preview_index.sort_created_at, preview_index.target_id) < (@cursor_time, @cursor_id))
 		  AND %s
-		ORDER BY COALESCE(latest.created_at, target.created_at) DESC, target.id DESC
+		ORDER BY preview_index.sort_created_at DESC, preview_index.target_id DESC
 		LIMIT @limit`, branchPreviewSummarySelect(), scopePredicate)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":        orgID,
@@ -391,9 +419,11 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 }
 
 func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID uuid.UUID, filters BranchPreviewIndexFilters) (map[string]int, error) {
-	query := fmt.Sprintf(`WITH latest_targets AS (
-			SELECT target.id, target.org_id, target.repository_id, target.source_type, target.source_id, target.last_snapshot_key,
-			       latest.status, latest.created_at
+	query := fmt.Sprintf(`WITH target_previews AS (
+			SELECT target.id AS target_id, target.org_id, target.repository_id, repo.full_name AS repository_full_name,
+			       target.branch, target.source_id, COALESCE(latest.status, 'target_created') AS status,
+			       COALESCE(latest.created_at, target.created_at) AS sort_created_at,
+			       %s AS resumable
 			FROM preview_targets target
 			JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
 			LEFT JOIN LATERAL (
@@ -405,19 +435,39 @@ func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID 
 				LIMIT 1
 			) latest ON TRUE
 			WHERE target.org_id = @org_id
-			  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
-			  AND (@branch = '' OR target.branch = @branch)
-			  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
-			  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
-			       OR repo.full_name ILIKE '%%' || @q || '%%'
-			       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
+		),
+		session_previews AS (
+			SELECT pi.id AS target_id, pi.org_id, sess.repository_id, repo.full_name AS repository_full_name,
+			       COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+			       sess.id::text AS source_id, pi.status AS status,
+			       pi.created_at AS sort_created_at, false AS resumable
+			FROM preview_instances pi
+			JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+			JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+			WHERE pi.org_id = @org_id
+			  AND pi.preview_target_id IS NULL
+			  AND pi.session_id IS NOT NULL
+		),
+		preview_index AS (
+			SELECT * FROM target_previews
+			UNION ALL
+			SELECT * FROM session_previews
+		),
+		filtered AS (
+			SELECT *
+			FROM preview_index
+			WHERE (@repository_id::uuid IS NULL OR repository_id = @repository_id)
+			  AND (@branch = '' OR branch = @branch)
+			  AND (@status = '' OR status = @status)
+			  AND (@q = '' OR branch ILIKE '%%' || @q || '%%'
+			       OR repository_full_name ILIKE '%%' || @q || '%%'
+			       OR (regexp_match(source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
 		)
 		SELECT
-			COUNT(*) FILTER (WHERE latest.status IN %s)::int AS running,
-			COUNT(*) FILTER (WHERE %s)::int AS resumable,
-			COUNT(*) FILTER (WHERE latest.status IN %s AND NOT %s AND latest.created_at >= now() - interval '7 days')::int AS recent
-		FROM latest_targets target
-		LEFT JOIN LATERAL (SELECT target.status, target.created_at) latest ON TRUE`, activeStatusFilter, branchPreviewResumablePredicate, terminalStatusFilter, branchPreviewResumablePredicate)
+			COUNT(*) FILTER (WHERE status IN %s)::int AS running,
+			COUNT(*) FILTER (WHERE resumable)::int AS resumable,
+			COUNT(*) FILTER (WHERE status IN %s AND NOT resumable AND sort_created_at >= now() - interval '7 days')::int AS recent
+		FROM filtered`, branchPreviewResumablePredicate, activeStatusFilter, terminalStatusFilter)
 	var running, resumable, recent int
 	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":        orgID,
