@@ -300,6 +300,16 @@ type ClaudeCodeAuthTokenStore interface {
 	StoreTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error)
 }
 
+// ClaudeCodeInvalidSubscriptionProber reports whether a scope holds a Claude
+// subscription row that has been marked invalid (e.g. after Anthropic
+// rejected its token refresh). Optionally implemented by the auth provider;
+// the orchestrator uses it to fail a run with "your subscription was
+// invalidated — reconnect it" instead of the misleading "no credentials are
+// configured" when credential rows exist but none is usable.
+type ClaudeCodeInvalidSubscriptionProber interface {
+	HasInvalidSubscription(ctx context.Context, scope models.Scope) (bool, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
@@ -6075,6 +6085,22 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
 	}
 
+	// Distinguish "never connected anything" from "a subscription exists but
+	// was invalidated" — telling a user who DID connect a subscription that
+	// no credentials are configured sends them hunting in the wrong place.
+	if o.claudeCodeInvalidSubscriptionExists(ctx, run) {
+		o.failRunWithCategory(ctx, run,
+			"claude subscription is marked invalid; reconnect required",
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from the Agent settings page to continue.",
+			[]string{
+				"Reconnect your Claude subscription from the Agent settings page",
+				"Or add an Anthropic API key under Credentials",
+			},
+		)
+		return TokenBillingModeUnknown, fmt.Errorf("claude subscription invalid for claude code agent")
+	}
+
 	o.failRunWithCategory(ctx, run,
 		"no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key",
 		FailureCategoryClaudeCodeAuth,
@@ -6085,6 +6111,36 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		},
 	)
 	return TokenBillingModeUnknown, fmt.Errorf("no credentials for claude code agent")
+}
+
+// claudeCodeInvalidSubscriptionExists probes whether the run's org (or the
+// triggering user's personal stack) holds a Claude subscription that has been
+// marked invalid. Best-effort: probe errors fall back to the generic
+// missing-credentials failure rather than blocking the run's error path.
+func (o *Orchestrator) claudeCodeInvalidSubscriptionExists(ctx context.Context, run *models.Session) bool {
+	prober, ok := o.claudeCodeAuth.(ClaudeCodeInvalidSubscriptionProber)
+	if !ok {
+		return false
+	}
+	scopes := []models.Scope{{OrgID: run.OrgID}}
+	if run.TriggeredByUserID != nil {
+		scopes = append(scopes, models.Scope{OrgID: run.OrgID, UserID: run.TriggeredByUserID})
+	}
+	for _, scope := range scopes {
+		invalid, err := prober.HasInvalidSubscription(ctx, scope)
+		if err != nil {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("invalid-subscription probe failed; reporting generic missing-credentials failure")
+			continue
+		}
+		if invalid {
+			return true
+		}
+	}
+	return false
 }
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
