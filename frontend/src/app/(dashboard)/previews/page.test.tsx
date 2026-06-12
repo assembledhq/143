@@ -90,6 +90,14 @@ function installPreviewHandlers(
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("PreviewsPage", () => {
   beforeEach(() => {
     currentUserRole.value = "member";
@@ -264,6 +272,29 @@ describe("PreviewsPage", () => {
     expect(
       screen.getByRole("link", { name: /create preview/i }),
     ).toHaveAttribute("href", "/previews/new");
+  });
+
+  it("keeps the initial preview content quiet until all sections resolve empty", async () => {
+    const previewsReleased = deferred<void>();
+    server.use(
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({ data: repositories, meta: {} }),
+      ),
+      http.get("*/api/v1/previews", async () => {
+        await previewsReleased.promise;
+        return HttpResponse.json({ data: [], meta });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+
+    expect(screen.queryByText("Loading previews...")).not.toBeInTheDocument();
+    expect(screen.queryByText("No previews are running.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No previews yet")).not.toBeInTheDocument();
+
+    previewsReleased.resolve();
+
+    expect(await screen.findByText("No previews yet")).toBeInTheDocument();
   });
 
   it("shows a stable per-section error state instead of the empty state when the list API fails", async () => {
