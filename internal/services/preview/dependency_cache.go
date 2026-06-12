@@ -310,17 +310,34 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 		return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: %w", err)
 	}
 	existing := make([]string, 0, len(effective))
+	probes := make([]string, 0, len(effective))
 	for _, p := range effective {
 		clean, err := cleanDependencyCachePathForRoot(spec.Root, p, true)
 		if err != nil {
 			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: invalid path %q: %w", p, err)
 		}
-		existsCmd := "cd " + shellQuote(rootDir) + " && test -e " + dependencyCacheShellPathArg(filepath.ToSlash(clean))
+		clean = filepath.ToSlash(clean)
+		existsCmd := "test -e " + dependencyCacheShellPathArg(clean)
 		if strings.Contains(clean, "*") {
 			existsCmd = "find " + shellQuote(rootDir) + " -path " + shellQuote(filepath.ToSlash(filepath.Join(rootDir, clean))) + " -print -quit | grep -q ."
 		}
-		exitCode, err := c.executor.Exec(ctx, sb, existsCmd, io.Discard, io.Discard)
-		if err == nil && exitCode == 0 {
+		probes = append(probes, fmt.Sprintf("if %s; then printf '%%s\\n' %s; fi", existsCmd, dependencyCacheShellPathArg(clean)))
+	}
+	if len(probes) > 0 {
+		var probeOut bytes.Buffer
+		probeCmd := fmt.Sprintf("cd %s && { %s; }", shellQuote(rootDir), strings.Join(probes, " "))
+		exitCode, err := c.executor.Exec(ctx, sb, probeCmd, &probeOut, io.Discard)
+		if err != nil {
+			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: probe effective paths exited %d: %w", exitCode, err)
+		}
+		if exitCode != 0 {
+			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: probe effective paths exited %d", exitCode)
+		}
+		for _, line := range strings.Split(probeOut.String(), "\n") {
+			clean := strings.TrimSpace(line)
+			if clean == "" {
+				continue
+			}
 			existing = append(existing, clean)
 		}
 	}
