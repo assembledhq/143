@@ -89,6 +89,19 @@ func TestSessionThreadPatchRouteIsBuilderWorkflowOnly(t *testing.T) {
 	require.Greater(t, builderGroupStart, readGroupStart, "builder workflow route group should follow the all-roles readable group")
 }
 
+func TestPreviewPolicyMutationRouteIsAdminOnly(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable for preview policy route grouping regression test")
+	adminGroupStart := strings.Index(string(source), `RequireRole("admin")`)
+	policyRoute := strings.Index(string(source), `r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)`)
+
+	require.NotEqual(t, -1, adminGroupStart, "router should still define an admin-only route group")
+	require.NotEqual(t, -1, policyRoute, "preview policy mutation route should be registered")
+	require.Greater(t, policyRoute, adminGroupStart, "preview policy mutation route should live in the admin-only group")
+}
+
 func TestNewRouter_WiresLinearWebhookSigningSecret(t *testing.T) {
 	t.Parallel()
 

@@ -970,6 +970,7 @@ const (
 	JobTypeAutomationRun       = "automation_run"
 	JobTypeStartPreview        = "start_preview"
 	JobTypeStartBranchPreview  = "start_branch_preview"
+	JobTypeAutoPreviewDeferred = "auto_preview_deferred"
 	JobTypeSyncGitHubOrgRoster = "sync_github_org_roster"
 	JobTypePreviewCachePrewarm = "preview_cache_prewarm"
 )

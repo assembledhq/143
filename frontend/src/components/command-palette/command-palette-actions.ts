@@ -40,6 +40,7 @@ export const staticActions: PaletteAction[] = [
   { id: "nav-automations", label: "Automations", icon: RefreshCw, href: "/automations", group: "navigation" },
   { id: "nav-projects", label: "Projects", icon: FolderKanban, href: "/projects", preserveRepo: true, group: "navigation" },
   { id: "nav-autopilot", label: "Autopilot", icon: Zap, href: "/autopilot", group: "navigation" },
+  { id: "nav-previews", label: "Previews", icon: MonitorPlay, href: "/previews", preserveRepo: true, group: "navigation" },
 
   // Settings & admin
   { id: "settings-account", label: "Account", icon: CircleUser, href: "/settings/account", group: "settings" },

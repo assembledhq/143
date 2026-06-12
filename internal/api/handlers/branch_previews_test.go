@@ -940,6 +940,69 @@ func TestBranchPreviewHandler_ListAPITokensReturnsUnavailableWhenStoreNil(t *tes
 	require.Contains(t, rr.Body.String(), "PREVIEW_API_TOKENS_UNAVAILABLE")
 }
 
+func TestBranchPreviewHandler_UpdatePolicyEmitsAudit(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	policyID := uuid.New()
+	now := time.Now()
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	handler.SetAuditEmitter(newAuditEmitterForTest(mock))
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, (*string)(nil), (*string)(nil), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()))
+	mock.ExpectQuery("INSERT INTO repository_preview_policies").
+		WithArgs(previewHandlerAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), userID, now, now))
+	expectAuditInsert(mock)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"auto_mode":"warm"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.UpdatePolicy(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "UpdatePolicy should update the repository policy")
+	require.Contains(t, rr.Body.String(), `"auto_mode":"warm"`, "UpdatePolicy should return the updated mode")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func repositoryPreviewPolicyTestCols() []string {
+	return []string{"id", "org_id", "repository_id", "auto_mode", "updated_by_user_id", "created_at", "updated_at"}
+}
+
+func repositoryTestCols() []string {
+	return []string{
+		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description",
+		"clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	}
+}
+
 func TestBranchPreviewHandler_CreateAPITokenRejectsMissingName(t *testing.T) {
 	t.Parallel()
 
@@ -1235,6 +1298,87 @@ func TestBranchPreviewHandler_ListRejectsPreviewTokenForWrongRepo(t *testing.T) 
 	require.Equal(t, http.StatusForbidden, rr.Code, "List should reject preview API tokens not scoped to the requested repository")
 	require.Contains(t, rr.Body.String(), "PREVIEW_TOKEN_FORBIDDEN")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBranchPreviewHandler_ListSupportsLegacyAndIndexParams(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		query     string
+		tokenRepo *uuid.UUID
+	}{
+		{name: "legacy filters", query: "repository_id=%s&branch=feature&status=ready"},
+		{name: "index filters", query: "repository_id=%s&scope=running&q=%23%34%32&limit=20"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			userID := uuid.New()
+			repoID := uuid.New()
+			handler := NewBranchPreviewHandler(
+				db.NewPreviewStore(mock),
+				db.NewRepositoryStore(mock),
+				fakeBranchPreviewGitHub{},
+				nil,
+				"https://app.143.dev",
+				"https://{id}.preview.143.dev",
+			)
+
+			mock.ExpectQuery("FROM preview_targets target[\\s\\S]+LIMIT @limit").
+				WithArgs(previewHandlerAnyArgs(8)...).
+				WillReturnRows(pgxmock.NewRows(branchPreviewSummaryTestCols()))
+			mock.ExpectQuery("WITH latest_targets AS").
+				WithArgs(previewHandlerAnyArgs(5)...).
+				WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "recent"}).AddRow(0, 0, 0))
+			mock.ExpectQuery("COUNT\\(\\*\\)[\\s\\S]+user_id = @user_id").
+				WithArgs(previewHandlerAnyArgs(2)...).
+				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+			mock.ExpectQuery("COUNT\\(\\*\\)::int[\\s\\S]+repository_preview_policies").
+				WithArgs(previewHandlerAnyArgs(1)...).
+				WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/previews?"+fmt.Sprintf(tt.query, repoID.String()), nil)
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+			ctx = middleware.WithPreviewAPIToken(ctx, &models.PreviewAPIToken{
+				OrgID:         orgID,
+				Scopes:        []string{"previews:read"},
+				RepositoryIDs: []uuid.UUID{repoID},
+			})
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			handler.List(rr, req)
+
+			require.Equal(t, http.StatusOK, rr.Code, "List should accept legacy and index query shapes")
+			require.Contains(t, rr.Body.String(), `"data":[]`, "List should return a list response")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func branchPreviewSummaryTestCols() []string {
+	return []string{
+		"target_id", "preview_id", "repository_id", "repository_full_name", "branch", "commit_sha", "preview_config_name",
+		"source_type", "source_id", "source_url", "status", "created_at", "sort_created_at", "expires_at", "stopped_at", "stopped_reason",
+		"current_phase", "error", "resumable", "resume_estimate_seconds",
+	}
+}
+
+func previewHandlerAnyArgs(n int) []any {
+	args := make([]any, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
 }
 
 func TestBranchPreviewExpiresAt_NilTTLUsesDefaultHardTTL(t *testing.T) {

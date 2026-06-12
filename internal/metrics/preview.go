@@ -36,6 +36,10 @@ type PreviewMetrics struct {
 	PrewarmRuns                    otelmetric.Int64Counter
 	PrewarmRunDuration             otelmetric.Float64Histogram
 	SchedulerDecisions             otelmetric.Int64Counter
+	IndexListDuration              otelmetric.Float64Histogram
+	ResumeTotal                    otelmetric.Int64Counter
+	AutoBuildsTotal                otelmetric.Int64Counter
+	AutoPoolSaturation             otelmetric.Int64Counter
 }
 
 func getPreviewMetrics() *PreviewMetrics {
@@ -61,6 +65,10 @@ func getPreviewMetrics() *PreviewMetrics {
 		prewarmRuns, _ := meter.Int64Counter("preview.cache_prewarm.runs", otelmetric.WithUnit("{run}"))
 		prewarmRunDuration, _ := meter.Float64Histogram("preview.cache_prewarm.run_duration", otelmetric.WithUnit("s"))
 		schedulerDecisions, _ := meter.Int64Counter("preview.session.dependency_cache.scheduler_decisions", otelmetric.WithUnit("{decision}"))
+		indexListDuration, _ := meter.Float64Histogram("preview.index.list_duration", otelmetric.WithUnit("s"))
+		resumeTotal, _ := meter.Int64Counter("preview.resume.total", otelmetric.WithUnit("{resume}"))
+		autoBuildsTotal, _ := meter.Int64Counter("preview.auto.builds_total", otelmetric.WithUnit("{build}"))
+		autoPoolSaturation, _ := meter.Int64Counter("preview.auto.pool_saturation", otelmetric.WithUnit("{event}"))
 		previewMetrics = &PreviewMetrics{
 			CreatesTotal:                   creates,
 			IdempotencyHits:                idem,
@@ -82,6 +90,10 @@ func getPreviewMetrics() *PreviewMetrics {
 			PrewarmRuns:                    prewarmRuns,
 			PrewarmRunDuration:             prewarmRunDuration,
 			SchedulerDecisions:             schedulerDecisions,
+			IndexListDuration:              indexListDuration,
+			ResumeTotal:                    resumeTotal,
+			AutoBuildsTotal:                autoBuildsTotal,
+			AutoPoolSaturation:             autoPoolSaturation,
 		}
 	})
 	return previewMetrics
@@ -269,4 +281,46 @@ func RecordSessionDependencyCacheSchedulerDecision(ctx context.Context, orgID, d
 		attribute.String("org.id", orgID),
 		attribute.String("decision", decision),
 	))
+}
+
+func RecordPreviewIndexListDuration(ctx context.Context, orgID, scope string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.IndexListDuration == nil || duration <= 0 {
+		return
+	}
+	m.IndexListDuration.Record(ctx, duration.Seconds(), otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("preview.scope", scope),
+	))
+}
+
+func RecordPreviewResume(ctx context.Context, orgID, path string) {
+	m := getPreviewMetrics()
+	if m == nil || m.ResumeTotal == nil {
+		return
+	}
+	m.ResumeTotal.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("path", path),
+	))
+}
+
+func RecordPreviewAutoBuild(ctx context.Context, orgID, mode, result string) {
+	m := getPreviewMetrics()
+	if m == nil || m.AutoBuildsTotal == nil {
+		return
+	}
+	m.AutoBuildsTotal.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("mode", mode),
+		attribute.String("result", result),
+	))
+}
+
+func RecordPreviewAutoPoolSaturation(ctx context.Context, orgID string) {
+	m := getPreviewMetrics()
+	if m == nil || m.AutoPoolSaturation == nil {
+		return
+	}
+	m.AutoPoolSaturation.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("org.id", orgID)))
 }

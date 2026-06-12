@@ -57,6 +57,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "preview_secret_bundle.updated is valid", value: AuditActionPreviewSecretBundleUpdated},
 		{name: "preview_secret_bundle.revealed is valid", value: AuditActionPreviewSecretBundleRevealed},
 		{name: "preview_secret_bundle.resolved is valid", value: AuditActionPreviewSecretBundleResolved},
+		{name: "preview_policy.updated is valid", value: AuditActionPreviewPolicyUpdated},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foo.bar", expectErr: true},
 	}
@@ -90,6 +91,7 @@ func TestAuditResourceType_Validate(t *testing.T) {
 		{name: "settings is valid", value: AuditResourceSettings},
 		{name: "credential is valid", value: AuditResourceCredential},
 		{name: "preview_secret_bundle is valid", value: AuditResourcePreviewSecretBundle},
+		{name: "preview_policy is valid", value: AuditResourcePreviewPolicy},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foobar", expectErr: true},
 	}

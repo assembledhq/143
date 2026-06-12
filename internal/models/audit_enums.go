@@ -129,6 +129,7 @@ const (
 	AuditActionPreviewSecretBundleRevealed AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
 	AuditActionPreviewSecretBundleResolved AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
 	AuditActionPreviewSecretBundleFailed   AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
+	AuditActionPreviewPolicyUpdated        AuditAction = "preview_policy.updated"
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -194,6 +195,7 @@ func (a AuditAction) Validate() error {
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
+		AuditActionPreviewPolicyUpdated,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
 		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
@@ -233,6 +235,7 @@ const (
 	AuditResourceAutomation           AuditResourceType = "automation"
 	AuditResourceOrganization         AuditResourceType = "organization"
 	AuditResourcePreviewSecretBundle  AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
+	AuditResourcePreviewPolicy        AuditResourceType = "preview_policy"
 	AuditResourceAPIClient            AuditResourceType = "api_client"
 	AuditResourceAPIToken             AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
 	AuditResourceCLIToken             AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
@@ -249,7 +252,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
-		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle,
+		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy,
 		AuditResourceAPIClient, AuditResourceAPIToken,
 		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,
 		AuditResourceOrgDomain:

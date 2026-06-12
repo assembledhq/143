@@ -267,6 +267,10 @@ type OrgSettings struct {
 	// DefaultPreviewMaxPreviewsPerUser.
 	PreviewMaxPreviewsPerUser int `json:"preview_max_previews_per_user,omitempty"`
 
+	// PreviewAutoPoolMaxActive caps concurrently running auto-created previews
+	// org-wide. Warm and hibernated previews do not count.
+	PreviewAutoPoolMaxActive int `json:"preview_auto_pool_max_active,omitempty"`
+
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
 
 	SandboxLifecycle SandboxLifecycleSettings `json:"sandbox_lifecycle,omitempty"`
@@ -634,6 +638,9 @@ const (
 	DefaultPreviewMaxPreviewsPerUser = 4
 	MinPreviewMaxPreviewsPerUser     = 1
 	MaxPreviewMaxPreviewsPerUser     = 20
+	DefaultPreviewAutoPoolMaxActive  = 4
+	MinPreviewAutoPoolMaxActive      = 1
+	MaxPreviewAutoPoolMaxActive      = 20
 
 	DefaultPreviewMaxCPUMillis        = 2000
 	MinPreviewMaxCPUMillis            = 250
@@ -835,6 +842,13 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.PreviewMaxPreviewsPerUser = MinPreviewMaxPreviewsPerUser
 	} else if s.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser {
 		s.PreviewMaxPreviewsPerUser = MaxPreviewMaxPreviewsPerUser
+	}
+	if s.PreviewAutoPoolMaxActive == 0 {
+		s.PreviewAutoPoolMaxActive = DefaultPreviewAutoPoolMaxActive
+	} else if s.PreviewAutoPoolMaxActive < MinPreviewAutoPoolMaxActive {
+		s.PreviewAutoPoolMaxActive = MinPreviewAutoPoolMaxActive
+	} else if s.PreviewAutoPoolMaxActive > MaxPreviewAutoPoolMaxActive {
+		s.PreviewAutoPoolMaxActive = MaxPreviewAutoPoolMaxActive
 	}
 	if s.SandboxLifecycle.CompletedSessionRetentionMinutes == 0 {
 		s.SandboxLifecycle.CompletedSessionRetentionMinutes = DefaultCompletedSessionRetentionMinutes
