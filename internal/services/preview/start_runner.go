@@ -3,6 +3,7 @@ package preview
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -195,11 +196,19 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		defer capacityReservation.Release()
 	}
 
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Creating preview sandbox", map[string]any{
+		"phase":   "sandbox_create",
+		"purpose": sandboxCfg.Purpose,
+	})
 	sb, err := r.sandboxProvider.Create(ctx, sandboxCfg)
 	if err != nil {
 		r.abort(ctx, reservation, "", fmt.Sprintf("create sandbox: %v", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Preview sandbox created", map[string]any{
+		"phase":      "sandbox_create",
+		"sandbox_id": sb.ID,
+	})
 	token, err := r.github.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("get GitHub token: %v", err))
@@ -209,12 +218,24 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("failed to persist checkout preview phase")
 	}
 	checkoutStarted := time.Now()
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Cloning repository", map[string]any{
+		"phase":  "git_clone",
+		"branch": target.Branch,
+	})
 	if err := r.sandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, target.Branch, token); err != nil {
 		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "clone")
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("clone repository: %v", err))
 		return fmt.Errorf("clone repository: %w", err)
 	}
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Repository cloned", map[string]any{
+		"phase":  "git_clone",
+		"branch": target.Branch,
+	})
 	var checkoutErr bytes.Buffer
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Checking out preview commit", map[string]any{
+		"phase":      "git_checkout",
+		"commit_sha": target.CommitSHA,
+	})
 	exitCode, err := r.sandboxProvider.Exec(ctx, sb, "git checkout --detach "+target.CommitSHA, io.Discard, &checkoutErr)
 	if err != nil {
 		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout")
@@ -227,6 +248,10 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.abort(ctx, reservation, sb.ID, "checkout commit failed: "+msg)
 		return fmt.Errorf("checkout commit failed with code %d: %s", exitCode, msg)
 	}
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Preview commit checked out", map[string]any{
+		"phase":      "git_checkout",
+		"commit_sha": target.CommitSHA,
+	})
 	metrics.RecordBranchPreviewCheckout(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, time.Since(checkoutStarted))
 	metrics.RecordBranchPreviewPhaseDuration(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout", time.Since(checkoutStarted))
 
@@ -236,6 +261,10 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	configStarted := time.Now()
 	cfg := payload.Config
 	if cfg == nil {
+		r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Reading preview config", map[string]any{
+			"phase":       "config",
+			"config_name": target.PreviewConfigName,
+		})
 		cfg, err = r.readWorkspacePreviewConfig(ctx, sb, uuid.Nil, target.PreviewConfigName)
 		if err != nil {
 			metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config")
@@ -286,6 +315,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	}
 	metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, 1)
 	defer metrics.AddBranchPreviewConcurrency(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, -1)
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepStart, "Launching preview runtime", map[string]any{
+		"phase": "launch_preview",
+	})
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
 		classified := ClassifyLaunchFailure(err)
@@ -293,6 +325,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepStart, "Preview runtime ready", map[string]any{
+		"phase": "launch_preview",
+	})
 	if r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKeys, sb, cfg) {
 		if err := r.previews.UpdatePreviewTargetSnapshotKey(ctx, payload.OrgID, payload.PreviewTargetID, startupCacheKeys.SnapshotKey); err != nil {
 			r.logger.Warn().Err(err).
@@ -817,6 +852,10 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		return fmt.Errorf("get session: %w", err)
 	}
 
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Acquiring preview sandbox", map[string]any{
+		"phase":      "sandbox_acquire",
+		"session_id": payload.SessionID.String(),
+	})
 	acq := r.acquireSandbox(ctx, payload.OrgID, &session, reservation)
 	if acq.Err != nil {
 		r.logger.Warn().Err(acq.Err).
@@ -841,6 +880,15 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		r.abort(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
 		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
 	}
+	sandboxMessage := "Using existing session sandbox"
+	if acq.Hydrated {
+		sandboxMessage = "Sandbox hydrated from session snapshot"
+	}
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, sandboxMessage, map[string]any{
+		"phase":      "sandbox_acquire",
+		"sandbox_id": acq.Sandbox.ID,
+		"hydrated":   acq.Hydrated,
+	})
 
 	input := StartPreviewInput{
 		SessionID:                  payload.SessionID,
@@ -860,6 +908,9 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	}
 
 	if input.Config == nil {
+		r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepBuild, "Reading preview config", map[string]any{
+			"phase": "config",
+		})
 		cfg, err := r.readWorkspacePreviewConfig(ctx, acq.Sandbox, payload.SessionID, "")
 		if err != nil {
 			if errors.Is(err, ErrInvalidConfig) {
@@ -877,6 +928,9 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		input.Config = cfg
 	}
 
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepStart, "Launching preview runtime", map[string]any{
+		"phase": "launch_preview",
+	})
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
 		classified := ClassifyLaunchFailure(err)
@@ -884,6 +938,9 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		r.logger.Warn().Err(err).Str("session_id", payload.SessionID.String()).Msg("preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
 	}
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepStart, "Preview runtime ready", map[string]any{
+		"phase": "launch_preview",
+	})
 
 	if r.nodeID != "" && (acq.Hydrated || (session.ContainerID != nil && *session.ContainerID != "")) {
 		containerID := acq.Sandbox.ID
@@ -896,6 +953,29 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 		}
 	}
 	return nil
+}
+
+func (r *StartRunner) createStartupLog(ctx context.Context, orgID, previewID uuid.UUID, level string, step models.PreviewLogStep, message string, metadata map[string]any) {
+	if r == nil || r.previews == nil || previewID == uuid.Nil {
+		return
+	}
+	rawMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to marshal preview startup log metadata")
+		rawMetadata = json.RawMessage(`{}`)
+	}
+	logCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), observerWriteTimeout)
+	defer cancel()
+	if err := r.previews.CreatePreviewLog(logCtx, &models.PreviewLog{
+		PreviewInstanceID: previewID,
+		OrgID:             orgID,
+		Level:             level,
+		Step:              step,
+		Message:           message,
+		Metadata:          rawMetadata,
+	}); err != nil {
+		r.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to persist preview startup log")
+	}
 }
 
 func (r *StartRunner) reassignReservationWorkerIfNeeded(ctx context.Context, orgID, previewID uuid.UUID, reservation *models.PreviewInstance) error {
