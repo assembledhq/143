@@ -11,6 +11,7 @@ import { installSessionDetailPageTestHooks, MockEventSource } from './session-de
 const { toast } = vi.hoisted(() => ({
   toast: {
     success: vi.fn(),
+    info: vi.fn(),
     error: vi.fn(),
   },
 }));
@@ -1014,8 +1015,170 @@ describe('SessionDetailPage PR health and merge', () => {
     await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
 
     await waitFor(() => {
-      expect(repairBody).toEqual({ thread_id: 'thread-review' });
+      expect(repairBody).toEqual({ thread_id: 'thread-review', push_changes: true });
     });
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it('starts no-push PR repair actions from the Fix tests dropdown', async () => {
+    let repairBody: unknown;
+
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', async ({ request }) => {
+        repairBody = await request.json();
+        return HttpResponse.json({
+          data: {
+            session_id: 'session-abcdef12-3456-7890',
+            mode: 'reconstructed',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 1,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'More fix tests actions' }));
+    await user.click(await screen.findByText('Fix without pushing changes'));
+
+    await waitFor(() => {
+      // mockSessions[0] has no threads, so activeThread is null and thread_id is absent from the body.
+      expect(repairBody).toEqual({ push_changes: false });
+    });
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it('includes both thread_id and push_changes:false when Fix without pushing is used from a threaded session', async () => {
+    let repairBody: unknown;
+
+    const threadedSession: Session = {
+      ...mockSessions[0],
+      threads: [
+        {
+          id: 'thread-main',
+          session_id: mockSessions[0].id,
+          org_id: 'org-1',
+          agent_type: 'claude_code',
+          label: 'Main',
+          status: 'completed',
+          current_turn: 1,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+        {
+          id: 'thread-review',
+          session_id: mockSessions[0].id,
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Review',
+          status: 'idle',
+          current_turn: 0,
+          created_at: '2026-02-17T07:01:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadedSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.get('/api/v1/sessions/:id/messages', () => {
+        return HttpResponse.json({
+          data: [],
+          meta: { has_older: false, thread_status: 'idle' },
+        });
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', async ({ request }) => {
+        repairBody = await request.json();
+        return HttpResponse.json({
+          data: {
+            session_id: threadedSession.id,
+            thread_id: 'thread-review',
+            mode: 'reconstructed',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 1,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={threadedSession.id} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Review/ }));
+    await user.click(await screen.findByRole('button', { name: 'More fix tests actions' }));
+    await user.click(await screen.findByText('Fix without pushing changes'));
+
+    await waitFor(() => {
+      expect(repairBody).toEqual({ thread_id: 'thread-review', push_changes: false });
+    });
+    expect(routerPush).not.toHaveBeenCalled();
+  });
+
+  it('shows an informational toast when the repair endpoint returns 409 REPAIR_ALREADY_IN_PROGRESS', async () => {
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            failing_test_count: 1,
+            can_fix_tests: true,
+            needs_agent_action: true,
+            summary: 'PR #42 has 1 failing test job.',
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', () => {
+        return HttpResponse.json(
+          { error: { code: 'REPAIR_ALREADY_IN_PROGRESS', message: 'a repair session is already in progress for this pull request' } },
+          { status: 409 },
+        );
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
+
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenCalledWith('Fix tests session is already in progress');
+    });
+    // Error banner should NOT be shown — only a toast.
+    expect(screen.queryByText('a repair session is already in progress for this pull request')).not.toBeInTheDocument();
     expect(routerPush).not.toHaveBeenCalled();
   });
 
