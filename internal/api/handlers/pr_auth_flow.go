@@ -46,11 +46,12 @@ const (
 )
 
 type prAuthResumeClaims struct {
-	SessionID  uuid.UUID `json:"session_id"`
-	UserID     uuid.UUID `json:"user_id"`
-	OrgID      uuid.UUID `json:"org_id"`
-	Draft      *bool     `json:"draft,omitempty"`
-	AuthorMode string    `json:"author_mode"`
+	SessionID      uuid.UUID `json:"session_id"`
+	UserID         uuid.UUID `json:"user_id"`
+	OrgID          uuid.UUID `json:"org_id"`
+	Draft          *bool     `json:"draft,omitempty"`
+	MergeWhenReady bool      `json:"merge_when_ready,omitempty"`
+	AuthorMode     string    `json:"author_mode"`
 	// Action is the originating endpoint ("create_pr" or "push_changes").
 	// Empty for tokens signed before this field was added; readers should
 	// treat empty as "create_pr" for backward compatibility.
@@ -140,6 +141,9 @@ func parsePRAuthResumeToken(key []byte, token string, now time.Time) (prAuthResu
 //   - Draft is preserved in the resume claims so the original Draft choice
 //     survives the GitHub round-trip — leave nil for endpoints that don't
 //     expose a draft toggle.
+//   - MergeWhenReady is preserved for the combined Create PR + auto-merge
+//     publish action so the OAuth round-trip does not downgrade it to a plain
+//     Create PR.
 type prAuthInterceptParams struct {
 	SessionID            uuid.UUID
 	OrgID                uuid.UUID
@@ -151,6 +155,7 @@ type prAuthInterceptParams struct {
 	ActionDescription    string
 	ResumeExpiredMessage string
 	Draft                *bool
+	MergeWhenReady       bool
 }
 
 // requirePRAuthOrIntercept centralizes the GitHub user-auth interception that
@@ -213,13 +218,14 @@ func (h *SessionHandler) requirePRAuthOrIntercept(w http.ResponseWriter, r *http
 		return false
 	}
 	signedToken, signErr := signPRAuthResumeToken(h.prAuthSigningKey, prAuthResumeClaims{
-		SessionID:  p.SessionID,
-		UserID:     user.ID,
-		OrgID:      p.OrgID,
-		Draft:      p.Draft,
-		AuthorMode: string(prAuthorModeUser),
-		Action:     string(p.Action),
-		ExpiresAt:  time.Now().Add(prAuthResumeTokenTTL).Unix(),
+		SessionID:      p.SessionID,
+		UserID:         user.ID,
+		OrgID:          p.OrgID,
+		Draft:          p.Draft,
+		MergeWhenReady: p.MergeWhenReady,
+		AuthorMode:     string(prAuthorModeUser),
+		Action:         string(p.Action),
+		ExpiresAt:      time.Now().Add(prAuthResumeTokenTTL).Unix(),
 	})
 	if signErr != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to prepare GitHub PR authorization", signErr)
@@ -233,6 +239,7 @@ func (h *SessionHandler) requirePRAuthOrIntercept(w http.ResponseWriter, r *http
 				"session_id":            p.SessionID.String(),
 				"connect_url":           "/api/v1/users/me/github/connect?flow=pr_authorship",
 				"resume_token":          signedToken,
+				"merge_when_ready":      p.MergeWhenReady,
 				"can_fallback_to_app":   p.OrgSettings.PRAuthorship != models.PRAuthorshipUserRequired,
 				"suggested_author_mode": string(prAuthorModeUser),
 			},
