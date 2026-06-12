@@ -215,9 +215,22 @@ function SettingRow({
   );
 }
 
-function UnitInput({ unit, children }: { unit?: string; children: ReactNode }) {
+function UnitInput({
+  unit,
+  children,
+  className,
+}: {
+  unit?: string;
+  children: ReactNode;
+  className?: string;
+}) {
   return (
-    <div className="flex min-w-0 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
+    <div
+      className={cn(
+        "flex min-w-0 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20",
+        className,
+      )}
+    >
       {children}
       {unit ? (
         <span className="shrink-0 border-l border-border px-2.5 text-xs text-muted-foreground">
@@ -253,19 +266,57 @@ function BoundedNumberInput({
   unit?: string;
   onStep?: (direction: -1 | 1) => void;
 }) {
-  return (
-    <div className="flex min-w-0 items-center gap-1.5">
-      {onStep ? (
+  if (onStep) {
+    return (
+      <div
+        role="group"
+        aria-label={`${label} controls`}
+        className="flex h-9 min-w-0 overflow-hidden rounded-md border border-input bg-background shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20"
+      >
         <Button
           type="button"
-          variant="outline"
-          size="icon-sm"
+          variant="ghost"
+          size="icon"
           aria-label={`Decrease ${label}`}
           onClick={() => onStep(-1)}
+          className="h-full w-9 rounded-none border-r border-border text-muted-foreground shadow-none hover:text-foreground focus-visible:z-10"
         >
           <Minus className="h-3.5 w-3.5" />
         </Button>
-      ) : null}
+        <UnitInput
+          unit={unit}
+          className="min-w-0 flex-1 rounded-none border-0 bg-transparent focus-within:ring-0"
+        >
+          <Input
+            id={id}
+            type="number"
+            inputMode={inputMode}
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            onChange={onChange}
+            onBlur={onBlur}
+            aria-label={label}
+            className="h-full rounded-none border-0 focus-visible:ring-0"
+          />
+        </UnitInput>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label={`Increase ${label}`}
+          onClick={() => onStep(1)}
+          className="h-full w-9 rounded-none border-l border-border text-muted-foreground shadow-none hover:text-foreground focus-visible:z-10"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 items-center">
       <UnitInput unit={unit}>
         <Input
           id={id}
@@ -281,17 +332,6 @@ function BoundedNumberInput({
           className="border-0 focus-visible:ring-0"
         />
       </UnitInput>
-      {onStep ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="icon-sm"
-          aria-label={`Increase ${label}`}
-          onClick={() => onStep(1)}
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
-      ) : null}
     </div>
   );
 }
@@ -548,7 +588,10 @@ function SandboxNetworkSection() {
               className="sm:ml-auto"
             />
           </SettingRow>
-          <div className="flex flex-col gap-2 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div
+            data-testid="public-ip-row"
+            className="flex flex-col items-start gap-2 py-4"
+          >
             <div className="min-w-0 space-y-1">
               <p className="text-xs font-medium text-foreground">Public IP</p>
               <p className="text-xs text-muted-foreground">
@@ -556,7 +599,10 @@ function SandboxNetworkSection() {
                 enabled.
               </p>
             </div>
-            <div className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 sm:max-w-[24rem]">
+            <div
+              data-testid="public-ip-value"
+              className="inline-flex max-w-full min-w-0 items-center gap-2 self-start rounded-md border border-border bg-muted/30 px-3 py-2"
+            >
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
                 {publicIP ?? "Not configured"}
               </code>
@@ -964,44 +1010,42 @@ function ResourceDefaultsSection() {
         className="space-y-3"
       >
         <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-          <SectionHeader
-            title="Advanced resource limits"
-            status={autosave.status}
-            action={
+          <Card>
+            <CardContent>
               <CollapsibleTrigger asChild>
                 <Button
                   type="button"
-                  variant="outline"
-                  size="sm"
+                  variant="ghost"
                   aria-label={
                     advancedOpen
-                      ? "Collapse advanced resource limits"
-                      : "Expand advanced resource limits"
+                      ? "Hide advanced resource limits"
+                      : "Show advanced resource limits"
                   }
+                  className="flex h-auto w-full items-center justify-between gap-4 rounded-none px-0 py-4 text-left hover:bg-transparent"
                 >
-                  {advancedOpen ? "Hide" : "Expand"}
-                  <ChevronDown
-                    className={cn(
-                      "h-3.5 w-3.5 transition-transform",
-                      advancedOpen && "rotate-180",
-                    )}
-                  />
+                  <span className="block min-w-0 space-y-1">
+                    <span className="block text-xs font-medium text-foreground">
+                      Advanced resource limits
+                    </span>
+                    <span className="block text-sm font-medium text-foreground">
+                      {advancedSummary}
+                    </span>
+                    <span className="block text-xs leading-5 whitespace-normal text-muted-foreground">
+                      Exact caps for repository-requested previews.
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2 text-xs font-medium text-muted-foreground">
+                    <AutosaveIndicator status={autosave.status} />
+                    {advancedOpen ? "Hide" : "Show"}
+                    <ChevronDown
+                      className={cn(
+                        "h-3.5 w-3.5 transition-transform",
+                        advancedOpen && "rotate-180",
+                      )}
+                    />
+                  </span>
                 </Button>
               </CollapsibleTrigger>
-            }
-          />
-          <Card>
-            <CardContent>
-              {!advancedOpen ? (
-                <div className="py-4">
-                  <p className="text-sm font-medium text-foreground">
-                    {advancedSummary}
-                  </p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    Exact caps for repository-requested previews.
-                  </p>
-                </div>
-              ) : null}
               <CollapsibleContent>
                 <SettingRow
                   id="preview-max-tier"
