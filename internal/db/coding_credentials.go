@@ -1397,6 +1397,53 @@ func sameUUIDSet(a, b []uuid.UUID) bool {
 	return len(seen) == 0
 }
 
+// WithRefreshLock runs fn while holding a per-credential Postgres advisory
+// lock, serializing OAuth token refreshes across processes and hosts.
+// Subscription refresh tokens (Anthropic, OpenAI) are single-use: two hosts
+// refreshing the same credential concurrently make the loser's grant look
+// revoked, and the loser would then invalidate an otherwise healthy
+// credential. An in-process mutex can't prevent that; this lock can.
+//
+// The lock is transaction-scoped and the transaction does nothing else — fn
+// performs its reads/writes on ordinary pool connections, which the advisory
+// lock doesn't block. fn typically spans one HTTPS round-trip to the token
+// endpoint, so the transaction is held for a few seconds at most, bounded by
+// the caller's HTTP client timeout. fn's error is returned unwrapped so
+// callers' errors.Is/message checks see exactly what fn produced.
+//
+// Pool note: each in-flight call pins one pool connection for the lock while
+// fn acquires more for its own queries. Concurrency is bounded by the number
+// of distinct credentials refreshing at once (small — refreshes happen at
+// ~8h token expiry), but keep that 2x footprint in mind before reusing this
+// for anything high-frequency.
+//
+// lint:allow-no-orgid reason="advisory lock keyed by credential ID only; it reads/writes no rows — scope is enforced by every store call fn makes while holding it"
+func (s *CodingCredentialStore) WithRefreshLock(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"coding_credential_refresh:"+credID.String(),
+	); err != nil {
+		return fmt.Errorf("acquire refresh lock: %w", err)
+	}
+
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	// The transaction holds only the advisory lock — fn's writes are already
+	// durable on other connections. A commit failure here must not surface as
+	// a refresh failure (the caller could react by invalidating a credential
+	// that was in fact refreshed); the lock dies with the connection either
+	// way, and the deferred Rollback covers cleanup.
+	_ = tx.Commit(ctx)
+	return nil
+}
+
 // withScopeLock acquires a per-scope advisory lock to serialize stack-priority
 // updates inside the surrounding transaction. Without it, concurrent Create,
 // Reorder, and Move calls could compute from stale priorities and emit
