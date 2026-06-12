@@ -123,6 +123,17 @@ type branchPreviewStartupCacheKeys struct {
 	CommitSHA   string
 }
 
+type StartupSnapshotResult string
+
+const (
+	StartupSnapshotSaved              StartupSnapshotResult = "saved"
+	StartupSnapshotSkippedNoLockfiles StartupSnapshotResult = "skipped_no_lockfiles"
+	StartupSnapshotSkippedSecretFiles StartupSnapshotResult = "skipped_secret_files"
+	StartupSnapshotFailed             StartupSnapshotResult = "failed"
+	StartupSnapshotTooLarge           StartupSnapshotResult = "too_large"
+	StartupSnapshotDisabled           StartupSnapshotResult = "disabled"
+)
+
 // StartReservedBranchPreview completes a target-owned branch preview by
 // creating a fresh sandbox, cloning the repository, checking out the pinned
 // commit, resolving the preview config, and launching the runtime.
@@ -328,7 +339,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "info", models.PreviewLogStepStart, "Preview runtime ready", map[string]any{
 		"phase": "launch_preview",
 	})
-	if r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKeys, sb, cfg) {
+	if result := r.createBranchPreviewStartupCache(ctx, payload.OrgID, target.RepositoryID, startupCacheKeys, sb, cfg); result == StartupSnapshotSaved {
 		if err := r.previews.UpdatePreviewTargetSnapshotKey(ctx, payload.OrgID, payload.PreviewTargetID, startupCacheKeys.SnapshotKey); err != nil {
 			r.logger.Warn().Err(err).
 				Str("preview_target_id", payload.PreviewTargetID.String()).
@@ -1450,9 +1461,17 @@ func (r *StartRunner) recoverWorkspaceFromGit(ctx context.Context, sb *agent.San
 	return nil
 }
 
-func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, keys branchPreviewStartupCacheKeys, sb *agent.Sandbox, cfg *models.PreviewConfig) bool {
+func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, keys branchPreviewStartupCacheKeys, sb *agent.Sandbox, cfg *models.PreviewConfig) StartupSnapshotResult {
+	started := time.Now()
 	if r == nil || r.snapshotCache == nil || sb == nil || keys.SnapshotKey == "" {
-		return false
+		result := StartupSnapshotDisabled
+		if r != nil && r.snapshotCache != nil && sb != nil && keys.SnapshotKey == "" {
+			result = StartupSnapshotSkippedNoLockfiles
+		}
+		if r != nil {
+			r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, result, 0, started, nil)
+		}
+		return result
 	}
 	if previewConfigHasRuntimeSecretFiles(cfg) {
 		// See maybeRestoreBranchPreviewStartupCache for why secret-file
@@ -1461,19 +1480,51 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 			Str("repository_id", repoID.String()).
 			Str("snapshot_key", keys.SnapshotKey).
 			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
-		return false
+		r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, StartupSnapshotSkippedSecretFiles, 0, started, nil)
+		return StartupSnapshotSkippedSecretFiles
 	}
 	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()
 	metadata := SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: keys.BaseKey, CommitSHA: keys.CommitSHA}
 	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata); err != nil {
+		result := startupSnapshotResultForCreateError(err)
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
 			Str("snapshot_key", keys.SnapshotKey).
 			Msg("failed to create branch preview startup cache")
-		return false
+		r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, result, 0, started, err)
+		return result
 	}
-	return true
+	r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, StartupSnapshotSaved, 0, started, nil)
+	return StartupSnapshotSaved
+}
+
+func startupSnapshotResultForCreateError(err error) StartupSnapshotResult {
+	if err == nil {
+		return StartupSnapshotSaved
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "too large") {
+		return StartupSnapshotTooLarge
+	}
+	return StartupSnapshotFailed
+}
+
+func (r *StartRunner) logBranchPreviewStartupSnapshotResult(repoID uuid.UUID, snapshotKey string, result StartupSnapshotResult, sizeBytes int64, started time.Time, err error) {
+	if r == nil {
+		return
+	}
+	event := r.logger.Info()
+	if err != nil {
+		event = r.logger.Warn().Err(err)
+	}
+	event.
+		Str("repository_id", repoID.String()).
+		Str("snapshot_key", snapshotKey).
+		Str("result", string(result)).
+		Int64("size_bytes", sizeBytes).
+		Dur("elapsed", time.Since(started)).
+		Msg("branch preview startup snapshot result")
 }
 
 func (r *StartRunner) computeBranchPreviewStartupCacheKeys(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, commitSHA string) (branchPreviewStartupCacheKeys, error) {

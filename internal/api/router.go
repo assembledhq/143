@@ -683,6 +683,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		MaxPerUser:             cfg.PreviewMaxPerUser,
 		MaxPerOrg:              cfg.PreviewMaxPerOrg,
 		MaxPerWorker:           cfg.PreviewMaxPerWorker,
+		PreviewIdleTimeout:     cfg.PreviewIdleTimeout,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -692,8 +693,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
 		recycleWorker.Start()
 		cleanupWorker := preview.NewCleanupWorker(preview.CleanupWorkerConfig{
-			Manager: previewManager,
-			Logger:  logger,
+			Manager:     previewManager,
+			Logger:      logger,
+			IdleTimeout: cfg.PreviewIdleTimeout,
 		})
 		cleanupWorker.Start()
 	} else {
