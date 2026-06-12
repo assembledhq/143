@@ -224,17 +224,6 @@ type restartBranchPreviewRequest struct {
 	StartLatest bool `json:"start_latest"`
 }
 
-type createPreviewAPITokenRequest struct {
-	Name          string      `json:"name"`
-	Scopes        []string    `json:"scopes"`
-	RepositoryIDs []uuid.UUID `json:"repository_ids"`
-}
-
-type createPreviewAPITokenResponse struct {
-	models.PreviewAPIToken
-	Token string `json:"token"`
-}
-
 type updatePreviewPolicyRequest struct {
 	AutoMode models.PreviewAutoMode `json:"auto_mode"`
 }
@@ -1347,16 +1336,7 @@ func (h *BranchPreviewHandler) previewIndexPool(ctx context.Context, orgID uuid.
 }
 
 func (h *BranchPreviewHandler) ListAPITokens(w http.ResponseWriter, r *http.Request) {
-	if h.apiTokens == nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKENS_UNAVAILABLE", "preview API token store is not configured")
-		return
-	}
-	tokens, err := h.apiTokens.List(r.Context(), middleware.OrgIDFromContext(r.Context()))
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKEN_LIST_FAILED", "failed to list preview API tokens", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.PreviewAPIToken]{Data: tokens})
+	writePreviewAPITokensDeprecated(w, r, middleware.OrgIDFromContext(r.Context()))
 }
 
 func (h *BranchPreviewHandler) ListPolicies(w http.ResponseWriter, r *http.Request) {
@@ -1428,76 +1408,15 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *BranchPreviewHandler) CreateAPIToken(w http.ResponseWriter, r *http.Request) {
-	if h.apiTokens == nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKENS_UNAVAILABLE", "preview API token store is not configured")
-		return
-	}
-	user := middleware.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
-		return
-	}
-	var req createPreviewAPITokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
-		return
-	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" {
-		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_API_TOKEN", "name is required")
-		return
-	}
-	if len(req.Scopes) == 0 {
-		req.Scopes = []string{"previews:create", "previews:read", "previews:stop"}
-	}
-	for _, scope := range req.Scopes {
-		if scope != "previews:create" && scope != "previews:read" && scope != "previews:stop" {
-			writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_API_TOKEN_SCOPE", "invalid preview API token scope")
-			return
-		}
-	}
-	rawToken, err := db.GeneratePreviewAPIToken()
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKEN_CREATE_FAILED", "failed to generate preview API token", err)
-		return
-	}
-	token := &models.PreviewAPIToken{
-		OrgID:           middleware.OrgIDFromContext(r.Context()),
-		Name:            req.Name,
-		TokenHash:       db.HashPreviewAPIToken(rawToken),
-		Scopes:          req.Scopes,
-		RepositoryIDs:   req.RepositoryIDs,
-		CreatedByUserID: user.ID,
-	}
-	if err := h.apiTokens.Create(r.Context(), token); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKEN_CREATE_FAILED", "failed to create preview API token", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, models.SingleResponse[createPreviewAPITokenResponse]{Data: createPreviewAPITokenResponse{
-		PreviewAPIToken: *token,
-		Token:           rawToken,
-	}})
+	writePreviewAPITokensDeprecated(w, r, middleware.OrgIDFromContext(r.Context()))
 }
 
 func (h *BranchPreviewHandler) RevokeAPIToken(w http.ResponseWriter, r *http.Request) {
-	if h.apiTokens == nil {
-		writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKENS_UNAVAILABLE", "preview API token store is not configured")
-		return
-	}
-	tokenID, err := uuid.Parse(chi.URLParam(r, "token_id"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid token ID")
-		return
-	}
-	if err := h.apiTokens.Revoke(r.Context(), middleware.OrgIDFromContext(r.Context()), tokenID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, r, http.StatusNotFound, "PREVIEW_API_TOKEN_NOT_FOUND", "preview API token not found")
-		} else {
-			writeError(w, r, http.StatusInternalServerError, "PREVIEW_API_TOKEN_REVOKE_FAILED", "failed to revoke preview API token", err)
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "revoked"}})
+	writePreviewAPITokensDeprecated(w, r, middleware.OrgIDFromContext(r.Context()))
+}
+
+func writePreviewAPITokensDeprecated(w http.ResponseWriter, r *http.Request, _ uuid.UUID) {
+	writeError(w, r, http.StatusGone, "PREVIEW_API_TOKENS_DEPRECATED", "Preview API token management is deprecated. Use External API tokens instead.")
 }
 
 func (h *BranchPreviewHandler) Restart(w http.ResponseWriter, r *http.Request) {
