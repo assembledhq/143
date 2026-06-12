@@ -26,6 +26,7 @@ function mockDomains(domains: DomainFixture[]) {
   server.use(
     http.get("/api/v1/team/domains", () => HttpResponse.json({ data: enriched, meta: {} })),
     http.get("/api/v1/team/github-orgs", () => HttpResponse.json({ github_orgs: [] })),
+    http.get("/api/v1/team/github/status", () => HttpResponse.json({ data: { connected: false } })),
   );
 }
 
@@ -36,6 +37,29 @@ describe("VerifiedDomainsSection", () => {
 
     expect(await screen.findByText(/People who match these rules join as members automatically/)).toBeInTheDocument();
     expect(await screen.findByText(/No domains yet/)).toBeInTheDocument();
+  });
+
+  it("keeps the add-domain controls the same height", async () => {
+    mockDomains([]);
+    renderWithProviders(<VerifiedDomainsSection />);
+
+    const input = await screen.findByLabelText("Domain to verify");
+    const button = screen.getByRole("button", { name: "Add domain" });
+
+    expect(input).toHaveClass("h-9");
+    expect(button).toHaveClass("h-9");
+  });
+
+  it("does not ask connected GitHub users to reconnect when no organization installation is available", async () => {
+    mockDomains([]);
+    server.use(
+      http.get("/api/v1/team/github/status", () => HttpResponse.json({ data: { connected: true } })),
+    );
+
+    renderWithProviders(<VerifiedDomainsSection />);
+
+    expect(await screen.findByText(/Install the GitHub App on a GitHub organization/)).toBeInTheDocument();
+    expect(screen.queryByText(/Connect GitHub to enable organization-based auto-join/)).not.toBeInTheDocument();
   });
 
   it("shows the DNS record instructions for a pending domain", async () => {

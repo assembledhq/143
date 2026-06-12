@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Terminal } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Badge } from "@/components/ui/badge";
@@ -96,10 +96,7 @@ export function CLIJoinTokensCard() {
 
   return (
     <section className="space-y-3">
-      <div className="flex items-center gap-1.5">
-        <Terminal className="size-3.5 text-muted-foreground" />
-        <h2 className="text-xs font-medium text-foreground">CLI install links</h2>
-      </div>
+      <h2 className="text-xs font-medium text-foreground">CLI install links</h2>
       <p className="text-xs text-muted-foreground">
         Anyone with this link can install 143-tools and join this org by
         signing in with GitHub — one command, no pre-registration. Share it in
@@ -123,9 +120,9 @@ export function CLIJoinTokensCard() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label>Role granted</Label>
+              <Label htmlFor="join-token-role">Role granted</Label>
               <Select value={role} onValueChange={setRole}>
-                <SelectTrigger className="w-full sm:w-32">
+                <SelectTrigger id="join-token-role" className="h-9 w-full sm:w-32">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -136,7 +133,7 @@ export function CLIJoinTokensCard() {
               </Select>
             </div>
             <Button
-              size="sm"
+              className="h-9"
               disabled={createMutation.isPending}
               onClick={() => createMutation.mutate()}
             >
