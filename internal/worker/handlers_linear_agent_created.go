@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -300,6 +302,9 @@ func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgI
 	if err := stores.Sessions.CreateInTx(ctx, tx, session); err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
+	if err := createInitialLinearAgentSessionMessage(ctx, tx, orgID, session); err != nil {
+		return err
+	}
 	if err := db.NewLinearAgentSessionStore(tx).AttachSession(ctx, orgID, agentSessionRowID, session.ID); err != nil {
 		return fmt.Errorf("attach session to linear_agent_sessions: %w", err)
 	}
@@ -307,6 +312,28 @@ func createAndAttachLinearAgentSession(ctx context.Context, stores *Stores, orgI
 		return fmt.Errorf("commit linear agent session create transaction: %w", err)
 	}
 	committed = true
+	return nil
+}
+
+func createInitialLinearAgentSessionMessage(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, session *models.Session) error {
+	if session == nil || session.PMApproach == nil {
+		return nil
+	}
+	content := strings.TrimSpace(*session.PMApproach)
+	if content == "" {
+		return nil
+	}
+	msg := &models.SessionMessage{
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   session.PrimaryThreadID,
+		TurnNumber: 0,
+		Role:       models.MessageRoleUser,
+		Content:    content,
+	}
+	if err := db.NewSessionMessageStore(tx).Create(ctx, msg); err != nil {
+		return fmt.Errorf("create initial linear agent session message: %w", err)
+	}
 	return nil
 }
 
