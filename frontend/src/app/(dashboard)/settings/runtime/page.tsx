@@ -1,22 +1,47 @@
 "use client";
 
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactNode,
+} from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Network } from "lucide-react";
+import { ChevronDown, CircleHelp, Minus, Plus } from "lucide-react";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CopyButton } from "@/components/copy-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useOrgSettingsAutosave } from "@/hooks/use-org-settings-autosave";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { cn } from "@/lib/utils";
 import {
   DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES,
   DEFAULT_IDLE_PREVIEW_TTL_MINUTES,
@@ -42,18 +67,40 @@ import {
   MIN_SESSION_DURATION_MINUTES,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { Organization, OrgSettings, SandboxResourceTier, SingleResponse } from "@/lib/types";
+import type {
+  Organization,
+  OrgSettings,
+  SandboxResourceTier,
+  SingleResponse,
+} from "@/lib/types";
 
 const DEFAULT_EXECUTION_SETTINGS = {
   max_concurrent_runs: 5,
   max_session_duration_seconds: 25 * 60,
 };
 
-const RESOURCE_TIERS: { value: SandboxResourceTier; label: string; description: string }[] = [
-  { value: "small", label: "Small", description: "Lower CPU and memory for lightweight tasks." },
-  { value: "standard", label: "Standard", description: "Default runtime resources for most work." },
-  { value: "large", label: "Large", description: "Higher CPU and memory for heavier builds." },
+const CPU_MILLIS_PER_CORE = 1000;
+const CPU_MILLIS_STEP = 250;
+
+const RESOURCE_TIERS: { value: SandboxResourceTier; label: string }[] = [
+  { value: "small", label: "Small" },
+  { value: "standard", label: "Standard" },
+  { value: "large", label: "Large" },
 ];
+
+function formatCPUCores(millis: number): string {
+  const cores = millis / CPU_MILLIS_PER_CORE;
+  return Number.isInteger(cores)
+    ? String(cores)
+    : cores.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function cpuCoresToMillis(cores: number): number {
+  return (
+    Math.round((cores * CPU_MILLIS_PER_CORE) / CPU_MILLIS_STEP) *
+    CPU_MILLIS_STEP
+  );
+}
 
 function useOrgSettingsQuery() {
   return useQuery<SingleResponse<Organization>>({
@@ -65,16 +112,359 @@ function useOrgSettingsQuery() {
 function SectionHeader({
   title,
   status,
+  action,
 }: {
   title: string;
   status?: ReturnType<typeof useOrgSettingsAutosave>["status"];
+  action?: ReactNode;
 }) {
   return (
     <div className="flex items-center justify-between">
       <h2 className="text-xs font-medium text-foreground">{title}</h2>
-      {status ? <AutosaveIndicator status={status} /> : null}
+      <div className="flex items-center gap-2">
+        {status ? <AutosaveIndicator status={status} /> : null}
+        {action}
+      </div>
     </div>
   );
+}
+
+function SettingLabel({
+  htmlFor,
+  label,
+  tooltip,
+}: {
+  htmlFor: string;
+  label: string;
+  tooltip?: string;
+}) {
+  const ariaLabel = `About ${label.charAt(0).toLowerCase()}${label.slice(1)}`;
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label htmlFor={htmlFor}>{label}</Label>
+      {tooltip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 rounded-full text-muted-foreground hover:text-foreground"
+              aria-label={ariaLabel}
+            >
+              <CircleHelp className="h-3.5 w-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top" sideOffset={6} className="max-w-72">
+            {tooltip}
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+    </div>
+  );
+}
+
+function HelperText({
+  children,
+  className,
+}: {
+  children: string;
+  className?: string;
+}) {
+  return (
+    <p className={cn("text-xs leading-5 text-muted-foreground", className)}>
+      {children}
+    </p>
+  );
+}
+
+function SettingRow({
+  id,
+  label,
+  description,
+  helper,
+  tooltip,
+  children,
+  className,
+}: {
+  id: string;
+  label: string;
+  description: string;
+  helper?: string;
+  tooltip?: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "grid gap-3 border-b border-border/70 py-4 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start",
+        className,
+      )}
+    >
+      <div className="min-w-0 space-y-1">
+        <SettingLabel htmlFor={id} label={label} tooltip={tooltip} />
+        <HelperText>{description}</HelperText>
+        {helper ? (
+          <HelperText className="text-muted-foreground/80">{helper}</HelperText>
+        ) : null}
+      </div>
+      <div className="min-w-0 sm:w-[15rem]">{children}</div>
+    </div>
+  );
+}
+
+function UnitInput({ unit, children }: { unit?: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
+      {children}
+      {unit ? (
+        <span className="shrink-0 border-l border-border px-2.5 text-xs text-muted-foreground">
+          {unit}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function BoundedNumberInput({
+  id,
+  label,
+  value,
+  onChange,
+  onBlur,
+  min,
+  max,
+  inputMode = "numeric",
+  step,
+  unit,
+  onStep,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onBlur: () => void;
+  min: number;
+  max: number;
+  inputMode?: "numeric" | "decimal";
+  step?: number;
+  unit?: string;
+  onStep?: (direction: -1 | 1) => void;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      {onStep ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label={`Decrease ${label}`}
+          onClick={() => onStep(-1)}
+        >
+          <Minus className="h-3.5 w-3.5" />
+        </Button>
+      ) : null}
+      <UnitInput unit={unit}>
+        <Input
+          id={id}
+          type="number"
+          inputMode={inputMode}
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={onChange}
+          onBlur={onBlur}
+          aria-label={label}
+          className="border-0 focus-visible:ring-0"
+        />
+      </UnitInput>
+      {onStep ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          aria-label={`Increase ${label}`}
+          onClick={() => onStep(1)}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function formatMinutes(minutes: number): string {
+  if (minutes >= 60 && minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
+function formatGiB(mib: number): string {
+  const gib = mib / 1024;
+  return Number.isInteger(gib) ? `${gib} GiB` : `${gib.toFixed(1)} GiB`;
+}
+
+function getSettings(response?: SingleResponse<Organization>): OrgSettings {
+  return (response?.data?.settings ?? {}) as OrgSettings;
+}
+
+function RuntimeSummary() {
+  const { data: settingsResponse } = useOrgSettingsQuery();
+  const settings = getSettings(settingsResponse);
+  const lifecycle = settings.sandbox_lifecycle ?? {};
+
+  const maxConcurrentRuns =
+    settings.max_concurrent_runs ??
+    DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+  const maxPreviewsPerUser =
+    settings.preview_max_previews_per_user ??
+    DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
+  const sessionMinutes = Math.round(
+    (settings.max_session_duration_seconds ??
+      DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
+  );
+  const idlePreviewTTLMinutes =
+    lifecycle.idle_preview_ttl_minutes ?? DEFAULT_IDLE_PREVIEW_TTL_MINUTES;
+
+  const items = [
+    {
+      label: "Agent runs",
+      value: `${maxConcurrentRuns} concurrent`,
+      description: "Org-wide cap",
+    },
+    {
+      label: "Active previews",
+      value: `${maxPreviewsPerUser} per user`,
+      description: "Per-user cap",
+    },
+    {
+      label: "Session max",
+      value: formatMinutes(sessionMinutes),
+      description: "Agent turn limit",
+    },
+    {
+      label: "Preview idle TTL",
+      value: formatMinutes(idlePreviewTTLMinutes),
+      description: "Auto-stop preview",
+    },
+  ];
+
+  return (
+    <div className="grid overflow-hidden rounded-md border border-border bg-card sm:grid-cols-2 lg:grid-cols-4">
+      {items.map((item) => (
+        <div
+          key={item.label}
+          className="border-b border-border/70 p-3 last:border-b-0 sm:border-r sm:last:border-r-0 sm:[&:nth-last-child(-n+2)]:border-b-0 lg:border-b-0"
+        >
+          <p className="text-xs font-medium text-muted-foreground">
+            {item.label}
+          </p>
+          <p className="mt-1 text-sm font-medium text-foreground">
+            {item.value}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {item.description}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function usePreviewCPUField({
+  serverMillis,
+  autosave,
+}: {
+  serverMillis: number;
+  autosave: ReturnType<typeof useOrgSettingsAutosave>;
+}) {
+  const [trackedServerMillis, setTrackedServerMillis] = useState(serverMillis);
+  const [local, setLocal] = useState(() => formatCPUCores(serverMillis));
+  const [lastSentMillis, setLastSentMillis] = useState(serverMillis);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingMillisRef = useRef<number | null>(null);
+  const hasEditedRef = useRef(false);
+
+  if (serverMillis !== trackedServerMillis) {
+    setTrackedServerMillis(serverMillis);
+    const hasPendingEdit = local !== formatCPUCores(lastSentMillis);
+    if (serverMillis !== lastSentMillis && !hasPendingEdit) {
+      setLocal(formatCPUCores(serverMillis));
+      setLastSentMillis(serverMillis);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const clampMillis = (cores: number) =>
+    clampNumber(
+      cpuCoresToMillis(cores),
+      MIN_PREVIEW_MAX_CPU_MILLIS,
+      MAX_PREVIEW_MAX_CPU_MILLIS,
+    );
+
+  const dispatch = (millis: number) => {
+    setLastSentMillis(millis);
+    autosave.save({
+      settings: { sandbox_resources: { preview_max_cpu_millis: millis } },
+    });
+  };
+
+  const onChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const raw = event.target.value;
+    hasEditedRef.current = true;
+    setLocal(raw);
+    if (raw.trim() === "") return;
+    const parsed = Number.parseFloat(raw);
+    if (Number.isNaN(parsed)) return;
+    const clampedMillis = clampMillis(parsed);
+    pendingMillisRef.current = clampedMillis;
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      const millis = pendingMillisRef.current;
+      pendingMillisRef.current = null;
+      if (millis !== null) dispatch(millis);
+    }, 400);
+  };
+
+  const onBlur = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    if (!hasEditedRef.current) {
+      pendingMillisRef.current = null;
+      return;
+    }
+    const parsed = Number.parseFloat(local);
+    if (Number.isNaN(parsed)) {
+      setLocal(formatCPUCores(serverMillis));
+      setLastSentMillis(serverMillis);
+      pendingMillisRef.current = null;
+      hasEditedRef.current = false;
+      return;
+    }
+    const clampedMillis = clampMillis(parsed);
+    setLocal(formatCPUCores(clampedMillis));
+    pendingMillisRef.current = null;
+    hasEditedRef.current = false;
+    if (clampedMillis !== lastSentMillis) dispatch(clampedMillis);
+  };
+
+  return { value: local, onChange, onBlur };
 }
 
 function ResourceTierSelect({
@@ -89,7 +479,10 @@ function ResourceTierSelect({
   onChange: (value: SandboxResourceTier) => void;
 }) {
   return (
-    <Select value={value} onValueChange={(nextValue) => onChange(nextValue as SandboxResourceTier)}>
+    <Select
+      value={value}
+      onValueChange={(nextValue) => onChange(nextValue as SandboxResourceTier)}
+    >
       <SelectTrigger id={id} aria-label={label}>
         <SelectValue />
       </SelectTrigger>
@@ -112,30 +505,32 @@ function SandboxNetworkSection() {
   });
   const autosave = useOrgSettingsAutosave();
 
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const settings = getSettings(settingsResponse);
   const sandboxNetwork = settings.sandbox_network ?? {};
   const networkStatus = networkStatusResponse?.data;
   const available = networkStatus?.static_egress_available ?? false;
   const publicIP = networkStatus?.static_egress_public_ip;
-  const enabled = sandboxNetwork.static_egress_enabled ?? networkStatus?.static_egress_enabled ?? false;
+  const enabled =
+    sandboxNetwork.static_egress_enabled ??
+    networkStatus?.static_egress_enabled ??
+    false;
 
   return (
     <section className="space-y-3">
       <SectionHeader title="Sandbox network" status={autosave.status} />
       <Card>
-        <CardContent className="space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="space-y-1">
-              <Label htmlFor="static-egress-enabled">Use static egress IP for sessions and previews</Label>
-              <p className="text-xs text-muted-foreground">
-                Uses a stable public IP for new and hydrated sandboxes.
-              </p>
-              {enabled && networkStatusResponse && !available && (
-                <p className="text-xs text-muted-foreground">
-                  Static egress is not currently available for new sandbox starts.
-                </p>
-              )}
-            </div>
+        <CardContent>
+          <SettingRow
+            id="static-egress-enabled"
+            label="Static egress IP"
+            description="Use one stable public IP for new and resumed sandboxes."
+            helper={
+              enabled && networkStatusResponse && !available
+                ? "Static egress is not currently available for new sandbox starts."
+                : undefined
+            }
+            tooltip="Use this when external services need to allowlist sandbox traffic."
+          >
             <Switch
               id="static-egress-enabled"
               checked={enabled}
@@ -149,13 +544,27 @@ function SandboxNetworkSection() {
                   },
                 });
               }}
-              aria-label="Use static egress IP for sessions and previews"
+              aria-label="Static egress IP"
+              className="sm:ml-auto"
             />
-          </div>
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
-            <span className="text-xs text-muted-foreground">Public IP</span>
-            <code className="font-mono text-xs text-foreground">{publicIP ?? "Not configured"}</code>
-            <CopyButton value={publicIP} label="Copy static egress public IP" />
+          </SettingRow>
+          <div className="flex flex-col gap-2 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0 space-y-1">
+              <p className="text-xs font-medium text-foreground">Public IP</p>
+              <p className="text-xs text-muted-foreground">
+                Add this address to external allowlists when static egress is
+                enabled.
+              </p>
+            </div>
+            <div className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 sm:max-w-[24rem]">
+              <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+                {publicIP ?? "Not configured"}
+              </code>
+              <CopyButton
+                value={publicIP}
+                label="Copy static egress public IP"
+              />
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -167,22 +576,27 @@ function CapacityLimitsSection() {
   const { data: settingsResponse } = useOrgSettingsQuery();
   const autosave = useOrgSettingsAutosave();
 
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const settings = getSettings(settingsResponse);
   const maxConcurrentRuns =
-    settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
+    settings.max_concurrent_runs ??
+    DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
   const maxPreviewsPerUser =
-    settings.preview_max_previews_per_user ?? DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
+    settings.preview_max_previews_per_user ??
+    DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
 
   const concurrentRunsField = useAutosaveNumericField({
     serverValue: maxConcurrentRuns,
     autosave,
     toPatch: (value) => ({ settings: { max_concurrent_runs: value } }),
-    clamp: (value) => clampNumber(value, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
+    clamp: (value) =>
+      clampNumber(value, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
   });
   const maxPreviewsPerUserField = useAutosaveNumericField({
     serverValue: maxPreviewsPerUser,
     autosave,
-    toPatch: (value) => ({ settings: { preview_max_previews_per_user: value } }),
+    toPatch: (value) => ({
+      settings: { preview_max_previews_per_user: value },
+    }),
     clamp: (value) =>
       clampNumber(
         value,
@@ -193,63 +607,110 @@ function CapacityLimitsSection() {
 
   return (
     <section className="space-y-3">
-      <SectionHeader title="Capacity limits" status={autosave.status} />
+      <SectionHeader title="Capacity" status={autosave.status} />
       <Card>
-        <CardContent className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="max-concurrent-runs">Concurrent coding-agent runs</Label>
-            <Input
+        <CardContent>
+          <SettingRow
+            id="max-concurrent-runs"
+            label="Concurrent agent runs"
+            description="Limit simultaneous coding-agent turns across the organization."
+            helper={`Range ${MIN_CONCURRENT_RUNS}-${MAX_CONCURRENT_RUNS}`}
+            tooltip="This protects shared runtime capacity. Users can still queue additional work."
+          >
+            <BoundedNumberInput
               id="max-concurrent-runs"
-              type="number"
-              inputMode="numeric"
+              label="Concurrent agent runs"
               min={MIN_CONCURRENT_RUNS}
               max={MAX_CONCURRENT_RUNS}
               value={concurrentRunsField.value}
               onChange={concurrentRunsField.onChange}
               onBlur={concurrentRunsField.onBlur}
+              onStep={(direction) => {
+                const current = Number.parseInt(concurrentRunsField.value, 10);
+                const next = clampNumber(
+                  (Number.isNaN(current) ? maxConcurrentRuns : current) +
+                    direction,
+                  MIN_CONCURRENT_RUNS,
+                  MAX_CONCURRENT_RUNS,
+                );
+                concurrentRunsField.setValueAndSave(next);
+              }}
             />
-            <p className="text-xs text-muted-foreground">
-              Limits how many agent turns can run for the org at once.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="preview-max-previews-per-user">Active previews per user</Label>
-            <Input
+          </SettingRow>
+          <SettingRow
+            id="preview-max-previews-per-user"
+            label="Active previews per user"
+            description="Limit how many preview environments one user can keep running."
+            helper={`Range ${MIN_PREVIEW_MAX_PREVIEWS_PER_USER}-${MAX_PREVIEW_MAX_PREVIEWS_PER_USER}`}
+            tooltip="This is a per-user guardrail, not a total organization-wide preview cap."
+          >
+            <BoundedNumberInput
               id="preview-max-previews-per-user"
-              type="number"
-              inputMode="numeric"
+              label="Active previews per user"
               min={MIN_PREVIEW_MAX_PREVIEWS_PER_USER}
               max={MAX_PREVIEW_MAX_PREVIEWS_PER_USER}
               value={maxPreviewsPerUserField.value}
               onChange={maxPreviewsPerUserField.onChange}
               onBlur={maxPreviewsPerUserField.onBlur}
+              onStep={(direction) => {
+                const current = Number.parseInt(
+                  maxPreviewsPerUserField.value,
+                  10,
+                );
+                const next = clampNumber(
+                  (Number.isNaN(current) ? maxPreviewsPerUser : current) +
+                    direction,
+                  MIN_PREVIEW_MAX_PREVIEWS_PER_USER,
+                  MAX_PREVIEW_MAX_PREVIEWS_PER_USER,
+                );
+                maxPreviewsPerUserField.setValueAndSave(next);
+              }}
             />
-            <p className="text-xs text-muted-foreground">
-              Limits how many previews one user can keep running at once.
-            </p>
-          </div>
+          </SettingRow>
         </CardContent>
       </Card>
     </section>
   );
 }
 
-function LifecycleDefaultsSection() {
+function SessionsAndCleanupSection() {
   const { data: settingsResponse } = useOrgSettingsQuery();
   const autosave = useOrgSettingsAutosave();
 
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const settings = getSettings(settingsResponse);
   const lifecycle = settings.sandbox_lifecycle ?? {};
+  const sessionMinutes = Math.round(
+    (settings.max_session_duration_seconds ??
+      DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
+  );
+  const tabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
   const completedRetentionMinutes =
-    lifecycle.completed_session_retention_minutes ?? DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES;
-  const idlePreviewTTLMinutes = lifecycle.idle_preview_ttl_minutes ?? DEFAULT_IDLE_PREVIEW_TTL_MINUTES;
+    lifecycle.completed_session_retention_minutes ??
+    DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES;
+  const idlePreviewTTLMinutes =
+    lifecycle.idle_preview_ttl_minutes ?? DEFAULT_IDLE_PREVIEW_TTL_MINUTES;
   const previewHoldsSandbox = lifecycle.preview_holds_sandbox ?? true;
 
+  const maxSessionMinutesField = useAutosaveNumericField({
+    serverValue: sessionMinutes,
+    autosave,
+    toPatch: (minutes) => ({
+      settings: { max_session_duration_seconds: minutes * 60 },
+    }),
+    clamp: (value) =>
+      clampNumber(
+        value,
+        MIN_SESSION_DURATION_MINUTES,
+        MAX_SESSION_DURATION_MINUTES,
+      ),
+  });
   const completedRetentionField = useAutosaveNumericField({
     serverValue: completedRetentionMinutes,
     autosave,
     toPatch: (value) => ({
-      settings: { sandbox_lifecycle: { completed_session_retention_minutes: value } },
+      settings: {
+        sandbox_lifecycle: { completed_session_retention_minutes: value },
+      },
     }),
     clamp: (value) =>
       clampNumber(
@@ -265,70 +726,110 @@ function LifecycleDefaultsSection() {
       settings: { sandbox_lifecycle: { idle_preview_ttl_minutes: value } },
     }),
     clamp: (value) =>
-      clampNumber(value, MIN_IDLE_PREVIEW_TTL_MINUTES, MAX_IDLE_PREVIEW_TTL_MINUTES),
+      clampNumber(
+        value,
+        MIN_IDLE_PREVIEW_TTL_MINUTES,
+        MAX_IDLE_PREVIEW_TTL_MINUTES,
+      ),
   });
 
   return (
     <section className="space-y-3">
-      <SectionHeader title="Lifecycle defaults" status={autosave.status} />
+      <SectionHeader title="Sessions and cleanup" status={autosave.status} />
       <Card>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="completed-session-retention">Completed session retention</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="completed-session-retention"
-                  type="number"
-                  inputMode="numeric"
-                  min={MIN_COMPLETED_SESSION_RETENTION_MINUTES}
-                  max={MAX_COMPLETED_SESSION_RETENTION_MINUTES}
-                  value={completedRetentionField.value}
-                  onChange={completedRetentionField.onChange}
-                  onBlur={completedRetentionField.onBlur}
-                />
-                <span className="text-xs text-muted-foreground">minutes</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Keeps completed sandbox state available before cleanup.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="idle-preview-ttl">Idle preview TTL</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="idle-preview-ttl"
-                  type="number"
-                  inputMode="numeric"
-                  min={MIN_IDLE_PREVIEW_TTL_MINUTES}
-                  max={MAX_IDLE_PREVIEW_TTL_MINUTES}
-                  value={idlePreviewTTLField.value}
-                  onChange={idlePreviewTTLField.onChange}
-                  onBlur={idlePreviewTTLField.onBlur}
-                />
-                <span className="text-xs text-muted-foreground">minutes</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Stops idle preview sandboxes after the configured window.
-              </p>
-            </div>
-          </div>
-          <div className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <Label htmlFor="preview-holds-sandbox">Preview holds sandbox</Label>
-              <p className="text-xs text-muted-foreground">
-                Keeps the preview sandbox allocated while the preview remains active.
-              </p>
-            </div>
+        <CardContent>
+          <SettingRow
+            id="max-session-minutes"
+            label="Maximum session length"
+            description="Stop an agent turn when it exceeds this organization limit."
+            helper={`Range ${MIN_SESSION_DURATION_MINUTES}-${MAX_SESSION_DURATION_MINUTES} minutes`}
+            tooltip="Longer limits help large changes finish, but they also hold sandbox capacity longer."
+          >
+            <BoundedNumberInput
+              id="max-session-minutes"
+              label="Maximum session length"
+              min={MIN_SESSION_DURATION_MINUTES}
+              max={MAX_SESSION_DURATION_MINUTES}
+              value={maxSessionMinutesField.value}
+              onChange={maxSessionMinutesField.onChange}
+              onBlur={maxSessionMinutesField.onBlur}
+              unit="min"
+            />
+          </SettingRow>
+          <SettingRow
+            id="completed-session-retention"
+            label="Keep completed sessions for"
+            description="Keep completed sandboxes available briefly for inspection and preview reuse."
+            helper={`Range ${MIN_COMPLETED_SESSION_RETENTION_MINUTES}-${MAX_COMPLETED_SESSION_RETENTION_MINUTES} minutes`}
+            tooltip="Use 0 minutes when completed sandboxes should be cleaned up immediately."
+          >
+            <BoundedNumberInput
+              id="completed-session-retention"
+              label="Keep completed sessions for"
+              min={MIN_COMPLETED_SESSION_RETENTION_MINUTES}
+              max={MAX_COMPLETED_SESSION_RETENTION_MINUTES}
+              value={completedRetentionField.value}
+              onChange={completedRetentionField.onChange}
+              onBlur={completedRetentionField.onBlur}
+              unit="min"
+            />
+          </SettingRow>
+          <SettingRow
+            id="idle-preview-ttl"
+            label="Idle preview timeout"
+            description="Stop a preview sandbox after it sits idle for this long."
+            helper={`Range ${MIN_IDLE_PREVIEW_TTL_MINUTES}-${MAX_IDLE_PREVIEW_TTL_MINUTES} minutes`}
+            tooltip="Active previews are still stopped when they hit this idle window."
+          >
+            <BoundedNumberInput
+              id="idle-preview-ttl"
+              label="Idle preview timeout"
+              min={MIN_IDLE_PREVIEW_TTL_MINUTES}
+              max={MAX_IDLE_PREVIEW_TTL_MINUTES}
+              value={idlePreviewTTLField.value}
+              onChange={idlePreviewTTLField.onChange}
+              onBlur={idlePreviewTTLField.onBlur}
+              unit="min"
+            />
+          </SettingRow>
+          <SettingRow
+            id="preview-holds-sandbox"
+            label="Keep sandbox while preview is active"
+            description="Preserve the backing sandbox while a preview is still running."
+            tooltip="Disable this only if preview cost is more important than fast preview reuse."
+          >
             <Switch
               id="preview-holds-sandbox"
               checked={previewHoldsSandbox}
               onCheckedChange={(checked) => {
-                autosave.save({ settings: { sandbox_lifecycle: { preview_holds_sandbox: checked } } });
+                autosave.save({
+                  settings: {
+                    sandbox_lifecycle: { preview_holds_sandbox: checked },
+                  },
+                });
               }}
-              aria-label="Preview holds sandbox"
+              aria-label="Keep sandbox while preview is active"
+              className="sm:ml-auto"
             />
-          </div>
+          </SettingRow>
+          <SettingRow
+            id="sandbox-tab-tools"
+            label="Agent tab tools"
+            description="Allow sibling agent tabs in the same session to coordinate through 143 tools."
+            tooltip="This only exposes scoped tab coordination for the current session and repository."
+          >
+            <Switch
+              id="sandbox-tab-tools"
+              checked={tabToolsEnabled}
+              onCheckedChange={(checked) => {
+                autosave.save({
+                  settings: { coding_agent_tab_tools_enabled: checked },
+                });
+              }}
+              aria-label="Agent tab tools"
+              className="sm:ml-auto"
+            />
+          </SettingRow>
         </CardContent>
       </Card>
     </section>
@@ -338,39 +839,47 @@ function LifecycleDefaultsSection() {
 function ResourceDefaultsSection() {
   const { data: settingsResponse } = useOrgSettingsQuery();
   const autosave = useOrgSettingsAutosave();
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const settings = getSettings(settingsResponse);
   const resources = settings.sandbox_resources ?? {};
   const agentDefaultTier = resources.agent_default_tier ?? "standard";
   const previewDefaultTier = resources.preview_default_tier ?? "standard";
-  const allowRepoResourceRequests = resources.allow_repo_resource_requests ?? true;
+  const allowRepoResourceRequests =
+    resources.allow_repo_resource_requests ?? true;
   const previewMaxTier = resources.preview_max_tier ?? "large";
   const previewMaxCPUMillis =
     resources.preview_max_cpu_millis ?? DEFAULT_PREVIEW_MAX_CPU_MILLIS;
   const previewMaxMemoryMiB =
     resources.preview_max_memory_mib ?? DEFAULT_PREVIEW_MAX_MEMORY_MIB;
   const previewMaxEphemeralDiskMiB =
-    resources.preview_max_ephemeral_disk_mib ?? DEFAULT_PREVIEW_MAX_EPHEMERAL_DISK_MIB;
+    resources.preview_max_ephemeral_disk_mib ??
+    DEFAULT_PREVIEW_MAX_EPHEMERAL_DISK_MIB;
 
-  const previewMaxCPUField = useAutosaveNumericField({
-    serverValue: previewMaxCPUMillis,
+  const previewMaxCPUField = usePreviewCPUField({
+    serverMillis: previewMaxCPUMillis,
     autosave,
-    toPatch: (value) => ({ settings: { sandbox_resources: { preview_max_cpu_millis: value } } }),
-    clamp: (value) =>
-      clampNumber(value, MIN_PREVIEW_MAX_CPU_MILLIS, MAX_PREVIEW_MAX_CPU_MILLIS),
   });
   const previewMaxMemoryField = useAutosaveNumericField({
     serverValue: previewMaxMemoryMiB,
     autosave,
-    toPatch: (value) => ({ settings: { sandbox_resources: { preview_max_memory_mib: value } } }),
+    toPatch: (value) => ({
+      settings: { sandbox_resources: { preview_max_memory_mib: value } },
+    }),
     clamp: (value) =>
-      clampNumber(value, MIN_PREVIEW_MAX_MEMORY_MIB, MAX_PREVIEW_MAX_MEMORY_MIB),
+      clampNumber(
+        value,
+        MIN_PREVIEW_MAX_MEMORY_MIB,
+        MAX_PREVIEW_MAX_MEMORY_MIB,
+      ),
   });
   const previewMaxDiskField = useAutosaveNumericField({
     serverValue: previewMaxEphemeralDiskMiB,
     autosave,
     toPatch: (value) => ({
-      settings: { sandbox_resources: { preview_max_ephemeral_disk_mib: value } },
+      settings: {
+        sandbox_resources: { preview_max_ephemeral_disk_mib: value },
+      },
     }),
     clamp: (value) =>
       clampNumber(
@@ -379,268 +888,202 @@ function ResourceDefaultsSection() {
         MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB,
       ),
   });
+  const advancedSummary = `${previewMaxTier.charAt(0).toUpperCase()}${previewMaxTier.slice(1)} max · ${formatCPUCores(previewMaxCPUMillis)} cores · ${formatGiB(previewMaxMemoryMiB)}`;
 
   return (
-    <section className="space-y-3">
-      <SectionHeader title="Resource defaults" status={autosave.status} />
-      <Card>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="agent-default-tier">Agent default tier</Label>
+    <>
+      <section data-testid="sandbox-defaults-section" className="space-y-3">
+        <SectionHeader title="Sandbox defaults" status={autosave.status} />
+        <Card>
+          <CardContent>
+            <SettingRow
+              id="agent-default-tier"
+              label="Agent sandbox size"
+              description="Choose the default sandbox tier for new coding-agent sessions."
+              tooltip="Repositories can still influence preview resources separately."
+            >
               <ResourceTierSelect
                 id="agent-default-tier"
-                label="Agent default tier"
+                label="Agent sandbox size"
                 value={agentDefaultTier}
                 onChange={(value) => {
-                  autosave.save({ settings: { sandbox_resources: { agent_default_tier: value } } });
+                  autosave.save({
+                    settings: {
+                      sandbox_resources: { agent_default_tier: value },
+                    },
+                  });
                 }}
               />
-              <p className="text-xs text-muted-foreground">
-                Default sandbox size for new coding-agent sessions.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="preview-default-tier">Preview default tier</Label>
+            </SettingRow>
+            <SettingRow
+              id="preview-default-tier"
+              label="Preview sandbox size"
+              description="Choose the default preview tier when repository config does not request one."
+              tooltip="This default applies before repository-specific preview requests are considered."
+            >
               <ResourceTierSelect
                 id="preview-default-tier"
-                label="Preview default tier"
+                label="Preview sandbox size"
                 value={previewDefaultTier}
                 onChange={(value) => {
-                  autosave.save({ settings: { sandbox_resources: { preview_default_tier: value } } });
+                  autosave.save({
+                    settings: {
+                      sandbox_resources: { preview_default_tier: value },
+                    },
+                  });
                 }}
               />
-              <p className="text-xs text-muted-foreground">
-                Default sandbox size for previews when repo config does not request one.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="preview-max-tier">Preview max tier</Label>
-              <ResourceTierSelect
-                id="preview-max-tier"
-                label="Preview max tier"
-                value={previewMaxTier}
-                onChange={(value) => {
-                  autosave.save({ settings: { sandbox_resources: { preview_max_tier: value } } });
-                }}
-              />
-              <p className="text-xs text-muted-foreground">
-                Highest resource tier previews may request from repo configuration.
-              </p>
-            </div>
-            <div className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="space-y-1">
-                <Label htmlFor="allow-repo-resource-requests">Allow repo resource requests</Label>
-                <p className="text-xs text-muted-foreground">
-                  Allows repository preview config to request CPU, memory, and disk up to the org limits.
-                </p>
-              </div>
+            </SettingRow>
+            <SettingRow
+              id="allow-repo-resource-requests"
+              label="Allow repository resource requests"
+              description="Let repository preview config request CPU, memory, and disk up to org limits."
+              tooltip="Disable this to force previews to use the organization preview default tier."
+            >
               <Switch
                 id="allow-repo-resource-requests"
                 checked={allowRepoResourceRequests}
                 onCheckedChange={(checked) => {
                   autosave.save({
-                    settings: { sandbox_resources: { allow_repo_resource_requests: checked } },
+                    settings: {
+                      sandbox_resources: {
+                        allow_repo_resource_requests: checked,
+                      },
+                    },
                   });
                 }}
-                aria-label="Allow repo resource requests"
+                aria-label="Allow repository resource requests"
+                className="sm:ml-auto"
               />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="preview-max-cpu-millis">Preview CPU request max</Label>
-              <div className="flex items-center gap-2">
-                <Input
+            </SettingRow>
+          </CardContent>
+        </Card>
+      </section>
+      <section
+        data-testid="advanced-resource-limits-section"
+        className="space-y-3"
+      >
+        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+          <SectionHeader
+            title="Advanced resource limits"
+            status={autosave.status}
+            action={
+              <CollapsibleTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={
+                    advancedOpen
+                      ? "Collapse advanced resource limits"
+                      : "Expand advanced resource limits"
+                  }
+                >
+                  {advancedOpen ? "Hide" : "Expand"}
+                  <ChevronDown
+                    className={cn(
+                      "h-3.5 w-3.5 transition-transform",
+                      advancedOpen && "rotate-180",
+                    )}
+                  />
+                </Button>
+              </CollapsibleTrigger>
+            }
+          />
+          <Card>
+            <CardContent>
+              {!advancedOpen ? (
+                <div className="py-4">
+                  <p className="text-sm font-medium text-foreground">
+                    {advancedSummary}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    Exact caps for repository-requested previews.
+                  </p>
+                </div>
+              ) : null}
+              <CollapsibleContent>
+                <SettingRow
+                  id="preview-max-tier"
+                  label="Largest preview size"
+                  description="Set the largest sandbox tier a repository preview config can request."
+                  tooltip="This cap applies only when repository resource requests are allowed."
+                >
+                  <ResourceTierSelect
+                    id="preview-max-tier"
+                    label="Largest preview size"
+                    value={previewMaxTier}
+                    onChange={(value) => {
+                      autosave.save({
+                        settings: {
+                          sandbox_resources: { preview_max_tier: value },
+                        },
+                      });
+                    }}
+                  />
+                </SettingRow>
+                <SettingRow
                   id="preview-max-cpu-millis"
-                  type="number"
-                  inputMode="numeric"
-                  min={MIN_PREVIEW_MAX_CPU_MILLIS}
-                  max={MAX_PREVIEW_MAX_CPU_MILLIS}
-                  value={previewMaxCPUField.value}
-                  onChange={previewMaxCPUField.onChange}
-                  onBlur={previewMaxCPUField.onBlur}
-                />
-                <span className="text-xs text-muted-foreground">millicores</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Hard platform cap is {MAX_PREVIEW_MAX_CPU_MILLIS} millicores.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="preview-max-memory-mib">Preview memory request max</Label>
-              <div className="flex items-center gap-2">
-                <Input
+                  label="Preview CPU limit"
+                  description="Set the largest CPU request a repository preview config can make."
+                  helper={`Range ${formatCPUCores(MIN_PREVIEW_MAX_CPU_MILLIS)}-${formatCPUCores(MAX_PREVIEW_MAX_CPU_MILLIS)} cores`}
+                  tooltip="CPU is shown in cores but saved as millicores."
+                >
+                  <BoundedNumberInput
+                    id="preview-max-cpu-millis"
+                    label="Preview CPU limit"
+                    inputMode="decimal"
+                    min={MIN_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
+                    max={MAX_PREVIEW_MAX_CPU_MILLIS / CPU_MILLIS_PER_CORE}
+                    step={CPU_MILLIS_STEP / CPU_MILLIS_PER_CORE}
+                    value={previewMaxCPUField.value}
+                    onChange={previewMaxCPUField.onChange}
+                    onBlur={previewMaxCPUField.onBlur}
+                    unit="cores"
+                  />
+                </SettingRow>
+                <SettingRow
                   id="preview-max-memory-mib"
-                  type="number"
-                  inputMode="numeric"
-                  min={MIN_PREVIEW_MAX_MEMORY_MIB}
-                  max={MAX_PREVIEW_MAX_MEMORY_MIB}
-                  value={previewMaxMemoryField.value}
-                  onChange={previewMaxMemoryField.onChange}
-                  onBlur={previewMaxMemoryField.onBlur}
-                />
-                <span className="text-xs text-muted-foreground">MiB</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Hard platform cap is {MAX_PREVIEW_MAX_MEMORY_MIB} MiB.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="preview-max-ephemeral-disk-mib">Preview ephemeral disk request max</Label>
-              <div className="flex items-center gap-2">
-                <Input
+                  label="Preview memory limit"
+                  description="Set the largest memory request a repository preview config can make."
+                  helper={`Range ${MIN_PREVIEW_MAX_MEMORY_MIB}-${MAX_PREVIEW_MAX_MEMORY_MIB} MiB`}
+                  tooltip="Use this to bound memory-heavy preview services without changing default tiers."
+                >
+                  <BoundedNumberInput
+                    id="preview-max-memory-mib"
+                    label="Preview memory limit"
+                    min={MIN_PREVIEW_MAX_MEMORY_MIB}
+                    max={MAX_PREVIEW_MAX_MEMORY_MIB}
+                    value={previewMaxMemoryField.value}
+                    onChange={previewMaxMemoryField.onChange}
+                    onBlur={previewMaxMemoryField.onBlur}
+                    unit="MiB"
+                  />
+                </SettingRow>
+                <SettingRow
                   id="preview-max-ephemeral-disk-mib"
-                  type="number"
-                  inputMode="numeric"
-                  min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
-                  max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
-                  value={previewMaxDiskField.value}
-                  onChange={previewMaxDiskField.onChange}
-                  onBlur={previewMaxDiskField.onBlur}
-                />
-                <span className="text-xs text-muted-foreground">MiB</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Hard platform cap is {MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB.
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
-
-function SessionRuntimeSection() {
-  const { data: settingsResponse } = useOrgSettingsQuery();
-  const autosave = useOrgSettingsAutosave();
-
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-  const sessionMinutes = Math.round(
-    (settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
-  );
-  const tabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
-  const maxSessionMinutesField = useAutosaveNumericField({
-    serverValue: sessionMinutes,
-    autosave,
-    toPatch: (minutes) => ({ settings: { max_session_duration_seconds: minutes * 60 } }),
-    clamp: (value) => clampNumber(value, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
-  });
-
-  return (
-    <section className="space-y-3">
-      <SectionHeader title="Session runtime" status={autosave.status} />
-      <Card>
-        <CardContent className="space-y-4">
-          <div className="max-w-[560px] space-y-2">
-            <Label htmlFor="max-session-minutes">Maximum session duration</Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="max-session-minutes"
-                type="number"
-                inputMode="numeric"
-                min={MIN_SESSION_DURATION_MINUTES}
-                max={MAX_SESSION_DURATION_MINUTES}
-                value={maxSessionMinutesField.value}
-                onChange={maxSessionMinutesField.onChange}
-                onBlur={maxSessionMinutesField.onBlur}
-              />
-              <span className="text-xs text-muted-foreground">minutes</span>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Stops long-running turns after the configured org limit.
-            </p>
-          </div>
-          <div className="flex flex-col gap-3 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <Label htmlFor="sandbox-tab-tools">Sandbox tab tools</Label>
-              <p className="text-xs text-muted-foreground">
-                Allows agent tabs in the same session to coordinate through the 143 tools CLI.
-              </p>
-            </div>
-            <Switch
-              id="sandbox-tab-tools"
-              checked={tabToolsEnabled}
-              onCheckedChange={(checked) => {
-                autosave.save({ settings: { coding_agent_tab_tools_enabled: checked } });
-              }}
-              aria-label="Sandbox tab tools"
-            />
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
-
-function RuntimeDiagnosticsSection() {
-  const { data: runtimeStatusResponse } = useQuery({
-    queryKey: queryKeys.settings.runtimeStatus,
-    queryFn: () => api.settings.getRuntimeStatus(),
-  });
-
-  const runtimeStatus = runtimeStatusResponse?.data;
-  const staticEgress = runtimeStatus?.static_egress;
-  const capacity = runtimeStatus?.capacity;
-  const staticEgressAvailable = staticEgress?.available ?? false;
-  const staticEgressEnabled = staticEgress?.enabled ?? false;
-  const capacityState = capacity?.state === "limited" ? "Limited" : "Normal";
-
-  const rows = [
-    {
-      label: "Static egress",
-      value: staticEgressAvailable ? "Available" : "Unavailable",
-      detail: staticEgressEnabled ? "Enabled for new sandbox starts" : "Disabled for new sandbox starts",
-      tone: staticEgressAvailable ? "default" : "secondary",
-    },
-    {
-      label: "Agent runs",
-      value: capacity
-        ? `${capacity.active_agent_runs} / ${capacity.max_concurrent_agent_runs}`
-        : "Loading",
-      detail: "Active coding-agent runs against the org concurrency limit",
-      tone: "secondary",
-    },
-    {
-      label: "Active previews",
-      value: capacity
-        ? `${capacity.active_previews} / ${capacity.max_previews_per_user}`
-        : "Loading",
-      detail: "Active previews against the per-user limit",
-      tone: "secondary",
-    },
-    {
-      label: "Capacity",
-      value: capacityState,
-      detail: capacity?.state === "limited" ? "One or more runtime limits is currently saturated" : "Runtime capacity is within configured limits",
-      tone: capacity?.state === "limited" ? "destructive" : "default",
-    },
-  ] satisfies {
-    label: string;
-    value: string;
-    detail: string;
-    tone: "default" | "secondary" | "destructive";
-  }[];
-
-  return (
-    <section className="space-y-3">
-      <SectionHeader title="Runtime diagnostics" />
-      <Card>
-        <CardContent className="divide-y divide-border/60 p-0">
-          {rows.map((row) => (
-            <div
-              key={row.label}
-              className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto] sm:items-center"
-            >
-              <div className="text-xs font-medium text-foreground">{row.label}</div>
-              <div className="text-xs text-muted-foreground">{row.detail}</div>
-              <div>
-                <Badge variant={row.tone}>{row.value}</Badge>
-              </div>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-    </section>
+                  label="Preview disk limit"
+                  description="Set the largest temporary disk request a repository preview config can make."
+                  helper={`Range ${MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}-${MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB} MiB`}
+                  tooltip="This limits ephemeral workspace disk, not persistent repository storage."
+                >
+                  <BoundedNumberInput
+                    id="preview-max-ephemeral-disk-mib"
+                    label="Preview disk limit"
+                    min={MIN_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                    max={MAX_PREVIEW_MAX_EPHEMERAL_DISK_MIB}
+                    value={previewMaxDiskField.value}
+                    onChange={previewMaxDiskField.onChange}
+                    onBlur={previewMaxDiskField.onBlur}
+                    unit="MiB"
+                  />
+                </SettingRow>
+              </CollapsibleContent>
+            </CardContent>
+          </Card>
+        </Collapsible>
+      </section>
+    </>
   );
 }
 
@@ -649,24 +1092,19 @@ export default function RuntimeSettingsPage() {
 
   return (
     <PageContainer size="default">
-      <div className="space-y-8">
-        <PageHeader
-          title="Runtime"
-          description="Configure sandbox networking, capacity, and lifecycle defaults."
-        />
-        <div className="grid gap-3 rounded-md border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground md:grid-cols-[auto_minmax(0,1fr)]">
-          <Network className="h-4 w-4 text-muted-foreground" />
-          <p>
-            These settings apply to sandbox runtimes across coding-agent sessions and previews.
-          </p>
+      <TooltipProvider delayDuration={150}>
+        <div className="space-y-8">
+          <PageHeader
+            title="Runtime"
+            description="Configure sandbox networking, capacity, and lifecycle defaults."
+          />
+          <RuntimeSummary />
+          <SandboxNetworkSection />
+          <CapacityLimitsSection />
+          <SessionsAndCleanupSection />
+          <ResourceDefaultsSection />
         </div>
-        <SandboxNetworkSection />
-        <CapacityLimitsSection />
-        <SessionRuntimeSection />
-        <LifecycleDefaultsSection />
-        <ResourceDefaultsSection />
-        <RuntimeDiagnosticsSection />
-      </div>
+      </TooltipProvider>
     </PageContainer>
   );
 }

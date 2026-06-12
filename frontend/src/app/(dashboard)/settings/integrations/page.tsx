@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CircleHelp, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
@@ -717,6 +718,7 @@ function IntegrationDetailSheet({
   connected,
   repositories,
   githubInstallationId,
+  githubAccountLogin,
   onDisconnect,
   disconnectingProvider,
   onDisconnectRepo,
@@ -735,6 +737,7 @@ function IntegrationDetailSheet({
   connected: Partial<Record<IntegrationKey, boolean>>;
   repositories: Repository[];
   githubInstallationId?: number;
+  githubAccountLogin?: string;
   onDisconnect: (provider: IntegrationKey) => void;
   disconnectingProvider?: IntegrationKey | null;
   onDisconnectRepo: (repoID: string) => void;
@@ -769,16 +772,29 @@ function IntegrationDetailSheet({
           </div>
 
           {provider === "github" ? (
-            <GitHubRepositoryClaims
-              installationId={githubInstallationId}
-              enabled={isConnected}
-              repositories={repositories}
-              onDisconnectRepo={onDisconnectRepo}
-              onReconnectRepo={onReconnectRepo}
-              pendingRepoID={pendingRepoID}
-              onSyncRepos={onSyncRepos}
-              isSyncing={isSyncingRepos}
-            />
+            <>
+              {isConnected ? (
+                <div className="rounded-md border border-border p-3">
+                  <div className="text-xs font-medium uppercase text-muted-foreground">Team access</div>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Members of {githubAccountLogin || "this GitHub organization"} can now join this workspace automatically. Manage auto-join in Team settings.
+                  </p>
+                  <Button asChild variant="link" size="sm" className="mt-1 h-auto p-0 text-sm">
+                    <Link href="/settings/team">Open Team settings</Link>
+                  </Button>
+                </div>
+              ) : null}
+              <GitHubRepositoryClaims
+                installationId={githubInstallationId}
+                enabled={isConnected}
+                repositories={repositories}
+                onDisconnectRepo={onDisconnectRepo}
+                onReconnectRepo={onReconnectRepo}
+                pendingRepoID={pendingRepoID}
+                onSyncRepos={onSyncRepos}
+                isSyncing={isSyncingRepos}
+              />
+            </>
           ) : null}
           {provider === "linear" ? <LinearAgentRoutingSettings repositoriesOverride={repositories} /> : null}
           {provider === "slack" ? <SlackChannelPicker /> : null}
@@ -1138,6 +1154,7 @@ export default function IntegrationsPage() {
         connected={connected}
         repositories={repositories}
         githubInstallationId={githubIntegration?.github_installation_id}
+        githubAccountLogin={githubIntegration?.github_account_login}
         onDisconnect={(provider) => disconnectMutation.mutate(provider, { onSuccess: () => setSelectedIntegration(null) })}
         disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
         onDisconnectRepo={(repoID) => repositoryStatusMutation.mutate({ repoID, action: "disconnect" })}

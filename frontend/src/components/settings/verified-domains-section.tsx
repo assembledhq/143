@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, Globe, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, Github, Globe, Trash2 } from "lucide-react";
 
 import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -21,7 +21,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import type { ListResponse, OrganizationDomain } from "@/lib/types";
+import type { GitHubOrgAutoJoin, GitHubOrgAutoJoinResponse, ListResponse, OrganizationDomain } from "@/lib/types";
 
 // copyText writes to the clipboard, falling back to the legacy
 // execCommand path when the async Clipboard API is unavailable —
@@ -87,6 +87,7 @@ export function VerifiedDomainsSection() {
   const [newDomain, setNewDomain] = useState("");
   const [error, setError] = useState("");
   const [removing, setRemoving] = useState<OrganizationDomain | null>(null);
+  const [disablingGitHubOrg, setDisablingGitHubOrg] = useState<GitHubOrgAutoJoin | null>(null);
 
   const { data, isLoading } = useQuery<ListResponse<OrganizationDomain>>({
     queryKey: queryKeys.team.domains,
@@ -94,8 +95,15 @@ export function VerifiedDomainsSection() {
   });
   const domains = data?.data ?? [];
 
+  const { data: githubOrgData, isLoading: githubOrgsLoading } = useQuery<GitHubOrgAutoJoinResponse>({
+    queryKey: queryKeys.team.githubOrgs,
+    queryFn: () => api.team.listGitHubOrgs(),
+  });
+  const githubOrgs = githubOrgData?.github_orgs ?? [];
+
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.team.domains });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.team.githubOrgs });
   };
 
   const friendlyError = (err: unknown, fallback: string) =>
@@ -140,6 +148,17 @@ export function VerifiedDomainsSection() {
     onError: (err) => setError(friendlyError(err, "Couldn't remove the domain. Please try again.")),
   });
 
+  const updateGitHubOrgMutation = useMutation({
+    mutationFn: ({ installationId, enabled }: { installationId: number; enabled: boolean }) =>
+      api.team.updateGitHubOrg(installationId, { auto_join_enabled: enabled }),
+    onSuccess: () => {
+      setError("");
+      invalidate();
+    },
+    onError: (err) =>
+      setError(friendlyError(err, "Couldn't update GitHub organization auto-join. Please try again.")),
+  });
+
   const handleAdd = () => {
     const domain = newDomain.trim();
     if (!domain) return;
@@ -149,11 +168,9 @@ export function VerifiedDomainsSection() {
   return (
     <section className="space-y-3">
       <div>
-        <h2 className="text-xs font-medium text-foreground">Verified domains</h2>
+        <h2 className="text-xs font-medium text-foreground">Auto-join</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Verify ownership of your company domain and anyone who signs in with a
-          verified <span className="font-medium">@yourdomain</span> email (via Google or GitHub)
-          automatically joins this workspace as an engineer — no invitation needed.
+          People who match these rules join as members automatically — no invitation needed.
         </p>
       </div>
 
@@ -165,6 +182,66 @@ export function VerifiedDomainsSection() {
 
       <Card>
         <CardContent className="p-0">
+          <div className="divide-y divide-border border-b border-border">
+            {githubOrgsLoading ? (
+              <div className="p-4 text-xs text-muted-foreground">Loading GitHub organizations...</div>
+            ) : githubOrgs.length === 0 ? (
+              <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
+                <Github className="h-3.5 w-3.5" />
+                <span>Connect GitHub to enable organization-based auto-join.</span>
+              </div>
+            ) : (
+              githubOrgs.map((org) => {
+                const needsApproval = org.members_permission === "missing";
+                const unavailable = org.captured_by_other_org || org.account_type === "User";
+                const disabled = needsApproval || unavailable || updateGitHubOrgMutation.isPending;
+                return (
+                  <div key={org.installation_id} className="space-y-2 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <Github className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-xs font-medium">GitHub organization {org.account_login}</div>
+                        <div className="text-xs text-muted-foreground">
+                          Anyone in {org.account_login} on GitHub can join this workspace.
+                        </div>
+                      </div>
+                      <Switch
+                        checked={org.auto_join_enabled}
+                        disabled={disabled}
+                        onCheckedChange={(enabled) => {
+                          if (!enabled && org.auto_join_enabled) {
+                            setDisablingGitHubOrg(org);
+                            return;
+                          }
+                          updateGitHubOrgMutation.mutate({ installationId: org.installation_id, enabled });
+                        }}
+                        aria-label={`Auto-join for GitHub organization ${org.account_login}`}
+                      />
+                    </div>
+                    {needsApproval && (
+                      <div className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                        An owner of {org.account_login} needs to approve updated permissions on GitHub.
+                        {org.settings_url && (
+                          <Button asChild variant="link" size="sm" className="ml-1 h-auto p-0 text-xs text-amber-700 dark:text-amber-400">
+                            <a href={org.settings_url} target="_blank" rel="noreferrer">
+                              Review on GitHub <ExternalLink className="ml-1 h-3 w-3" />
+                            </a>
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    {unavailable && (
+                      <div className="rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+                        {org.captured_by_other_org
+                          ? "This GitHub organization is already connected to another workspace."
+                          : "Auto-join is only available for GitHub organization installations."}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
           <div className="flex flex-col gap-2 border-b border-border px-4 py-3 sm:flex-row">
             <Input
               type="text"
@@ -321,6 +398,33 @@ export function VerifiedDomainsSection() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!disablingGitHubOrg} onOpenChange={(open) => !open && setDisablingGitHubOrg(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Turn off GitHub auto-join</AlertDialogTitle>
+            <AlertDialogDescription>
+              Stops new automatic joins from {disablingGitHubOrg?.account_login}. Nobody is removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (disablingGitHubOrg) {
+                  updateGitHubOrgMutation.mutate({
+                    installationId: disablingGitHubOrg.installation_id,
+                    enabled: false,
+                  });
+                  setDisablingGitHubOrg(null);
+                }
+              }}
+            >
+              Turn off
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

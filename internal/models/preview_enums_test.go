@@ -151,7 +151,7 @@ func TestPreviewStoppedReason_Validate(t *testing.T) {
 func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000176_preview_policies.up.sql")
+	body, err := os.ReadFile("../../migrations/000180_preview_policies.up.sql")
 	require.NoError(t, err, "migration file should be readable")
 
 	tests := []struct {

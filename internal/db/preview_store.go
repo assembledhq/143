@@ -31,6 +31,12 @@ func NewPreviewStore(db TxStarter) *PreviewStore {
 	return &PreviewStore{db: db}
 }
 
+// Configured reports whether the store has a backing database handle.
+// lint:allow-no-orgid reason="configuration guard reads no tenant data"
+func (s *PreviewStore) Configured() bool {
+	return s != nil && s.db != nil
+}
+
 // Begin starts a transaction.
 // lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PreviewStore) Begin(ctx context.Context) (pgx.Tx, error) {
@@ -91,17 +97,21 @@ const previewLogColumns = `id, preview_instance_id, org_id, level, step, message
 const previewAccessSessionColumns = `id, org_id, user_id, preview_instance_id,
 	session_token_hash, issued_at, expires_at, revoked_at, last_accessed_at, created_at`
 
-const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, blob_path,
+const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, base_key, commit_sha, blob_path,
 	size_bytes, worker_node_id, last_used_at, created_at`
 
 const repositoryPreviewPolicyColumns = `id, org_id, repository_id, auto_mode,
 	updated_by_user_id, created_at, updated_at`
 
-const previewDependencyCacheColumns = `id, org_id, repo_id, cache_key, placement_key,
+const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
 	blob_key, size_bytes, metadata, last_used_at, created_at`
 
-const previewDependencyCacheLocationColumns = `id, org_id, repo_id, cache_key, placement_key,
+const previewDependencyCacheLocationColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
 	worker_node_id, size_bytes, last_used_at, created_at`
+
+const previewCachePrewarmRunColumns = `id, org_id, repo_id, source, source_id, cache_scope_key,
+	job_id, worker_node_id, status, package_manager_cache_key, dependency_cache_key,
+	config_digest, commit_sha, workspace_revision, error, started_at, completed_at, created_at, updated_at`
 
 const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id,
 	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
@@ -2649,12 +2659,13 @@ func (s *PreviewStore) ExtendAccessSessionExpiry(ctx context.Context, orgID, id 
 func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.PreviewStartupCache) error {
 	query := fmt.Sprintf(`
 		INSERT INTO preview_startup_cache (
-			org_id, repo_id, snapshot_key, blob_path, size_bytes, worker_node_id
+			org_id, repo_id, snapshot_key, base_key, commit_sha, blob_path, size_bytes, worker_node_id
 		) VALUES (
-			@org_id, @repo_id, @snapshot_key, @blob_path, @size_bytes, @worker_node_id
+			@org_id, @repo_id, @snapshot_key, @base_key, @commit_sha, @blob_path, @size_bytes, @worker_node_id
 		)
 		ON CONFLICT (org_id, repo_id, snapshot_key, worker_node_id)
-		DO UPDATE SET blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
+		DO UPDATE SET base_key = EXCLUDED.base_key, commit_sha = EXCLUDED.commit_sha,
+			blob_path = EXCLUDED.blob_path, size_bytes = EXCLUDED.size_bytes,
 			last_used_at = now()
 		RETURNING %s`, previewStartupCacheColumns)
 
@@ -2662,6 +2673,8 @@ func (s *PreviewStore) UpsertStartupCache(ctx context.Context, entry *models.Pre
 		"org_id":         entry.OrgID,
 		"repo_id":        entry.RepoID,
 		"snapshot_key":   entry.SnapshotKey,
+		"base_key":       entry.BaseKey,
+		"commit_sha":     entry.CommitSHA,
 		"blob_path":      entry.BlobPath,
 		"size_bytes":     entry.SizeBytes,
 		"worker_node_id": entry.WorkerNodeID,
@@ -2722,6 +2735,31 @@ func (s *PreviewStore) FindWarmResumeStartupCacheForTarget(ctx context.Context, 
 	return &row, nil
 }
 
+// FindLatestCacheByBaseKey returns the newest startup cache entry on a worker
+// whose base key (lockfiles + config digest, commit-independent) matches but
+// whose commit differs from excludeCommitSHA. Used for partial invalidation:
+// restore the base snapshot, then apply the git diff up to the new commit.
+func (s *PreviewStore) FindLatestCacheByBaseKey(ctx context.Context, orgID, repoID uuid.UUID, baseKey, workerNodeID, excludeCommitSHA string) (*models.PreviewStartupCache, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_startup_cache
+		WHERE org_id = @org_id AND repo_id = @repo_id AND base_key = @base_key
+			AND worker_node_id = @worker_node_id AND base_key <> '' AND commit_sha <> @exclude_commit
+		ORDER BY created_at DESC
+		LIMIT 1`, previewStartupCacheColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id": orgID, "repo_id": repoID, "base_key": baseKey,
+		"worker_node_id": workerNodeID, "exclude_commit": excludeCommitSHA,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query startup cache by base key: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewStartupCache])
+	if err != nil {
+		return nil, fmt.Errorf("get startup cache by base key: %w", err)
+	}
+	return &row, nil
+}
+
 // TouchCache updates the last_used_at timestamp, scoped to org.
 func (s *PreviewStore) TouchCache(ctx context.Context, orgID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
@@ -2760,10 +2798,13 @@ func (s *PreviewStore) DeleteCache(ctx context.Context, orgID, id uuid.UUID) err
 	return nil
 }
 
-func (s *PreviewStore) FindDependencyCache(ctx context.Context, orgID, repoID uuid.UUID, cacheKey string) (*models.PreviewDependencyCache, error) {
+func (s *PreviewStore) FindDependencyCache(ctx context.Context, orgID, repoID uuid.UUID, kind models.PreviewCacheKind, cacheKey string) (*models.PreviewDependencyCache, error) {
+	if kind == "" {
+		kind = models.PreviewCacheKindInstallArtifact
+	}
 	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache
-		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_key = @cache_key`, previewDependencyCacheColumns)
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "cache_key": cacheKey})
+		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_kind = @cache_kind AND cache_key = @cache_key`, previewDependencyCacheColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "cache_kind": kind, "cache_key": cacheKey})
 	if err != nil {
 		return nil, fmt.Errorf("query dependency cache: %w", err)
 	}
@@ -2775,13 +2816,16 @@ func (s *PreviewStore) FindDependencyCache(ctx context.Context, orgID, repoID uu
 }
 
 func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.PreviewDependencyCache) error {
+	if entry.CacheKind == "" {
+		entry.CacheKind = models.PreviewCacheKindInstallArtifact
+	}
 	query := fmt.Sprintf(`
 		INSERT INTO preview_dependency_cache (
-			org_id, repo_id, cache_key, placement_key, blob_key, size_bytes, metadata
+			org_id, repo_id, cache_kind, cache_key, placement_key, blob_key, size_bytes, metadata
 		) VALUES (
-			@org_id, @repo_id, @cache_key, @placement_key, @blob_key, @size_bytes, @metadata
+			@org_id, @repo_id, @cache_kind, @cache_key, @placement_key, @blob_key, @size_bytes, @metadata
 		)
-		ON CONFLICT (org_id, repo_id, cache_key)
+		ON CONFLICT (org_id, repo_id, cache_kind, cache_key)
 		DO UPDATE SET placement_key = EXCLUDED.placement_key,
 			blob_key = EXCLUDED.blob_key,
 			size_bytes = EXCLUDED.size_bytes,
@@ -2791,6 +2835,7 @@ func (s *PreviewStore) UpsertDependencyCache(ctx context.Context, entry *models.
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":        entry.OrgID,
 		"repo_id":       entry.RepoID,
+		"cache_kind":    entry.CacheKind,
 		"cache_key":     entry.CacheKey,
 		"placement_key": entry.PlacementKey,
 		"blob_key":      entry.BlobKey,
@@ -2871,7 +2916,7 @@ func (s *PreviewStore) ListDependencyCachesOverLimit(ctx context.Context, keepNe
 	}
 	query := fmt.Sprintf(`SELECT %s FROM (
 			SELECT %s, row_number() OVER (
-				PARTITION BY org_id, repo_id ORDER BY last_used_at DESC
+				PARTITION BY org_id, repo_id, cache_kind ORDER BY last_used_at DESC
 			) AS dependency_cache_rank
 			FROM preview_dependency_cache
 		) ranked_dependency_cache
@@ -2885,13 +2930,16 @@ func (s *PreviewStore) ListDependencyCachesOverLimit(ctx context.Context, keepNe
 }
 
 func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, location *models.PreviewDependencyCacheLocation) error {
+	if location.CacheKind == "" {
+		location.CacheKind = models.PreviewCacheKindInstallArtifact
+	}
 	query := fmt.Sprintf(`
 		INSERT INTO preview_dependency_cache_locations (
-			org_id, repo_id, cache_key, placement_key, worker_node_id, size_bytes
+			org_id, repo_id, cache_kind, cache_key, placement_key, worker_node_id, size_bytes
 		) VALUES (
-			@org_id, @repo_id, @cache_key, @placement_key, @worker_node_id, @size_bytes
+			@org_id, @repo_id, @cache_kind, @cache_key, @placement_key, @worker_node_id, @size_bytes
 		)
-		ON CONFLICT (org_id, repo_id, cache_key, worker_node_id)
+		ON CONFLICT (org_id, repo_id, cache_kind, cache_key, worker_node_id)
 		DO UPDATE SET placement_key = EXCLUDED.placement_key,
 			size_bytes = EXCLUDED.size_bytes,
 			last_used_at = now()
@@ -2899,6 +2947,7 @@ func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, locati
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":         location.OrgID,
 		"repo_id":        location.RepoID,
+		"cache_kind":     location.CacheKind,
 		"cache_key":      location.CacheKey,
 		"placement_key":  location.PlacementKey,
 		"worker_node_id": location.WorkerNodeID,
@@ -2915,11 +2964,14 @@ func (s *PreviewStore) UpsertDependencyCacheLocation(ctx context.Context, locati
 	return nil
 }
 
-func (s *PreviewStore) ListDependencyCacheWorkersByPlacement(ctx context.Context, orgID, repoID uuid.UUID, placementKey string, limit int) ([]models.PreviewDependencyCacheLocation, error) {
+func (s *PreviewStore) ListDependencyCacheWorkersByPlacement(ctx context.Context, orgID, repoID uuid.UUID, kind models.PreviewCacheKind, placementKey string, limit int) ([]models.PreviewDependencyCacheLocation, error) {
+	if kind == "" {
+		kind = models.PreviewCacheKindInstallArtifact
+	}
 	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache_locations
-		WHERE org_id = @org_id AND repo_id = @repo_id AND placement_key = @placement_key
+		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_kind = @cache_kind AND placement_key = @placement_key
 		ORDER BY last_used_at DESC LIMIT @limit`, previewDependencyCacheLocationColumns)
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "placement_key": placementKey, "limit": limit})
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "cache_kind": kind, "placement_key": placementKey, "limit": limit})
 	if err != nil {
 		return nil, fmt.Errorf("list dependency cache workers by placement: %w", err)
 	}
@@ -2952,10 +3004,13 @@ func (s *PreviewStore) DeleteExpiredDependencyCacheLocations(ctx context.Context
 
 // DeleteDependencyCacheLocationByWorkerCacheKey removes a single local cache location hint for the given worker and cache key.
 // lint:allow-no-orgid reason="worker cleanup deletes ephemeral local cache hints across orgs without exposing tenant data"
-func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context.Context, workerNodeID, cacheKey string) error {
+func (s *PreviewStore) DeleteDependencyCacheLocationByWorkerCacheKey(ctx context.Context, workerNodeID string, kind models.PreviewCacheKind, cacheKey string) error {
+	if kind == "" {
+		kind = models.PreviewCacheKindInstallArtifact
+	}
 	_, err := s.db.Exec(ctx,
-		`DELETE FROM preview_dependency_cache_locations WHERE worker_node_id = @worker_node_id AND cache_key = @cache_key`,
-		pgx.NamedArgs{"worker_node_id": workerNodeID, "cache_key": cacheKey},
+		`DELETE FROM preview_dependency_cache_locations WHERE worker_node_id = @worker_node_id AND cache_kind = @cache_kind AND cache_key = @cache_key`,
+		pgx.NamedArgs{"worker_node_id": workerNodeID, "cache_kind": kind, "cache_key": cacheKey},
 	)
 	if err != nil {
 		return fmt.Errorf("delete dependency cache location by worker cache key: %w", err)
@@ -2972,6 +3027,94 @@ func (s *PreviewStore) DeleteDependencyCacheLocationsForWorker(ctx context.Conte
 	)
 	if err != nil {
 		return fmt.Errorf("delete dependency cache locations for worker: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) UpsertPreviewCachePrewarmRun(ctx context.Context, run *models.PreviewCachePrewarmRun) (*models.PreviewCachePrewarmRun, error) {
+	if run == nil {
+		return nil, fmt.Errorf("preview cache prewarm run is nil")
+	}
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		INSERT INTO preview_cache_prewarm_runs (
+			org_id, repo_id, source, source_id, cache_scope_key, job_id, worker_node_id,
+			status, package_manager_cache_key, dependency_cache_key, config_digest,
+			commit_sha, workspace_revision, error, started_at, completed_at
+		)
+		VALUES (
+			@org_id, @repo_id, @source, @source_id, @cache_scope_key, @job_id, @worker_node_id,
+			@status, @package_manager_cache_key, @dependency_cache_key, @config_digest,
+			@commit_sha, @workspace_revision, @error, @started_at, @completed_at
+		)
+		ON CONFLICT (org_id, repo_id, cache_scope_key) DO UPDATE SET
+			job_id = COALESCE(EXCLUDED.job_id, preview_cache_prewarm_runs.job_id),
+			worker_node_id = EXCLUDED.worker_node_id,
+			status = EXCLUDED.status,
+			package_manager_cache_key = EXCLUDED.package_manager_cache_key,
+			dependency_cache_key = EXCLUDED.dependency_cache_key,
+			config_digest = EXCLUDED.config_digest,
+			commit_sha = EXCLUDED.commit_sha,
+			workspace_revision = EXCLUDED.workspace_revision,
+			error = EXCLUDED.error,
+			started_at = EXCLUDED.started_at,
+			completed_at = EXCLUDED.completed_at,
+			updated_at = now()
+		RETURNING %s`, previewCachePrewarmRunColumns),
+		pgx.NamedArgs{
+			"org_id":                    run.OrgID,
+			"repo_id":                   run.RepoID,
+			"source":                    run.Source,
+			"source_id":                 run.SourceID,
+			"cache_scope_key":           run.CacheScopeKey,
+			"job_id":                    run.JobID,
+			"worker_node_id":            run.WorkerNodeID,
+			"status":                    run.Status,
+			"package_manager_cache_key": run.PackageManagerCacheKey,
+			"dependency_cache_key":      run.DependencyCacheKey,
+			"config_digest":             run.ConfigDigest,
+			"commit_sha":                run.CommitSHA,
+			"workspace_revision":        run.WorkspaceRevision,
+			"error":                     run.Error,
+			"started_at":                run.StartedAt,
+			"completed_at":              run.CompletedAt,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert preview cache prewarm run: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewCachePrewarmRun])
+	if err != nil {
+		return nil, fmt.Errorf("collect preview cache prewarm run: %w", err)
+	}
+	return &row, nil
+}
+
+func (s *PreviewStore) UpdatePreviewCachePrewarmRunStatus(ctx context.Context, orgID, repoID uuid.UUID, cacheScopeKey, status, packageManagerCacheKey, dependencyCacheKey, configDigest, errMsg string, completed bool) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE preview_cache_prewarm_runs
+		SET status = @status,
+			package_manager_cache_key = COALESCE(NULLIF(@package_manager_cache_key, ''), package_manager_cache_key),
+			dependency_cache_key = COALESCE(NULLIF(@dependency_cache_key, ''), dependency_cache_key),
+			config_digest = COALESCE(NULLIF(@config_digest, ''), config_digest),
+			error = @error,
+			started_at = COALESCE(started_at, now()),
+			completed_at = CASE WHEN @completed THEN now() ELSE completed_at END,
+			updated_at = now()
+		WHERE org_id = @org_id AND repo_id = @repo_id AND cache_scope_key = @cache_scope_key`,
+		pgx.NamedArgs{
+			"org_id":                    orgID,
+			"repo_id":                   repoID,
+			"cache_scope_key":           cacheScopeKey,
+			"status":                    status,
+			"package_manager_cache_key": packageManagerCacheKey,
+			"dependency_cache_key":      dependencyCacheKey,
+			"config_digest":             configDigest,
+			"error":                     errMsg,
+			"completed":                 completed,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview cache prewarm run status: %w", err)
 	}
 	return nil
 }

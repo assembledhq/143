@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, waitFor, userEvent } from "@/test/test-utils";
+import {
+  renderWithProviders,
+  screen,
+  waitFor,
+  userEvent,
+} from "@/test/test-utils";
 import RuntimeSettingsPage from "./page";
 
 const {
@@ -94,38 +99,138 @@ describe("RuntimeSettingsPage", () => {
     });
   });
 
-  it("renders shared sandbox runtime sections with existing settings", async () => {
+  it("renders shared sandbox runtime policy sections with existing settings", async () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
-    expect(await screen.findByRole("heading", { name: "Runtime" })).toBeInTheDocument();
-    expect(screen.getByText("Configure sandbox networking, capacity, and lifecycle defaults.")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Runtime" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Configure sandbox networking, capacity, and lifecycle defaults.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Agent runs")).toBeInTheDocument();
+    expect(await screen.findByText("5 concurrent")).toBeInTheDocument();
+    expect(screen.getByText("Active previews")).toBeInTheDocument();
+    expect(await screen.findByText("7 per user")).toBeInTheDocument();
+    expect(screen.getByText("Session max")).toBeInTheDocument();
+    expect(screen.getByText("25 minutes")).toBeInTheDocument();
+    expect(screen.getByText("Preview idle TTL")).toBeInTheDocument();
+    expect(screen.getByText("5 hours")).toBeInTheDocument();
     expect(screen.getByText("Sandbox network")).toBeInTheDocument();
-    expect(screen.getByText("Capacity limits")).toBeInTheDocument();
-    expect(screen.getByText("Session runtime")).toBeInTheDocument();
-    expect(screen.getByText("Lifecycle defaults")).toBeInTheDocument();
-    expect(screen.getByText("Resource defaults")).toBeInTheDocument();
+    expect(screen.getByText("Capacity")).toBeInTheDocument();
+    expect(screen.getByText("Sessions and cleanup")).toBeInTheDocument();
+    expect(screen.getByText("Sandbox defaults")).toBeInTheDocument();
+    expect(screen.getByText("Advanced resource limits")).toBeInTheDocument();
+    expect(screen.queryByText("Usage limits")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sessions")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cleanup defaults")).not.toBeInTheDocument();
+    expect(screen.queryByText("Resource defaults")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "These settings apply to sandbox runtimes across coding-agent sessions and previews.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Runtime diagnostics")).not.toBeInTheDocument();
+    expect(settingsRuntimeStatusMock).not.toHaveBeenCalled();
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Use static egress IP for sessions and previews")).toBeChecked();
+      expect(screen.getByLabelText("Static egress IP")).toBeChecked();
     });
     expect(screen.getAllByText("203.0.113.10").length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Concurrent coding-agent runs")).toHaveValue(5);
+    expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(5);
     expect(screen.getByLabelText("Active previews per user")).toHaveValue(7);
-    expect(screen.getByLabelText("Maximum session duration")).toHaveValue(25);
-    expect(screen.getByLabelText("Sandbox tab tools")).not.toBeChecked();
-    expect(screen.getByLabelText("Completed session retention")).toHaveValue(120);
-    expect(screen.getByLabelText("Idle preview TTL")).toHaveValue(300);
-    expect(screen.getByLabelText("Preview holds sandbox")).not.toBeChecked();
-    expect(screen.getByRole("combobox", { name: "Agent default tier" })).toHaveTextContent("Standard");
-    expect(screen.getByRole("combobox", { name: "Preview default tier" })).toHaveTextContent("Small");
-    expect(screen.getByLabelText("Allow repo resource requests")).not.toBeChecked();
-    expect(screen.getByRole("combobox", { name: "Preview max tier" })).toHaveTextContent("Large");
-    expect(screen.getByLabelText("Preview CPU request max")).toHaveValue(1500);
-    expect(screen.getByLabelText("Preview memory request max")).toHaveValue(4096);
-    expect(screen.getByLabelText("Preview ephemeral disk request max")).toHaveValue(6144);
-    expect(screen.getByText("4 / 5")).toBeInTheDocument();
-    expect(screen.getByText("3 / 7")).toBeInTheDocument();
-    expect(screen.getByText("Limited")).toBeInTheDocument();
+    expect(screen.getByLabelText("Maximum session length")).toHaveValue(25);
+    expect(screen.getByLabelText("Agent tab tools")).not.toBeChecked();
+    expect(screen.getByLabelText("Keep completed sessions for")).toHaveValue(
+      120,
+    );
+    expect(screen.getByLabelText("Idle preview timeout")).toHaveValue(300);
+    expect(
+      screen.getByLabelText("Keep sandbox while preview is active"),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("combobox", { name: "Agent sandbox size" }),
+    ).toHaveTextContent("Standard");
+    expect(
+      screen.getByRole("combobox", { name: "Preview sandbox size" }),
+    ).toHaveTextContent("Small");
+    expect(
+      screen.getByLabelText("Allow repository resource requests"),
+    ).not.toBeChecked();
+    expect(
+      screen.queryByLabelText("Preview CPU limit"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Large max · 1.5 cores · 4 GiB"),
+    ).toBeInTheDocument();
+  });
+
+  it("uses concise visible helper copy with question mark tooltips for caveats", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "About static egress IP" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "About concurrent agent runs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Use one stable public IP for new and resumed sandboxes.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Limit simultaneous coding-agent turns across the organization.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "These settings apply to sandbox runtimes across coding-agent sessions and previews.",
+      ),
+    ).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.hover(
+      screen.getByRole("button", { name: "About static egress IP" }),
+    );
+    expect(
+      await screen.findAllByText(
+        "Use this when external services need to allowlist sandbox traffic.",
+      ),
+    ).not.toHaveLength(0);
+  });
+
+  it("keeps repository resource requests visible while exact resource caps stay advanced", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    await screen.findByLabelText("Allow repository resource requests");
+    expect(
+      screen.queryByLabelText("Preview disk limit"),
+    ).not.toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "Expand advanced resource limits" }),
+    );
+
+    const diskLimit = await screen.findByLabelText("Preview disk limit");
+    const repositoryRequests = screen.getByLabelText(
+      "Allow repository resource requests",
+    );
+    const sandboxDefaults = screen.getByTestId("sandbox-defaults-section");
+    const advancedLimits = screen.getByTestId(
+      "advanced-resource-limits-section",
+    );
+
+    expect(
+      repositoryRequests.compareDocumentPosition(diskLimit) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(sandboxDefaults).toContainElement(repositoryRequests);
+    expect(advancedLimits).toContainElement(diskLimit);
   });
 
   it("saves runtime settings through the existing org settings API", async () => {
@@ -163,14 +268,14 @@ describe("RuntimeSettingsPage", () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
     const user = userEvent.setup();
-    await user.click(await screen.findByLabelText("Use static egress IP for sessions and previews"));
+    await user.click(await screen.findByLabelText("Static egress IP"));
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
         settings: { sandbox_network: { static_egress_enabled: false } },
       });
     });
 
-    await user.click(screen.getByLabelText("Sandbox tab tools"));
+    await user.click(screen.getByLabelText("Agent tab tools"));
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
         settings: { coding_agent_tab_tools_enabled: true },
@@ -182,7 +287,9 @@ describe("RuntimeSettingsPage", () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
     const user = userEvent.setup();
-    const concurrentRuns = await screen.findByLabelText("Concurrent coding-agent runs");
+    const concurrentRuns = await screen.findByLabelText(
+      "Concurrent agent runs",
+    );
     await user.click(concurrentRuns);
     await user.keyboard("{Control>}a{/Control}8");
     await user.tab();
@@ -193,7 +300,7 @@ describe("RuntimeSettingsPage", () => {
       });
     });
 
-    const sessionDuration = screen.getByLabelText("Maximum session duration");
+    const sessionDuration = screen.getByLabelText("Maximum session length");
     await user.click(sessionDuration);
     await user.keyboard("{Control>}a{/Control}30");
     await user.tab();
@@ -214,6 +321,87 @@ describe("RuntimeSettingsPage", () => {
         settings: { preview_max_previews_per_user: 20 },
       });
     });
+  });
+
+  it("uses the current setting value when stepping an empty numeric field", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const user = userEvent.setup();
+    const concurrentRuns = await screen.findByLabelText(
+      "Concurrent agent runs",
+    );
+    await user.clear(concurrentRuns);
+    await user.click(
+      screen.getByRole("button", { name: "Increase Concurrent agent runs" }),
+    );
+
+    await waitFor(() => {
+      expect(concurrentRuns).toHaveValue(6);
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { max_concurrent_runs: 6 },
+      });
+    });
+  });
+
+  it("saves preview CPU limits as millicores while showing cores", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Expand advanced resource limits",
+      }),
+    );
+    const cpuLimit = await screen.findByLabelText("Preview CPU limit");
+    await waitFor(() => {
+      expect(cpuLimit).toHaveValue(1.5);
+    });
+
+    await user.click(cpuLimit);
+    await user.keyboard("{Control>}a{/Control}2.25");
+    await user.tab();
+
+    await waitFor(() => {
+      expect(settingsUpdateMock).toHaveBeenCalledWith({
+        settings: { sandbox_resources: { preview_max_cpu_millis: 2000 } },
+      });
+    });
+    expect(cpuLimit).toHaveValue(2);
+  });
+
+  it("does not round and save an unchanged preview CPU value on blur", async () => {
+    settingsGetMock.mockResolvedValue({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: {
+          sandbox_resources: {
+            preview_max_cpu_millis: 333,
+          },
+        },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Expand advanced resource limits",
+      }),
+    );
+    const cpuLimit = await screen.findByLabelText("Preview CPU limit");
+    await waitFor(() => {
+      expect(cpuLimit).toHaveValue(0.33);
+    });
+    settingsUpdateMock.mockClear();
+
+    await user.click(cpuLimit);
+    await user.tab();
+
+    expect(settingsUpdateMock).not.toHaveBeenCalled();
+    expect(cpuLimit).toHaveValue(0.33);
   });
 
   it("saves lifecycle defaults", async () => {
@@ -251,18 +439,24 @@ describe("RuntimeSettingsPage", () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
     const user = userEvent.setup();
-    const retention = await screen.findByLabelText("Completed session retention");
+    const retention = await screen.findByLabelText(
+      "Keep completed sessions for",
+    );
     await user.click(retention);
     await user.keyboard("{Control>}a{/Control}90");
     await user.tab();
 
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { sandbox_lifecycle: { completed_session_retention_minutes: 90 } },
+        settings: {
+          sandbox_lifecycle: { completed_session_retention_minutes: 90 },
+        },
       });
     });
 
-    await user.click(screen.getByLabelText("Preview holds sandbox"));
+    await user.click(
+      screen.getByLabelText("Keep sandbox while preview is active"),
+    );
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
         settings: { sandbox_lifecycle: { preview_holds_sandbox: true } },
@@ -313,7 +507,9 @@ describe("RuntimeSettingsPage", () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("combobox", { name: "Agent default tier" }));
+    await user.click(
+      await screen.findByRole("combobox", { name: "Agent sandbox size" }),
+    );
     await user.click(await screen.findByRole("option", { name: "Large" }));
 
     await waitFor(() => {
@@ -322,14 +518,19 @@ describe("RuntimeSettingsPage", () => {
       });
     });
 
-    await user.click(screen.getByLabelText("Allow repo resource requests"));
+    await user.click(
+      screen.getByLabelText("Allow repository resource requests"),
+    );
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
         settings: { sandbox_resources: { allow_repo_resource_requests: true } },
       });
     });
 
-    const memoryMax = screen.getByLabelText("Preview memory request max");
+    await user.click(
+      screen.getByRole("button", { name: "Expand advanced resource limits" }),
+    );
+    const memoryMax = screen.getByLabelText("Preview memory limit");
     await user.click(memoryMax);
     await user.keyboard("{Control>}a{/Control}99999");
     await user.tab();
@@ -362,10 +563,12 @@ describe("RuntimeSettingsPage", () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Use static egress IP for sessions and previews")).not.toBeChecked();
+      expect(screen.getByLabelText("Static egress IP")).not.toBeChecked();
     });
     expect(
-      screen.queryByText("Static egress is not currently available for new sandbox starts."),
+      screen.queryByText(
+        "Static egress is not currently available for new sandbox starts.",
+      ),
     ).not.toBeInTheDocument();
   });
 
@@ -381,7 +584,11 @@ describe("RuntimeSettingsPage", () => {
 
     renderWithProviders(<RuntimeSettingsPage />);
 
-    expect(await screen.findByText("Static egress is not currently available for new sandbox starts.")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "Static egress is not currently available for new sandbox starts.",
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("worker capability mismatch"),
     ).not.toBeInTheDocument();

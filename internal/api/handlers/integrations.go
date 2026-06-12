@@ -16,9 +16,12 @@ import (
 	"strings"
 	"time"
 
+	"sync"
+
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghapp "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
@@ -72,6 +75,11 @@ type integrationCredentialStore interface {
 // githubAppService provides GitHub App installation tokens for fetching repos.
 type githubAppService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
+}
+
+type githubOrgAutoJoinService interface {
+	GetInstallationDetails(ctx context.Context, installationID int64) (ghapp.InstallationDetails, error)
+	ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghapp.OrgMember, error)
 }
 
 type githubAppUserCredentialProvider interface {
@@ -191,11 +199,13 @@ type IntegrationHandler struct {
 
 	// GitHub App service and repo store (for fetching repos on install)
 	githubService       githubAppService
+	githubOrgAutoJoin   githubOrgAutoJoinService
 	repoStore           *db.RepositoryStore
 	githubInstallations *db.GitHubInstallationStore
 	githubAppUserAuth   githubAppUserCredentialProvider
 	memberships         githubMembershipStore
 	setupSigningKey     string
+	audit               *db.AuditEmitter
 
 	// Slack OAuth
 	slackClientID          string
@@ -212,6 +222,7 @@ type IntegrationHandler struct {
 
 	// Linear post-install hooks (nil-safe).
 	linearJobStore                *db.JobStore
+	githubRosterJobStore          *db.JobStore
 	linearTeamKeyRefresher        func(ctx context.Context, orgID uuid.UUID) error
 	linearTeamKeyCacheInvalidator func(orgID uuid.UUID)
 	linearAgentBootstrapper       func(ctx context.Context, orgID uuid.UUID) error
@@ -223,6 +234,10 @@ type IntegrationHandler struct {
 // detection won't work right after install.
 func (h *IntegrationHandler) SetLinearJobStore(jobs *db.JobStore) {
 	h.linearJobStore = jobs
+}
+
+func (h *IntegrationHandler) SetGitHubRosterJobStore(jobs *db.JobStore) {
+	h.githubRosterJobStore = jobs
 }
 
 // SetLinearTeamKeyRefresher wires an inline refresh hook (typically
@@ -321,7 +336,18 @@ func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
 func WithGitHubApp(svc githubAppService, repoStore *db.RepositoryStore) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.githubService = svc
+		if autoJoin, ok := svc.(githubOrgAutoJoinService); ok {
+			h.githubOrgAutoJoin = autoJoin
+		} else {
+			zerolog.Ctx(context.Background()).Warn().Msg("github app service does not implement githubOrgAutoJoinService; org auto-join permission checks disabled — use WithGitHubOrgAutoJoinService to wire it explicitly")
+		}
 		h.repoStore = repoStore
+	}
+}
+
+func WithGitHubOrgAutoJoinService(svc githubOrgAutoJoinService) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubOrgAutoJoin = svc
 	}
 }
 
@@ -347,6 +373,10 @@ func WithGitHubSetupSigningKey(key string) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.setupSigningKey = key
 	}
+}
+
+func (h *IntegrationHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
 }
 
 // pmAutoTriggerJobStore is the minimal job enqueue interface for PM context auto-triggers.
@@ -1153,6 +1183,8 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 		}
 		if err := h.githubInstallations.UpsertOrgLink(ctx, link); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to link github installation to org")
+		} else {
+			h.tryEnableGitHubOrgAutoJoin(ctx, orgID, userID, installationID, accountLogin)
 		}
 	}
 	configJSON, marshalErr := json.Marshal(map[string]any{
@@ -1178,6 +1210,271 @@ func isGitHubAppSetupAction(action string) bool {
 	default:
 		return false
 	}
+}
+
+type githubOrgAutoJoinResponse struct {
+	GitHubOrgs []githubOrgAutoJoinRow `json:"github_orgs"`
+}
+
+type githubOrgAutoJoinRow struct {
+	InstallationID     int64      `json:"installation_id"`
+	AccountLogin       string     `json:"account_login"`
+	AccountType        *string    `json:"account_type,omitempty"`
+	AutoJoinEnabled    bool       `json:"auto_join_enabled"`
+	MembersPermission  string     `json:"members_permission"`
+	RosterSyncedAt     *time.Time `json:"roster_synced_at,omitempty"`
+	CapturedByOtherOrg bool       `json:"captured_by_other_org"`
+	SettingsURL        string     `json:"settings_url,omitempty"`
+}
+
+func (h *IntegrationHandler) ListGitHubOrgAutoJoin(w http.ResponseWriter, r *http.Request) {
+	if h.githubInstallations == nil {
+		writeJSON(w, http.StatusOK, githubOrgAutoJoinResponse{GitHubOrgs: []githubOrgAutoJoinRow{}})
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	summaries, err := h.githubInstallations.ListOrgAutoJoinSummaries(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_ORGS_LOOKUP_FAILED", "failed to list github organizations", err)
+		return
+	}
+	// Fetch installation permission state concurrently — one GitHub API call per
+	// installation would otherwise serialize and stall the page load.
+	permissions := make([]string, len(summaries))
+	for i := range permissions {
+		permissions[i] = "missing"
+	}
+	if h.githubOrgAutoJoin != nil {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for i, summary := range summaries {
+			wg.Add(1)
+			go func(idx int, installationID int64) {
+				defer wg.Done()
+				if details, err := h.githubOrgAutoJoin.GetInstallationDetails(r.Context(), installationID); err == nil && details.Permissions.Members == "read" {
+					mu.Lock()
+					permissions[idx] = "granted"
+					mu.Unlock()
+				}
+			}(i, summary.InstallationID)
+		}
+		wg.Wait()
+	}
+	rows := make([]githubOrgAutoJoinRow, 0, len(summaries))
+	for i, summary := range summaries {
+		rows = append(rows, githubOrgAutoJoinRow{
+			InstallationID:     summary.InstallationID,
+			AccountLogin:       summary.AccountLogin,
+			AccountType:        summary.AccountType,
+			AutoJoinEnabled:    summary.AutoJoinEnabled,
+			MembersPermission:  permissions[i],
+			RosterSyncedAt:     summary.RosterSyncedAt,
+			CapturedByOtherOrg: summary.CapturedByOtherOrg,
+			SettingsURL:        githubInstallationSettingsURL(summary.AccountLogin, summary.InstallationID),
+		})
+	}
+	writeJSON(w, http.StatusOK, githubOrgAutoJoinResponse{GitHubOrgs: rows})
+}
+
+func (h *IntegrationHandler) UpdateGitHubOrgAutoJoin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	installationID, ok := parseInstallationIDParam(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		AutoJoinEnabled bool `json:"auto_join_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	actorID := uuid.Nil
+	if user != nil {
+		actorID = user.ID
+	}
+	if body.AutoJoinEnabled {
+		result := h.tryEnableGitHubOrgAutoJoin(r.Context(), orgID, actorID, installationID, "")
+		if result.err != nil {
+			writeGitHubOrgAutoJoinError(w, r, result.err, result.settingsURL)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result.link})
+		return
+	}
+	link, err := h.githubInstallations.SetOrgLinkAutoJoin(r.Context(), orgID, installationID, false)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "GITHUB_ORG_NOT_FOUND", "github organization link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_ORG_AUTO_JOIN_UPDATE_FAILED", "failed to update github organization auto-join", err)
+		return
+	}
+	if err := h.githubInstallations.ClearRosterForInstallation(r.Context(), installationID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to clear github org roster after disabling auto-join")
+	}
+	h.emitGitHubOrgAutoJoinAudit(r.Context(), orgID, actorID, models.AuditActionTeamGitHubOrgAutoJoinDisabled, link.AccountLogin, installationID, "admin_disabled")
+	writeJSON(w, http.StatusOK, map[string]any{"data": link})
+}
+
+type githubOrgAutoJoinEnableResult struct {
+	link        models.GitHubInstallationOrgLink
+	settingsURL string
+	err         error
+}
+
+var (
+	errGitHubOrgMembersPermissionMissing = errors.New("github members permission missing")
+	errGitHubAutoJoinNotOrganization     = errors.New("github installation is not an organization")
+)
+
+func (h *IntegrationHandler) tryEnableGitHubOrgAutoJoin(ctx context.Context, orgID, actorID uuid.UUID, installationID int64, accountLogin string) githubOrgAutoJoinEnableResult {
+	result := githubOrgAutoJoinEnableResult{}
+	if h.githubInstallations == nil || h.githubOrgAutoJoin == nil {
+		result.err = errors.New("github org auto-join dependencies not configured")
+		return result
+	}
+	link, err := h.githubInstallations.GetOrgLink(ctx, orgID, installationID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	inst, err := h.githubInstallations.GetByInstallationID(ctx, installationID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	if accountLogin == "" {
+		accountLogin = link.AccountLogin
+	}
+	result.settingsURL = githubInstallationSettingsURL(accountLogin, installationID)
+	details, err := h.githubOrgAutoJoin.GetInstallationDetails(ctx, installationID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	accountType := ""
+	if inst.AccountType != nil {
+		accountType = *inst.AccountType
+	}
+	if accountType == "" {
+		accountType = details.Account.Type
+	}
+	if accountType != "Organization" {
+		result.err = errGitHubAutoJoinNotOrganization
+		return result
+	}
+	if accountLogin == "" || accountLogin == "unknown" {
+		accountLogin = details.Account.Login
+	}
+	result.settingsURL = githubInstallationSettingsURL(accountLogin, installationID)
+	if details.Permissions.Members != "read" {
+		result.err = errGitHubOrgMembersPermissionMissing
+		return result
+	}
+	enabled, err := h.githubInstallations.SetOrgLinkAutoJoin(ctx, orgID, installationID, true)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.link = enabled
+	h.emitGitHubOrgAutoJoinAudit(ctx, orgID, actorID, models.AuditActionTeamGitHubOrgAutoJoinEnabled, enabled.AccountLogin, installationID, "admin_enabled")
+	if err := h.enqueueGitHubOrgRosterSync(ctx, orgID, installationID, enabled.AccountLogin); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to enqueue github org roster sync after enabling auto-join")
+	}
+	return result
+}
+
+func (h *IntegrationHandler) enqueueGitHubOrgRosterSync(ctx context.Context, orgID uuid.UUID, installationID int64, accountLogin string) error {
+	if h.githubRosterJobStore == nil {
+		return fmt.Errorf("github roster job store not configured")
+	}
+	dedupe := fmt.Sprintf("sync_github_org_roster:%d", installationID)
+	_, err := h.githubRosterJobStore.Enqueue(ctx, orgID, "github", models.JobTypeSyncGitHubOrgRoster, map[string]any{
+		"org_id":          orgID.String(),
+		"installation_id": installationID,
+		"account_login":   accountLogin,
+	}, 5, &dedupe)
+	return err
+}
+
+func parseInstallationIDParam(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	raw := chi.URLParam(r, "installation_id")
+	installationID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || installationID <= 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INSTALLATION_ID", "invalid github installation id")
+		return 0, false
+	}
+	return installationID, true
+}
+
+func writeGitHubOrgAutoJoinError(w http.ResponseWriter, r *http.Request, err error, settingsURL string) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, r, http.StatusNotFound, "GITHUB_ORG_NOT_FOUND", "github organization link not found")
+	case errors.Is(err, db.ErrGitHubOrgAlreadyCaptured):
+		writeError(w, r, http.StatusConflict, "GITHUB_ORG_ALREADY_CAPTURED", "this GitHub organization is already connected to another workspace")
+	case errors.Is(err, errGitHubOrgMembersPermissionMissing):
+		zerolog.Ctx(r.Context()).Info().Str("settings_url", settingsURL).Msg("github members permission missing")
+		writeJSON(w, http.StatusPreconditionFailed, models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "MEMBERS_PERMISSION_MISSING",
+				Message: "an owner must approve updated GitHub App permissions",
+				Details: map[string]any{"settings_url": settingsURL},
+			},
+		})
+	case errors.Is(err, errGitHubAutoJoinNotOrganization):
+		writeError(w, r, http.StatusUnprocessableEntity, "NOT_AN_ORGANIZATION", "auto-join requires a GitHub organization installation")
+	default:
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_ORG_AUTO_JOIN_UPDATE_FAILED", "failed to update github organization auto-join", err)
+	}
+}
+
+func githubInstallationSettingsURL(accountLogin string, installationID int64) string {
+	if accountLogin == "" || accountLogin == "unknown" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/organizations/%s/settings/installations/%d", url.PathEscape(accountLogin), installationID)
+}
+
+func (h *IntegrationHandler) emitGitHubOrgAutoJoinAudit(ctx context.Context, orgID, actorID uuid.UUID, action models.AuditAction, accountLogin string, installationID int64, reason string) {
+	resourceID := fmt.Sprintf("%d", installationID)
+	details := marshalAuditDetails(zerolog.Ctx(ctx).With().Logger(), map[string]any{
+		"account_login":   accountLogin,
+		"installation_id": installationID,
+		"reason":          reason,
+	})
+	if h.audit != nil {
+		if actorID != uuid.Nil {
+			h.audit.EmitUserAction(ctx, db.UserActionParams{
+				OrgID:        orgID,
+				UserID:       actorID,
+				Action:       action,
+				ResourceType: models.AuditResourceIntegration,
+				ResourceID:   &resourceID,
+				Details:      details,
+			})
+		} else {
+			h.audit.EmitSystemAction(ctx, db.SystemActionParams{
+				OrgID:        orgID,
+				ActorID:      "github_org_auto_join",
+				Action:       action,
+				ResourceType: models.AuditResourceIntegration,
+				ResourceID:   &resourceID,
+				Details:      details,
+			})
+		}
+	}
+	zerolog.Ctx(ctx).Info().
+		Str("org_id", orgID.String()).
+		Str("actor_user_id", actorID.String()).
+		Str("action", string(action)).
+		Str("account_login", accountLogin).
+		Int64("installation_id", installationID).
+		Str("reason", reason).
+		Msg("github org auto-join policy changed")
 }
 
 // SyncGitHubRepos reports repositories visible to the GitHub App installation.

@@ -38,6 +38,7 @@ export interface User {
   role: string;
   github_id?: number;
   github_login?: string;
+  captured_github_org_login?: string;
   avatar_url?: string;
   google_id?: string;
   // Whether the account's current email is attested (OAuth provider claim,
@@ -478,11 +479,11 @@ export interface Session {
   recovery_queued_at?: string;
   recovery_started_at?: string;
   recovery_attempt_count?: number;
-  pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_creation_state?: PRCreationState;
   pr_creation_error?: string;
-  pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_push_state?: PRPushState;
   pr_push_error?: string;
-  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_state?: BranchCreationState;
   branch_creation_error?: string;
   branch_url?: string;
   has_unpushed_changes?: boolean;
@@ -760,6 +761,15 @@ export interface SessionLog {
   metadata: Record<string, unknown> | null;
   turn_number: number;
   created_at: string;
+  message_bytes: number;
+  message_chars: number;
+  message_truncated: boolean;
+}
+
+export interface SessionLogDetail extends Omit<SessionLog, 'message_truncated'> {
+  message: string;
+  message_bytes: number;
+  message_chars: number;
 }
 
 export interface SessionTimelineEntry {
@@ -1417,6 +1427,23 @@ export interface OrganizationDomain {
   failed_checks: number;
   dns_record_name: string;
   dns_record_value: string;
+}
+
+export type GitHubOrgMembersPermission = 'granted' | 'missing';
+
+export interface GitHubOrgAutoJoin {
+  installation_id: number;
+  account_login: string;
+  account_type?: string;
+  auto_join_enabled: boolean;
+  members_permission: GitHubOrgMembersPermission;
+  roster_synced_at?: string;
+  captured_by_other_org: boolean;
+  settings_url?: string;
+}
+
+export interface GitHubOrgAutoJoinResponse {
+  github_orgs: GitHubOrgAutoJoin[];
 }
 
 // JoinableOrganization is a workspace the current user may join because
@@ -2171,15 +2198,24 @@ export interface AutomationRun {
   session?: AutomationRunSession;
 }
 
-// Mirrors models.PRCreationState. Kept as a literal union so the row UI
-// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
-// pill on completed_no_pr rows).
-export type PRCreationState =
+// Mirrors the session publish lifecycle enums in internal/models/session_enums.go.
+// Kept as a literal union so UI branches get exhaustiveness checks while only
+// accepting backend-defined enum values.
+export type SessionPublishState =
   | 'idle'
   | 'queued'
   | 'pushing'
   | 'succeeded'
   | 'failed';
+
+// Mirrors models.PRCreationState.
+export type PRCreationState = SessionPublishState;
+
+// Mirrors models.PRPushState.
+export type PRPushState = SessionPublishState;
+
+// Mirrors models.BranchCreationState.
+export type BranchCreationState = SessionPublishState;
 
 export interface AutomationRunSession {
   id: string;

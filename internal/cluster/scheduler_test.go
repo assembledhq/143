@@ -74,6 +74,7 @@ func (m *mockRepos) ListByOrg(ctx context.Context, orgID uuid.UUID, _ db.Reposit
 type trackingJobs struct {
 	enqueued   []string // jobType values
 	enqueuedTx []string // jobType values inserted in the scheduler tx
+	queues     []string
 	payloads   []any
 	dedupeKeys []string
 	enqueueErr error
@@ -81,6 +82,7 @@ type trackingJobs struct {
 
 func (m *trackingJobs) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	m.enqueued = append(m.enqueued, jobType)
+	m.queues = append(m.queues, queue)
 	m.payloads = append(m.payloads, payload)
 	if dedupeKey != nil {
 		m.dedupeKeys = append(m.dedupeKeys, *dedupeKey)
@@ -115,6 +117,22 @@ func (m *mockPMDocs) GetByOrgAndSourceType(ctx context.Context, orgID uuid.UUID,
 		return doc, nil
 	}
 	return models.PMDocument{}, pgx.ErrNoRows
+}
+
+type mockSchedulerGitHubOrgStore struct {
+	due          []models.GitHubOrgAutoJoinCandidate
+	syncedBefore time.Time
+	limit        int
+	err          error
+}
+
+func (m *mockSchedulerGitHubOrgStore) ListEnabledAutoJoinLinksDueForRosterSync(ctx context.Context, syncedBefore time.Time, limit int) ([]models.GitHubOrgAutoJoinCandidate, error) {
+	m.syncedBefore = syncedBefore
+	m.limit = limit
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.due, nil
 }
 
 func TestScheduler_SetPMDocStore(t *testing.T) {
@@ -173,6 +191,41 @@ func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
 	require.Equal(t, pullRequestReconcileBatch, firstPayload["limit"], "scheduler should include the configured reconciliation batch size")
 	require.Len(t, jobs.dedupeKeys, 2, "should compute one dedupe key per reconciliation job")
 	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":20260423220", "dedupe key should include the org and UTC ten-minute bucket")
+}
+
+func TestScheduler_ScheduleGitHubOrgRosterSyncs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	orgID := uuid.New()
+	store := &mockSchedulerGitHubOrgStore{
+		due: []models.GitHubOrgAutoJoinCandidate{
+			{
+				OrgID:          orgID,
+				InstallationID: 12345,
+				AccountLogin:   "acme",
+			},
+		},
+	}
+	jobs := &trackingJobs{}
+	s := &Scheduler{
+		jobs:       jobs,
+		githubOrgs: store,
+		logger:     zerolog.Nop(),
+	}
+
+	s.scheduleGitHubOrgRosterSyncs(context.Background(), now)
+
+	require.Equal(t, githubOrgRosterSyncBatchSize, store.limit, "scheduler should bound the GitHub org roster reconciliation batch")
+	require.Equal(t, now.Add(-githubOrgRosterSyncInterval), store.syncedBefore, "scheduler should request rosters stale by the configured interval")
+	require.Equal(t, []string{models.JobTypeSyncGitHubOrgRoster}, jobs.enqueued, "scheduler should enqueue a roster sync job for each due capture")
+	require.Equal(t, []string{"github"}, jobs.queues, "scheduler should send roster sync work to the GitHub queue")
+	require.Equal(t, []string{"sync_github_org_roster:12345"}, jobs.dedupeKeys, "scheduler should dedupe by installation")
+	payload, ok := jobs.payloads[0].(map[string]any)
+	require.True(t, ok, "scheduler should enqueue GitHub roster sync payloads as maps")
+	require.Equal(t, orgID.String(), payload["org_id"], "scheduler should include the owning org ID")
+	require.Equal(t, int64(12345), payload["installation_id"], "scheduler should include the installation ID")
+	require.Equal(t, "acme", payload["account_login"], "scheduler should include the GitHub account login")
 }
 
 func TestScheduler_ScheduleLinearTeamKeyRefresh_OncePerUTCDay(t *testing.T) {

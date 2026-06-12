@@ -210,6 +210,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+			authHandler.SetGitHubOrgAutoJoinDeps(githubInstallationStore, ghSvc)
 		}
 	}
 	if appUserAuthSvc != nil {
@@ -226,6 +227,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		integrationOpts...,
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
+	integrationHandler.SetGitHubRosterJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	slackbotHandler := handlers.NewSlackbotHandler(
@@ -551,6 +553,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
+	integrationHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAttributionStore(sessionAttributionStore)
@@ -743,6 +746,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
 	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
+	branchPreviewHandler.SetPreviewCachePrewarm(cfg.PreviewCachePrewarmEnabled, cfg.PreviewCachePrewarmPriority)
 	branchPreviewHandler.SetStaticEgressSettings(orgStore, cfg.StaticEgressPublicIP)
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
@@ -1031,6 +1035,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
+				r.Get("/api/v1/sessions/{id}/logs/{log_id}", sessionHandler.GetLogDetail)
 				r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 				r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 				r.Get("/api/v1/sessions/{id}/human-input-requests", sessionHandler.ListHumanInputRequests)
@@ -1391,6 +1396,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/team/domains/{id}/verify", orgDomainsHandler.Verify)
 				r.Patch("/api/v1/team/domains/{id}", orgDomainsHandler.Update)
 				r.Delete("/api/v1/team/domains/{id}", orgDomainsHandler.Delete)
+				r.Get("/api/v1/team/github-orgs", integrationHandler.ListGitHubOrgAutoJoin)
+				r.Patch("/api/v1/team/github-orgs/{installation_id}", integrationHandler.UpdateGitHubOrgAutoJoin)
 
 				// Integration management (OAuth flows + connect/disconnect/sync).
 				// Connecting an integration is an org-wide trust decision, so members

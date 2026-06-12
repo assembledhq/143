@@ -341,6 +341,9 @@ func TestWebhook_HandleInstallationDeleted_DeactivatesInstallationLinks(t *testi
 	mock.ExpectExec("UPDATE github_installation_org_links").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 10))
 	mock.ExpectExec("UPDATE repositories").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
@@ -355,6 +358,138 @@ func TestWebhook_HandleInstallationDeleted_DeactivatesInstallationLinks(t *testi
 	require.Equal(t, http.StatusOK, rr.Code, "installation deleted webhook should be acknowledged")
 	require.Contains(t, rr.Body.String(), "installation deleted", "response should describe deleted installation")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhook_HandleOrganizationMemberAdded(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := setupWebhookHandler(t, mock, "test-secret")
+	handler.SetGitHubInstallationStore(db.NewGitHubInstallationStore(mock))
+
+	mock.ExpectExec("INSERT INTO github_org_members").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	body := []byte(`{"action":"member_added","installation":{"id":12345,"account":{"id":100,"login":"acme","type":"Organization"}},"membership":{"user":{"id":42,"login":"alice"}}}`)
+	sig := computeTestSignature("test-secret", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "organization")
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rr := httptest.NewRecorder()
+
+	handler.HandleGitHub(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "organization member_added webhook should be acknowledged")
+	require.Contains(t, rr.Body.String(), "organization updated", "response should describe the organization update")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhook_HandleOrganizationMemberRemoved(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := setupWebhookHandler(t, mock, "test-secret")
+	handler.SetGitHubInstallationStore(db.NewGitHubInstallationStore(mock))
+
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	body := []byte(`{"action":"member_removed","installation":{"id":12345,"account":{"id":100,"login":"acme","type":"Organization"}},"membership":{"user":{"id":42,"login":"alice"}}}`)
+	sig := computeTestSignature("test-secret", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "organization")
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rr := httptest.NewRecorder()
+
+	handler.HandleGitHub(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "organization member_removed webhook should be acknowledged")
+	require.Contains(t, rr.Body.String(), "organization updated", "response should describe the organization update")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhook_HandleOrganizationMemberRemovedIgnoresZeroUserID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := setupWebhookHandler(t, mock, "test-secret")
+	handler.SetGitHubInstallationStore(db.NewGitHubInstallationStore(mock))
+
+	// No DB expectations — zero user ID should be skipped without a DB call.
+	body := []byte(`{"action":"member_removed","installation":{"id":12345,"account":{"id":100,"login":"acme","type":"Organization"}},"membership":{"user":{"id":0,"login":""}}}`)
+	sig := computeTestSignature("test-secret", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "organization")
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rr := httptest.NewRecorder()
+
+	handler.HandleGitHub(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "zero user ID should be silently skipped")
+	require.NoError(t, mock.ExpectationsWereMet(), "no database calls should be made for zero user ID")
+}
+
+func TestWebhook_HandleOrganizationRenamed(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := setupWebhookHandler(t, mock, "test-secret")
+	handler.SetGitHubInstallationStore(db.NewGitHubInstallationStore(mock))
+
+	mock.ExpectExec("UPDATE github_installation_org_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body := []byte(`{"action":"renamed","installation":{"id":12345,"account":{"id":100,"login":"acme-new","type":"Organization"}},"organization":{"id":100,"login":"acme-new"}}`)
+	sig := computeTestSignature("test-secret", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "organization")
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rr := httptest.NewRecorder()
+
+	handler.HandleGitHub(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "organization renamed webhook should be acknowledged")
+	require.Contains(t, rr.Body.String(), "organization updated", "response should describe the organization update")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhook_HandleOrganizationUnknownActionIgnored(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	handler := setupWebhookHandler(t, mock, "test-secret")
+	handler.SetGitHubInstallationStore(db.NewGitHubInstallationStore(mock))
+
+	body := []byte(`{"action":"some_other_action","installation":{"id":12345,"account":{"id":100,"login":"acme","type":"Organization"}},"membership":{"user":{"id":42,"login":"alice"}}}`)
+	sig := computeTestSignature("test-secret", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	req.Header.Set("X-GitHub-Event", "organization")
+	req.Header.Set("X-Hub-Signature-256", sig)
+	rr := httptest.NewRecorder()
+
+	handler.HandleGitHub(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "unknown organization actions should be silently ignored")
+	require.Contains(t, rr.Body.String(), "ignored", "response should indicate the event was ignored")
+	require.NoError(t, mock.ExpectationsWereMet(), "no database calls should be made for unknown actions")
 }
 
 func TestWebhook_HandlePullRequestScopesLookupToActiveOwner(t *testing.T) {

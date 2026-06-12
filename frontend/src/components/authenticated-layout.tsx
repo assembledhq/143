@@ -46,8 +46,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RepoContextSwitcher } from "@/components/repo-context-switcher";
@@ -81,6 +82,16 @@ const APP_SIDEBAR_DEFAULT_WIDTH = 236;
 const APP_SIDEBAR_MIN_WIDTH = 200;
 const APP_SIDEBAR_MAX_WIDTH = 300;
 const APP_SIDEBAR_STORAGE_KEY = "143:app-sidebar-width";
+
+function prefetchAuthGateRouteData(queryClient: QueryClient, pathname: string): void {
+  const sessionId = sessionDetailRouteId(pathname);
+  if (!sessionId) return;
+
+  void queryClient.prefetchQuery({
+    queryKey: queryKeys.sessions.detail(sessionId),
+    queryFn: () => api.sessions.get(sessionId),
+  });
+}
 
 function VersionMenuItem() {
   const [copied, setCopied] = useState(false);
@@ -513,8 +524,7 @@ function isSessionDetailRoute(pathname: string): boolean {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Strict variant for the auth-gate prefetch: only a UUID segment is worth a
-// speculative request, so non-id paths never hit the API.
+// Strict variant for session detail callers that need an API-safe id.
 export function sessionDetailRouteId(pathname: string): string | null {
   const segment = sessionDetailRouteSegment(pathname);
   return segment !== null && UUID_RE.test(segment) ? segment : null;
@@ -578,29 +588,16 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-
-  // On a cold load this layout renders only a skeleton until /auth/me
-  // resolves, so the page behind it can't start its own data fetches — every
-  // round trip serializes behind auth. Warm the session detail cache for
-  // /sessions/[id] routes in parallel with /auth/me; when the page mounts,
-  // React Query dedupes against the in-flight prefetch (or serves the settled
-  // payload) instead of paying a fresh round trip. prefetchQuery swallows
-  // errors by design: a 401 here just means the auth gate is about to
-  // redirect to /login anyway.
   const queryClient = useQueryClient();
-  const didPrefetchRouteDataRef = useRef(false);
+  const prefetchedPathRef = useRef<string | null>(null);
   useEffect(() => {
-    if (didPrefetchRouteDataRef.current) return;
-    didPrefetchRouteDataRef.current = true;
-    // Auth already settled (warm navigation) — the page mounts immediately
-    // and owns its fetches; prefetching would only duplicate work.
+    // Keep auth-gate warming to explicit, idempotent query preloads. Rendering
+    // route children here would also run mount effects and mutations before
+    // auth/role gates settle.
     if (user || !isLoading) return;
-    const sessionId = sessionDetailRouteId(pathname);
-    if (!sessionId) return;
-    void queryClient.prefetchQuery({
-      queryKey: queryKeys.sessions.detail(sessionId),
-      queryFn: () => api.sessions.get(sessionId),
-    });
+    if (prefetchedPathRef.current === pathname) return;
+    prefetchedPathRef.current = pathname;
+    prefetchAuthGateRouteData(queryClient, pathname);
   }, [isLoading, pathname, queryClient, user]);
   const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
     storageKey: APP_SIDEBAR_STORAGE_KEY,
@@ -648,6 +645,34 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
       router.replace("/login");
     }
   }, [isLoading, isUnauthorized, router]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const joinedOrg = searchParams.get("joined_org");
+    const joinedVia = searchParams.get("joined_via");
+    if (!joinedOrg || (joinedVia !== "github_org" && joinedVia !== "domain")) {
+      return;
+    }
+    const orgName = searchParams.get("joined_org_name") || "your team";
+    const githubOrg = searchParams.get("github_org");
+    if (joinedVia === "github_org") {
+      toast.success(
+        `You've joined ${orgName} because you're a member of the ${githubOrg || "connected"} GitHub organization.`,
+        { duration: 8000 },
+      );
+    } else {
+      toast.success(`You've joined ${orgName} because your email domain is verified.`, {
+        duration: 8000,
+      });
+    }
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("joined_org");
+    next.delete("joined_via");
+    next.delete("joined_org_name");
+    next.delete("github_org");
+    const qs = next.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  }, [pathname, router]);
 
   // Show the loading skeleton while the initial /me call is in flight OR
   // while retries are still in progress without a cached user. Confirmed

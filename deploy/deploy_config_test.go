@@ -288,6 +288,8 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, fleetText, `DEPLOY_JOBS="${DEPLOY_JOBS:-4}"`, "fleet deploy should default to a bounded four-node deploy fan-out")
 	require.Contains(t, fleetText, `xargs -n1 -P "$DEPLOY_JOBS"`, "fleet deploy should deploy matching nodes concurrently instead of serializing the whole fleet")
 	require.Contains(t, fleetText, `LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"`, "parallel fleet deploy should keep per-host logs inspectable after failures")
+	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override so CI can upload per-host logs as an artifact")
+	require.Contains(t, fleetText, `dump_failed_logs`, "fleet deploy should print failed hosts' log tails so CI output is introspectable without the runner's /tmp")
 	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
 	require.Contains(t, fleetText, `FAILED: one or more deploys failed`, "fleet deploy should finish pending parallel deploys and then fail loudly when any host fails")
 	require.Contains(t, fleetText, `DEPLOY_JOBS=1`, "fleet deploy should document how to recover the old one-host-at-a-time rollout behavior")
@@ -295,6 +297,8 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
 	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"`, "CI should use deploy-fleet's default app/worker role set for routine main-branch deploys")
+	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the artifact upload step can find per-host logs")
+	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v4`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
 
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
@@ -429,6 +433,65 @@ echo "$role@$ip deployed by fake script"
 	require.Less(t, appIndex, workerIndex, "same-host deploys should preserve FLEET_HOSTS order")
 }
 
+func TestDeployFleetPrintsFailedHostLogs(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+role="$1"
+ip="$2"
+if [ "$role" = "worker" ]; then
+  echo "remote gate said: config changed during routine deploy on $ip"
+  exit 1
+fi
+echo "healthy $role deploy detail that must stay out of failure output"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Pre-seed the pinned log dir with a previous run's failure; the script
+	// must clear it instead of re-dumping it alongside this run's failures.
+	logDir := filepath.Join(tempDir, "fleet-logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755), "test should create the pinned log dir")
+	staleLog := filepath.Join(logDir, "app-9.9.9.9.log")
+	require.NoError(t, os.WriteFile(staleLog, []byte("stale failure from a previous run\n"), 0o644), "test should seed a stale per-host log")
+	require.NoError(t, os.WriteFile(staleLog+".failed", nil, 0o644), "test should seed a stale failure marker")
+
+	summaryPath := filepath.Join(tempDir, "step-summary.md")
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
+	cmd.Env = append(os.Environ(),
+		"DEPLOY_JOBS=2",
+		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.2",
+		"DEPLOY_FLEET_LOG_DIR="+logDir,
+		"GITHUB_ACTIONS=true",
+		"GITHUB_STEP_SUMMARY="+summaryPath,
+	)
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err, "deploy-fleet should exit non-zero when a host fails: %s", string(output))
+	text := string(output)
+	require.Contains(t, text, "remote gate said: config changed during routine deploy on 10.0.0.2", "fleet output should include the failed host's log so CI failures are introspectable")
+	require.Contains(t, text, "::group::FAILED worker-10.0.0.2", "fleet output should wrap failed logs in a collapsible GitHub Actions group")
+	require.Contains(t, text, "::stop-commands::", "fleet output should fence dumped remote log content so the runner does not interpret ::-prefixed lines as workflow commands")
+	require.NotContains(t, text, "healthy app deploy detail", "fleet output should not dump logs of hosts that deployed cleanly")
+	require.NotContains(t, text, "stale failure from a previous run", "fleet deploy should clear prior-run state from a reused pinned log dir before deploying")
+	require.FileExists(t, filepath.Join(logDir, "worker-10.0.0.2.log"), "fleet deploy should write per-host logs into the pinned artifact dir")
+
+	summary, err := os.ReadFile(summaryPath)
+	require.NoError(t, err, "fleet deploy should append failures to the GitHub step summary")
+	require.Contains(t, string(summary), "remote gate said: config changed during routine deploy on 10.0.0.2", "step summary should carry the failed host's log tail")
+}
+
 func indexOfString(values []string, target string) int {
 	for i, value := range values {
 		if value == target {
@@ -529,6 +592,13 @@ func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {
 	require.Contains(t, cloudInitText, "mkdir -p /var/cache/143/preview-dependency-cache", "worker cloud-init should create the host dependency cache directory before first compose startup")
 	require.Contains(t, cloudInitText, "chown 1000:1000 /var/cache/143/preview-dependency-cache", "worker cloud-init should make the host dependency cache directory writable by appuser")
 	require.Contains(t, cloudInitText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker cloud-init should keep the host dependency cache directory private")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read the worker reconcile script")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, "mkdir -p /var/cache/143/preview-dependency-cache", "worker reconcile should create the host dependency cache directory so pre-#1342 hosts heal on deploy")
+	require.Contains(t, reconcileText, "chown 1000:1000 /var/cache/143/preview-dependency-cache", "worker reconcile should repair dependency cache directory ownership drift")
+	require.Contains(t, reconcileText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker reconcile should keep the dependency cache directory private")
 }
 
 func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {

@@ -1273,6 +1273,95 @@ func TestResolvePreviewInstallCachePaths(t *testing.T) {
 	}
 }
 
+func TestResolvePreviewInstallPackageManagerCachePaths(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		wantPMs []string
+		want    []string
+		enabled bool
+	}{
+		{
+			name: "infers npm from lockfile",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+			},
+			wantPMs: []string{"npm"},
+			want:    []string{".npm"},
+			enabled: true,
+		},
+		{
+			name: "infers nested pnpm from lockfile and command",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"pnpm", "install", "--frozen-lockfile"},
+				Lockfiles: []string{"frontend/pnpm-lock.yaml"},
+			},
+			wantPMs: []string{"pnpm"},
+			want:    []string{".local/share/pnpm/store"},
+			enabled: true,
+		},
+		{
+			name: "infers go module and build caches",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"go", "mod", "download"},
+				Lockfiles: []string{"go.mod"},
+			},
+			wantPMs: []string{"go"},
+			want:    []string{".cache/go-build", "go/pkg/mod"},
+			enabled: true,
+		},
+		{
+			name: "explicit include and paths are additive",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"custompm", "install"},
+				Lockfiles: []string{"custom.lock"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{
+						Include: []string{"pip"},
+						Paths:   []string{".cache/custom-package-manager"},
+					},
+				},
+			},
+			wantPMs: []string{"pip"},
+			want:    []string{".cache/custom-package-manager", ".cache/pip"},
+			enabled: true,
+		},
+		{
+			name: "package manager opt out disables only home cache",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Enabled: &disabled},
+				},
+			},
+			enabled: false,
+		},
+		{
+			name: "global cache requires lockfiles",
+			install: &models.PreviewInstallConfig{
+				Command: []string{"npm", "ci"},
+			},
+			enabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			paths, managers, enabled := ResolvePreviewInstallPackageManagerCachePaths(tt.install)
+			require.Equal(t, tt.enabled, enabled, "package-manager cache resolver should return expected enabled state")
+			require.Equal(t, tt.wantPMs, managers, "package-manager cache resolver should return expected package managers")
+			require.Equal(t, tt.want, paths, "package-manager cache resolver should return expected home-relative paths")
+		})
+	}
+}
+
 func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 	t.Parallel()
 
@@ -1368,6 +1457,60 @@ func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".pnpm-store/*"}},
 			},
 			wantErr: "glob paths are not allowed",
+		},
+		{
+			name: "valid package manager override",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{".cache/custom-package-manager"}},
+				},
+			},
+		},
+		{
+			name: "rejects unknown package manager include",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Include: []string{"unknownpm"}},
+				},
+			},
+			wantErr: "preview.install.cache.package_manager.include[0]",
+		},
+		{
+			name: "rejects absolute package manager path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{"/home/sandbox/.npm"}},
+				},
+			},
+			wantErr: "must be a relative path",
+		},
+		{
+			name: "rejects package manager traversal",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{"../.npm"}},
+				},
+			},
+			wantErr: "escapes the sandbox home",
+		},
+		{
+			name: "rejects sensitive package manager path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{".ssh"}},
+				},
+			},
+			wantErr: "must not target sensitive sandbox home state",
 		},
 	}
 
@@ -1854,14 +1997,18 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
 			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
 			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
-			require.Contains(t, string(raw), "package-lock.json", "dogfood Next preview should key dependency install reuse to the lockfile")
-			require.Contains(t, string(raw), ".143-npm-ci-lock", "dogfood Next preview should only skip npm ci after a successful lockfile-matched install marker")
-			require.Contains(t, string(raw), "node_modules/.bin/next", "dogfood Next preview should verify the expected Next binary exists before reusing installed deps")
-			require.Contains(t, string(raw), "rm -rf node_modules", "dogfood Next preview should clean partial dependency installs before retrying npm ci")
+			require.Contains(t, string(raw), "sh .143/preview-install-frontend.sh", "dogfood Next preview should run the shared install script as a fallback when the platform install phase did not run")
 			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
 			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
+
+			installScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-install-frontend.sh"))
+			require.NoError(t, err, "test should read committed dogfood frontend install script")
+			require.Contains(t, string(installScript), "package-lock.json", "dogfood install script should key dependency install reuse to the lockfile")
+			require.Contains(t, string(installScript), ".143-npm-ci-lock", "dogfood install script should only skip npm ci after a successful lockfile-matched install marker")
+			require.Contains(t, string(installScript), "node_modules/.bin/next", "dogfood install script should verify the expected Next binary exists before reusing installed deps")
+			require.Contains(t, string(installScript), "rm -rf node_modules", "dogfood install script should clean partial dependency installs before retrying npm ci")
 			return
 		}
 		parent := filepath.Dir(dir)

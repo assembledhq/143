@@ -640,6 +640,8 @@ type recordingObserver struct {
 	outputCalls        []recordedOutput
 	cacheRestores      []recordedCacheEvent
 	cacheSaves         []recordedCacheEvent
+	pmCacheRestores    []recordedCacheEvent
+	pmCacheSaves       []recordedCacheEvent
 	phaseStarts        []string
 	phaseEnds          []string
 }
@@ -683,6 +685,18 @@ func (r *recordingObserver) OnDependencyCacheSave(status string, cacheKey string
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cacheSaves = append(r.cacheSaves, recordedCacheEvent{status: status, cacheKey: cacheKey, sizeBytes: sizeBytes, err: err})
+}
+
+func (r *recordingObserver) OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pmCacheRestores = append(r.pmCacheRestores, recordedCacheEvent{status: status, cacheKey: cacheKey, sizeBytes: sizeBytes, err: err})
+}
+
+func (r *recordingObserver) OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pmCacheSaves = append(r.pmCacheSaves, recordedCacheEvent{status: status, cacheKey: cacheKey, sizeBytes: sizeBytes, err: err})
 }
 
 func (r *recordingObserver) OnPhaseStart(name string) {
@@ -758,6 +772,24 @@ func (r *recordingObserver) dependencyCacheRestores() []recordedCacheEvent {
 	return append([]recordedCacheEvent(nil), r.cacheRestores...)
 }
 
+func (r *recordingObserver) dependencyCacheSaves() []recordedCacheEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedCacheEvent(nil), r.cacheSaves...)
+}
+
+func (r *recordingObserver) packageManagerCacheRestores() []recordedCacheEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedCacheEvent(nil), r.pmCacheRestores...)
+}
+
+func (r *recordingObserver) packageManagerCacheSaves() []recordedCacheEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedCacheEvent(nil), r.pmCacheSaves...)
+}
+
 func (r *recordingObserver) phasesStarted() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -771,43 +803,121 @@ func (r *recordingObserver) phasesEnded() []string {
 }
 
 type fakeDependencyCache struct {
-	mu         sync.Mutex
-	findHit    *preview.DependencyCacheHit
-	findErr    error
-	restoreErr error
-	saveErr    error
-	finds      int
-	restores   int
-	saves      int
-	savePaths  []string
+	mu           sync.Mutex
+	findHit      *preview.DependencyCacheHit
+	findErr      error
+	restoreErr   error
+	saveErr      error
+	pmFindHit    *preview.DependencyCacheHit
+	pmFindErr    error
+	pmRestoreErr error
+	pmSaveErr    error
+	finds        int
+	restores     int
+	saves        int
+	savePaths    []string
+	pathFinds    map[models.PreviewCacheKind]int
+	pathRestores map[models.PreviewCacheKind]int
+	pathSaves    map[models.PreviewCacheKind]int
+	restoreRoots []models.PreviewCacheRoot
+	saveSpecs    []preview.PreviewPathCacheSaveSpec
 }
 
 func (f *fakeDependencyCache) Find(context.Context, uuid.UUID, uuid.UUID, string) (*preview.DependencyCacheHit, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.finds++
-	return f.findHit, f.findErr
+	return f.FindPathCache(context.Background(), uuid.Nil, uuid.Nil, models.PreviewCacheKindInstallArtifact, "")
 }
 
 func (f *fakeDependencyCache) Restore(context.Context, *agent.Sandbox, *preview.DependencyCacheHit) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.restores++
-	return f.restoreErr
+	return f.RestorePathCache(context.Background(), nil, nil, models.PreviewCacheRootWorkDir)
 }
 
-func (f *fakeDependencyCache) Save(_ context.Context, _ *agent.Sandbox, _ string, paths []string, _ preview.DependencyCacheMetadata) (preview.DependencyCacheSaveResult, error) {
+func (f *fakeDependencyCache) Save(ctx context.Context, sb *agent.Sandbox, cacheKey string, paths []string, metadata preview.DependencyCacheMetadata) (preview.DependencyCacheSaveResult, error) {
+	return f.SavePathCache(ctx, sb, preview.PreviewPathCacheSaveSpec{
+		Kind:     models.PreviewCacheKindInstallArtifact,
+		Root:     models.PreviewCacheRootWorkDir,
+		CacheKey: cacheKey,
+		Paths:    paths,
+		Metadata: metadata,
+	})
+}
+
+func (f *fakeDependencyCache) FindPathCache(_ context.Context, _ uuid.UUID, _ uuid.UUID, kind models.PreviewCacheKind, _ string) (*preview.DependencyCacheHit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.saves++
-	f.savePaths = append([]string(nil), paths...)
-	return preview.DependencyCacheSaveResult{SizeBytes: 123}, f.saveErr
+	if f.pathFinds == nil {
+		f.pathFinds = map[models.PreviewCacheKind]int{}
+	}
+	f.pathFinds[kind]++
+	switch kind {
+	case models.PreviewCacheKindPackageManager:
+		return f.pmFindHit, f.pmFindErr
+	default:
+		f.finds++
+		return f.findHit, f.findErr
+	}
+}
+
+func (f *fakeDependencyCache) RestorePathCache(_ context.Context, _ *agent.Sandbox, _ *preview.DependencyCacheHit, root models.PreviewCacheRoot) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kind := models.PreviewCacheKindInstallArtifact
+	if root == models.PreviewCacheRootHomeDir {
+		kind = models.PreviewCacheKindPackageManager
+	}
+	if f.pathRestores == nil {
+		f.pathRestores = map[models.PreviewCacheKind]int{}
+	}
+	f.pathRestores[kind]++
+	f.restoreRoots = append(f.restoreRoots, root)
+	switch kind {
+	case models.PreviewCacheKindPackageManager:
+		return f.pmRestoreErr
+	default:
+		f.restores++
+		return f.restoreErr
+	}
+}
+
+func (f *fakeDependencyCache) SavePathCache(_ context.Context, _ *agent.Sandbox, spec preview.PreviewPathCacheSaveSpec) (preview.DependencyCacheSaveResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pathSaves == nil {
+		f.pathSaves = map[models.PreviewCacheKind]int{}
+	}
+	f.pathSaves[spec.Kind]++
+	f.saveSpecs = append(f.saveSpecs, spec)
+	switch spec.Kind {
+	case models.PreviewCacheKindPackageManager:
+		return preview.DependencyCacheSaveResult{SizeBytes: 456}, f.pmSaveErr
+	default:
+		f.saves++
+		f.savePaths = append([]string(nil), spec.Paths...)
+		return preview.DependencyCacheSaveResult{SizeBytes: 123}, f.saveErr
+	}
 }
 
 func (f *fakeDependencyCache) counts() (int, int, int, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.finds, f.restores, f.saves, append([]string(nil), f.savePaths...)
+}
+
+func (f *fakeDependencyCache) pathCounts() (map[models.PreviewCacheKind]int, map[models.PreviewCacheKind]int, map[models.PreviewCacheKind]int, []models.PreviewCacheRoot, []preview.PreviewPathCacheSaveSpec) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	finds := map[models.PreviewCacheKind]int{}
+	for kind, count := range f.pathFinds {
+		finds[kind] = count
+	}
+	restores := map[models.PreviewCacheKind]int{}
+	for kind, count := range f.pathRestores {
+		restores[kind] = count
+	}
+	saves := map[models.PreviewCacheKind]int{}
+	for kind, count := range f.pathSaves {
+		saves[kind] = count
+	}
+	return finds, restores, saves, append([]models.PreviewCacheRoot(nil), f.restoreRoots...), append([]preview.PreviewPathCacheSaveSpec(nil), f.saveSpecs...)
 }
 
 // fakeServiceExecutor lets a single test customize what each kind of exec
@@ -1593,12 +1703,16 @@ func TestStartPreview_DependencyCacheHitRestoresBeforeMarkerValidation(t *testin
 	require.NoError(t, err, "StartPreview should continue after dependency cache restore")
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
-	finds, restores, _, _ := cache.counts()
+	finds, restores, saves, _ := cache.counts()
 	require.Equal(t, 1, finds, "dependency cache should be looked up once")
 	require.Equal(t, 1, restores, "dependency cache hit should restore before marker validation")
+	require.Equal(t, 0, saves, "a blob restored this launch must not be re-archived under the same key")
 	restoresObserved := obs.dependencyCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one restore event")
 	require.Equal(t, "restored", restoresObserved[0].status, "observer should report a restored cache hit")
+	savesObserved := obs.dependencyCacheSaves()
+	require.Len(t, savesObserved, 1, "observer should receive one save event")
+	require.Equal(t, "skipped_fresh_restore", savesObserved[0].status, "observer should explain why the save was skipped")
 
 	mu.Lock()
 	calls := append([]string(nil), streamCalls...)
@@ -1613,6 +1727,9 @@ func TestStartPreview_DependencyCacheHitRestoresBeforeMarkerValidation(t *testin
 func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *testing.T) {
 	t.Parallel()
 
+	// Without declared verify_paths there is no contract proving a restored
+	// tree reproduces install output, so a missing marker still skips the
+	// lookup entirely.
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var streamCalls []string
@@ -1651,7 +1768,9 @@ func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *t
 	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
 	obs := &recordingObserver{}
 
-	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+	cfg := previewInstallTestConfig()
+	cfg.Install.VerifyPaths = nil
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, cfg, preview.StartPreviewOptions{
 		OrgID:        uuid.New(),
 		RepositoryID: uuid.New(),
 		SessionID:    uuid.New(),
@@ -1660,8 +1779,8 @@ func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *t
 	require.NotNil(t, handle, "StartPreview should return a handle")
 
 	finds, restores, _, _ := cache.counts()
-	require.Equal(t, 0, finds, "missing install marker should skip dependency cache lookup")
-	require.Equal(t, 0, restores, "missing install marker should not restore dependency blobs that install will clean")
+	require.Equal(t, 0, finds, "missing install marker without verify_paths should skip dependency cache lookup")
+	require.Equal(t, 0, restores, "missing install marker without verify_paths should not restore dependency blobs that install will clean")
 	restoresObserved := obs.dependencyCacheRestores()
 	require.Len(t, restoresObserved, 1, "observer should receive one cache restore event")
 	require.Equal(t, "skipped_marker_missing", restoresObserved[0].status, "observer should explain why restore was skipped")
@@ -1672,6 +1791,275 @@ func TestStartPreview_DependencyCacheRestoreSkippedWhenInstallMarkerMissing(t *t
 	require.Len(t, calls, 2, "missing marker should run install before starting service")
 	require.Contains(t, calls[0], "'npm' 'ci'", "preview.install should run on first cold start")
 	require.Contains(t, calls[1], "'npm' 'run' 'dev'", "service should start after install")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_ColdStartRestoreSatisfiesVerifyPaths(t *testing.T) {
+	t.Parallel()
+
+	// Marker missing + verify_paths declared: a successful restore whose
+	// verify paths all exist writes the install marker and skips install.
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var streamCalls []string
+	markerWritten := false
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, ".143/cache/preview-install/") && strings.Contains(cmd, "printf") {
+				mu.Lock()
+				markerWritten = true
+				mu.Unlock()
+			}
+			return 0, nil // curl, test -e, and marker writes all succeed
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			switch {
+			case path == "package-lock.json":
+				return []byte(`{"lockfileVersion":3}`), nil
+			case strings.Contains(path, ".143/cache/preview-install/"):
+				mu.Lock()
+				written := markerWritten
+				mu.Unlock()
+				if written {
+					return []byte("ok\n"), nil
+				}
+				return nil, os.ErrNotExist
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+	}
+	cache := &fakeDependencyCache{findHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{SizeBytes: 123}}}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.NoError(t, err, "StartPreview should succeed when restore satisfies verify_paths")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	finds, restores, saves, _ := cache.counts()
+	require.Equal(t, 1, finds, "cold start with verify_paths should look up the dependency cache")
+	require.Equal(t, 1, restores, "cold start with verify_paths should restore the dependency cache hit")
+	require.Equal(t, 0, saves, "a blob restored this launch must not be re-archived under the same key")
+	restoresObserved := obs.dependencyCacheRestores()
+	require.Len(t, restoresObserved, 1, "observer should receive one cache restore event")
+	require.Equal(t, "restored_satisfied_install", restoresObserved[0].status, "observer should record that the restore satisfied the install contract")
+	savesObserved := obs.dependencyCacheSaves()
+	require.Len(t, savesObserved, 1, "observer should receive one save event")
+	require.Equal(t, "skipped_fresh_restore", savesObserved[0].status, "observer should explain why the save was skipped")
+
+	mu.Lock()
+	calls := append([]string(nil), streamCalls...)
+	mu.Unlock()
+	require.Len(t, calls, 1, "a satisfied restore should skip preview.install and only start the service")
+	require.NotContains(t, calls[0], "'npm' 'ci'", "preview.install should not run after a satisfied restore")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_PackageManagerCacheRestoresWhenInstallMarkerMissing(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var streamCalls []string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			switch {
+			case path == "package-lock.json":
+				return []byte(`{"lockfileVersion":3}`), nil
+			case strings.Contains(path, ".143/cache/preview-install/"):
+				return nil, os.ErrNotExist
+			default:
+				return nil, os.ErrNotExist
+			}
+		},
+	}
+	cache := &fakeDependencyCache{
+		pmFindHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{
+			CacheKind: models.PreviewCacheKindPackageManager,
+			SizeBytes: 99,
+		}},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	// VerifyPaths nil keeps this focused on package-manager behavior: with
+	// declared verify_paths a missing marker now attempts the install-artifact
+	// restore too (covered by ColdStartRestoreSatisfiesVerifyPaths).
+	cfg := previewInstallTestConfig()
+	cfg.Install.VerifyPaths = nil
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, cfg, preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.NoError(t, err, "StartPreview should continue after package-manager cache restore with a missing marker")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	finds, restores, _, roots, _ := cache.pathCounts()
+	require.Equal(t, 1, finds[models.PreviewCacheKindPackageManager], "package-manager cache should be looked up even when marker is absent")
+	require.Equal(t, 1, restores[models.PreviewCacheKindPackageManager], "package-manager cache should restore before install")
+	require.Contains(t, roots, models.PreviewCacheRootHomeDir, "package-manager cache should restore relative to HomeDir")
+	require.Equal(t, 0, finds[models.PreviewCacheKindInstallArtifact], "missing marker without verify_paths should still skip install artifact lookup")
+	restoresObserved := obs.packageManagerCacheRestores()
+	require.Len(t, restoresObserved, 1, "observer should receive one package-manager restore event")
+	require.Equal(t, "restored", restoresObserved[0].status, "observer should report package-manager restored")
+
+	mu.Lock()
+	calls := append([]string(nil), streamCalls...)
+	mu.Unlock()
+	require.Len(t, calls, 2, "missing marker should run install before starting service")
+	require.Contains(t, calls[0], "'npm' 'ci'", "preview.install should run after package-manager restore")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_PackageManagerCacheRestoreFailureContinuesCold(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var streamCalls []string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			mu.Lock()
+			streamCalls = append(streamCalls, cmd)
+			mu.Unlock()
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	cache := &fakeDependencyCache{
+		pmFindHit: &preview.DependencyCacheHit{Entry: models.PreviewDependencyCache{
+			CacheKind: models.PreviewCacheKindPackageManager,
+			SizeBytes: 99,
+		}},
+		pmRestoreErr: fmt.Errorf("restore exploded"),
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+
+	require.NoError(t, err, "StartPreview should continue cold after package-manager cache restore failure")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+	mu.Lock()
+	calls := strings.Join(streamCalls, "\n")
+	mu.Unlock()
+	require.Contains(t, calls, "'npm' 'ci'", "preview.install should run after package-manager cache restore failure")
+	restoresObserved := obs.packageManagerCacheRestores()
+	require.NotEmpty(t, restoresObserved, "observer should record package-manager restore status")
+	require.Equal(t, "restore_failed", restoresObserved[len(restoresObserved)-1].status, "observer should report package-manager restore failure")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_PackageManagerCacheDisabledSkipsLookup(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	cache := &fakeDependencyCache{}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache), WithPackageManagerCacheEnabled(false))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+
+	require.NoError(t, err, "StartPreview should run with package-manager cache disabled")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+	finds, _, _, _, _ := cache.pathCounts()
+	require.Equal(t, 0, finds[models.PreviewCacheKindPackageManager], "disabled package-manager cache should not perform a lookup")
+	restoresObserved := obs.packageManagerCacheRestores()
+	require.NotEmpty(t, restoresObserved, "observer should record disabled package-manager status")
+	require.Equal(t, "disabled", restoresObserved[0].status, "observer should report package-manager cache disabled")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
@@ -1854,6 +2242,74 @@ func TestStartPreview_DependencyCacheMissRunsInstallAndSaves(t *testing.T) {
 	calls := strings.Join(streamCalls, "\n")
 	mu.Unlock()
 	require.Contains(t, calls, "'npm' 'ci'", "preview.install should run on dependency cache miss")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_PackageManagerAndDependencyCacheSavesAreIndependent(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") {
+				return 0, nil
+			}
+			return 1, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	cache := &fakeDependencyCache{saveErr: fmt.Errorf("dependency artifact save failed")}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.NoError(t, err, "StartPreview should continue even when dependency cache save fails asynchronously")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	require.Eventually(t, func() bool {
+		_, _, saves, _, specs := cache.pathCounts()
+		return saves[models.PreviewCacheKindInstallArtifact] == 1 &&
+			saves[models.PreviewCacheKindPackageManager] == 1 &&
+			len(specs) == 2
+	}, 2*time.Second, 10*time.Millisecond, "both cache kinds should attempt independent saves after install")
+
+	_, _, saves, _, specs := cache.pathCounts()
+	require.Equal(t, 1, saves[models.PreviewCacheKindInstallArtifact], "dependency artifact save should run once")
+	require.Equal(t, 1, saves[models.PreviewCacheKindPackageManager], "package-manager cache save should run once")
+	var packageManagerSpec *preview.PreviewPathCacheSaveSpec
+	for i := range specs {
+		if specs[i].Kind == models.PreviewCacheKindPackageManager {
+			packageManagerSpec = &specs[i]
+			break
+		}
+	}
+	require.NotNil(t, packageManagerSpec, "package-manager save spec should be recorded")
+	require.Equal(t, models.PreviewCacheRootHomeDir, packageManagerSpec.Root, "package-manager save should use the HomeDir root")
+	require.Contains(t, packageManagerSpec.Paths, ".npm", "npm package-manager save should include the inferred npm cache path")
+	pmSaves := obs.packageManagerCacheSaves()
+	require.Len(t, pmSaves, 1, "observer should receive package-manager save result")
+	require.Equal(t, "saved", pmSaves[0].status, "package-manager save should succeed independently from artifact save")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")

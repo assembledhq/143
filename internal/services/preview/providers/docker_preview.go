@@ -37,6 +37,7 @@ import (
 
 // Compile-time check.
 var _ preview.PreviewCapableProvider = (*DockerPreviewProvider)(nil)
+var _ preview.PreviewCachePrewarmProvider = (*DockerPreviewProvider)(nil)
 
 // DockerPreviewClient defines the subset of the Docker API used for preview infrastructure.
 type DockerPreviewClient interface {
@@ -102,7 +103,8 @@ type DockerPreviewProvider struct {
 	// single pull instead of fanning out N redundant streams.
 	imagePulls singleflight.Group
 
-	dependencyCache preview.DependencyCache
+	dependencyCache            preview.DependencyCache
+	packageManagerCacheEnabled bool
 }
 
 type previewDialer func(ctx context.Context, addr string) (net.Conn, error)
@@ -195,6 +197,12 @@ func WithDependencyCache(cache preview.DependencyCache) DockerPreviewOption {
 	}
 }
 
+func WithPackageManagerCacheEnabled(enabled bool) DockerPreviewOption {
+	return func(p *DockerPreviewProvider) {
+		p.packageManagerCacheEnabled = enabled
+	}
+}
+
 // NewDockerPreviewProvider creates a new Docker-based preview provider.
 func NewDockerPreviewProvider(
 	client DockerPreviewClient,
@@ -203,12 +211,13 @@ func NewDockerPreviewProvider(
 	opts ...DockerPreviewOption,
 ) *DockerPreviewProvider {
 	p := &DockerPreviewProvider{
-		client:   client,
-		executor: executor,
-		network:  "143-sandbox",
-		logger:   logger,
-		dialer:   defaultPreviewDialer,
-		previews: make(map[string]*previewState),
+		client:                     client,
+		executor:                   executor,
+		network:                    "143-sandbox",
+		logger:                     logger,
+		dialer:                     defaultPreviewDialer,
+		previews:                   make(map[string]*previewState),
+		packageManagerCacheEnabled: true,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -389,6 +398,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 				d.logger.Info().Str("service", cfg.Primary).Int("port", primaryCfg.Port).Msg("primary service ready (progressive)")
 				notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, pid)
 				partiallyReady = true
+				d.warmPrimaryRoute(svcCtx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath)
 			}
 
 			// Wait for support services in the background.
@@ -451,6 +461,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			d.mu.Unlock()
 			d.logger.Info().Str("service", name).Int("port", svcCfg.Port).Msg("service ready")
 			notifyServiceReady(observer, name, svcCfg.Port, pid)
+			if name == cfg.Primary {
+				d.warmPrimaryRoute(svcCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath)
+			}
 		}
 		return nil
 	}(); err != nil {
@@ -464,6 +477,19 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		InfraCredentials: infraCreds,
 		PartiallyReady:   partiallyReady,
 	}, nil
+}
+
+func (d *DockerPreviewProvider) PrewarmPreviewInstallCaches(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
+	if cfg == nil || cfg.Install == nil {
+		return nil
+	}
+	state := &previewState{
+		handle:  "preview-cache-prewarm-" + uuid.NewString(),
+		sandbox: sb,
+		config:  cfg,
+		infra:   map[string]*preview.InfraHandle{},
+	}
+	return d.runPreviewInstallWithSaveMode(ctx, state, cfg.Install, opts, observer, false)
 }
 
 // =============================================================================
@@ -1053,6 +1079,10 @@ type previewInstallLockfileKey struct {
 }
 
 func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
+	return d.runPreviewInstallWithSaveMode(ctx, state, install, opts, observer, true)
+}
+
+func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver, saveAsync bool) error {
 	if install == nil {
 		return nil
 	}
@@ -1062,10 +1092,18 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	}
 
 	dependencyPaths, dependencyCacheEnabled := preview.ResolvePreviewInstallCachePaths(install)
+	packageManagerPaths, packageManagers, packageManagerCacheEnabled := preview.ResolvePreviewInstallPackageManagerCachePaths(install)
 	var dependencyCacheKey string
 	var dependencyLockfiles []preview.PreviewInstallLockfileKey
 	var placementKey string
+	var packageManagerCacheKey string
+	var packageManagerLockfiles []preview.PreviewInstallLockfileKey
+	var packageManagerPlacementKey string
 	forceInstallAfterDependencyRestoreFailure := false
+	// dependencyRestoredThisLaunch records that the install-artifact blob for
+	// dependencyCacheKey was extracted into this sandbox during this launch,
+	// making a post-hit save byte-identical re-archival of the same key.
+	dependencyRestoredThisLaunch := false
 
 	markerCheckStarted := time.Now()
 	notifyPhaseStart(observer, "install_marker_check")
@@ -1080,6 +1118,80 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	markerExists := d.previewInstallMarkerExists(ctx, state.sandbox, markerPath)
 	notifyPhaseEnd(observer, "install_marker_check", nil)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_marker_check", time.Since(markerCheckStarted))
+
+	pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
+	if d.packageManagerCacheEnabled && d.dependencyCache != nil && hasPathCache && packageManagerCacheEnabled && opts.OrgID != uuid.Nil && opts.RepositoryID != uuid.Nil {
+		if len(packageManagerPaths) == 0 {
+			notifyPackageManagerCacheRestore(observer, "skipped_no_paths", "", 0, nil)
+			metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "skipped_no_paths", 0)
+		} else {
+			var keyErr error
+			keyStarted := time.Now()
+			notifyPhaseStart(observer, "package_manager_cache_key")
+			packageManagerCacheKey, packageManagerLockfiles, keyErr = preview.ComputePreviewPackageManagerCacheKey(ctx, d.executor, state.sandbox, install, packageManagerPaths, packageManagers)
+			if keyErr != nil {
+				notifyPhaseEnd(observer, "package_manager_cache_key", keyErr)
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_key", time.Since(keyStarted))
+				notifyPackageManagerCacheRestore(observer, "key_failed", "", 0, keyErr)
+				metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "key_failed", 0)
+				d.logger.Warn().Err(keyErr).Msg("preview package-manager cache key unavailable; continuing cold")
+			} else {
+				configDigest := opts.ConfigDigest
+				if configDigest == "" {
+					if digest, digestErr := preview.ComputePreviewConfigDigest(state.config); digestErr == nil {
+						configDigest = digest
+					}
+				}
+				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, packageManagerPaths)
+				if placementErr != nil {
+					d.logger.Warn().Err(placementErr).Str("cache_key", packageManagerCacheKey).Msg("preview package-manager cache placement key unavailable")
+				} else {
+					packageManagerPlacementKey = computedPlacementKey
+				}
+				notifyPhaseEnd(observer, "package_manager_cache_key", nil)
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_key", time.Since(keyStarted))
+
+				lookupStarted := time.Now()
+				notifyPhaseStart(observer, "package_manager_cache_lookup")
+				hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindPackageManager, packageManagerCacheKey)
+				if findErr != nil {
+					notifyPhaseEnd(observer, "package_manager_cache_lookup", findErr)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_lookup", time.Since(lookupStarted))
+					notifyPackageManagerCacheRestore(observer, "restore_failed", packageManagerCacheKey, 0, findErr)
+					metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(lookupStarted))
+					d.logger.Warn().Err(findErr).Str("cache_key", packageManagerCacheKey).Msg("preview package-manager cache lookup failed; continuing cold")
+				} else if hit == nil {
+					notifyPhaseEnd(observer, "package_manager_cache_lookup", nil)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_lookup", time.Since(lookupStarted))
+					notifyPackageManagerCacheRestore(observer, "miss", packageManagerCacheKey, 0, nil)
+					metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(lookupStarted))
+				} else {
+					notifyPhaseEnd(observer, "package_manager_cache_lookup", nil)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_lookup", time.Since(lookupStarted))
+					restoreStarted := time.Now()
+					notifyPhaseStart(observer, "package_manager_cache_restore")
+					if restoreErr := pathCache.RestorePathCache(ctx, state.sandbox, hit, models.PreviewCacheRootHomeDir); restoreErr != nil {
+						notifyPhaseEnd(observer, "package_manager_cache_restore", restoreErr)
+						notifyPackageManagerCacheRestore(observer, "restore_failed", packageManagerCacheKey, hit.Entry.SizeBytes, restoreErr)
+						metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(restoreStarted))
+						metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_restore", time.Since(restoreStarted))
+						d.logger.Warn().Err(restoreErr).Str("cache_key", packageManagerCacheKey).Msg("preview package-manager cache restore failed; continuing cold")
+					} else {
+						notifyPhaseEnd(observer, "package_manager_cache_restore", nil)
+						notifyPackageManagerCacheRestore(observer, "restored", packageManagerCacheKey, hit.Entry.SizeBytes, nil)
+						metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "restored", time.Since(restoreStarted))
+						metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "package_manager_cache_restore", time.Since(restoreStarted))
+						d.logger.Info().Str("cache_key", packageManagerCacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview package-manager cache restored")
+					}
+				}
+			}
+		}
+	} else {
+		notifyPackageManagerCacheRestore(observer, "disabled", "", 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionPackageManagerCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
+		}
+	}
 
 	if d.dependencyCache != nil && dependencyCacheEnabled && opts.OrgID != uuid.Nil && opts.RepositoryID != uuid.Nil {
 		var keyErr error
@@ -1107,10 +1219,14 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 			}
 			notifyPhaseEnd(observer, "dependency_cache_key", nil)
 			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_key", time.Since(keyStarted))
-			if !markerExists {
+			if !markerExists && len(install.VerifyPaths) == 0 {
+				// Without declared verify_paths there is no contract proving a
+				// restored tree reproduces install output, and commands like
+				// `npm ci` wipe restored paths anyway — restoring first would
+				// only add latency to a cold start that must run install.
 				notifyDependencyCacheRestore(observer, "skipped_marker_missing", dependencyCacheKey, 0, nil)
 				metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "skipped_marker_missing", 0)
-				d.logger.Debug().Str("cache_key", dependencyCacheKey).Str("marker", markerPath).Msg("preview dependency cache restore skipped because install marker is absent")
+				d.logger.Info().Str("cache_key", dependencyCacheKey).Str("marker", markerPath).Msg("preview dependency cache restore skipped: install marker absent and no verify_paths declared")
 			} else {
 				lookupStarted := time.Now()
 				notifyPhaseStart(observer, "dependency_cache_lookup")
@@ -1126,6 +1242,7 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_lookup", time.Since(lookupStarted))
 					notifyDependencyCacheRestore(observer, "miss", dependencyCacheKey, 0, nil)
 					metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(lookupStarted))
+					d.logger.Info().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache miss")
 				} else {
 					notifyPhaseEnd(observer, "dependency_cache_lookup", nil)
 					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_lookup", time.Since(lookupStarted))
@@ -1140,10 +1257,29 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 						d.logger.Warn().Err(restoreErr).Str("cache_key", dependencyCacheKey).Msg("preview dependency cache restore failed; continuing cold")
 					} else {
 						notifyPhaseEnd(observer, "dependency_cache_restore", nil)
-						notifyDependencyCacheRestore(observer, "restored", dependencyCacheKey, hit.Entry.SizeBytes, nil)
-						metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), "restored", time.Since(restoreStarted))
+						dependencyRestoredThisLaunch = true
+						restoreStatus := "restored"
+						if !markerExists {
+							// Cold start: the cache key proves this blob was
+							// produced by this exact install command against
+							// these exact lockfile contents on this sandbox
+							// image. When the repo's declared verify_paths are
+							// all present after restore, writing the marker
+							// lets the install phase skip entirely.
+							if d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, install.VerifyPaths) {
+								if markerErr := d.writePreviewInstallMarker(ctx, state.sandbox, markerPath); markerErr != nil {
+									d.logger.Warn().Err(markerErr).Str("marker", markerPath).Msg("preview dependency cache restore satisfied verify_paths but marker write failed; running install")
+								} else {
+									restoreStatus = "restored_satisfied_install"
+								}
+							} else {
+								d.logger.Info().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache restored but verify_paths incomplete; running install")
+							}
+						}
+						notifyDependencyCacheRestore(observer, restoreStatus, dependencyCacheKey, hit.Entry.SizeBytes, nil)
+						metrics.RecordSessionDependencyCacheRestore(ctx, opts.OrgID.String(), restoreStatus, time.Since(restoreStarted))
 						metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_restore", time.Since(restoreStarted))
-						d.logger.Info().Str("cache_key", dependencyCacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview dependency cache restored")
+						d.logger.Info().Str("cache_key", dependencyCacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Str("result", restoreStatus).Msg("preview dependency cache restored")
 					}
 				}
 			}
@@ -1161,7 +1297,19 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	// restore can satisfy verify_paths and skip preview.install entirely.
 	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
-		d.saveDependencyCacheAsync(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer)
+		if dependencyRestoredThisLaunch {
+			// The blob for this exact key was just extracted into the
+			// sandbox; re-archiving byte-identical content would burn
+			// sandbox CPU/IO while services boot. Restore already touched
+			// the cache entry and refreshed worker-local blobs.
+			notifyDependencyCacheSave(observer, "skipped_fresh_restore", dependencyCacheKey, 0, nil)
+			if opts.OrgID != uuid.Nil {
+				metrics.RecordSessionDependencyCacheSave(ctx, opts.OrgID.String(), "skipped_fresh_restore", 0)
+			}
+			d.logger.Debug().Str("cache_key", dependencyCacheKey).Msg("preview dependency cache save skipped: blob restored this launch")
+		} else {
+			d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync)
+		}
 		return nil
 	}
 	if forceInstallAfterDependencyRestoreFailure {
@@ -1203,11 +1351,65 @@ func (d *DockerPreviewProvider) runPreviewInstall(ctx context.Context, state *pr
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "install_command", time.Since(installStarted))
 	notifyPhaseEnd(observer, "install_build", nil)
 	d.logger.Info().Str("marker", markerPath).Msg("preview install completed")
-	d.saveDependencyCacheAsync(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer)
+	d.savePackageManagerCache(ctx, state, install, opts, packageManagerCacheKey, packageManagerPlacementKey, packageManagerPaths, packageManagers, packageManagerLockfiles, observer, saveAsync)
+	d.saveDependencyCache(ctx, state, install, opts, dependencyCacheKey, placementKey, dependencyPaths, dependencyLockfiles, observer, saveAsync)
 	return nil
 }
 
-func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver) {
+func (d *DockerPreviewProvider) savePackageManagerCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths, packageManagers []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool) {
+	pathCache, ok := d.dependencyCache.(preview.PreviewPathCache)
+	if !d.packageManagerCacheEnabled || d.dependencyCache == nil || !ok || cacheKey == "" || len(paths) == 0 {
+		notifyPackageManagerCacheSave(observer, "skipped", cacheKey, 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionPackageManagerCacheSave(context.Background(), opts.OrgID.String(), "skipped", 0)
+		}
+		return
+	}
+	lockHashes := make(map[string]string, len(lockfiles))
+	for _, lockfile := range lockfiles {
+		lockHashes[lockfile.Path] = lockfile.SHA256
+	}
+	metadata := preview.DependencyCacheMetadata{
+		Kind:            models.PreviewCacheKindPackageManager,
+		Root:            models.PreviewCacheRootHomeDir,
+		OrgID:           opts.OrgID,
+		RepoID:          opts.RepositoryID,
+		SessionID:       opts.SessionID,
+		PlacementKey:    placementKey,
+		InstallCommand:  append([]string(nil), install.Command...),
+		EffectivePaths:  append([]string(nil), paths...),
+		PackageManagers: append([]string(nil), packageManagers...),
+		LockfileHashes:  lockHashes,
+		Lockfiles:       lockfiles,
+	}
+	save := func() {
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		defer cancel()
+		started := time.Now()
+		result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
+			Kind:     models.PreviewCacheKindPackageManager,
+			Root:     models.PreviewCacheRootHomeDir,
+			CacheKey: cacheKey,
+			Paths:    paths,
+			Metadata: metadata,
+		})
+		if err != nil {
+			notifyPackageManagerCacheSave(observer, "save_failed", cacheKey, 0, err)
+			metrics.RecordSessionPackageManagerCacheSave(saveCtx, opts.OrgID.String(), "save_failed", time.Since(started))
+			d.logger.Warn().Err(err).Str("cache_key", cacheKey).Msg("preview package-manager cache save failed")
+			return
+		}
+		notifyPackageManagerCacheSave(observer, "saved", cacheKey, result.SizeBytes, nil)
+		metrics.RecordSessionPackageManagerCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
+	}
+	if async {
+		go save()
+		return
+	}
+	save()
+}
+
+func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, cacheKey, placementKey string, paths []string, lockfiles []preview.PreviewInstallLockfileKey, observer preview.ServiceObserver, async bool) {
 	if d.dependencyCache == nil || cacheKey == "" || len(paths) == 0 {
 		notifyDependencyCacheSave(observer, "skipped", cacheKey, 0, nil)
 		if opts.OrgID != uuid.Nil {
@@ -1220,6 +1422,8 @@ func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, st
 		lockHashes[lockfile.Path] = lockfile.SHA256
 	}
 	metadata := preview.DependencyCacheMetadata{
+		Kind:           models.PreviewCacheKindInstallArtifact,
+		Root:           models.PreviewCacheRootWorkDir,
 		OrgID:          opts.OrgID,
 		RepoID:         opts.RepositoryID,
 		SessionID:      opts.SessionID,
@@ -1229,7 +1433,7 @@ func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, st
 		LockfileHashes: lockHashes,
 		Lockfiles:      lockfiles,
 	}
-	go func() {
+	save := func() {
 		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 		defer cancel()
 		started := time.Now()
@@ -1242,7 +1446,12 @@ func (d *DockerPreviewProvider) saveDependencyCacheAsync(ctx context.Context, st
 		}
 		notifyDependencyCacheSave(observer, "saved", cacheKey, result.SizeBytes, nil)
 		metrics.RecordSessionDependencyCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
-	}()
+	}
+	if async {
+		go save()
+		return
+	}
+	save()
 }
 
 func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Context, sb *agent.Sandbox, install *models.PreviewInstallConfig) (string, error) {
@@ -1310,6 +1519,39 @@ func (d *DockerPreviewProvider) previewInstallCacheValid(ctx context.Context, sb
 func (d *DockerPreviewProvider) previewInstallMarkerExists(ctx context.Context, sb *agent.Sandbox, markerPath string) bool {
 	_, err := d.executor.ReadFile(ctx, sb, markerPath)
 	return err == nil
+}
+
+// previewInstallVerifyPathsSatisfied reports whether every declared
+// verify_path exists in the sandbox. An empty list reports false: without a
+// declared contract there is no evidence that a restored dependency tree
+// reproduces the install command's output.
+func (d *DockerPreviewProvider) previewInstallVerifyPathsSatisfied(ctx context.Context, sb *agent.Sandbox, verifyPaths []string) bool {
+	if len(verifyPaths) == 0 {
+		return false
+	}
+	for _, verifyPath := range verifyPaths {
+		cleanPath, err := cleanPreviewInstallRepoPath(verifyPath, false)
+		if err != nil {
+			return false
+		}
+		if !d.previewInstallPathExists(ctx, sb, cleanPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *DockerPreviewProvider) writePreviewInstallMarker(ctx context.Context, sb *agent.Sandbox, markerPath string) error {
+	cmd := fmt.Sprintf("mkdir -p .143/cache/preview-install && printf 'ok\\n' > %s", shellEscape(markerPath))
+	var stderr bytes.Buffer
+	exitCode, err := d.executor.Exec(ctx, sb, cmd, io.Discard, &stderr)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("write install marker exited %d: %s", exitCode, stderr.String())
+	}
+	return nil
 }
 
 func (d *DockerPreviewProvider) previewInstallPathExists(ctx context.Context, sb *agent.Sandbox, repoPath string) bool {
@@ -1420,6 +1662,22 @@ func notifyDependencyCacheSave(observer preview.ServiceObserver, status string, 
 		return
 	}
 	cacheObserver.OnDependencyCacheSave(status, cacheKey, sizeBytes, err)
+}
+
+func notifyPackageManagerCacheRestore(observer preview.ServiceObserver, status string, cacheKey string, sizeBytes int64, err error) {
+	cacheObserver, ok := observer.(preview.CacheObserver)
+	if !ok || cacheObserver == nil {
+		return
+	}
+	cacheObserver.OnPackageManagerCacheRestore(status, cacheKey, sizeBytes, err)
+}
+
+func notifyPackageManagerCacheSave(observer preview.ServiceObserver, status string, cacheKey string, sizeBytes int64, err error) {
+	cacheObserver, ok := observer.(preview.CacheObserver)
+	if !ok || cacheObserver == nil {
+		return
+	}
+	cacheObserver.OnPackageManagerCacheSave(status, cacheKey, sizeBytes, err)
 }
 
 // =============================================================================
@@ -1705,6 +1963,38 @@ func (d *DockerPreviewProvider) startService(
 // timeout — the for-select can only react to deadline.C *between* probe
 // attempts, so a slow exec stalls the timer too.
 const readinessProbeAttemptTimeout = 5 * time.Second
+
+// primaryRouteWarmTimeout bounds the post-readiness warm request. Dev servers
+// compiling a large route on demand can legitimately take tens of seconds —
+// that is exactly the cost warming exists to absorb.
+const primaryRouteWarmTimeout = 60 * time.Second
+
+// warmPrimaryRoute fires one best-effort GET against the primary service's
+// root route after it passes readiness. Dev servers compile routes on demand,
+// so without this the user's first page load pays the compile cost; warming
+// moves it into the launch window instead. Skipped when the readiness probe
+// already targets "/" — that request warmed the route.
+func (d *DockerPreviewProvider) warmPrimaryRoute(ctx context.Context, state *previewState, name string, port int, readyPath string) {
+	if readyPath == "" || readyPath == "/" {
+		return
+	}
+	state.wg.Add(1)
+	go func() {
+		defer state.wg.Done()
+		warmCtx, cancel := context.WithTimeout(ctx, primaryRouteWarmTimeout)
+		defer cancel()
+		started := time.Now()
+		cmd := fmt.Sprintf("curl -sf -o /dev/null --max-time %d %s",
+			int(primaryRouteWarmTimeout.Seconds())-5,
+			shellEscape(fmt.Sprintf("http://localhost:%d/", port)))
+		exitCode, err := d.executor.Exec(warmCtx, state.sandbox, cmd, io.Discard, io.Discard)
+		if err != nil || exitCode != 0 {
+			d.logger.Debug().Err(err).Int("exit_code", exitCode).Str("service", name).Msg("primary route warm request did not succeed")
+			return
+		}
+		d.logger.Info().Str("service", name).Dur("elapsed_ms", time.Since(started)).Msg("primary route warmed")
+	}()
+}
 
 func (d *DockerPreviewProvider) waitForReadiness(ctx context.Context, state *previewState, name string, port int, httpPath string, timeout time.Duration) error {
 	overallCtx, cancelOverall := context.WithTimeout(ctx, timeout)

@@ -16,6 +16,7 @@ export const queryKeys = {
     detail: (id: string) => ["session", id] as const,
     diff: (id: string, revision?: string | null) => ["session", id, "diff", revision ?? null] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
+    logDetail: (sessionId: string, logId: number) => ["session", sessionId, "logs", logId, "detail"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
     humanInputRequests: (id: string, status?: string | null, threadId?: string | null) =>
@@ -77,6 +78,7 @@ export const queryKeys = {
   team: {
     members: ["team", "members"] as const,
     domains: ["team", "domains"] as const,
+    githubOrgs: ["team", "github-orgs"] as const,
   },
   organizations: {
     joinable: ["organizations", "joinable"] as const,

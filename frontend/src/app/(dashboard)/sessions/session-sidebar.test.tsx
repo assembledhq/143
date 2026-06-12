@@ -1244,6 +1244,19 @@ describe('SessionSidebar', () => {
     expect(link).toHaveAttribute('href', '/sessions/s1?people=user-2%2Cuser-3');
   });
 
+  it('shows in-flight PR creation and push statuses on session rows', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Opening a pull request', pr_creation_state: 'queued' }),
+      makeSession({ id: 's2', result_summary: 'Updating an existing pull request', pr_push_state: 'pushing' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Opening a pull request');
+    expect(screen.getByText('Creating PR')).toBeInTheDocument();
+    expect(screen.getByText('Pushing changes')).toBeInTheDocument();
+  });
+
   it('only serializes the filters that are actually set', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Status-only session' }),

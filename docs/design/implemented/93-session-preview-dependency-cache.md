@@ -11,7 +11,33 @@ The platform already has two preview acceleration mechanisms:
 - Live session sandbox reuse: fastest path, but only works while the session container is still running.
 - Branch/PR preview startup snapshots: worker-local full-workspace snapshots keyed by commit, lockfiles, and preview config.
 
-Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as package-manager stores or framework build caches.
+Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as framework build caches.
+
+## 2026-06 Update: Package-Manager Caches And Prewarming
+
+The cache implementation now treats preview install caching as a generic path-cache with two durable `cache_kind` values:
+
+- `install_artifact`: WorkDir-relative dependency/build artifacts. These are the original dependency artifact caches and remain marker-gated on restore.
+- `package_manager`: HomeDir-relative package-manager global caches. These restore before `preview.install` even when the install marker is absent, because package-manager download caches are useful to first cold installs and are not removed by repo `clean_paths`.
+
+`preview.install.cache.package_manager` supports `enabled`, `include`, and additive HomeDir-relative `paths`. Omitted `include` infers managers from lockfiles and install command. Default paths are:
+
+| Manager | HomeDir-relative paths |
+|---|---|
+| npm | `.npm` |
+| pnpm | `.local/share/pnpm/store` |
+| yarn | `.yarn/berry/cache` |
+| bun | `.bun/install/cache` |
+| pip | `.cache/pip` |
+| uv | `.cache/uv` |
+| poetry | `.cache/pypoetry` |
+| go | `go/pkg/mod`, `.cache/go-build` |
+
+Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
+
+The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-artifact local paths still readable during rollout.
+
+Prewarming is implemented as a low-priority `preview_cache_prewarm` worker job with branch and session payload sources. The automatic triggers are branch/PR preview target creation or commit update, plus successful snapshot-producing `run_agent` and `continue_session` turns. The runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, skips when install/cache inputs are absent or both cache kinds are already warm in L2, runs only `preview.install.command`, saves package-manager and install-artifact caches synchronously, and then destroys the sandbox. Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
 
 ## Goals
 
@@ -62,7 +88,8 @@ The new flow:
    - If metadata is found, check worker-local L1 by `cache_key` and use it when the checksum matches; otherwise stream the L2 blob from object storage into a bounded worker temp file.
    - Preflight the recorded compressed size, verify checksum, validate tar members against the stored effective paths on the worker, stage downloaded compressed blobs under the worker-local dependency cache staging directory instead of `/tmp`, stream extraction into the sandbox over stdin, populate worker-local L1 when configured, and upsert the worker's L1 location hint.
    - If both L1 and L2 miss, continue to the normal install path.
-   - If the install marker is absent, skip restore entirely and go straight to the normal install path; commands such as `npm ci` clean/reinstall the same paths, so restoring first only adds latency on first-ever cold starts.
+   - If the install marker is absent and the config declares no `verify_paths`, skip restore entirely and go straight to the normal install path; commands such as `npm ci` clean/reinstall the same paths, so restoring first only adds latency on first-ever cold starts.
+   - If the install marker is absent but the config declares `verify_paths`, attempt the restore anyway: the cache key proves the blob was produced by this exact install command against these exact lockfile contents on this sandbox image, so when every declared verify path exists after restore, the marker is written and install skips with restore status `restored_satisfied_install`. When verify paths are incomplete after restore, the normal install command runs.
 6. Run the existing `preview.install` flow:
    - If the dependency-cache restore did not fail and the marker and `verify_paths` are present, skip install.
    - Otherwise clean `clean_paths`, run `command`, then write the marker.
@@ -71,7 +98,7 @@ The new flow:
 
 This means cache restore is an accelerator, not the source of truth. The hydrated session snapshot remains authoritative for source files.
 
-**Restore and marker interaction:** The marker-existence check runs before dependency-cache lookup/restore. When the marker is absent (e.g. a new session that has never completed install), restore is skipped with `skipped_marker_missing` and the normal install command runs. When the session snapshot already contains the install marker, restore may run before full `verify_paths` validation so restored artifacts can satisfy `verify_paths` and skip install entirely — this is the primary returning-session fast path. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists.
+**Restore and marker interaction:** The marker-existence check runs before dependency-cache lookup/restore. When the marker is absent and no `verify_paths` are declared (e.g. a new session for a repo without an install-output contract), restore is skipped with `skipped_marker_missing` and the normal install command runs. When the marker is absent but `verify_paths` are declared, restore runs and — when all verify paths exist afterwards — writes the marker and skips install (`restored_satisfied_install`); this is the cold-start fast path that production data showed was otherwise unreachable, because session snapshots either carry both the marker and the dependency tree or neither. When the session snapshot already contains the install marker, restore may run before full `verify_paths` validation so restored artifacts can satisfy `verify_paths` and skip install entirely. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists.
 
 ### Cache-Key-Aware Scheduling
 

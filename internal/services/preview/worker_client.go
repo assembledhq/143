@@ -95,6 +95,29 @@ type AutoPreviewDeferredPayload struct {
 	Mode           models.PreviewAutoMode `json:"mode"`
 }
 
+type PreviewCachePrewarmSource string
+
+const (
+	PreviewCachePrewarmSourceSession PreviewCachePrewarmSource = "session"
+	PreviewCachePrewarmSourceBranch  PreviewCachePrewarmSource = "branch"
+)
+
+type PreviewCachePrewarmJobPayload struct {
+	JobID             uuid.UUID                 `json:"job_id,omitempty"`
+	OrgID             uuid.UUID                 `json:"org_id"`
+	RepositoryID      uuid.UUID                 `json:"repository_id"`
+	UserID            uuid.UUID                 `json:"user_id,omitempty"`
+	Source            PreviewCachePrewarmSource `json:"source"`
+	SessionID         uuid.UUID                 `json:"session_id,omitempty"`
+	PreviewTargetID   uuid.UUID                 `json:"preview_target_id,omitempty"`
+	Branch            string                    `json:"branch,omitempty"`
+	CommitSHA         string                    `json:"commit_sha,omitempty"`
+	PreviewConfigName string                    `json:"preview_config_name,omitempty"`
+	WorkspaceRevision int64                     `json:"workspace_revision,omitempty"`
+	ConfigDigest      string                    `json:"config_digest,omitempty"`
+	Reason            string                    `json:"reason,omitempty"`
+}
+
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.
 type RemoteStopActivePreviewForSessionRequest struct {
 	OrgID     uuid.UUID `json:"org_id"`

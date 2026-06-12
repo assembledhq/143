@@ -9,6 +9,21 @@ import { DocumentTitle } from "@/components/document-title";
 
 export const DEFAULT_QUERY_STALE_TIME_MS = 30_000;
 export const DEFAULT_QUERY_GC_TIME_MS = 10 * 60_000;
+const DEFAULT_QUERY_RETRY_LIMIT = 2;
+
+function errorStatus(error: unknown): number | null {
+  if (typeof error !== "object" || error === null) return null;
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : null;
+}
+
+export function shouldRetryQuery(failureCount: number, error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status !== null && status >= 400 && status < 500) {
+    return false;
+  }
+  return failureCount < DEFAULT_QUERY_RETRY_LIMIT;
+}
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
@@ -16,7 +31,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            retry: 2,
+            retry: shouldRetryQuery,
             staleTime: DEFAULT_QUERY_STALE_TIME_MS,
             gcTime: DEFAULT_QUERY_GC_TIME_MS,
             refetchOnWindowFocus: false,

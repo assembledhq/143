@@ -24,6 +24,17 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// sandboxBusyAcquireRetries and sandboxBusyAcquireRetryDelay bound the
+// in-process retry loop when a preview start loses the sandbox attach race.
+// The winner needs a moment to finish wiring its container (network attach,
+// auth socket) before the reuse path's liveness check accepts it; three
+// 2-second retries cover that window without stretching the HTTP request
+// noticeably against the launch that follows.
+const (
+	sandboxBusyAcquireRetries    = 3
+	sandboxBusyAcquireRetryDelay = 2 * time.Second
+)
+
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
 	manager         *preview.Manager
@@ -42,6 +53,10 @@ type PreviewHandler struct {
 	localNodeID     string
 	logger          zerolog.Logger
 	audit           *db.AuditEmitter
+
+	// sandboxBusyRetryDelay overrides sandboxBusyAcquireRetryDelay in tests;
+	// zero means the production default.
+	sandboxBusyRetryDelay time.Duration
 }
 
 // SetStaticEgressRuntime injects the worker-local static egress runtime for
@@ -754,6 +769,32 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	//      usable snapshot exists.
 	hydrateStarted := time.Now()
 	acq := h.acquireSandbox(ctx, orgID, &session, reservation)
+	// Losing the attach race means a competing holder (typically a
+	// continue_session turn) just published a live container — exactly what
+	// the reuse path attaches to. Retrying the acquire after a short delay
+	// converts the most common preview start failure ("another process
+	// attached first") into a successful attach instead of aborting the
+	// reservation and making the user click again.
+	retryDelay := h.sandboxBusyRetryDelay
+	if retryDelay <= 0 {
+		retryDelay = sandboxBusyAcquireRetryDelay
+	}
+	for attempt := 1; acq.ErrCode == "SANDBOX_BUSY" && attempt <= sandboxBusyAcquireRetries && ctx.Err() == nil; attempt++ {
+		h.logger.Info().
+			Str("session_id", sessionID.String()).
+			Int("attempt", attempt).
+			Msg("preview start: sandbox busy; retrying acquire against the winning container")
+		select {
+		case <-ctx.Done():
+		case <-time.After(retryDelay):
+		}
+		// Re-read the session row: the winner published a container_id that
+		// the reuse path needs to see.
+		if fresh, freshErr := h.sessionStore.GetByID(ctx, orgID, sessionID); freshErr == nil {
+			session = fresh
+		}
+		acq = h.acquireSandbox(ctx, orgID, &session, reservation)
+	}
 	metrics.RecordSessionPreviewPhaseDuration(ctx, orgID.String(), "hydrate", time.Since(hydrateStarted))
 	if acq.Err != nil {
 		h.logger.Warn().Err(acq.Err).
@@ -852,32 +893,40 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 	if session.RepositoryID != nil {
 		repoID = *session.RepositoryID
 	}
-	placementKey := ""
+	var cachePlacements []preview.WorkerCachePlacement
 	if repoID != uuid.Nil {
 		if body.Config != nil {
-			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled {
-				configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
-				if digestErr != nil {
-					h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
-				}
+			configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
+			if digestErr != nil {
+				h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
+			}
+			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled && len(paths) > 0 {
 				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
 				if placementErr != nil {
 					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 				} else {
-					placementKey = computedPlacementKey
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
+				}
+			}
+			if paths, _, enabled := preview.ResolvePreviewInstallPackageManagerCachePaths(body.Config.Install); enabled && len(paths) > 0 {
+				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
+				if placementErr != nil {
+					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview package-manager cache placement key")
+				} else {
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindPackageManager, PlacementKey: computedPlacementKey})
 				}
 			}
 		}
-		if placementKey == "" {
+		if len(cachePlacements) == 0 {
 			computedPlacementKey, placementErr := preview.ComputePreviewDependencyCacheRepoPlacementKey(orgID, repoID)
 			if placementErr != nil {
 				h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 			} else {
-				placementKey = computedPlacementKey
+				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
 			}
 		}
 	}
-	worker, err := h.workerSelector.SelectStartNodeWithPlacementAndRequirements(ctx, orgID, &session, repoID, placementKey, reqs)
+	worker, err := h.workerSelector.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, &session, repoID, cachePlacements, reqs)
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):

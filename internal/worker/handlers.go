@@ -334,12 +334,16 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
+	if stores.GitHubInstallations != nil && services != nil && services.GitHubOrgRoster != nil {
+		w.Register(models.JobTypeSyncGitHubOrgRoster, newSyncGitHubOrgRosterHandler(stores, services, logger))
+	}
 	if services != nil && services.PreviewStarter != nil {
 		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(stores, services, logger))
 		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(stores, services, logger))
 		if services.AutoPreviewStarter != nil {
 			w.Register(models.JobTypeAutoPreviewDeferred, newAutoPreviewDeferredHandler(stores, services, logger))
 		}
+		w.Register(models.JobTypePreviewCachePrewarm, newPreviewCachePrewarmHandler(services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -429,6 +433,7 @@ type Stores struct {
 	EvalBootstraps      *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
 	EvalReleaseGates    *db.EvalReleaseGateStore // nil-safe: eval release gates
 	Repositories        *db.RepositoryStore      // nil-safe: needed for eval repo lookup
+	GitHubInstallations *db.GitHubInstallationStore
 	SessionMessages     *db.SessionMessageStore  // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore   // nil-safe: needed for thread-scoped continuation status
 	HumanInputRequests  *db.SessionHumanInputRequestStore
@@ -509,6 +514,7 @@ type Services struct {
 	SlackSummarizer *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster githubOrgRosterService        // nil-safe: needed for GitHub org auto-join roster sync
 	Snapshots       storage.SnapshotStore         // nil-safe: needed for eval code_check grading
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
@@ -561,6 +567,12 @@ type Services struct {
 	// AutoPreviewStarter handles deferred auto-preview starts (E6 queue-at-cap).
 	// nil-safe: deferred auto_preview_deferred jobs are no-ops if not configured.
 	AutoPreviewStarter ghservice.AutoPreviewStarter
+	// PreviewCachePrewarmEnabled gates opportunistic low-priority prewarm
+	// enqueues from successful session turns.
+	PreviewCachePrewarmEnabled bool
+	// PreviewCachePrewarmPriority is the job priority for opportunistic prewarm
+	// work; production defaults it below foreground preview starts.
+	PreviewCachePrewarmPriority int
 	// PreviewController handles control-plane actions for already-created
 	// previews. nil when preview control is unavailable on this process.
 	PreviewController previewController
@@ -578,9 +590,14 @@ type Services struct {
 	RequireSessionExecutorDispatcher bool
 }
 
+type githubOrgRosterService interface {
+	ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghservice.OrgMember, error)
+}
+
 type previewStarter interface {
 	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
 	StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error
+	PrewarmPreviewCaches(ctx context.Context, payload previewsvc.PreviewCachePrewarmJobPayload) error
 }
 
 type previewController interface {
@@ -820,7 +837,46 @@ func newAutoPreviewDeferredHandler(stores *Stores, services *Services, logger ze
 		}
 
 		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode); err != nil {
-			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)
+			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)		}
+		return nil
+	}
+}
+
+func newPreviewCachePrewarmHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.PreviewCachePrewarmJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal preview_cache_prewarm payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("preview_cache_prewarm payload missing required ids")}
+		}
+		switch input.Source {
+		case previewsvc.PreviewCachePrewarmSourceSession:
+			if input.SessionID == uuid.Nil {
+				return &FatalError{Err: fmt.Errorf("preview_cache_prewarm session payload missing session_id")}
+			}
+		case previewsvc.PreviewCachePrewarmSourceBranch:
+			if input.PreviewTargetID == uuid.Nil || input.CommitSHA == "" {
+				return &FatalError{Err: fmt.Errorf("preview_cache_prewarm branch payload missing target or commit")}
+			}
+		default:
+			return &FatalError{Err: fmt.Errorf("preview_cache_prewarm payload has invalid source %q", input.Source)}
+		}
+		logger.Info().
+			Str("repository_id", input.RepositoryID.String()).
+			Str("source", string(input.Source)).
+			Msg("processing preview_cache_prewarm job")
+		if err := services.PreviewStarter.PrewarmPreviewCaches(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCachePrewarmCapacitySkipped) || errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				logger.Info().Err(err).Msg("preview cache prewarm skipped due to capacity")
+				return nil
+			}
+			return &FatalError{Err: err}
+
 		}
 		return nil
 	}
@@ -4742,6 +4798,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSlackFinalIfLinked(ctx, stores, logger, orgID, runID)
 		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.completed", "143 session completed", "The session finished successfully.")
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
+		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
 		return nil
 	}
 }
@@ -6136,8 +6193,82 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
+		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
+}
+
+func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
+	if stores == nil || services == nil || !services.PreviewCachePrewarmEnabled || stores.Sessions == nil || stores.Jobs == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for preview cache prewarm enqueue")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		UserID:            userID,
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Reason:            reason,
+	}
+	dedupeKey := previewsvc.PreviewCachePrewarmScopeKey(payload)
+	if dedupeKey == "" {
+		return
+	}
+	targetNodeID := models.SessionWorkerTarget(&session)
+	var jobID uuid.UUID
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to enqueue session preview cache prewarm")
+		return
+	}
+	if stores.Previews != nil {
+		var jobIDPtr *uuid.UUID
+		if jobID != uuid.Nil {
+			jobIDCopy := jobID
+			jobIDPtr = &jobIDCopy
+		}
+		_, runErr := stores.Previews.UpsertPreviewCachePrewarmRun(ctx, &models.PreviewCachePrewarmRun{
+			OrgID:             orgID,
+			RepoID:            *session.RepositoryID,
+			Source:            string(previewsvc.PreviewCachePrewarmSourceSession),
+			SourceID:          session.ID.String(),
+			CacheScopeKey:     dedupeKey,
+			JobID:             jobIDPtr,
+			WorkerNodeID:      stringPtrValue(targetNodeID),
+			Status:            "pending",
+			WorkspaceRevision: session.WorkspaceRevision,
+		})
+		if runErr != nil {
+			logger.Warn().Err(runErr).Str("session_id", session.ID.String()).Msg("failed to upsert session preview cache prewarm run")
+		}
+	}
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid.UUID {
@@ -7459,4 +7590,120 @@ func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger)
 		svc.ClearIntegrationUnauthorized(ctx, orgID)
 		return nil
 	}
+}
+
+type syncGitHubOrgRosterPayload struct {
+	OrgID          string `json:"org_id"`
+	InstallationID int64  `json:"installation_id"`
+	AccountLogin   string `json:"account_login"`
+}
+
+func newSyncGitHubOrgRosterHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var p syncGitHubOrgRosterPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("unmarshal sync_github_org_roster payload: %w", err)
+		}
+		orgID, err := uuid.Parse(p.OrgID)
+		if err != nil {
+			return fmt.Errorf("parse sync_github_org_roster org_id: %w", err)
+		}
+		if p.InstallationID <= 0 {
+			return fmt.Errorf("sync_github_org_roster installation_id is required")
+		}
+		if strings.TrimSpace(p.AccountLogin) == "" {
+			links, err := stores.GitHubInstallations.ListEnabledAutoJoinLinksByInstallation(ctx, p.InstallationID)
+			if err != nil {
+				return &RetryableError{Err: fmt.Errorf("load github org auto-join link: %w", err)}
+			}
+			if len(links) == 0 {
+				logger.Info().Int64("installation_id", p.InstallationID).Msg("github org roster sync skipped; auto-join no longer enabled")
+				return nil
+			}
+			p.AccountLogin = links[0].AccountLogin
+			orgID = links[0].OrgID
+		}
+		members, err := services.GitHubOrgRoster.ListOrgMembers(ctx, p.InstallationID, p.AccountLogin)
+		if err != nil {
+			if httpStatus(err) == http.StatusForbidden {
+				return disableGitHubOrgAutoJoinAfterPermissionLoss(ctx, stores, logger, orgID, p.InstallationID, p.AccountLogin)
+			}
+			return &RetryableError{Err: fmt.Errorf("list github org members: %w", err)}
+		}
+		rows := make([]models.GitHubOrgMember, 0, len(members))
+		for _, member := range members {
+			rows = append(rows, models.GitHubOrgMember{
+				InstallationID: p.InstallationID,
+				GitHubUserID:   member.ID,
+				GitHubLogin:    member.Login,
+			})
+		}
+		if err := stores.GitHubInstallations.ReplaceRosterForInstallation(ctx, p.InstallationID, rows); err != nil {
+			return &RetryableError{Err: fmt.Errorf("replace github org roster: %w", err)}
+		}
+		logger.Info().
+			Str("job_type", jobType).
+			Str("org_id", orgID.String()).
+			Int64("installation_id", p.InstallationID).
+			Int("member_count", len(rows)).
+			Msg("github org roster synced")
+		return nil
+	}
+}
+
+type httpStatusError interface {
+	HTTPStatus() int
+}
+
+func httpStatus(err error) int {
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.HTTPStatus()
+	}
+	return 0
+}
+
+func disableGitHubOrgAutoJoinAfterPermissionLoss(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, installationID int64, accountLogin string) error {
+	link, err := stores.GitHubInstallations.DisableOrgLinkAutoJoin(ctx, orgID, installationID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Link already disabled (e.g. a previous attempt succeeded up to this
+			// point). Still clear the roster — if the previous attempt failed after
+			// the disable but before the clear, this retry must finish the job.
+			if clearErr := stores.GitHubInstallations.ClearRosterForInstallation(ctx, installationID); clearErr != nil {
+				return &RetryableError{Err: fmt.Errorf("clear github org roster after permission loss (retry): %w", clearErr)}
+			}
+			return nil
+		}
+		return &RetryableError{Err: fmt.Errorf("disable github org auto-join: %w", err)}
+	}
+	if err := stores.GitHubInstallations.ClearRosterForInstallation(ctx, installationID); err != nil {
+		return &RetryableError{Err: fmt.Errorf("clear github org roster after permission loss: %w", err)}
+	}
+	if accountLogin == "" {
+		accountLogin = link.AccountLogin
+	}
+	if stores.AuditLogs != nil {
+		audit := db.NewAuditEmitter(stores.AuditLogs, logger)
+		resourceID := fmt.Sprintf("%d", installationID)
+		details, _ := json.Marshal(map[string]any{
+			"account_login":   accountLogin,
+			"installation_id": installationID,
+			"reason":          "members_permission_revoked",
+		})
+		audit.EmitSystemAction(ctx, db.SystemActionParams{
+			OrgID:        orgID,
+			ActorID:      "github_org_auto_join",
+			Action:       models.AuditActionTeamGitHubOrgAutoJoinDisabled,
+			ResourceType: models.AuditResourceIntegration,
+			ResourceID:   &resourceID,
+			Details:      details,
+		})
+	}
+	logger.Warn().
+		Str("org_id", orgID.String()).
+		Int64("installation_id", installationID).
+		Str("account_login", accountLogin).
+		Msg("disabled github org auto-join after GitHub returned 403 for roster sync")
+	return nil
 }
