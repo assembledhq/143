@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,50 @@ func TestNewSessionLogResponse(t *testing.T) {
 			require.Equal(t, now, resp.CreatedAt, "response should map timestamp to created_at")
 		})
 	}
+}
+
+func TestNewSessionLogResponseAnnotatesBenignCodexDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	log := SessionLog{
+		ID:        43,
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Timestamp: time.Now(),
+		Level:     SessionLogLevelError,
+		Message:   "Reconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: Try again)",
+	}
+
+	resp := NewSessionLogResponse(log)
+
+	var metadata map[string]string
+	require.NoError(t, json.Unmarshal(resp.Metadata, &metadata), "response metadata should be valid JSON")
+	require.Equal(t, "hidden", metadata["visibility"], "benign Codex diagnostics should be marked hidden in API responses")
+	require.Equal(t, "benign_runtime_diagnostic", metadata["diagnostic_class"], "response should identify benign diagnostic class")
+	require.Equal(t, "codex", metadata["diagnostic_source"], "response should identify diagnostic source")
+	require.Equal(t, "responses_websocket_retry", metadata["diagnostic_kind"], "response should include the classifier kind")
+}
+
+func TestNewSessionLogResponseOverridesVisibilityForBenignCodexDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	log := SessionLog{
+		ID:        44,
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Timestamp: time.Now(),
+		Level:     SessionLogLevelError,
+		Message:   "Reconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: Try again)",
+		Metadata:  json.RawMessage(`{"visibility":"visible","diagnostic_kind":"custom"}`),
+	}
+
+	resp := NewSessionLogResponse(log)
+
+	var metadata map[string]string
+	require.NoError(t, json.Unmarshal(resp.Metadata, &metadata), "response metadata should be valid JSON")
+	require.Equal(t, "hidden", metadata["visibility"], "benign Codex diagnostics should stay hidden even if raw metadata disagrees")
+	require.Equal(t, "custom", metadata["diagnostic_kind"], "response annotation should not overwrite existing diagnostic kind")
+	require.Equal(t, "benign_runtime_diagnostic", metadata["diagnostic_class"], "response should fill missing diagnostic class")
 }
 
 func TestNewSessionLogDetailResponse(t *testing.T) {

@@ -1384,7 +1384,7 @@ func TestEmitCodexStderrLogs_FlagsBenignDiagnosticsHidden(t *testing.T) {
 	logCh := make(chan agent.LogEntry, 10)
 	input := "2026-05-16T02:59:58.624143Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
 
-	filtered := emitCodexStderrLogs([]byte(input), logCh)
+	filtered := emitCodexStderrLogs([]byte(input), 1, logCh)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -1412,7 +1412,7 @@ func TestEmitCodexStderrLogs_FlagsApplyPatchVerificationDiagnosticHidden(t *test
 		"      : trimmedMessage;\n" +
 		"    const optimisticID = optimisticMessageIDRef.current--;"
 
-	filtered := emitCodexStderrLogs([]byte(input), logCh)
+	filtered := emitCodexStderrLogs([]byte(input), 1, logCh)
 	close(logCh)
 
 	var logs []agent.LogEntry
@@ -1426,6 +1426,140 @@ func TestEmitCodexStderrLogs_FlagsApplyPatchVerificationDiagnosticHidden(t *test
 	require.Equal(t, input, logs[0].Message, "hidden diagnostic should preserve the full multiline message")
 	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "hidden diagnostic should be marked hidden from the user")
 	require.Equal(t, "apply_patch_verification_failed", logs[0].Metadata["diagnostic_kind"], "hidden diagnostic should identify the matched kind")
+}
+
+func TestEmitCodexStderrLogs_FlagsRecoverableWebsocketDiagnosticHidden(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "2026-06-12T08:54:38.209896Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: Try again, url: wss://chatgpt.com/backend-api/codex/responses"
+
+	filtered := emitCodexStderrLogs([]byte(input), 1, logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, filtered, "recoverable websocket retry diagnostic should not be returned as visible stderr")
+	require.Len(t, logs, 1, "recoverable websocket diagnostic should be retained as one hidden log")
+	require.Equal(t, "debug", logs[0].Level, "hidden diagnostic should be emitted below user-visible error severity")
+	require.Equal(t, input, logs[0].Message, "hidden diagnostic should preserve the original message")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "hidden diagnostic should be marked hidden from the user")
+	require.Equal(t, "responses_websocket_retry", logs[0].Metadata["diagnostic_kind"], "hidden diagnostic should identify the matched kind")
+}
+
+func TestEmitCodexStderrLogs_HidesUnknownStderrWhenCodexSucceeds(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "warning: background cleanup took longer than expected"
+
+	filtered := emitCodexStderrLogs([]byte(input), 0, logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, filtered, "stderr from a successful Codex run should not be returned as visible stderr")
+	require.Len(t, logs, 1, "successful-run stderr should be retained as a hidden diagnostic")
+	require.Equal(t, "debug", logs[0].Level, "successful-run stderr should be emitted below user-visible error severity")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "successful-run stderr should be hidden from the user")
+	require.Equal(t, "codex_stderr_success", logs[0].Metadata["diagnostic_kind"], "successful-run stderr should have a generic diagnostic kind")
+}
+
+func TestEmitCodexStderrLogs_KeepsUnknownStderrVisibleWhenCodexFails(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "fatal: codex could not complete"
+
+	filtered := emitCodexStderrLogs([]byte(input), 1, logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Equal(t, input, filtered, "stderr from a failed Codex run should remain visible")
+	require.Len(t, logs, 1, "failed-run stderr should be emitted as a visible log")
+	require.Equal(t, "error", logs[0].Level, "failed-run stderr should keep error severity")
+	require.Nil(t, logs[0].Metadata, "failed-run stderr should not be marked hidden")
+}
+
+func TestEmitCodexStderrLogs_StopsMultilineDiagnosticAtCodexAPIRecord(t *testing.T) {
+	t.Parallel()
+
+	logCh := make(chan agent.LogEntry, 10)
+	input := "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/models/automation_test.go:\n" +
+		"        tests := []struct {\n" +
+		"                name string\n" +
+		"        }\n" +
+		"2026-06-12T08:54:38.209896Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: Try again, url: wss://chatgpt.com/backend-api/codex/responses"
+
+	filtered := emitCodexStderrLogs([]byte(input), 1, logCh)
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Empty(t, filtered, "known benign diagnostics should not be returned as visible stderr")
+	require.Len(t, logs, 2, "separate benign diagnostics should be retained as separate hidden logs")
+	require.Equal(t, "apply_patch_verification_failed", logs[0].Metadata["diagnostic_kind"], "first hidden diagnostic should be the apply_patch context mismatch")
+	require.Equal(t, "responses_websocket_retry", logs[1].Metadata["diagnostic_kind"], "second hidden diagnostic should be the websocket retry")
+	require.NotContains(t, logs[0].Message, "responses_websocket", "multiline apply_patch diagnostic should stop before the next codex_api record")
+}
+
+func TestParseCodexStreamLine_FlagsRecoverableReconnectErrorHidden(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	line := []byte(`{"type":"error","error":"Reconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: Try again)"}`)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 1, "recoverable reconnect stream event should still be retained as a hidden log")
+	require.Equal(t, "debug", logs[0].Level, "recoverable reconnect stream event should not be emitted as a visible error")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "recoverable reconnect stream event should be marked hidden from the user")
+	require.Equal(t, "responses_websocket_retry", logs[0].Metadata["diagnostic_kind"], "recoverable reconnect stream event should identify the matched kind")
+}
+
+func TestParseCodexStreamLine_FlagsGenericReconnectErrorHidden(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 100)
+	var summaryParts []string
+	lastByType := make(map[string]string)
+
+	line := []byte(`{"type":"error","error":"Reconnecting... 4/5 (stream disconnected before completion: An error occurred while processing your request. Please try again.)"}`)
+	parseCodexStreamLine(line, result, logCh, &summaryParts, lastByType, new(string))
+	close(logCh)
+
+	var logs []agent.LogEntry
+	for entry := range logCh {
+		logs = append(logs, entry)
+	}
+
+	require.Len(t, logs, 1, "recoverable reconnect stream event should still be retained as a hidden log")
+	require.Equal(t, "debug", logs[0].Level, "recoverable reconnect stream event should not be emitted as a visible error")
+	require.Equal(t, "hidden", logs[0].Metadata["visibility"], "recoverable reconnect stream event should be marked hidden from the user")
+	require.Equal(t, "responses_websocket_retry", logs[0].Metadata["diagnostic_kind"], "recoverable reconnect stream event should identify the matched kind")
 }
 
 func TestParseCodexStreamLine_SuppressesRefreshTokenError(t *testing.T) {

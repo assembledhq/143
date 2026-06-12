@@ -1829,11 +1829,12 @@ func writeSessionLogSSEEvent(sw *sse.Writer, log models.SessionLog) error {
 }
 
 func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.SessionLog) error {
-	if err := sw.WriteDataID(streamID, log); err != nil {
+	payload := models.NewSessionLogResponse(log)
+	if err := sw.WriteDataID(streamID, payload); err != nil {
 		return err
 	}
 	if eventType, ok := humanInputSSEEventType(log); ok {
-		if err := sw.WriteEventID(eventType, streamID, log); err != nil {
+		if err := sw.WriteEventID(eventType, streamID, payload); err != nil {
 			return err
 		}
 	}
