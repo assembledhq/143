@@ -922,7 +922,7 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 			if placementErr != nil {
 				h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 			} else {
-				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
+				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey, Approximate: true})
 			}
 		}
 	}

@@ -2663,6 +2663,20 @@ func (s *PreviewStore) ListDependencyCacheWorkersByPlacement(ctx context.Context
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCacheLocation])
 }
 
+func (s *PreviewStore) ListRecentDependencyCacheWorkersForRepo(ctx context.Context, orgID, repoID uuid.UUID, limit int) ([]models.PreviewDependencyCacheLocation, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	query := fmt.Sprintf(`SELECT %s FROM preview_dependency_cache_locations
+		WHERE org_id = @org_id AND repo_id = @repo_id
+		ORDER BY last_used_at DESC LIMIT @limit`, previewDependencyCacheLocationColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "repo_id": repoID, "limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("list recent dependency cache workers for repo: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewDependencyCacheLocation])
+}
+
 func (s *PreviewStore) DeleteDependencyCacheLocation(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error {
 	_, err := s.db.Exec(ctx,
 		`DELETE FROM preview_dependency_cache_locations WHERE id = @id AND org_id = @org_id`,

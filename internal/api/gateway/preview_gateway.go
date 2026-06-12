@@ -35,9 +35,12 @@ import (
 // sessionCacheEntry caches access session validation results to avoid
 // hitting the database on every proxied request (including static assets).
 type sessionCacheEntry struct {
-	validUntil time.Time // when this cache entry expires
-	revokedAt  *time.Time
-	expiresAt  time.Time
+	validUntil        time.Time // when this cache entry expires
+	orgID             uuid.UUID
+	hostID            uuid.UUID
+	previewInstanceID uuid.UUID
+	revokedAt         *time.Time
+	expiresAt         time.Time
 }
 
 // sessionCache is a simple TTL cache for access session lookups.
@@ -106,6 +109,22 @@ func (g *Gateway) putCachedSession(id uuid.UUID, entry *sessionCacheEntry) {
 	g.sessionCacheMu.Lock()
 	defer g.sessionCacheMu.Unlock()
 	g.sessionCache[id] = entry
+}
+
+func (g *Gateway) getCachedSession(id, orgID, hostID uuid.UUID, now time.Time) (*sessionCacheEntry, bool) {
+	g.sessionCacheMu.RLock()
+	entry, ok := g.sessionCache[id]
+	g.sessionCacheMu.RUnlock()
+	if !ok || entry == nil {
+		return nil, false
+	}
+	if entry.orgID != orgID || entry.hostID != hostID || now.After(entry.validUntil) {
+		if now.After(entry.validUntil) {
+			g.evictCachedSession(id)
+		}
+		return nil, false
+	}
+	return entry, true
 }
 
 // NewGateway creates a new preview gateway.
@@ -316,22 +335,25 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	// Re-check the access session in the database before honoring the cookie.
-	// The local cache is only a short-lived mirror of the latest DB state; we
-	// do not trust it across requests for revocation decisions.
 	now := time.Now()
-	sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
-	if err != nil {
-		g.evictCachedSession(accessSessionID)
-		http.Error(w, "preview session not found", http.StatusUnauthorized)
-		return
+	cached, ok := g.getCachedSession(accessSessionID, orgID, previewID, now)
+	if !ok {
+		sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
+		if err != nil {
+			g.evictCachedSession(accessSessionID)
+			http.Error(w, "preview session not found", http.StatusUnauthorized)
+			return
+		}
+		cached = &sessionCacheEntry{
+			validUntil:        now.Add(sessionCacheTTL),
+			orgID:             orgID,
+			hostID:            previewID,
+			previewInstanceID: sess.PreviewInstanceID,
+			revokedAt:         sess.RevokedAt,
+			expiresAt:         sess.ExpiresAt,
+		}
+		g.putCachedSession(accessSessionID, cached)
 	}
-	cached := &sessionCacheEntry{
-		validUntil: now.Add(sessionCacheTTL),
-		revokedAt:  sess.RevokedAt,
-		expiresAt:  sess.ExpiresAt,
-	}
-	g.putCachedSession(accessSessionID, cached)
 
 	if cached.revokedAt != nil {
 		g.evictCachedSession(accessSessionID)
@@ -343,8 +365,8 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
-	runtimePreviewID := sess.PreviewInstanceID
-	if runtimePreviewID != previewID && !g.accessSessionMatchesTargetHost(r, sess, previewID) {
+	runtimePreviewID := cached.previewInstanceID
+	if runtimePreviewID != previewID && !g.accessSessionMatchesTargetHostIDs(r, orgID, runtimePreviewID, previewID) {
 		g.evictCachedSession(accessSessionID)
 		g.serveStaleSessionOverlay(w, r, previewID)
 		return
@@ -368,9 +390,12 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 			http.SetCookie(w, previewSessionCookie(refreshedCookie, newExpiry, g.secureCookie))
 			// Update the cache with the new expiry.
 			g.putCachedSession(accessSessionID, &sessionCacheEntry{
-				validUntil: now.Add(sessionCacheTTL),
-				revokedAt:  cached.revokedAt,
-				expiresAt:  newExpiry,
+				validUntil:        now.Add(sessionCacheTTL),
+				orgID:             orgID,
+				hostID:            previewID,
+				previewInstanceID: runtimePreviewID,
+				revokedAt:         cached.revokedAt,
+				expiresAt:         newExpiry,
 			})
 		}
 	}
@@ -423,13 +448,20 @@ func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {
 }
 
 func (g *Gateway) accessSessionMatchesTargetHost(r *http.Request, sess *models.PreviewAccessSession, hostID uuid.UUID) bool {
+	if sess == nil {
+		return false
+	}
+	return g.accessSessionMatchesTargetHostIDs(r, sess.OrgID, sess.PreviewInstanceID, hostID)
+}
+
+func (g *Gateway) accessSessionMatchesTargetHostIDs(r *http.Request, orgID, runtimePreviewID, hostID uuid.UUID) bool {
 	if g.store == nil {
 		return false
 	}
-	instance, err := g.store.GetPreviewInstance(r.Context(), sess.OrgID, sess.PreviewInstanceID)
+	instance, err := g.store.GetPreviewInstance(r.Context(), orgID, runtimePreviewID)
 	if err != nil {
 		g.logger.Warn().Err(err).
-			Str("preview_id", sess.PreviewInstanceID.String()).
+			Str("preview_id", runtimePreviewID.String()).
 			Str("host_id", hostID.String()).
 			Msg("failed to resolve target-host preview session")
 		return false

@@ -845,6 +845,53 @@ func TestWorkerSelector_SelectLeastLoadedNodeInPreferredRegionIgnoresUnknownRegi
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestWorkerSelector_SelectStartNodeFallsBackToRecentRepoCacheHolder(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	metadata, err := json.Marshal(WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewInternalBaseURL: "http://worker-warm.internal:8080",
+	})
+	require.NoError(t, err, "worker metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.PreviewCacheKindInstallArtifact, "missing-placement", pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}))
+	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache_locations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, "cache-key", "other-placement", "worker-warm", int64(10), now, now))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(workerNodeTestCols).
+			AddRow("worker-warm", "worker", "worker-warm.internal", "active", metadata, now, now))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("worker-warm", 0))
+
+	selector := NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), db.NewPreviewStore(mock), 2)
+	worker, err := selector.SelectStartNodeWithCachePlacementsAndRequirements(context.Background(), orgID, &models.Session{ID: sessionID}, repoID, []WorkerCachePlacement{
+		{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: "missing-placement", Approximate: true},
+	}, WorkerSelectionRequirements{})
+	require.NoError(t, err, "SelectStartNode should fall back to a recent repo cache holder")
+	require.Equal(t, "worker-warm", worker.ID, "recent repo cache holder should beat cold rendezvous when exact placement has no holder")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion(t *testing.T) {
 	t.Parallel()
 

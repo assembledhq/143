@@ -978,7 +978,7 @@ func TestGateway_ServeHTTP_Proxy_CookieMismatch(t *testing.T) {
 	require.Contains(t, w.Body.String(), "does not match")
 }
 
-func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
+func TestGateway_ServeHTTP_Proxy_UsesCachedSessionForHotAssetRequests(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -988,7 +988,6 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
 	previewID := uuid.New()
-	sessionID := uuid.New()
 	accessSessionID := uuid.New()
 	now := time.Now()
 	expiresAt := now.Add(10 * time.Minute)
@@ -1029,7 +1028,82 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 	gw.ServeHTTP(firstResp, firstReq)
 	require.Equal(t, http.StatusNoContent, firstResp.Code, "first request should succeed and populate the cache")
 
-	revokedAt := now.Add(30 * time.Second)
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	secondReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
+	secondReq.Host = previewID.String() + ".preview.143.dev"
+	secondReq.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
+	secondResp := httptest.NewRecorder()
+
+	gw.ServeHTTP(secondResp, secondReq)
+	require.Equal(t, http.StatusNoContent, secondResp.Code, "hot requests should use the short-lived access-session cache instead of re-querying the database")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_DetectsRevokedSessionAfterCacheTTLExpiry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	accessSessionID := uuid.New()
+	now := time.Now()
+	expiresAt := now.Add(10 * time.Minute)
+	secret := []byte("test-secret")
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:  store,
+		Logger: zerolog.Nop(),
+	})
+	gw := NewGateway(GatewayConfig{
+		Store:        store,
+		Manager:      manager,
+		Logger:       zerolog.Nop(),
+		AppOrigin:    "https://app.143.dev",
+		CookieSecret: secret,
+	})
+
+	cookieVal := encodeCookieValue(secret, orgID, previewID, accessSessionID)
+
+	// First request — populates the session cache.
+	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "user_id", "preview_instance_id",
+				"session_token_hash", "issued_at", "expires_at", "revoked_at", "last_accessed_at", "created_at",
+			}).AddRow(accessSessionID, orgID, userID, previewID, "hash", now, expiresAt, nil, now, now),
+		)
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at = now\\(\\), updated_at = now\\(\\) WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	firstReq := httptest.NewRequest(http.MethodGet, "/__143_heartbeat", nil)
+	firstReq.Host = previewID.String() + ".preview.143.dev"
+	firstReq.AddCookie(&http.Cookie{Name: "preview_session", Value: cookieVal})
+	firstResp := httptest.NewRecorder()
+
+	gw.ServeHTTP(firstResp, firstReq)
+	require.Equal(t, http.StatusNoContent, firstResp.Code, "first request should succeed and populate the cache")
+
+	// Manually expire the cache entry so the next request re-queries the DB.
+	gw.sessionCacheMu.Lock()
+	gw.sessionCache[accessSessionID].validUntil = now.Add(-time.Second)
+	gw.sessionCacheMu.Unlock()
+
+	// Second request — cache miss forces DB re-query; DB returns a revoked session.
+	// The stale-session overlay then queries the preview instance to decide
+	// whether to redirect or show an HTML overlay; a Ready instance triggers
+	// a redirect to the bootstrap launch flow.
+	revokedAt := now.Add(-30 * time.Second)
 	mock.ExpectQuery("SELECT .+ FROM preview_access_sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -1052,7 +1126,7 @@ func TestGateway_ServeHTTP_Proxy_RechecksRevokedCachedSession(t *testing.T) {
 	secondResp := httptest.NewRecorder()
 
 	gw.ServeHTTP(secondResp, secondReq)
-	require.Equal(t, http.StatusFound, secondResp.Code, "gateway should stop honoring a session revoked after it was cached and fall back to the launch flow")
+	require.Equal(t, http.StatusFound, secondResp.Code, "gateway should redirect after detecting a revoked session on cache-miss re-query")
 	require.Equal(t, "https://app.143.dev/previews/"+previewID.String()+"?launch=1", secondResp.Header().Get("Location"), "revoked session should redirect through the bootstrap launch flow")
 	require.Contains(t, secondResp.Header().Values("Set-Cookie")[0], "preview_session=;", "revoked session cookie should be cleared")
 	require.Contains(t, secondResp.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
