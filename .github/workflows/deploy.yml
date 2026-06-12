@@ -121,14 +121,16 @@ jobs:
         if: steps.deploy_latest.outputs.should_deploy == 'true'
 
       # Encrypted env bundles live in the private 143-infra repo, not here.
-      # INFRA_REPO_TOKEN is a fine-grained PAT with contents:read on that
-      # repo only. .infra is gitignored so it can never leak into builds.
+      # INFRA_REPO_DEPLOY_KEY is the private half of a read-only deploy key
+      # on that repo — a machine credential tied to the repo (not a person's
+      # account), so it never expires and any maintainer can audit/rotate it.
+      # .infra is gitignored so it can never leak into builds.
       - name: Check out private secrets repo
         if: steps.deploy_latest.outputs.should_deploy == 'true'
         uses: actions/checkout@v6
         with:
           repository: assembledhq/143-infra
-          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          ssh-key: ${{ secrets.INFRA_REPO_DEPLOY_KEY }}
           path: .infra
 
       - name: Install sops and age

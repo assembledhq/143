@@ -54,7 +54,7 @@ make secrets-encrypt                             # .env → ../143-infra/.env.en
 cd ../143-infra && git add -A && git commit -m "Seed secrets" && git push
 ```
 
-CI deploys check the private repo out via the `INFRA_REPO_TOKEN` repository secret — a fine-grained PAT with read-only contents access to `143-infra` only (see `.github/workflows/deploy.yml`).
+CI deploys check the private repo out via the `INFRA_REPO_DEPLOY_KEY` repository secret — the private half of a **read-only deploy key** on `143-infra` (see `.github/workflows/deploy.yml`). A deploy key is repo-scoped by construction, never expires, and isn't tied to any individual's GitHub account — any maintainer can audit or rotate it from the `143-infra` repo settings. To rotate: generate a fresh keypair (`ssh-keygen -t ed25519`), add the public half as a read-only deploy key on `143-infra`, update the secret (`gh secret set INFRA_REPO_DEPLOY_KEY --repo <your-org>/143 < keyfile`), then delete the old deploy key and local key files.
 
 ### Initial setup (one-time per developer)
 
