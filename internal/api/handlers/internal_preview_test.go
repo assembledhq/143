@@ -266,11 +266,11 @@ func TestInternalPreviewHandler_AuthorizePreviewActionRejectsStaleRuntime(t *tes
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
 			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
-			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "created_at", "updated_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
 		}).AddRow(
 			runtimeID, orgID, previewID, 2, "worker-1",
 			"http://worker-1.internal", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
-			now, nil, nil, "", now, now,
+			now, nil, nil, "", "", now, now,
 		))
 
 	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy", nil)
@@ -871,36 +871,6 @@ func TestInternalPreviewHandler_ProxyWebSocket_HijackUnsupported(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-type closeTrackingConn struct {
-	net.Conn
-	closed bool
-}
-
-func (c *closeTrackingConn) Close() error {
-	c.closed = true
-	if c.Conn != nil {
-		return c.Conn.Close()
-	}
-	return nil
-}
-
-type errReadCloser struct{ err error }
-
-func (errReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
-func (e errReadCloser) Close() error           { return e.err }
-
-func TestConnClosingBody_ClosePrefersBodyError(t *testing.T) {
-	t.Parallel()
-
-	conn := &closeTrackingConn{}
-	body := &connClosingBody{ReadCloser: errReadCloser{err: errors.New("body close failed")}, conn: conn}
-
-	err := body.Close()
-	require.Error(t, err, "connClosingBody should surface body close failures")
-	require.Contains(t, err.Error(), "body close failed", "connClosingBody should prefer the body close error")
-	require.True(t, conn.closed, "connClosingBody should still close the underlying connection")
-}
-
 func TestCopyWithHMRSnoopToClient_ForwardsTraffic(t *testing.T) {
 	t.Parallel()
 
@@ -928,4 +898,133 @@ func TestCopyWithHMRSnoopToClient_ForwardsTraffic(t *testing.T) {
 
 func ptrUUID(id uuid.UUID) *uuid.UUID {
 	return &id
+}
+
+func TestInternalPreviewHandler_AuthorizePreviewActionCachesRuntimeLookup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+
+	store := db.NewPreviewStore(mock)
+	handler := NewInternalPreviewHandler(&PreviewHandler{store: store, logger: zerolog.Nop()}, nil, "worker-1", "worker-secret", zerolog.Nop())
+
+	// Exactly one runtime lookup for two authorized requests: the second one
+	// must be validated against the cache.
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 1, "worker-1",
+			"http://worker-1.internal", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		))
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy", nil)
+		req = withPreviewRouteParam(req, previewID.String())
+		req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+			OrgID:        orgID,
+			PreviewID:    &previewID,
+			TargetNodeID: "worker-1",
+			RuntimeID:    &runtimeID,
+			RuntimeEpoch: 1,
+			Action:       "proxy",
+			ExpiresAt:    time.Now().Add(time.Minute),
+		}))
+		rr := httptest.NewRecorder()
+
+		_, _, ok := handler.authorizePreviewAction(rr, req, "proxy")
+		require.True(t, ok, "request %d with valid runtime claims should authorize", i+1)
+	}
+	require.NoError(t, mock.ExpectationsWereMet(), "second authorization should hit the runtime cache instead of the database")
+}
+
+func TestInternalPreviewHandler_AuthorizePreviewActionRefreshesStaleCacheOnMismatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	oldRuntimeID := uuid.New()
+	newRuntimeID := uuid.New()
+	now := time.Now().UTC()
+
+	store := db.NewPreviewStore(mock)
+	handler := NewInternalPreviewHandler(&PreviewHandler{store: store, logger: zerolog.Nop()}, nil, "worker-1", "worker-secret", zerolog.Nop())
+
+	runtimeRow := func(id uuid.UUID, epoch int) *pgxmock.Rows {
+		return pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			id, orgID, previewID, epoch, "worker-1",
+			"http://worker-1.internal", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		)
+	}
+
+	// First request populates the cache with epoch 1; the second request
+	// carries epoch-2 claims (fresh recycle) and must trigger a re-resolve
+	// instead of being rejected against the stale cache entry.
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(runtimeRow(oldRuntimeID, 1))
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(runtimeRow(newRuntimeID, 2))
+
+	authorize := func(runtimeID uuid.UUID, epoch int) bool {
+		req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy", nil)
+		req = withPreviewRouteParam(req, previewID.String())
+		req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+			OrgID:        orgID,
+			PreviewID:    &previewID,
+			TargetNodeID: "worker-1",
+			RuntimeID:    &runtimeID,
+			RuntimeEpoch: epoch,
+			Action:       "proxy",
+			ExpiresAt:    time.Now().Add(time.Minute),
+		}))
+		rr := httptest.NewRecorder()
+		_, _, ok := handler.authorizePreviewAction(rr, req, "proxy")
+		return ok
+	}
+
+	require.True(t, authorize(oldRuntimeID, 1), "epoch-1 claims should authorize against the live epoch-1 runtime")
+	require.True(t, authorize(newRuntimeID, 2), "epoch-2 claims should re-resolve past the stale cache entry and authorize")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestInternalPreviewHandler_PreviewTransportPoolsPerPreview(t *testing.T) {
+	t.Parallel()
+
+	handler := newInternalPreviewTestHandler(nil)
+	orgID := uuid.New()
+	previewID := uuid.New()
+	otherPreviewID := uuid.New()
+
+	first := handler.previewTransport(orgID, previewID)
+	second := handler.previewTransport(orgID, previewID)
+	require.Same(t, first, second, "repeated requests for the same preview should reuse the pooled transport")
+
+	other := handler.previewTransport(orgID, otherPreviewID)
+	require.NotSame(t, first, other, "distinct previews must not share a transport (their dialers target different containers)")
+
+	handler.evictPreviewTransport(previewID)
+	third := handler.previewTransport(orgID, previewID)
+	require.NotSame(t, first, third, "eviction should drop the pooled transport so a fresh one is built")
 }

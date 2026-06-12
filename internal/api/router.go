@@ -745,6 +745,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
 	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
+	branchPreviewHandler.SetSessionPreviewRestarter(previewHandler)
 	branchPreviewHandler.SetPreviewCachePrewarm(cfg.PreviewCachePrewarmEnabled, cfg.PreviewCachePrewarmPriority)
 	branchPreviewHandler.SetStaticEgressSettings(orgStore, cfg.StaticEgressPublicIP)
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
