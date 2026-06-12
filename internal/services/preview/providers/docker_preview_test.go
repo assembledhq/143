@@ -821,6 +821,7 @@ type fakeDependencyCache struct {
 	pathSaves    map[models.PreviewCacheKind]int
 	restoreRoots []models.PreviewCacheRoot
 	saveSpecs    []preview.PreviewPathCacheSaveSpec
+	saveStarted  chan models.PreviewCacheKind
 }
 
 func (f *fakeDependencyCache) Find(context.Context, uuid.UUID, uuid.UUID, string) (*preview.DependencyCacheHit, error) {
@@ -879,6 +880,12 @@ func (f *fakeDependencyCache) RestorePathCache(_ context.Context, _ *agent.Sandb
 }
 
 func (f *fakeDependencyCache) SavePathCache(_ context.Context, _ *agent.Sandbox, spec preview.PreviewPathCacheSaveSpec) (preview.DependencyCacheSaveResult, error) {
+	if f.saveStarted != nil {
+		select {
+		case f.saveStarted <- spec.Kind:
+		default:
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.pathSaves == nil {
@@ -2242,6 +2249,86 @@ func TestStartPreview_DependencyCacheMissRunsInstallAndSaves(t *testing.T) {
 	calls := strings.Join(streamCalls, "\n")
 	mu.Unlock()
 	require.Contains(t, calls, "'npm' 'ci'", "preview.install should run on dependency cache miss")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+func TestStartPreview_DefersCacheSavesUntilAfterReadiness(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	serviceStarted := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "'npm' 'ci'") {
+				return 0, nil
+			}
+			close(serviceStarted)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) {
+			return 0, nil
+		},
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+	cache := &fakeDependencyCache{saveStarted: make(chan models.PreviewCacheKind, 2)}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	done := make(chan *preview.PreviewHandle, 1)
+	errs := make(chan error, 1)
+	go func() {
+		handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+			OrgID:        uuid.New(),
+			RepositoryID: uuid.New(),
+			SessionID:    uuid.New(),
+		}, &recordingObserver{})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- handle
+	}()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-serviceStarted:
+			return true
+		default:
+			return false
+		}
+	}, 2*time.Second, 10*time.Millisecond, "service should start before readiness can complete")
+
+	select {
+	case kind := <-cache.saveStarted:
+		require.Failf(t, "cache save started before readiness", "cache kind %s started before StartPreview returned", kind)
+	default:
+	}
+
+	var handle *preview.PreviewHandle
+	select {
+	case err := <-errs:
+		require.NoError(t, err, "StartPreview should not fail")
+	case handle = <-done:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "StartPreview should return after readiness")
+	}
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	require.Eventually(t, func() bool {
+		_, _, saves, _, _ := cache.pathCounts()
+		return saves[models.PreviewCacheKindInstallArtifact] == 1 &&
+			saves[models.PreviewCacheKindPackageManager] == 1
+	}, 2*time.Second, 10*time.Millisecond, "cache saves should start after readiness")
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")

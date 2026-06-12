@@ -55,6 +55,24 @@ func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd stri
 	e.execCalls = append(e.execCalls, cmd)
 	e.mu.Unlock()
 	switch {
+	case strings.Contains(cmd, "printf '%s\\n'"):
+		parts := strings.Split(cmd, "printf '%s\\n' ")
+		for _, part := range parts[1:] {
+			part = strings.TrimSpace(part)
+			if !strings.HasPrefix(part, "'") {
+				continue
+			}
+			rest := strings.TrimPrefix(part, "'")
+			end := strings.Index(rest, "'")
+			if end < 0 {
+				continue
+			}
+			_, err := stdout.Write([]byte(rest[:end] + "\n"))
+			if err != nil {
+				return -1, err
+			}
+		}
+		return 0, nil
 	case strings.HasPrefix(cmd, "test -e "), strings.Contains(cmd, " && test -e "):
 		return 0, nil
 	case strings.Contains(cmd, "tar czf -"):
@@ -266,6 +284,59 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	require.Empty(t, blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/install_artifact/"+cacheKey+".tar.gz"], "Save should not overwrite a shared mutable blob key")
 	require.Contains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "tar czf -", "Save should stream tar output instead of creating a sandbox temp archive")
 	require.NotContains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "cat /tmp/preview-dependency-cache-", "Save should not read back a sandbox temp archive")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cacheKey := strings.Repeat("b", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{
+		"node_modules/.bin/next": "next",
+		".next/cache/app":        "cache",
+		"dist/index.html":        "html",
+	})
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindInstallArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+
+	exec := &dependencyCacheExec{payload: payload}
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(mock),
+		Executor:  exec,
+		BlobStore: newMemorySnapshotStore(),
+		Logger:    zerolog.Nop(),
+		Prefix:    "deps",
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	_, err = cache.Save(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, cacheKey, []string{"node_modules", ".next/cache", "dist"}, DependencyCacheMetadata{
+		OrgID:          orgID,
+		RepoID:         repoID,
+		PlacementKey:   "placement",
+		InstallCommand: []string{"npm", "ci"},
+	})
+	require.NoError(t, err, "Save should upload dependency cache")
+
+	var existenceProbeCount int
+	for _, call := range exec.calls() {
+		if strings.Contains(call, "test -e ") || strings.Contains(call, "find ") {
+			existenceProbeCount++
+		}
+	}
+	require.Equal(t, 1, existenceProbeCount, "Save should batch effective-path existence checks into one sandbox exec")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

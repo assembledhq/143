@@ -37,6 +37,12 @@ Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive d
 
 The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-artifact local paths still readable during rollout.
 
+Preview startup uses cache placement as a scheduling hint, not a correctness primitive. Exact config-derived placement keys prefer workers with known L1 blobs. When the API cannot know the exact config before worker selection, the repo-level fallback is marked approximate and the scheduler prefers recent repo cache holders before rendezvous hashing. The worker still recomputes exact cache keys inside the hydrated workspace before restore.
+
+Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-artifact archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
+
+The preview gateway keeps a short-lived access-session validation cache so asset-heavy preview page loads do not hit Postgres for every JS/CSS/image request. The cache is scoped to the decoded org, public host, and runtime preview ID, and is intentionally short TTL so revocation/expiry changes converge quickly while protecting hot page-load latency.
+
 Prewarming is implemented as a low-priority `preview_cache_prewarm` worker job with branch and session payload sources. The automatic triggers are branch/PR preview target creation or commit update, plus successful snapshot-producing `run_agent` and `continue_session` turns. The runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, skips when install/cache inputs are absent or both cache kinds are already warm in L2, runs only `preview.install.command`, saves package-manager and install-artifact caches synchronously, and then destroys the sandbox. Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
 
 ## Goals

@@ -58,6 +58,7 @@ type WorkerSelectionRequirements struct {
 type WorkerCachePlacement struct {
 	Kind         models.PreviewCacheKind
 	PlacementKey string
+	Approximate  bool
 }
 
 type StaticEgressWorkerDiagnostics struct {
@@ -283,10 +284,26 @@ func (s *WorkerSelector) SelectStartNodeWithCachePlacementsAndRequirements(ctx c
 		} else if lookupErr != nil {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
 		}
+		if workerCachePlacementsApproximate(placements) {
+			if worker, ok, err := s.selectRecentRepoCacheWorker(ctx, orgID, repoID, true, req); err != nil {
+				metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
+			} else if ok {
+				metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "repo_cache_holder")
+				return worker, nil
+			}
+		}
 		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, rendezvousPlacementKey(placements), rendezvousTopN, true, req); err != nil && !errors.Is(err, ErrNoPreviewWorkers) {
 			return WorkerNode{}, err
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "rendezvous")
+			return worker, nil
+		}
+	}
+	if repoID != uuid.Nil && len(placements) == 0 {
+		if worker, ok, err := s.selectRecentRepoCacheWorker(ctx, orgID, repoID, true, req); err != nil {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
+		} else if ok {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "repo_cache_holder")
 			return worker, nil
 		}
 	}
@@ -306,8 +323,24 @@ func (s *WorkerSelector) SelectStartNodeWithCachePlacementsAndRequirements(ctx c
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
 			return worker, nil
 		}
+		if workerCachePlacementsApproximate(placements) {
+			if worker, ok, err := s.selectRecentRepoCacheWorker(ctx, orgID, repoID, false, req); err != nil {
+				metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
+			} else if ok {
+				metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
+				return worker, nil
+			}
+		}
 		if worker, ok, err := s.selectRendezvousWorker(ctx, orgID, repoID, rendezvousPlacementKey(placements), rendezvousTopN, false, req); err != nil {
 			return WorkerNode{}, err
+		} else if ok {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
+			return worker, nil
+		}
+	}
+	if repoID != uuid.Nil && len(placements) == 0 {
+		if worker, ok, err := s.selectRecentRepoCacheWorker(ctx, orgID, repoID, false, req); err != nil {
+			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "fallback_error")
 		} else if ok {
 			metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "cross_region")
 			return worker, nil
@@ -527,6 +560,80 @@ func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, 
 	return best, true, nil
 }
 
+func (s *WorkerSelector) selectRecentRepoCacheWorker(ctx context.Context, orgID, repoID uuid.UUID, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
+	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	locations, err := s.previews.ListRecentDependencyCacheWorkersForRepo(lookupCtx, orgID, repoID, 64)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	return s.selectCacheLocationWorker(ctx, locations, preferredOnly, req)
+}
+
+func (s *WorkerSelector) selectCacheLocationWorker(ctx context.Context, locations []models.PreviewDependencyCacheLocation, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
+	if len(locations) == 0 {
+		return WorkerNode{}, false, nil
+	}
+	nodes, err := s.nodes.ListActive(ctx)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	routable := make(map[string]WorkerNode, len(nodes))
+	for _, node := range nodes {
+		worker, err := parseWorkerNodeWithRequirements(node, req)
+		if err != nil || !nodeCanClaimSessionJobs(node) {
+			continue
+		}
+		if preferredOnly && !s.inPreferredRegion(worker) {
+			continue
+		}
+		routable[worker.ID] = worker
+	}
+	ids := make([]string, 0, len(locations))
+	seen := make(map[string]struct{}, len(locations))
+	for _, location := range locations {
+		if _, ok := routable[location.WorkerNodeID]; !ok {
+			continue
+		}
+		if _, ok := seen[location.WorkerNodeID]; ok {
+			continue
+		}
+		seen[location.WorkerNodeID] = struct{}{}
+		ids = append(ids, location.WorkerNodeID)
+	}
+	if len(ids) == 0 {
+		return WorkerNode{}, false, nil
+	}
+	counts, err := s.previews.CountActivePreviewsByWorkers(ctx, ids)
+	if err != nil {
+		return WorkerNode{}, false, err
+	}
+	best := WorkerNode{}
+	bestCount := 0
+	bestOrder := 0
+	found := false
+	for order, location := range locations {
+		worker, ok := routable[location.WorkerNodeID]
+		if !ok {
+			continue
+		}
+		count := counts[worker.ID]
+		if count >= s.maxPreviewsPerWorker {
+			continue
+		}
+		if !found || count < bestCount || (count == bestCount && order < bestOrder) {
+			best = worker
+			bestCount = count
+			bestOrder = order
+			found = true
+		}
+	}
+	if !found {
+		return WorkerNode{}, false, nil
+	}
+	return best, true, nil
+}
+
 func normalizeWorkerCachePlacements(placements []WorkerCachePlacement) []WorkerCachePlacement {
 	normalized := make([]WorkerCachePlacement, 0, len(placements))
 	seen := make(map[string]struct{}, len(placements))
@@ -544,9 +651,18 @@ func normalizeWorkerCachePlacements(placements []WorkerCachePlacement) []WorkerC
 			continue
 		}
 		seen[dedupe] = struct{}{}
-		normalized = append(normalized, WorkerCachePlacement{Kind: kind, PlacementKey: key})
+		normalized = append(normalized, WorkerCachePlacement{Kind: kind, PlacementKey: key, Approximate: placement.Approximate})
 	}
 	return normalized
+}
+
+func workerCachePlacementsApproximate(placements []WorkerCachePlacement) bool {
+	for _, placement := range placements {
+		if placement.Approximate {
+			return true
+		}
+	}
+	return false
 }
 
 func rendezvousPlacementKey(placements []WorkerCachePlacement) string {
