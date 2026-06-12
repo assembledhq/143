@@ -935,6 +935,7 @@ export interface PullRequestActiveRepair {
 
 export interface PullRequestRepairRequest {
   thread_id?: string;
+  push_changes?: boolean;
 }
 
 export type PullRequestMergeWhenReadyState =
