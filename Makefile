@@ -330,7 +330,7 @@ secrets-rotate:
 	@for f in $(SECRETS_DIR)/.env*.enc; do \
 		[ -f "$$f" ] || continue; \
 		echo "Rotating keys for $$f ..."; \
-		sops updatekeys --yes --config $(_SOPS_CONFIG) --input-type dotenv "$$f"; \
+		sops --config $(_SOPS_CONFIG) updatekeys --yes --input-type dotenv "$$f" || exit 1; \
 	done
 	@echo "Done. Commit the updated .enc files in $(SECRETS_DIR)."
 

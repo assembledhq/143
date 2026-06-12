@@ -22,7 +22,7 @@ has_env_enc=0
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   case "$f" in
-    .env*.enc)                   has_env_enc=1 ;;
+    .env*.enc|.sops.yaml)        has_env_enc=1 ;;
     *.go)                        has_go=1 ;;
   esac
   case "$f" in
@@ -87,9 +87,10 @@ run_check() {
 
 if [[ $has_env_enc -eq 1 ]]; then
   echo "  [pre-commit] encrypted env guard ... FAIL"
-  echo "    An .env*.enc file is staged. Encrypted env bundles live in the" >&2
-  echo "    private secrets repo (see docs/secrets/README.md), never in this" >&2
-  echo "    public repo — even encrypted, published ciphertext can't be unpublished." >&2
+  echo "    An .env*.enc file or .sops.yaml is staged. Encrypted env bundles and" >&2
+  echo "    the SOPS config live in the private secrets repo (see" >&2
+  echo "    docs/secrets/README.md), never in this public repo — even encrypted," >&2
+  echo "    published ciphertext can't be unpublished." >&2
   fail=1
 fi
 

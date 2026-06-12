@@ -17,7 +17,7 @@
 #   export WORKER_PRIVATE_IP="10.0.0.12"            # this worker's private IPv4
 #   export PREVIEW_INTERNAL_BASE_URL="http://10.0.0.12:8080"  # usually http://${WORKER_PRIVATE_IP}:8080
 #   export CHROME_WS_URL="ws://chrome:9222"
-#   export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
+#   export ENV_PRODUCTION_ENC_B64="$(base64 < "$(./deploy/scripts/resolve-secrets-dir.sh .)/.env.production.enc")"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/worker.yml > /tmp/user-data.yml
 #
