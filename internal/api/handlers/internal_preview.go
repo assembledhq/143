@@ -42,7 +42,7 @@ type InternalPreviewHandler struct {
 	sessions  *db.SessionStore
 	canceller SessionCanceller
 	nodeID    string
-	secret    string
+	keyring   auth.PreviewTokenKeyring
 	logger    zerolog.Logger
 
 	// runtimeAuthCache short-circuits the per-request active-runtime check.
@@ -57,11 +57,19 @@ type InternalPreviewHandler struct {
 }
 
 func NewInternalPreviewHandler(preview *PreviewHandler, manager *previewsvc.Manager, nodeID, secret string, logger zerolog.Logger) *InternalPreviewHandler {
+	keyring, err := auth.NewPreviewTokenKeyring([]string{secret})
+	if err != nil {
+		keyring = auth.PreviewTokenKeyring{}
+	}
+	return NewInternalPreviewHandlerWithKeyring(preview, manager, nodeID, keyring, logger)
+}
+
+func NewInternalPreviewHandlerWithKeyring(preview *PreviewHandler, manager *previewsvc.Manager, nodeID string, keyring auth.PreviewTokenKeyring, logger zerolog.Logger) *InternalPreviewHandler {
 	return &InternalPreviewHandler{
 		preview:           preview,
 		manager:           manager,
 		nodeID:            nodeID,
-		secret:            secret,
+		keyring:           keyring,
 		logger:            logger,
 		runtimeAuthCache:  make(map[uuid.UUID]*runtimeAuthEntry),
 		previewTransports: make(map[uuid.UUID]*http.Transport),
@@ -76,23 +84,40 @@ func (h *InternalPreviewHandler) SetSessionCancelRuntime(sessions *db.SessionSto
 func (h *InternalPreviewHandler) authorize(w http.ResponseWriter, r *http.Request, action string) (*auth.PreviewTokenClaims, bool) {
 	tokenStr := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if tokenStr == "" {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing authorization token")
 		return nil, false
 	}
-	claims, err := auth.ValidatePreviewToken(h.secret, tokenStr)
+	claims, err := h.keyring.Validate(tokenStr)
 	if err != nil {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid preview token", err)
 		return nil, false
 	}
 	if claims.TargetNodeID != h.nodeID {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "WRONG_PREVIEW_WORKER", "preview token targets a different worker")
 		return nil, false
 	}
 	if claims.Action != action {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "PREVIEW_ACTION_MISMATCH", "preview token is not valid for this action")
 		return nil, false
 	}
 	return claims, true
+}
+
+func markPreviewWorkerError(w http.ResponseWriter) {
+	w.Header().Set(auth.PreviewWorkerErrorHeader, "1")
+}
+
+func (h *InternalPreviewHandler) AuthCheck(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, "auth_check"); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{
+		Data: map[string]string{"node_id": h.nodeID},
+	})
 }
 
 func (h *InternalPreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request) (previewsvc.PreviewInspector, bool) {
@@ -449,15 +474,18 @@ func (h *InternalPreviewHandler) authorizePreviewAction(w http.ResponseWriter, r
 		return uuid.Nil, nil, false
 	}
 	if claims.PreviewID == nil || *claims.PreviewID != previewID {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "PREVIEW_MISMATCH", "preview token does not match the requested preview")
 		return uuid.Nil, nil, false
 	}
 	if action == "proxy" && (claims.RuntimeID == nil || claims.RuntimeEpoch <= 0) {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "PREVIEW_RUNTIME_MISMATCH", "preview token does not match an active runtime")
 		return uuid.Nil, nil, false
 	}
 	if action == "proxy" && h.preview != nil && h.preview.store != nil {
 		if !h.runtimeClaimsValid(r.Context(), claims, previewID) {
+			markPreviewWorkerError(w)
 			writeError(w, r, http.StatusForbidden, "PREVIEW_RUNTIME_MISMATCH", "preview token does not match an active runtime")
 			return uuid.Nil, nil, false
 		}
@@ -534,6 +562,10 @@ func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.
 			stripPreviewAccessCookies(req)
 		},
 		Transport: h.previewTransport(orgID, previewID),
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del(auth.PreviewWorkerErrorHeader)
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), originalReq, orgID, previewID, claims, backendPath).
 				Msg("internal preview proxy error")

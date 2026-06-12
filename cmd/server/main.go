@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/api"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
@@ -687,7 +688,12 @@ func main() {
 				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 				PreferredRegion:      cfg.NodeRegion,
 			})
-			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+			if keyringErr != nil {
+				logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+				previewRPCKeyring = auth.PreviewTokenKeyring{}
+			}
+			client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
 			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
@@ -950,6 +956,7 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeR
 	}
 	if previewCapable {
 		metadata["preview_capable"] = true
+		metadata["preview_rpc_auth_check"] = true
 	}
 	if previewInternalBaseURL != "" {
 		metadata["preview_internal_base_url"] = previewInternalBaseURL

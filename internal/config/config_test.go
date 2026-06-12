@@ -159,6 +159,26 @@ func TestLoad_PreviewSecretBundleKEKVersion(t *testing.T) {
 }
 
 //nolint:paralleltest // uses t.Setenv
+func TestLoad_PreviewRPCSecrets(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "session-secret")
+	t.Setenv("PREVIEW_RPC_SECRETS", " new-secret , old-secret ,, ")
+
+	cfg := Load()
+
+	require.Equal(t, []string{"new-secret", "old-secret"}, cfg.PreviewRPCSecrets, "Load should parse PREVIEW_RPC_SECRETS in signing order and drop empty entries")
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestLoad_PreviewRPCSecretsFallbackToSessionSecret(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "session-secret")
+	t.Setenv("PREVIEW_RPC_SECRETS", "")
+
+	cfg := Load()
+
+	require.Equal(t, []string{"session-secret"}, cfg.PreviewRPCSecrets, "Load should fall back to SESSION_SECRET for preview RPC compatibility when PREVIEW_RPC_SECRETS is unset")
+}
+
+//nolint:paralleltest // uses t.Setenv
 func TestLoad_DerivesStandaloneRedisURL(t *testing.T) {
 	t.Setenv("REDIS_URL", "")
 	t.Setenv("REDIS_TOPOLOGY", "standalone")

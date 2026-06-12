@@ -36,6 +36,7 @@ type Config struct {
 	Port                    int           `env:"PORT"                  envDefault:"8080"`
 	LogLevel                string        `env:"LOG_LEVEL"             envDefault:"info"`
 	SessionSecret           string        `env:"SESSION_SECRET"` // #nosec G117 -- env config field
+	PreviewRPCSecrets       []string      `env:"PREVIEW_RPC_SECRETS"   envSeparator:","`
 	NodeID                  string        `env:"NODE_ID"`
 	NodeRegion              string        `env:"NODE_REGION"`
 	BaseURL                 string        `env:"BASE_URL"              envDefault:"http://localhost:8080"`
@@ -385,6 +386,7 @@ func Load() *Config {
 	if cfg.DatabaseMaxConnIdleTime < 0 {
 		cfg.DatabaseMaxConnIdleTime = 0
 	}
+	cfg.PreviewRPCSecrets = normalizePreviewRPCSecrets(cfg.PreviewRPCSecrets, cfg.SessionSecret)
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
 	if cfg.CSRFSigningKey == "" {
@@ -396,6 +398,21 @@ func Load() *Config {
 	}
 
 	return cfg
+}
+
+func normalizePreviewRPCSecrets(secrets []string, sessionSecret string) []string {
+	normalized := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		normalized = append(normalized, secret)
+	}
+	if len(normalized) == 0 && strings.TrimSpace(sessionSecret) != "" {
+		normalized = append(normalized, strings.TrimSpace(sessionSecret))
+	}
+	return normalized
 }
 
 // GitHubAppEnabled reports whether the GitHub App integration should be
