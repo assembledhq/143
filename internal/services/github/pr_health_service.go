@@ -541,8 +541,9 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 }
 
 type StartPullRequestRepairOptions struct {
-	Action   models.PullRequestRepairActionType
-	ThreadID *uuid.UUID
+	Action      models.PullRequestRepairActionType
+	ThreadID    *uuid.UUID
+	PushChanges *bool
 }
 
 func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, opts StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
@@ -592,16 +593,11 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	if err == nil {
 		session, sessionErr := s.sessions.GetByID(ctx, orgID, existing.SessionID)
 		if sessionErr == nil && !isSessionTerminalStatus(session.Status) {
-			return &models.PullRequestRepairResponse{
-				SessionID:        existing.SessionID,
-				ThreadID:         existing.ThreadID,
-				Mode:             "existing",
-				ReusedInFlight:   true,
-				HeadSHA:          current.HeadSHA,
-				BaseSHA:          current.BaseSHA,
-				HealthVersion:    current.Version,
-				RepairActionType: action,
-			}, nil
+			// The existing repair run carries no push_changes preference, so we
+			// cannot verify that the in-flight session's prompt matches the
+			// caller's intent.  Return an error for all cases; the caller can
+			// navigate to the active repair via active_repairs on the health response.
+			return nil, ErrRepairAlreadyInProgress
 		}
 		_ = s.pullRequests.DeactivateRepairRun(ctx, orgID, existing.ID)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -631,7 +627,14 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	if workspaceMode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason != "" {
 		return nil, fmt.Errorf("canonical pull request session is not ready for repair: %s", reason)
 	}
-	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID)
+	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action, repairShouldPushChanges(opts)), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID)
+}
+
+func repairShouldPushChanges(opts StartPullRequestRepairOptions) bool {
+	if opts.PushChanges == nil {
+		return true
+	}
+	return *opts.PushChanges
 }
 
 func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current models.PullRequestHealthCurrent, summary models.PullRequestHealthSummary, snapshot models.PullRequestHealthSnapshot, action models.PullRequestRepairActionType) ([]byte, error) {
@@ -769,19 +772,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	}
 	if err := txPRs.CreateRepairRun(ctx, repairRun); err != nil {
 		if isUniqueActiveRepairRunViolation(err) {
-			existing, lookupErr := s.pullRequests.GetActiveRepairRun(ctx, pr.OrgID, pr.ID, action, healthVersion)
-			if lookupErr == nil {
-				return &models.PullRequestRepairResponse{
-					SessionID:        existing.SessionID,
-					ThreadID:         existing.ThreadID,
-					Mode:             "existing",
-					ReusedInFlight:   true,
-					HeadSHA:          headSHA,
-					BaseSHA:          baseSHA,
-					HealthVersion:    healthVersion,
-					RepairActionType: action,
-				}, nil
-			}
+			return nil, ErrRepairAlreadyInProgress
 		}
 		return nil, err
 	}
@@ -827,6 +818,10 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 
 // ErrRepairThreadNotFound is returned when the requested thread_id is not found in the canonical PR session.
 var ErrRepairThreadNotFound = errors.New("requested repair thread does not belong to the canonical pull request session")
+
+// ErrRepairAlreadyInProgress is returned when a repair session is already running and the caller requested a
+// different push behavior than the default, meaning the new preference cannot be honored.
+var ErrRepairAlreadyInProgress = errors.New("a repair session is already in progress")
 
 func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*uuid.UUID, error) {
 	if requestedThreadID != nil {
@@ -1110,12 +1105,18 @@ func (s *PRService) publishPullRequestUpdated(ctx context.Context, pr models.Pul
 		Msg("pull request health updated")
 }
 
-func repairPromptForAction(action models.PullRequestRepairActionType) string {
+func repairPromptForAction(action models.PullRequestRepairActionType, pushChanges bool) string {
 	switch action {
 	case models.PullRequestRepairActionTypeResolveConflicts:
-		return "Please resolve the conflicts."
+		if pushChanges {
+			return "Please resolve the conflicts and push changes to the pull request branch."
+		}
+		return "Please resolve the conflicts without pushing changes."
 	case models.PullRequestRepairActionTypeFixTests:
-		return "Please fix these tests."
+		if pushChanges {
+			return "Please fix these tests and push changes to the pull request branch."
+		}
+		return "Please fix these tests without pushing changes."
 	default:
 		return "Please repair this pull request."
 	}
