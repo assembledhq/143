@@ -53,7 +53,7 @@ This is intentionally not ultra-conservative: it targets high utilization at the
 
 ## Where to set these in production
 
-For fleet-managed deploys, set these values in `.env.production.enc` (same pattern as other deploy-time env vars like `MODE`, `DB_HOST`, etc.). Deploy/provision scripts write them into `/opt/143/.env` for worker nodes.
+For fleet-managed deploys, set these values in `.env.production.enc` in your private secrets checkout (`SECRETS_DIR` — see [docs/secrets/README.md](../secrets/README.md)), same pattern as other deploy-time env vars like `MODE`, `DB_HOST`, etc. Deploy/provision scripts write them into `/opt/143/.env` for worker nodes.
 
 For fleet-managed deploys, either set `WORKER_PROCESS_COUNT` directly or map specific hosts in one env var using `WORKER_BUCKET_MAP`.
 

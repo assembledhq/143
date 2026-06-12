@@ -56,6 +56,13 @@ HOME_DIR="$TMP_DIR/home"
 mkdir -p "$HOME_DIR/.config/sops/age"
 printf 'AGE-SECRET-KEY-test\n' >"$HOME_DIR/.config/sops/age/keys.txt"
 
+# deploy.sh resolves the encrypted bundle from SECRETS_DIR (the private
+# secrets checkout); stage a stub so the sops-stub decrypt path runs.
+SECRETS_DIR="$TMP_DIR/secrets"
+mkdir -p "$SECRETS_DIR"
+printf 'sops-stub\n' >"$SECRETS_DIR/.env.production.enc"
+export SECRETS_DIR
+
 CAPTURE_FILE="$TMP_DIR/deploy.capture"
 : >"$CAPTURE_FILE"
 STDIN_DIR="$TMP_DIR/stdin"
