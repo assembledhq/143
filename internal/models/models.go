@@ -937,7 +937,8 @@ const (
 	JobTypeProjectCycle       = "project_cycle"
 	JobTypeAutomationRun      = "automation_run"
 	JobTypeStartPreview       = "start_preview"
-	JobTypeStartBranchPreview = "start_branch_preview"
+	JobTypeStartBranchPreview  = "start_branch_preview"
+	JobTypeAutoPreviewDeferred = "auto_preview_deferred"
 )
 
 // Job represents an async work queue item.

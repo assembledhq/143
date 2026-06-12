@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -2842,4 +2843,56 @@ func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
 	require.NoError(t, err, "DeleteExpiredDependencyCacheLocations should delete stale location hints")
 	require.Equal(t, int64(7), deleted, "DeleteExpiredDependencyCacheLocations should report deleted rows")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// branchPreviewSummaryTestCols returns the column list for BranchPreviewSummary
+// mock rows, matching the SELECT column order produced by branchPreviewSummarySelect().
+func branchPreviewSummaryTestCols() []string {
+	return []string{
+		"target_id", "preview_id", "repository_id", "repository_full_name", "branch", "commit_sha", "preview_config_name",
+		"source_type", "source_id", "source_url", "status", "created_at", "sort_created_at", "expires_at", "stopped_at", "stopped_reason",
+		"current_phase", "error", "resumable", "resume_estimate_seconds",
+	}
+}
+
+// TestPreviewStore_ListBranchPreviewIndex_SingleQueryForMultipleRows verifies
+// that listing branch previews issues exactly one SQL query regardless of result
+// size (no N+1). The mock expects a single query and returns multiple rows; the
+// test fails if the store issues additional queries per row.
+func TestPreviewStore_ListBranchPreviewIndex_SingleQueryForMultipleRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Build 5 rows to prove no N+1 — all returned from a single query.
+	resumeEstimate := 30
+	rows := pgxmock.NewRows(branchPreviewSummaryTestCols())
+	for i := range 5 {
+		targetID := uuid.New()
+		previewID := uuid.New()
+		rows.AddRow(
+			targetID, &previewID, uuid.New(), "acme/app",
+			fmt.Sprintf("feature/branch-%d", i), "abc123", "",
+			"pull_request", fmt.Sprintf("acme/app#%d@abc123", i+1), "https://github.com/acme/app/pull/1",
+			"ready", now, now, (*time.Time)(nil), (*time.Time)(nil), "",
+			"", "", true, &resumeEstimate,
+		)
+	}
+
+	mock.ExpectQuery("SELECT .+").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+
+	results, err := store.ListBranchPreviewIndex(context.Background(), orgID, BranchPreviewIndexFilters{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, results, 5, "all 5 rows should be returned")
+
+	// ExpectationsWereMet verifies exactly one query was issued — no N+1
+	require.NoError(t, mock.ExpectationsWereMet(), "exactly one SQL query must be issued for any result size")
 }

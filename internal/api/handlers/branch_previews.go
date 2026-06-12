@@ -928,6 +928,22 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 	if h.autoPreviewPoolFull(ctx, orgID) {
 		metrics.RecordPreviewAutoPoolSaturation(ctx, orgID.String())
 		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "pool_full")
+		if h.jobs != nil {
+			deferredPayload := preview.AutoPreviewDeferredPayload{
+				OrgID:        orgID,
+				UserID:       userID,
+				RepositoryID: repo.ID,
+				PRNumber:     prNumber,
+				HeadRef:      headRef,
+				HeadSHA:      headSHA,
+				HTMLURL:      htmlURL,
+				Mode:         mode,
+			}
+			dedupeKey := fmt.Sprintf("auto_preview_deferred:%s:%s:%d:%s", orgID, repo.ID, prNumber, headSHA)
+			if _, err := h.jobs.Enqueue(ctx, orgID, "preview", models.JobTypeAutoPreviewDeferred, deferredPayload, 4, &dedupeKey); err != nil {
+				return fmt.Errorf("enqueue deferred auto preview: %w", err)
+			}
+		}
 		return nil
 	}
 	sourceID := fmt.Sprintf("%s#%d@%s", repo.FullName, prNumber, headSHA)

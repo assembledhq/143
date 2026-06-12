@@ -437,6 +437,15 @@ export default function PreviewsPage() {
     [repositoriesQuery.data?.data],
   );
 
+  const recentPreviews = useMemo(() => {
+    const data = recentQuery.data?.data ?? [];
+    return [...data].sort((a, b) => {
+      if (a.status === "failed" && b.status !== "failed") return -1;
+      if (a.status !== "failed" && b.status === "failed") return 1;
+      return 0;
+    });
+  }, [recentQuery.data?.data]);
+
   const stopPreview = useMutation({
     mutationFn: (preview: BranchPreviewResponse) =>
       api.previews.stop(preview.preview_id ?? preview.target_id),
@@ -558,7 +567,7 @@ export default function PreviewsPage() {
                   </div>
                   <SectionRows
                     scope={section.scope}
-                    previews={sectionQuery.data?.data ?? []}
+                    previews={section.scope === "recent" ? recentPreviews : (sectionQuery.data?.data ?? [])}
                     isLoading={sectionQuery.isLoading}
                     canMutate={canMutate}
                     onStop={(preview) => stopPreview.mutate(preview)}

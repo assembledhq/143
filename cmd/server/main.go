@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api"
+	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/cluster"
@@ -516,6 +517,16 @@ func main() {
 						NodeID:          cfg.NodeID,
 						Logger:          logger,
 					})
+					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
+						autoPreviewNodeStore := db.NewNodeStore(pool)
+						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+							MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+							PreferredRegion:      cfg.NodeRegion,
+						})
+						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
+						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
+						services.AutoPreviewStarter = branchPreviewHandler
+					}
 				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
@@ -793,7 +804,7 @@ func main() {
 		drainCancel()
 		if !workerDrainTimedOut && workerPreviewStore != nil && cfg.NodeID != "" {
 			if drained := waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second); !drained {
-				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorker(context.Background(), cfg.NodeID, "worker preview drain timeout"); err != nil {
+				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), cfg.NodeID, "worker preview drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout); err != nil {
 					logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes lost after drain timeout")
 				}
 			}

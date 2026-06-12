@@ -80,6 +80,21 @@ type StartBranchPreviewJobPayload struct {
 	StopAfterReady    bool                  `json:"stop_after_ready,omitempty"`
 }
 
+// AutoPreviewDeferredPayload is the payload for a deferred auto-preview
+// start job, enqueued when the auto-preview pool is full at webhook time.
+// The job re-attempts the start once capacity is available, retrying with
+// backoff rather than silently dropping the webhook event.
+type AutoPreviewDeferredPayload struct {
+	OrgID          uuid.UUID             `json:"org_id"`
+	UserID         uuid.UUID             `json:"user_id"`
+	RepositoryID   uuid.UUID             `json:"repository_id"`
+	PRNumber       int                   `json:"pr_number"`
+	HeadRef        string                `json:"head_ref"`
+	HeadSHA        string                `json:"head_sha"`
+	HTMLURL        string                `json:"html_url"`
+	Mode           models.PreviewAutoMode `json:"mode"`
+}
+
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.
 type RemoteStopActivePreviewForSessionRequest struct {
 	OrgID     uuid.UUID `json:"org_id"`

@@ -337,6 +337,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if services != nil && services.PreviewStarter != nil {
 		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(stores, services, logger))
 		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(stores, services, logger))
+		if services.AutoPreviewStarter != nil {
+			w.Register(models.JobTypeAutoPreviewDeferred, newAutoPreviewDeferredHandler(stores, services, logger))
+		}
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -555,6 +558,9 @@ type Services struct {
 	// PreviewStarter completes durable preview startup jobs. nil when this
 	// node has no preview provider.
 	PreviewStarter previewStarter
+	// AutoPreviewStarter handles deferred auto-preview starts (E6 queue-at-cap).
+	// nil-safe: deferred auto_preview_deferred jobs are no-ops if not configured.
+	AutoPreviewStarter ghservice.AutoPreviewStarter
 	// PreviewController handles control-plane actions for already-created
 	// previews. nil when preview control is unavailable on this process.
 	PreviewController previewController
@@ -759,6 +765,63 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 			Body:      "The preview is ready.",
 			PreviewID: &input.PreviewID,
 		})
+		return nil
+	}
+}
+
+// newAutoPreviewDeferredHandler retries an auto-preview start that was
+// deferred because the auto-pool was full at webhook time. It re-checks
+// capacity at dequeue time and backs off with a RetryableError when the
+// pool is still saturated, so auto-preview starts queue naturally rather
+// than being silently dropped.
+func newAutoPreviewDeferredHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	retryDelay := 2 * time.Minute
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.AutoPreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred: starter not configured")}
+		}
+		var input previewsvc.AutoPreviewDeferredPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal auto_preview_deferred payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred payload missing required ids")}
+		}
+
+		// Load repo so we can call StartAutoPullRequestPreview.
+		if stores == nil || stores.Repositories == nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred: repository store not configured")}
+		}
+		repo, err := stores.Repositories.GetByID(ctx, input.OrgID, input.RepositoryID)
+		if err != nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred: load repository: %w", err)}
+		}
+
+		// Check pool capacity. If still full, back off and let the retry
+		// mechanism reschedule rather than immediately calling the starter
+		// (which would enqueue another deferred job, creating a chain).
+		if stores.Previews != nil && stores.Organizations != nil {
+			maxActive := models.DefaultPreviewAutoPoolMaxActive
+			if org, orgErr := stores.Organizations.GetByID(ctx, input.OrgID); orgErr == nil {
+				if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil && settings.PreviewAutoPoolMaxActive > 0 {
+					maxActive = settings.PreviewAutoPoolMaxActive
+				}
+			}
+			count, countErr := stores.Previews.CountActiveAutoPreviews(ctx, input.OrgID)
+			if countErr == nil && count >= maxActive {
+				logger.Debug().
+					Str("org_id", input.OrgID.String()).
+					Int("active", count).
+					Int("max", maxActive).
+					Dur("retry_after", retryDelay).
+					Msg("auto_preview_deferred: pool still full, backing off")
+				return &RetryableError{Err: fmt.Errorf("auto-preview pool full (%d/%d)", count, maxActive), RetryAfter: &retryDelay}
+			}
+		}
+
+		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode); err != nil {
+			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)
+		}
 		return nil
 	}
 }
