@@ -18,6 +18,7 @@ import (
 
 const PreviewDependencyCacheRuntimeVersion = "preview-dependency-cache-v1"
 const PreviewPackageManagerCacheRuntimeVersion = "preview-package-manager-cache-v1"
+const PreviewBuildCacheRuntimeVersion = "preview-build-cache-v1"
 
 type PreviewInstallLockfileKey struct {
 	Path   string `json:"path"`
@@ -132,6 +133,37 @@ func ComputePreviewDependencyCachePlacementKey(orgID, repoID uuid.UUID, configNa
 	key, err := stableJSONSHA256(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal dependency cache placement key: %w", err)
+	}
+	return key, nil
+}
+
+// ComputePreviewBuildCacheKey returns the latest-wins key for the
+// build-artifact cache. Unlike install-artifact keys it deliberately excludes
+// lockfile contents and sandbox identity: build tools (e.g. turbo) content-hash
+// their own cache entries, so a single blob per (org, repo, config, install,
+// paths) slot that is overwritten after every ready preview maximizes hit rate,
+// and a stale blob degrades to partial build-tool hits rather than wrong
+// output.
+func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {
+	payload := previewDependencyCachePlacementKey{
+		RuntimeVersion: PreviewBuildCacheRuntimeVersion,
+		OrgID:          orgID,
+		RepoID:         repoID,
+		ConfigName:     strings.TrimSpace(configName),
+		ConfigDigest:   strings.TrimSpace(configDigest),
+		EffectivePaths: sortedNormalizedDependencyPaths(effectivePaths),
+	}
+	if install != nil {
+		payload.InstallCommand = append([]string(nil), install.Command...)
+		payload.InstallCwd = install.Cwd
+		if payload.InstallCwd == "" {
+			payload.InstallCwd = "."
+		}
+		payload.LockfilePaths = sortedNormalizedDependencyPaths(install.Lockfiles)
+	}
+	key, err := stableJSONSHA256(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal build cache key: %w", err)
 	}
 	return key, nil
 }
