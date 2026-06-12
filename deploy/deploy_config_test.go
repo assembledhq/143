@@ -634,6 +634,36 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "routine blue/green deploy refuses blocking drain fallback", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
 }
 
+func TestDeployRunsPreviewRPCAuthCheckBeforeCutoverAndWorkerDrain(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	rollingBody := extractShellFunction(t, deployText, "rolling_deploy_service", "resolve_worker_drain_timeout_seconds")
+	workerBody := extractShellFunction(t, deployText, "deploy_worker_blue_green", "dump_diagnostics")
+
+	cliSource, err := os.ReadFile("../cmd/worker-deployctl/main.go")
+	require.NoError(t, err, "test should read worker-deployctl source")
+	require.Contains(t, string(cliSource), `case "preview-auth-check":`, "worker-deployctl should expose a preview RPC auth compatibility probe")
+	require.Contains(t, string(cliSource), "runPreviewAuthCheck", "preview-auth-check should have a dedicated CLI implementation")
+
+	appProbeIndex := strings.Index(rollingBody, `preview_rpc_auth_preflight "$new_container"`)
+	require.NotEqual(t, -1, appProbeIndex, "app rolling deploy should run the preview RPC auth probe from the new api container")
+	appDrainIndex := strings.Index(rollingBody, `echo "Draining $old_count old $service container(s)`)
+	require.NotEqual(t, -1, appDrainIndex, "app rolling deploy should still drain old containers")
+	require.Less(t, appProbeIndex, appDrainIndex, "app rolling deploy should run preview RPC auth check before draining old api containers")
+
+	workerProbeIndex := strings.Index(workerBody, `run_worker_deployctl preview-auth-check --json`)
+	require.NotEqual(t, -1, workerProbeIndex, "worker blue/green deploy should run preview RPC auth check from the candidate image")
+	heartbeatIndex := strings.Index(workerBody, `wait_worker_db_heartbeat "$node_id"`)
+	require.NotEqual(t, -1, heartbeatIndex, "worker blue/green deploy should wait for the green generation heartbeat")
+	workerDrainIndex := strings.Index(workerBody, `drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id"`)
+	require.NotEqual(t, -1, workerDrainIndex, "worker blue/green deploy should drain old worker containers")
+	require.Less(t, heartbeatIndex, workerProbeIndex, "worker deploy should only probe after the green generation is registered")
+	require.Less(t, workerProbeIndex, workerDrainIndex, "worker deploy should run preview RPC auth check before draining old worker containers")
+}
+
 func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testing.T) {
 	t.Parallel()
 

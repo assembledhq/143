@@ -36,6 +36,7 @@ type WorkerNodeMetadata struct {
 	BuildSHA               string `json:"build_sha,omitempty"`
 	Region                 string `json:"region,omitempty"`
 	PreviewCapable         bool   `json:"preview_capable,omitempty"`
+	PreviewRPCAuthCheck    bool   `json:"preview_rpc_auth_check,omitempty"`
 	PreviewInternalBaseURL string `json:"preview_internal_base_url,omitempty"`
 	StaticEgressCapable    bool   `json:"static_egress_capable,omitempty"`
 	StaticEgressPublicIP   string `json:"static_egress_public_ip,omitempty"`

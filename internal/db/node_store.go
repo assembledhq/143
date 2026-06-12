@@ -144,6 +144,29 @@ func (s *NodeStore) ListActive(ctx context.Context) ([]models.Node, error) {
 	return result, nil
 }
 
+// ListPreviewRPCProbeNodes returns active or draining worker nodes that should
+// be checked before deploying preview RPC callers.
+// lint:allow-no-orgid reason="preview RPC deploy compatibility is cluster-scoped"
+func (s *NodeStore) ListPreviewRPCProbeNodes(ctx context.Context) ([]models.Node, error) {
+	rows, err := s.db.Query(ctx,
+		fmt.Sprintf(`SELECT %s FROM nodes
+		 WHERE status IN ('active', 'draining')
+		   AND mode IN ('worker', 'all')
+		   AND metadata->>'preview_capable' = 'true'
+		   AND metadata->>'preview_rpc_auth_check' = 'true'
+		   AND COALESCE(metadata->>'preview_internal_base_url', '') <> ''
+		 ORDER BY id ASC`, nodeColumns),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list preview RPC probe nodes: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Node])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview RPC probe nodes: %w", err)
+	}
+	return result, nil
+}
+
 // WorkerHeartbeatHealth returns aggregate worker heartbeat freshness for
 // control-plane alerts.
 // lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
