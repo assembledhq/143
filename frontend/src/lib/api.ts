@@ -435,11 +435,12 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').SessionLogDetail>>(`/api/v1/sessions/${sessionId}/logs/${logId}`),
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
-    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
+    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
         ...(options.draft !== undefined ? { draft: options.draft } : {}),
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
+        ...(options.mergeWhenReady ? { merge_when_ready: true } : {}),
       } : undefined),
     createBranch: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/branch`, options ? {

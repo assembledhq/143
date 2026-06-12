@@ -7064,6 +7064,84 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionHandler_CreatePR_WithMergeWhenReadyIncludesIntentInJobPayload(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	snapshotKey := "snap-TestSessionHandler_CreatePR_WithMergeWhenReadyIncludesIntentInJobPayload"
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	jobID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	diff := "--- a/file.go\n+++ b/file.go\n@@ -1 +1 @@\n-old\n+new"
+	var payloadBytes []byte
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, "idle", (*string)(nil), nil, now,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			addSessionRow(pgxmock.NewRows(sessionColumns),
+				sessionID, issueID, orgID, "claude_code", "completed", "semi", "low",
+				nil, nil, nil, nil,
+				nil, false, &now, &now, nil,
+				nil, nil, nil, false,
+				nil, nil, nil, nil, &diff,
+				nil, nil, nil, nil,
+				nil, nil,
+				nil,
+				nil, 0, now, "none", &snapshotKey,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, "queued", (*string)(nil), nil, now,
+			),
+		)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), capturingJSONArg{dest: &payloadBytes}, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr", strings.NewReader(`{"merge_when_ready":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreatePR(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "CreatePR should accept the merge-when-ready publish intent")
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(payloadBytes, &payload), "job payload should be valid JSON")
+	require.Equal(t, true, payload["merge_when_ready"], "open_pr job payload should carry the merge-when-ready intent")
+	require.Equal(t, userID.String(), payload["requested_by_user_id"], "open_pr job payload should carry the merge-when-ready requester")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandler_CreatePR_RejectsActiveThreadRuntimeHolders(t *testing.T) {
 	t.Parallel()
 

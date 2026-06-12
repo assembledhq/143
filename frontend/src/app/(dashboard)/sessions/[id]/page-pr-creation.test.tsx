@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers } from '@/test/mocks/handlers';
+import { mockSessions, mockMembers, mockPR } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import type { Session, User, SingleResponse } from '@/lib/types';
 import { installSessionDetailPageTestHooks, mockSessionDetailWithLazyDiff } from './session-detail-test-kit';
@@ -695,6 +695,45 @@ describe('SessionDetailPage PR creation', () => {
     });
   });
 
+  it('calls createPR API with merge_when_ready when Create PR and enable auto-merge is clicked', async () => {
+    let createPRBody: unknown;
+
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.post('/api/v1/sessions/:id/pr', async ({ request }) => {
+        createPRBody = await request.json();
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'More publish actions' }));
+    await user.click(await screen.findByRole('menuitem', { name: /Create PR and enable auto-merge/ }));
+
+    await waitFor(() => {
+      expect(createPRBody).toEqual({ merge_when_ready: true });
+    });
+  });
+
   it('keeps Create PR at full opacity while the request is queueing', async () => {
     let releaseCreatePR: (() => void) | undefined;
     const createPRResponse = new Promise<Response>((resolve) => {
@@ -1360,6 +1399,63 @@ describe('SessionDetailPage PR creation', () => {
     expect(alert).toHaveTextContent('GitHub rejected the branch push.');
     expect(within(alert).getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   }, 8000);
+
+  it('refetches the PR row when auto-merge queueing fails after opening the PR', async () => {
+    let sessionFetchCount = 0;
+    let prFetchCount = 0;
+    const queuedSession: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'queued',
+    };
+    const failedAfterOpenSession: Session = {
+      ...queuedSession,
+      pr_creation_state: 'failed',
+      pr_creation_error: 'Could not enable auto-merge for this pull request.',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        sessionFetchCount += 1;
+        if (sessionFetchCount <= 1) {
+          return HttpResponse.json({
+            data: { ...queuedSession, pr_creation_state: 'idle' },
+          } satisfies SingleResponse<Session>);
+        }
+        return HttpResponse.json({ data: failedAfterOpenSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        prFetchCount += 1;
+        if (prFetchCount <= 1) {
+          return HttpResponse.json(
+            { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+            { status: 404 },
+          );
+        }
+        return HttpResponse.json({ data: mockPR });
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    await waitFor(
+      async () => {
+        expect(await screen.findByRole('link', { name: /View PR/ })).toBeInTheDocument();
+      },
+      { timeout: 8000 },
+    );
+    expect(prFetchCount).toBeGreaterThan(1);
+  }, 10000);
 
   it('shows snapshot-unavailable guidance without a retry action when direct PR creation loses the snapshot', async () => {
     const sessionWithDiff: Session = {

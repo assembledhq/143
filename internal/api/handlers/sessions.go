@@ -1988,9 +1988,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 
 	// Parse optional request body for per-PR overrides and authorship flow.
 	var req struct {
-		Draft       *bool  `json:"draft,omitempty"`
-		AuthorMode  string `json:"author_mode,omitempty"`
-		ResumeToken string `json:"resume_token,omitempty"`
+		Draft          *bool  `json:"draft,omitempty"`
+		AuthorMode     string `json:"author_mode,omitempty"`
+		ResumeToken    string `json:"resume_token,omitempty"`
+		MergeWhenReady bool   `json:"merge_when_ready,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -2002,6 +2003,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
+	}
+	if req.ResumeToken != "" && len(h.prAuthSigningKey) > 0 {
+		if claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now()); tokenErr == nil && claims.MergeWhenReady {
+			req.MergeWhenReady = true
+		}
 	}
 
 	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
@@ -2028,6 +2034,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		ActionDescription:    "create this pull request",
 		ResumeExpiredMessage: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
 		Draft:                req.Draft,
+		MergeWhenReady:       req.MergeWhenReady,
 	}) {
 		return
 	}
@@ -2041,6 +2048,15 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	if authorMode != prAuthorModeAuto {
 		payload["author_mode"] = string(authorMode)
+	}
+	if req.MergeWhenReady {
+		user := middleware.UserFromContext(r.Context())
+		if user == nil {
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			return
+		}
+		payload["merge_when_ready"] = true
+		payload["requested_by_user_id"] = user.ID.String()
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 	queued, err := h.enqueuePublishActionInTx(
@@ -2074,6 +2090,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	})
 	if req.Draft != nil {
 		prDetails["draft"] = *req.Draft
+	}
+	if req.MergeWhenReady {
+		prDetails["merge_when_ready"] = true
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 		marshalAuditDetails(h.logger, prDetails))
