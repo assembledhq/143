@@ -1429,7 +1429,10 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 		UserID:            userID,
 		PreviewInstanceID: previewID,
 		SessionTokenHash:  tokenHash,
-		ExpiresAt:         time.Now().Add(5 * time.Minute),
+		// Deliberately short: this initial window only needs to cover token
+		// redemption. The gateway extends the session to its full sliding
+		// lifetime (accessSessionTTL) on the first proxied request.
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 
 	if err := m.store.CreateAccessSession(ctx, sess); err != nil {
