@@ -12,11 +12,14 @@ import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
-  previewOriginFromURL,
 } from "@/lib/preview-bootstrap";
-import { safeExternalUrl } from "@/lib/utils";
 
 const BOOTSTRAP_TIMEOUT_MS = 15_000;
+
+type BootstrapToken = {
+  token: string;
+  preview_id?: string;
+};
 
 type PendingOpen = {
   previewID: string;
@@ -34,6 +37,7 @@ export type OpenPreviewButtonProps = {
   variant?: ComponentProps<typeof Button>["variant"];
   size?: ComponentProps<typeof Button>["size"];
   className?: string;
+  bootstrapPreview?: (previewId: string) => Promise<BootstrapToken>;
 };
 
 export function OpenPreviewButton({
@@ -44,6 +48,7 @@ export function OpenPreviewButton({
   variant,
   size,
   className,
+  bootstrapPreview,
 }: OpenPreviewButtonProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const pendingRef = useRef<PendingOpen | null>(null);
@@ -51,11 +56,9 @@ export function OpenPreviewButton({
   const [iframeSrc, setIframeSrc] = useState<string | undefined>();
   const [isOpening, setIsOpening] = useState(false);
 
-  const safePreviewURL = useMemo(() => safeExternalUrl(previewUrl), [previewUrl]);
-  const previewOrigin = useMemo(
-    () => (safePreviewURL ? previewOriginFromURL(safePreviewURL) : undefined),
-    [safePreviewURL],
-  );
+  const safePreview = useMemo(() => parsePreviewURL(previewUrl), [previewUrl]);
+  const safePreviewURL = safePreview?.href;
+  const previewOrigin = safePreview?.origin;
 
   const clearTimeoutRef = useCallback(() => {
     if (timeoutRef.current !== null) {
@@ -82,10 +85,11 @@ export function OpenPreviewButton({
   );
 
   const bootstrapMutation = useMutation({
-    mutationFn: (id: string) => api.previews.bootstrap(id),
+    mutationFn: (id: string) =>
+      bootstrapPreview ? bootstrapPreview(id) : api.previews.bootstrap(id).then((response) => response.data),
     onSuccess: (response) => {
       const pending = pendingRef.current;
-      const token = response.data.token;
+      const token = response.token;
       if (!pending || !token) return;
 
       const contentWindow = iframeRef.current?.contentWindow;
@@ -197,5 +201,29 @@ export function OpenPreviewButton({
         />
       ) : null}
     </>
+  );
+}
+
+function parsePreviewURL(url: string | undefined | null): { href: string; origin: string } | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" || isLocalPreviewHTTP(parsed)) {
+      return { href: url, origin: parsed.origin };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function isLocalPreviewHTTP(parsed: URL): boolean {
+  if (parsed.protocol !== "http:") return false;
+  return (
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "[::1]" ||
+    parsed.hostname.endsWith(".localhost") ||
+    parsed.hostname.endsWith(".test")
   );
 }

@@ -13,7 +13,6 @@ import {
   Play,
   Square,
   RotateCw,
-  ExternalLink,
   Monitor,
   Loader2,
   AlertTriangle,
@@ -61,13 +60,19 @@ import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { TTLWarning } from "./ttl-warning";
+import { OpenPreviewButton } from "./open-preview-button";
 import {
   buildPreviewBootstrapSrc,
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
 } from "@/lib/preview-bootstrap";
 
-export { PREVIEW_BOOTSTRAP_READY_EVENT, PREVIEW_BOOTSTRAP_TOKEN_EVENT };
+export {
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
+  PREVIEW_BOOTSTRAP_READY_EVENT,
+  PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+};
 
 export function buildPreviewIframeSrc(previewOrigin: string): string {
   return buildPreviewBootstrapSrc(previewOrigin);
@@ -1040,16 +1045,13 @@ export function PreviewPanel({
               )}
 
               {isReady && previewOrigin && (
-                <Button size="sm" asChild>
-                  <a
-                    href={previewOrigin}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <ExternalLink className="size-3.5" />
-                    Open Preview
-                  </a>
-                </Button>
+                <OpenPreviewButton
+                  previewId={instance?.id}
+                  previewUrl={previewOrigin}
+                  label="Open Preview"
+                  size="sm"
+                  bootstrapPreview={() => api.sessions.preview.bootstrap(sessionId)}
+                />
               )}
 
               {shouldShowRetryPreview && (
