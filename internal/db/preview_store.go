@@ -959,6 +959,7 @@ func (s *PreviewStore) GetActivePreviewRuntime(ctx context.Context, orgID, previ
 	return &row, nil
 }
 
+// ListActivePreviewRuntimesForReachability returns active runtime endpoints for app-side probes.
 // lint:allow-no-orgid reason="cross-org app-side reachability sweep probes active preview runtime endpoints"
 func (s *PreviewStore) ListActivePreviewRuntimesForReachability(ctx context.Context, limit int) ([]models.PreviewRuntime, error) {
 	if limit <= 0 {
