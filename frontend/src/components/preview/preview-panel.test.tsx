@@ -1,6 +1,8 @@
+import { act } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   buildPreviewIframeSrc,
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
   PreviewPanel,
@@ -564,20 +566,60 @@ describe("PreviewPanel component", () => {
     );
   });
 
-  it("renders a prominent preview link instead of viewport preset buttons in ready state", async () => {
+  it("bootstraps preview access before opening from the ready state", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
+    const openedWindow = {
+      close: vi.fn(),
+      document: {
+        close: vi.fn(),
+        write: vi.fn(),
+      },
+      location: {
+        href: "about:blank",
+      },
+      opener: null,
+    } as unknown as Window;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(openedWindow);
 
     const { container } = renderWithProviders(
       <PreviewPanel {...DEFAULT_PROPS} />,
     );
 
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: /Open Preview/i })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Open Preview" }));
+
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(screen.getByTitle("Preview bootstrap")).toHaveAttribute(
+      "src",
+      "http://prev-1.preview.test/bootstrap",
+    );
+    expect(openedWindow.location.href).toBe("about:blank");
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: PREVIEW_BOOTSTRAP_READY_EVENT },
+          origin: "http://prev-1.preview.test",
+        }),
+      );
     });
 
-    const previewLink = screen.getByRole("link", { name: /Open Preview/i });
-    expect(previewLink).toHaveAttribute("href", "http://prev-1.preview.test");
-    expect(previewLink).toHaveAttribute("target", "_blank");
+    await waitFor(() => {
+      expect(mockBootstrap).toHaveBeenCalledWith("sess-1");
+    });
+    expect(openedWindow.location.href).toBe("about:blank");
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: PREVIEW_BOOTSTRAP_COMPLETE_EVENT },
+          origin: "http://prev-1.preview.test",
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(openedWindow.location.href).toBe("http://prev-1.preview.test");
+    });
     expect(screen.queryByRole("button", { name: /^Stop$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Restart$/ })).not.toBeInTheDocument();
 
@@ -586,6 +628,8 @@ describe("PreviewPanel component", () => {
       ".flex.items-center.gap-0\\.5.rounded-md.border",
     );
     expect(presetContainer).not.toBeInTheDocument();
+
+    openSpy.mockRestore();
   });
 
   it("renders ConsoleBadge in ready state", async () => {
@@ -1599,7 +1643,7 @@ describe("PreviewPanel component", () => {
     const freshnessCallout = screen.getByTestId("preview-freshness-callout");
     const refreshButton = screen.getByRole("button", { name: "Refresh preview" });
     expect(freshnessCallout).toContainElement(refreshButton);
-    expect(screen.getByRole("link", { name: "Open Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry preview" })).not.toBeInTheDocument();
 
     await user.click(refreshButton);
