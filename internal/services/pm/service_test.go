@@ -43,6 +43,13 @@ func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUI
 }
 
 func (m *mockSessionStore) Create(ctx context.Context, run *models.Session) error {
+	if run.ID == uuid.Nil {
+		run.ID = uuid.New()
+	}
+	if run.PrimaryThreadID == nil {
+		threadID := uuid.New()
+		run.PrimaryThreadID = &threadID
+	}
 	m.created = append(m.created, run)
 	return nil
 }
@@ -62,6 +69,15 @@ func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.U
 }
 
 func (m *mockSessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
+	return nil
+}
+
+type mockSessionMessageStore struct {
+	created []*models.SessionMessage
+}
+
+func (m *mockSessionMessageStore) Create(ctx context.Context, msg *models.SessionMessage) error {
+	m.created = append(m.created, msg)
 	return nil
 }
 
@@ -114,12 +130,13 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 	require.NoError(t, err, "should marshal settings")
 
 	svc := &Service{
-		issues:   &mockIssueStore{},
-		sessions: &mockSessionStore{},
-		orgs:     &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
-		jobs:     &mockJobStore{},
-		plans:    &mockPlanStore{},
-		logger:   zerolog.Nop(),
+		issues:          &mockIssueStore{},
+		sessions:        &mockSessionStore{},
+		sessionMessages: &mockSessionMessageStore{},
+		orgs:            &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}},
+		jobs:            &mockJobStore{},
+		plans:           &mockPlanStore{},
+		logger:          zerolog.Nop(),
 	}
 
 	plan := &Plan{
@@ -157,6 +174,15 @@ func TestExecutePlan_DelegatesWithinCapacity(t *testing.T) {
 	require.NotNil(t, runStore.created[0].Title, "session title should be set")
 	require.NotNil(t, runStore.created[0].PMApproach, "PM approach should be set")
 	require.NotNil(t, runStore.created[0].PMReasoning, "PM reasoning should be set")
+
+	messageStore := svc.sessionMessages.(*mockSessionMessageStore)
+	require.Len(t, messageStore.created, 1, "delegated PM sessions should include an initial user message")
+	require.Equal(t, runStore.created[0].ID, messageStore.created[0].SessionID, "initial user message should belong to delegated session")
+	require.Equal(t, orgID, messageStore.created[0].OrgID, "initial user message should be org-scoped")
+	require.Equal(t, runStore.created[0].PrimaryThreadID, messageStore.created[0].ThreadID, "initial user message should be attached to the primary thread")
+	require.Equal(t, 0, messageStore.created[0].TurnNumber, "initial user message should be turn zero")
+	require.Equal(t, models.MessageRoleUser, messageStore.created[0].Role, "initial PM message should render as a user message")
+	require.Equal(t, "Approach 1", messageStore.created[0].Content, "initial user message should use the PM approach")
 }
 
 func TestExecutePlan_ManualAutonomySkipsDelegation(t *testing.T) {
