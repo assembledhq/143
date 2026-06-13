@@ -187,23 +187,21 @@ describe("Agent settings page", () => {
 
 	    installHandlers();
 	    server.use(
-	      http.post("/api/v1/settings/coding-auths", async ({ request }) => {
+	      http.post("/api/v1/coding-credentials", async ({ request }) => {
 	        capturedBody = await request.json() as Record<string, unknown>;
 	        return HttpResponse.json({
-	          data: {
-	            id: "auth-opencode",
-	            org_id: "org-1",
-	            priority: 2,
-	            agent: "opencode",
-	            auth_type: "api_key",
-	            label: "OpenCode API key",
-	            scope: "organization",
-	            provider: "opencode",
-	            status: "healthy",
-	            is_default: false,
-	            created_at: "2026-04-22T10:00:00Z",
-	            updated_at: "2026-04-22T10:00:00Z",
-	          },
+	          id: "auth-opencode",
+	          org_id: "org-1",
+	          priority: 2,
+	          agent: "opencode",
+	          auth_type: "api_key",
+	          label: "OpenCode API key",
+	          scope: "org",
+	          provider: "opencode",
+	          status: "healthy",
+	          is_default: false,
+	          created_at: "2026-04-22T10:00:00Z",
+	          updated_at: "2026-04-22T10:00:00Z",
 	        });
 	      }),
 	    );

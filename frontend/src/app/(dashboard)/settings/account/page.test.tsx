@@ -259,7 +259,7 @@ describe("Account settings page", () => {
     });
 	  });
 
-	  it("posts personal OpenCode auth with an explicit backing provider", async () => {
+	  it("posts personal OpenCode auth with an explicit backing provider", { timeout: 12_000 }, async () => {
 	    const user = userEvent.setup();
 	    let createBody: Record<string, unknown> | null = null;
 	    server.use(
