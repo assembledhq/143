@@ -19,7 +19,7 @@ const apiClientColumns = `id, org_id, name, description, status,
 	created_by_user_id, disabled_by_user_id, disabled_at, created_at, updated_at`
 
 const apiTokenColumns = `id, org_id, api_client_id, name, token_hash, token_prefix,
-	scopes, repository_ids, expires_at, last_used_at, last_used_ip, last_used_user_agent,
+	scopes, repository_ids, allowed_ip_cidrs, expires_at, last_used_at, last_used_ip, last_used_user_agent,
 	revoked_by_user_id, revoked_at, created_by_user_id, created_at` // #nosec G101 -- SQL column list, not a credential
 
 type APIClientStore struct {
@@ -143,10 +143,10 @@ func NewAPITokenStore(db DBTX) *APITokenStore {
 func (s *APITokenStore) Create(ctx context.Context, token *models.APIToken) error {
 	query := fmt.Sprintf(`INSERT INTO api_tokens (
 		org_id, api_client_id, name, token_hash, token_prefix, scopes,
-		repository_ids, expires_at, created_by_user_id
+		repository_ids, allowed_ip_cidrs, expires_at, created_by_user_id
 	) VALUES (
 		@org_id, @api_client_id, @name, @token_hash, @token_prefix, @scopes,
-		@repository_ids, @expires_at, @created_by_user_id
+		@repository_ids, @allowed_ip_cidrs, @expires_at, @created_by_user_id
 	) RETURNING %s`, apiTokenColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":             token.OrgID,
@@ -156,6 +156,7 @@ func (s *APITokenStore) Create(ctx context.Context, token *models.APIToken) erro
 		"token_prefix":       token.TokenPrefix,
 		"scopes":             token.Scopes,
 		"repository_ids":     token.RepositoryIDs,
+		"allowed_ip_cidrs":   token.AllowedIPCidrs,
 		"expires_at":         token.ExpiresAt,
 		"created_by_user_id": token.CreatedByUserID,
 	})
@@ -184,7 +185,7 @@ func (s *APITokenStore) GetByToken(ctx context.Context, rawToken, ip, userAgent 
 			AND (t.expires_at IS NULL OR t.expires_at > now())
 		RETURNING
 			t.id AS token_id, t.org_id, t.api_client_id, t.name AS token_name, t.token_hash, t.token_prefix,
-			t.scopes, t.repository_ids, t.expires_at, t.revoked_at, t.created_by_user_id,
+			t.scopes, t.repository_ids, t.allowed_ip_cidrs, t.expires_at, t.revoked_at, t.created_by_user_id,
 			c.status AS client_status, c.name AS client_name`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"token_hash":           hash,
@@ -203,6 +204,7 @@ func (s *APITokenStore) GetByToken(ctx context.Context, rawToken, ip, userAgent 
 		TokenPrefix     string                 `db:"token_prefix"`
 		Scopes          []string               `db:"scopes"`
 		RepositoryIDs   []uuid.UUID            `db:"repository_ids"`
+		AllowedIPCidrs  []string               `db:"allowed_ip_cidrs"`
 		ExpiresAt       *time.Time             `db:"expires_at"`
 		RevokedAt       *time.Time             `db:"revoked_at"`
 		CreatedByUserID *uuid.UUID             `db:"created_by_user_id"`
@@ -229,6 +231,7 @@ func (s *APITokenStore) GetByToken(ctx context.Context, rawToken, ip, userAgent 
 			TokenPrefix:     row.TokenPrefix,
 			Scopes:          row.Scopes,
 			RepositoryIDs:   row.RepositoryIDs,
+			AllowedIPCidrs:  row.AllowedIPCidrs,
 			ExpiresAt:       row.ExpiresAt,
 			RevokedAt:       row.RevokedAt,
 			CreatedByUserID: row.CreatedByUserID,

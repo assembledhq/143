@@ -1752,9 +1752,66 @@ export interface AIImprovementResponse {
   summary: string;
 }
 
+export type APIClientStatus = 'enabled' | 'disabled';
+
+export interface APIClient {
+  id: string;
+  org_id: string;
+  name: string;
+  description?: string;
+  status: APIClientStatus;
+  created_by_user_id?: string;
+  disabled_by_user_id?: string;
+  disabled_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface APIToken {
+  id: string;
+  org_id: string;
+  api_client_id: string;
+  name: string;
+  token_prefix: string;
+  scopes: string[];
+  repository_ids: string[];
+  allowed_ip_cidrs: string[];
+  expires_at?: string;
+  last_used_at?: string;
+  last_used_ip?: string;
+  last_used_user_agent?: string;
+  revoked_by_user_id?: string;
+  revoked_at?: string;
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CreateAPIKeyRequest {
+  integration_name: string;
+  description?: string;
+  token_name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPITokenRequest {
+  name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPIKeyResponse {
+  client: APIClient;
+  token: APIToken & { token: string };
+}
+
 // Audit log types
 export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user' | 'api_client' | 'api_token';
 
 export interface AuditLog {
   id: number;
