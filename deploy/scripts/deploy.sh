@@ -1796,7 +1796,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       docker rm "$new_cid" >/dev/null 2>&1 || true
       return 1
     fi
-    run_worker_deployctl preview-auth-check --json
+    if ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
+      echo "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure..."
+      docker stop "$new_cid" >/dev/null 2>&1 || true
+      docker rm "$new_cid" >/dev/null 2>&1 || true
+      return 1
+    fi
     if [ -n "$preflight_node_id" ]; then
       protect_active_executor_images "$preflight_node_id" "$deploy_id"
     fi

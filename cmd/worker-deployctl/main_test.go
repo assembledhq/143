@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/stretchr/testify/require"
 )
 
@@ -94,4 +96,33 @@ func TestProbePreviewRPCAuthNodes_UsesBoundedConcurrency(t *testing.T) {
 	require.Equal(t, expected, checked, "probePreviewRPCAuthNodes should report checked nodes in input order")
 	require.GreaterOrEqual(t, atomic.LoadInt32(&roundTripper.maxInFlight), int32(2), "probePreviewRPCAuthNodes should send more than one probe at a time")
 	require.Less(t, elapsed, 500*time.Millisecond, "probePreviewRPCAuthNodes should not serialize per-node latency")
+}
+
+func TestSelectPreviewAuthProbeNodesFiltersByNodeID(t *testing.T) {
+	t.Parallel()
+
+	firstMetadata, err := json.Marshal(map[string]any{
+		"preview_internal_base_url": "http://worker-1:8080",
+	})
+	require.NoError(t, err, "first metadata should marshal")
+	secondMetadata, err := json.Marshal(map[string]any{
+		"preview_internal_base_url": "http://worker-2:8080/",
+	})
+	require.NoError(t, err, "second metadata should marshal")
+
+	nodes := []models.Node{
+		{ID: "worker-1", Metadata: firstMetadata},
+		{ID: "worker-2", Metadata: secondMetadata},
+	}
+
+	selected, err := selectPreviewAuthProbeNodes(nodes, "worker-2")
+	require.NoError(t, err, "selectPreviewAuthProbeNodes should accept an existing node id")
+	require.Equal(t, []previewAuthProbeNode{{
+		ID:      "worker-2",
+		BaseURL: "http://worker-2:8080",
+	}}, selected, "selectPreviewAuthProbeNodes should return only the requested node with a normalized base URL")
+
+	_, err = selectPreviewAuthProbeNodes(nodes, "missing-worker")
+	require.Error(t, err, "selectPreviewAuthProbeNodes should reject an unknown node id")
+	require.Contains(t, err.Error(), "missing-worker", "selectPreviewAuthProbeNodes should name the missing node")
 }
