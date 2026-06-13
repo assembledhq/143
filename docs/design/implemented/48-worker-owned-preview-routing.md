@@ -119,11 +119,17 @@ Startup recovery is worker-scoped. A worker only rehydrates sandbox-auth sockets
 - App nodes do not mount Docker and do not run Chrome.
 - App-node Caddy terminates both the main app domain and the wildcard preview domain, proxying wildcard preview traffic to the API preview gateway port.
 - Worker nodes mount Docker, run the preview-capable server in `MODE=worker`, and run a Chrome sidecar for inspector features.
-- Candidate app and worker generations run `worker-deployctl preview-auth-check`
-  before app cutover or old-worker drain. The command signs an `auth_check`
-  token with the candidate process keyring and calls every active/draining
-  worker that advertises `preview_rpc_auth_check = true` at
-  `/internal/preview/auth-check`. Any rejection fails the deploy closed.
+- Candidate app generations run `worker-deployctl preview-auth-check` before
+  app cutover. The command signs an `auth_check` token with the candidate
+  process keyring and calls every active/draining worker that advertises
+  `preview_rpc_auth_check = true` at `/internal/preview/auth-check`. Any
+  rejection fails the app deploy closed.
+- Candidate worker generations run the same auth check scoped to the newly
+  started worker node before old-worker drain. Worker deploys intentionally do
+  not require worker-to-worker reachability across the whole fleet; app deploys
+  are the fleet-wide app-to-worker compatibility gate. A candidate worker that
+  cannot serve its own advertised internal preview endpoint is rolled back
+  before older generations are drained.
 - `preview_rpc_auth_check` is an opt-in capability flag so the first rollout
   that introduces the endpoint does not fail against older draining workers
   that cannot serve it yet. After workers have rolled, future deploys enforce
