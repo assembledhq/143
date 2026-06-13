@@ -1,0 +1,139 @@
+{
+  "uid": "preview-health",
+  "title": "143 - Preview Health",
+  "tags": ["143", "preview", "health"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active previews",
+      "description": "Current platform-wide active preview count from the preview lifecycle sampler.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"preview health: lifecycle sample\" | stats max(active_previews) as active_previews",
+          "step": "$__interval"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Startup p50/p95",
+      "description": "Preview startup duration from preview row creation to ready_at over the sampler window.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"preview health: lifecycle sample\" | stats max(startup_p50_seconds) as startup_p50_seconds",
+          "step": "$__interval"
+        },
+        {
+          "refId": "B",
+          "queryType": "statsRange",
+          "expr": "_msg:\"preview health: lifecycle sample\" | stats max(startup_p95_seconds) as startup_p95_seconds",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Ready vs failed previews",
+      "description": "Ready previews compared with failed/unavailable previews in the sampler window.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"preview health: lifecycle sample\" | stats max(previews_ready) as previews_ready",
+          "step": "$__interval"
+        },
+        {
+          "refId": "B",
+          "queryType": "statsRange",
+          "expr": "_msg:\"preview health: lifecycle sample\" | stats max(previews_failed_unavailable) as previews_failed_unavailable",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Cache hit rate",
+      "description": "Restore hit ratio by cache kind. Hits are restored cache events; misses and restore failures are non-hits.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"preview health: cache event\" | stats by (cache_kind) avg(cache_hit_value) as cache_hit_rate",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Recent preview errors",
+      "description": "Recent preview-related error logs for quick drilldown.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "expr": "(service:api OR service:worker) AND level:error AND preview"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -3516,6 +3517,48 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 			require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist non-failure restore statuses")
 		})
 	}
+}
+
+func TestManagerServiceObserver_OnCacheRestore_EmitsPreviewHealthCacheEvent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	var logs bytes.Buffer
+	mgr := NewManager(ManagerConfig{
+		Store:    db.NewPreviewStore(mock),
+		Provider: &mockProvider{},
+		Logger:   zerolog.New(&logs),
+	})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	cacheKey := strings.Repeat("d", 64)
+
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+	obs.OnPackageManagerCacheRestore("restored", cacheKey, 512, nil)
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist the preview log")
+
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "cache restore observer should emit a valid JSON log event")
+	require.Equal(t, "preview health: cache event", event["message"], "cache restore observer should use the canonical dashboard log message")
+	require.Equal(t, orgID.String(), event["org_id"], "cache restore event should include org id")
+	require.Equal(t, previewID.String(), event["preview_id"], "cache restore event should include preview id")
+	require.Equal(t, "package_manager", event["cache_kind"], "cache restore event should include cache kind")
+	require.Equal(t, "restore", event["operation"], "cache restore event should identify restore operations")
+	require.Equal(t, "restored", event["status"], "cache restore event should include restore status")
+	require.Equal(t, true, event["cache_hit"], "restored cache statuses should be classified as cache hits")
+	require.Equal(t, float64(1), event["cache_hit_value"], "restored cache statuses should include a numeric hit value for Grafana math")
+	require.Equal(t, float64(512), event["size_bytes"], "cache restore event should include cache size")
 }
 
 func TestManagerServiceObserver_OnPhaseStartAndEnd_PersistsLifecycleLogs(t *testing.T) {
