@@ -431,7 +431,8 @@ type Session struct {
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	Threads []SessionThread `json:"threads"`
+	RepositoryFullName *string         `json:"repository_full_name,omitempty"`
+	Threads            []SessionThread `json:"threads"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is
@@ -581,6 +582,9 @@ func (s SessionDetail) MarshalJSON() ([]byte, error) {
 	base, err := s.Session.marshalJSONMap()
 	if err != nil {
 		return nil, err
+	}
+	if s.RepositoryFullName != nil {
+		base["repository_full_name"] = *s.RepositoryFullName
 	}
 	base["threads"] = s.Threads
 	return json.Marshal(base)

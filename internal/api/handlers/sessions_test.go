@@ -1544,6 +1544,7 @@ func TestSessionHandler_Get(t *testing.T) {
 				now := time.Now()
 				runID := uuid.New()
 				issueID := uuid.New()
+				repoID := uuid.New()
 				mock.ExpectQuery("SELECT").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1558,13 +1559,13 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil,                      // model_override
 							nil,                      // triggered_by_user_id
 							nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-							nil,      // target_branch
-							nil,      // working_branch
-							nil,      // repository_id
-							nil,      // diff_stats
-							nil,      // diff_history
-							nil,      // input_manifest
-							nil, nil, // archived_at, archived_by_user_id
+							ptr("main"),                         // target_branch
+							ptr("143/session-details-metadata"), // working_branch
+							&repoID,                             // repository_id
+							nil,                                 // diff_stats
+							nil,                                 // diff_history
+							nil,                                 // input_manifest
+							nil, nil,                            // archived_at, archived_by_user_id
 							nil,            // automation_run_id
 							"idle",         // pr_creation_state
 							(*string)(nil), // pr_creation_error
@@ -1572,9 +1573,16 @@ func TestSessionHandler_Get(t *testing.T) {
 							now,
 						),
 					)
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+					}).AddRow(
+						repoID, orgID, uuid.New(), int64(123), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(456), "active", nil, nil, json.RawMessage(`{}`), now, now,
+					))
 			},
 			expectedCode: http.StatusOK,
-			expectedBody: "running",
+			expectedBody: "assembledhq/143",
 		},
 		{
 			name:         "returns bad request for invalid UUID",
@@ -1613,8 +1621,8 @@ func TestSessionHandler_Get(t *testing.T) {
 
 			handler.Get(w, req)
 			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
-			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
 		})
 	}
 }

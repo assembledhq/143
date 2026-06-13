@@ -485,6 +485,7 @@ export interface Session {
   target_branch?: string;
   working_branch?: string;
   repository_id?: string;
+  repository_full_name?: string;
   linked_issues?: Array<{
     id: string;
     session_id: string;
