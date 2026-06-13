@@ -16,7 +16,7 @@ The smart routing system adds three capabilities:
 2. **Execution aggressiveness control** — admin-configurable slider that determines how far the system goes (simple fixes only vs. attempt everything)
 3. **Explicit post-run outcomes** — execution status, diff presence, failures, validation, and PR/review state determine what happens after a run
 
-The admin selects their preferred coding agent (Claude Code, Codex, Gemini CLI, etc.) and model separately in the agent settings. Smart routing does not change which agent or model is used — it controls _which issues_ are attempted.
+The admin selects their preferred coding agent (Claude Code, Codex, OpenCode, etc.) and model separately in the agent settings. Smart routing does not change which agent or model is used — it controls _which issues_ are attempted.
 
 ## Complexity Estimation
 
@@ -132,7 +132,7 @@ The agent settings page (`/settings/agents`) is extended with a new "Execution S
 
 Admins choose their preferred coding agent and model in the existing agent config section:
 
-- **Agent type**: Claude Code, Codex, Gemini CLI, or custom
+- **Agent type**: Claude Code, Codex, OpenCode, or custom
 - **Model**: whichever model the chosen agent supports (e.g., for Claude Code: Opus, Sonnet, Haiku)
 
 The system always uses the admin's configured agent and model for all runs. Smart routing does not override this — it only controls which issues are attempted.

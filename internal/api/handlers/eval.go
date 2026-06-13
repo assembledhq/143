@@ -199,7 +199,6 @@ var allowedModels = map[string]bool{
 	"claude-opus-4-6":                 true,
 	"claude-sonnet-4-6":               true,
 	"codex":                           true,
-	"gemini-cli":                      true,
 	models.OpenCodeModelGPT54Mini:     true,
 	models.OpenCodeModelClaudeHaiku45: true,
 	models.OpenCodeModelDeepSeekChat:  true,
@@ -873,7 +872,7 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowedModels[req.Model] {
-		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", "model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, gemini-cli")
+		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", "model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, openai/gpt-5.4-mini, anthropic/claude-haiku-4-5, deepseek/deepseek-chat")
 		return
 	}
 	if req.ConfigRef != nil && *req.ConfigRef != "" {
@@ -964,10 +963,10 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 
 func evalRunAgentType(model string) models.AgentType {
 	switch model {
-	case "gemini-cli":
-		return models.AgentTypeGeminiCLI
 	case "claude-opus-4-6", "claude-sonnet-4-6":
 		return models.AgentTypeClaudeCode
+	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekChat:
+		return models.AgentTypeOpenCode
 	default:
 		return models.AgentTypeCodex
 	}
@@ -978,7 +977,7 @@ func evalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model string,
 	agentType := evalRunAgentType(model)
 	baseCommitSHA := task.BaseCommitSHA
 	var modelOverride *string
-	if model != "codex" && model != "gemini-cli" {
+	if model != "codex" {
 		modelOverride = &model
 	}
 	var createdBy *uuid.UUID
@@ -1117,7 +1116,7 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if !allowedModels[cfg.Model] {
 			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL",
-				fmt.Sprintf("configs[%d].model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, gemini-cli", i))
+				fmt.Sprintf("configs[%d].model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, openai/gpt-5.4-mini, anthropic/claude-haiku-4-5, deepseek/deepseek-chat", i))
 			return
 		}
 		if cfg.ConfigRef != nil && *cfg.ConfigRef != "" {

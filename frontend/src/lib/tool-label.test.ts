@@ -68,7 +68,7 @@ describe("deriveToolDisplay", () => {
     });
   });
 
-  describe("Gemini CLI run_shell_command", () => {
+  describe("run_shell_command", () => {
     it("maps to bash canonical", () => {
       const log = makeLog({
         tool: "run_shell_command",

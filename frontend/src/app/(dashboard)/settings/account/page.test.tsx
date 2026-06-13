@@ -166,7 +166,7 @@ describe("Account settings page", () => {
     expect(screen.getByText(/Ask an admin to add an org-level fallback/)).toBeInTheDocument();
   });
 
-  it("uses the shared provider-card modal with Gemini, Amp, and Pi support", async () => {
+  it("uses the shared provider-card modal with OpenCode, Amp, and Pi support", async () => {
     const user = userEvent.setup();
     server.use(...emptyCodingCredentialsHandlers());
 
@@ -176,12 +176,12 @@ describe("Account settings page", () => {
 
     expect(await screen.findByText("Codex")).toBeInTheDocument();
     expect(screen.getAllByText("Claude Code").length).toBeGreaterThan(0);
-    expect(screen.getByText("Gemini CLI")).toBeInTheDocument();
+    expect(screen.getByText("OpenCode")).toBeInTheDocument();
     expect(screen.getAllByText("Amp").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pi").length).toBeGreaterThan(0);
 
-    await user.click(screen.getByLabelText("Gemini CLI"));
-    expect(screen.getByPlaceholderText("AIza...")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("OpenCode"));
+    expect(screen.getByPlaceholderText("OpenCode or provider API key")).toBeInTheDocument();
 
     await user.click(screen.getByLabelText("Amp"));
     expect(screen.getByPlaceholderText("amp_...")).toBeInTheDocument();

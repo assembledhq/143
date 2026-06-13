@@ -40,7 +40,7 @@ import type {
 } from "@/lib/types";
 
 // agentLabel renders the human-readable agent name. The unified API exposes
-// rows tagged by agent (codex / claude_code / gemini_cli / amp / pi) so the
+// rows tagged by agent (codex / claude_code / amp / pi / opencode) so the
 // translation from provider strings the legacy personal page used is no
 // longer needed.
 function agentLabel(agent: CodingAuthAgent | string) {
@@ -49,8 +49,6 @@ function agentLabel(agent: CodingAuthAgent | string) {
       return "Codex";
     case "claude_code":
       return "Claude Code";
-    case "gemini_cli":
-      return "Gemini CLI";
     case "amp":
       return "Amp";
     case "pi":
@@ -368,7 +366,7 @@ export default function AccountPage() {
 
   // The selected provider's metadata drives whether the auth-type selector
   // is visible. For providers that don't ship a subscription OAuth flow
-  // (Gemini CLI / Amp / Pi), we coerce auth_type to "api_key" so the modal
+  // (Amp / Pi / OpenCode), we coerce auth_type to "api_key" so the modal
   // doesn't render a dead radio group.
   const selectedProviderOption = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === provider) ?? PERSONAL_PROVIDER_OPTIONS[0];
   const showAuthTypeSelector = selectedProviderOption.supportsSubscription;
@@ -381,7 +379,6 @@ export default function AccountPage() {
     const agent = personalProviderToAgent(p);
     const base = agent === "codex" ? "Codex"
       : agent === "claude_code" ? "Claude Code"
-      : agent === "gemini_cli" ? "Gemini CLI"
       : agent === "amp" ? "Amp"
       : agent === "pi" ? "Pi"
       : agent === "opencode" ? "OpenCode"
@@ -698,19 +695,17 @@ export default function AccountPage() {
                 type="password"
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
-                placeholder={
-                  provider === "anthropic"
-                    ? "sk-ant-..."
-                    : provider === "gemini"
-                      ? "AIza..."
-                      : provider === "amp"
-                        ? "amp_..."
-                        : provider === "pi"
-                          ? "pi_..."
-                          : provider === "opencode"
-                            ? "OpenCode or provider key"
-                            : "sk-..."
-                }
+	                placeholder={
+	                  provider === "anthropic"
+	                    ? "sk-ant-..."
+	                    : provider === "amp"
+	                      ? "amp_..."
+	                      : provider === "pi"
+	                        ? "pi_..."
+	                        : provider === "opencode"
+	                          ? "OpenCode or provider key"
+	                          : "sk-..."
+	                }
               />
             </div>
           </>

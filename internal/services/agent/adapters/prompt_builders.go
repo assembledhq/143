@@ -1,5 +1,5 @@
 // Shared prompt-construction helpers used by every coding-agent adapter
-// (claude_code, codex, amp, pi, gemini_cli). The system and user prompts
+// (claude_code, codex, amp, pi, opencode). The system and user prompts
 // are agent-agnostic — only the wire format around them differs per CLI.
 package adapters
 

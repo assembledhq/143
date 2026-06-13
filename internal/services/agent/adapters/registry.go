@@ -19,7 +19,6 @@ import (
 func DefaultMap(logger zerolog.Logger) map[models.AgentType]agent.AgentAdapter {
 	return map[models.AgentType]agent.AgentAdapter{
 		models.AgentTypeClaudeCode: NewClaudeCodeAdapter(logger),
-		models.AgentTypeGeminiCLI:  NewGeminiCLIAdapter(logger),
 		models.AgentTypeCodex:      NewCodexAdapter(logger),
 		models.AgentTypeAmp:        NewAmpAdapter(logger),
 		models.AgentTypePi:         NewPiAdapter(logger),

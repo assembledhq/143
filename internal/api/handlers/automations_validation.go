@@ -261,8 +261,6 @@ func automationAgentConfigSecretKeys(agentType models.AgentType) []string {
 		return []string{"OPENAI_API_KEY"}
 	case models.AgentTypeClaudeCode:
 		return []string{"ANTHROPIC_API_KEY"}
-	case models.AgentTypeGeminiCLI:
-		return []string{"GEMINI_API_KEY"}
 	case models.AgentTypeAmp:
 		return []string{"AMP_API_KEY"}
 	case models.AgentTypePi:
@@ -278,8 +276,6 @@ func codingCredentialAgentType(provider models.ProviderName) models.AgentType {
 		return models.AgentTypeClaudeCode
 	case models.ProviderOpenAI, models.ProviderOpenAISubscription:
 		return models.AgentTypeCodex
-	case models.ProviderGemini:
-		return models.AgentTypeGeminiCLI
 	case models.ProviderAmp:
 		return models.AgentTypeAmp
 	case models.ProviderPi:

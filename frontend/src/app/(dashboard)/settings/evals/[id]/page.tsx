@@ -393,7 +393,6 @@ function RunEvalDialog({ taskId }: { taskId: string }) {
                 <SelectItem value="claude-opus-4-6">claude-opus-4-6</SelectItem>
                 <SelectItem value="claude-sonnet-4-6">claude-sonnet-4-6</SelectItem>
                 <SelectItem value="codex">codex</SelectItem>
-                <SelectItem value="gemini-cli">gemini-cli</SelectItem>
               </SelectContent>
             </Select>
           </div>

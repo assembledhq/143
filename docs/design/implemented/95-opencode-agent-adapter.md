@@ -6,11 +6,11 @@
 
 Implemented as a first-class `opencode` coding agent with explicit OpenCode-scoped API-key credentials, sandbox installation via `opencode-ai`, non-interactive `opencode run --format json` execution, explicit `--session` resume, curated cost-first model metadata, and frontend settings/session picker surfaces.
 
-OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, Gemini CLI, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`); OpenRouter remains the flexible multi-provider escape hatch.
+OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, OpenCode, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`); OpenRouter remains the flexible multi-provider escape hatch.
 
 ## Context
 
-OpenCode is a high-adoption open-source terminal coding agent and is the strongest candidate for the next first-class 143 coding agent after Codex, Claude Code, Gemini CLI, Amp, and Pi. Public signals as of June 2026 put it ahead of other open-source CLI candidates: roughly 170k+ GitHub stars and more than 1M weekly npm downloads for `opencode-ai`.
+OpenCode is a high-adoption open-source terminal coding agent and is now the fifth first-class 143 coding agent alongside Codex, Claude Code, Amp, and Pi. Public signals as of June 2026 put it ahead of other open-source CLI candidates: roughly 170k+ GitHub stars and more than 1M weekly npm downloads for `opencode-ai`.
 
 OpenCode fits 143 better than Antigravity for this role because it is explicitly API-key/provider driven, supports many model providers, and documents a non-interactive CLI execution path. It should be added as its own `opencode` agent type rather than hidden under Codex/Claude/Gemini provider settings.
 
@@ -128,7 +128,7 @@ Files:
 
 Decision:
 
-OpenCode should use explicit OpenCode-scoped credential rows, even when the underlying provider is Anthropic, OpenAI, Gemini, or OpenRouter. Do not silently reuse the user's existing Claude Code, Codex, Gemini CLI, or platform provider credentials for OpenCode runs.
+OpenCode should use explicit OpenCode-scoped credential rows, even when the underlying provider is Anthropic, OpenAI, Gemini, or OpenRouter. Do not silently reuse the user's existing Claude Code, Codex, OpenCode, or platform provider credentials for OpenCode runs.
 
 Why:
 
@@ -178,7 +178,7 @@ Changes:
   - `OPENCODE_CONFIG_CONTENT=<json>` or write a generated config file and set `OPENCODE_CONFIG=<path>`.
   - Provider API keys only for the selected provider/model.
 - Clear OpenCode env in `clearAgentCredentialEnv`.
-- Map OpenCode credential shedding to the selected OpenCode credential row, not to a shared provider row used by Codex, Claude Code, or Gemini CLI.
+- Map OpenCode credential shedding to the selected OpenCode credential row, not to a shared provider row used by Codex or Claude Code.
 
 Runtime credential binding records `(agent_type, credential_id, effective_model, backing_provider)` for OpenCode picks so shedding, fallback, and usage attribution target the explicit OpenCode credential row rather than a sibling provider row.
 

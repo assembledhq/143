@@ -1039,8 +1039,8 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 			wantAuthRejected: false,
 		},
 		{
-			name:             "gemini quota error sheds rate limited",
-			agentType:        models.AgentTypeGeminiCLI,
+			name:             "opencode quota error sheds rate limited",
+			agentType:        models.AgentTypeOpenCode,
 			result:           &AgentResult{Error: "quota exceeded: retry-after=90"},
 			wantRateLimited:  true,
 			wantAuthRejected: false,
@@ -1126,6 +1126,12 @@ func testConfigForShedProvider(provider models.ProviderName) models.ProviderConf
 		return models.AmpConfig{APIKey: "amp-test-1234"}
 	case models.ProviderPi:
 		return models.PiConfig{APIKey: "pi-test-1234"}
+	case models.ProviderOpenCode:
+		return models.OpenCodeConfig{
+			APIKey:          "opencode-test-1234",
+			BackingProvider: models.ProviderOpenCode,
+			Model:           models.OpenCodeModelGPT54Mini,
+		}
 	default:
 		return nil
 	}
@@ -1239,7 +1245,6 @@ func TestCodingProviderForAgent(t *testing.T) {
 		want      models.ProviderName
 	}{
 		{"claude code maps to anthropic api key", models.AgentTypeClaudeCode, models.ProviderAnthropic},
-		{"gemini cli maps to gemini", models.AgentTypeGeminiCLI, models.ProviderGemini},
 		{"amp maps to amp", models.AgentTypeAmp, models.ProviderAmp},
 		{"pi maps to pi", models.AgentTypePi, models.ProviderPi},
 		{"opencode maps to opencode", models.AgentTypeOpenCode, models.ProviderOpenCode},
@@ -1285,7 +1290,6 @@ func TestBillingModeForAgent(t *testing.T) {
 		env       map[string]string
 		want      TokenBillingMode
 	}{
-		{"gemini cli returns api key", models.AgentTypeGeminiCLI, nil, TokenBillingModeAPIKey},
 		{"amp returns api key", models.AgentTypeAmp, nil, TokenBillingModeAPIKey},
 		{"pi returns api key", models.AgentTypePi, nil, TokenBillingModeAPIKey},
 		{"opencode returns api key", models.AgentTypeOpenCode, nil, TokenBillingModeAPIKey},

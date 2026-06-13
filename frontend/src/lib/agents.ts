@@ -7,7 +7,6 @@ import {
   AVAILABLE_AMP_MODES,
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_CODEX_MODELS,
-  AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_OPENCODE_MODELS,
   AVAILABLE_PI_MODELS,
 } from "@/lib/model-constants";
@@ -73,19 +72,6 @@ export const AGENTS: readonly AgentMeta[] = [
     ],
   },
   {
-    key: "gemini_cli",
-    label: "Gemini CLI",
-    short: "GE",
-    color: "#4285f4",
-    description: "Google Gemini (Pro, Flash)",
-    providerKey: "gemini",
-    models: AVAILABLE_GEMINI_CLI_MODELS,
-    envVars: [
-      { name: "GEMINI_API_KEY", label: "API Key", sensitive: true },
-      { name: "GEMINI_MODEL", label: "Default model", options: [...AVAILABLE_GEMINI_CLI_MODELS] },
-    ],
-  },
-  {
     key: "amp",
     label: "Amp",
     short: "AM",
@@ -127,7 +113,7 @@ export const AGENTS: readonly AgentMeta[] = [
     description: "OpenCode multi-provider coding agent",
     providerKey: "opencode",
     models: AVAILABLE_OPENCODE_MODELS,
-    note: "OpenCode uses explicit OpenCode-scoped keys. A key may target OpenCode native auth or a backing provider, but it is stored separately from Codex, Claude Code, and Gemini keys.",
+    note: "OpenCode uses explicit OpenCode-scoped keys. A key may target OpenCode native auth or a backing provider, but it is stored separately from Codex and Claude Code keys.",
     envVars: [
       { name: "OPENCODE_API_KEY", label: "API Key", sensitive: true, placeholder: "OpenCode or provider API key" },
       { name: "OPENCODE_MODEL", label: "Default model", options: [...AVAILABLE_OPENCODE_MODELS] },

@@ -738,7 +738,6 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.True(t, orgRows[3].IsDefault, "first non-rate-limited runnable org row should be marked default")
 	require.Equal(t, models.CodingAuthStatusNeedsReauth, orgRows[1].Status, "pending_auth row should need reauth")
 	require.Equal(t, "max", orgRows[0].UsageNote, "subscription usage note should prefer account type")
-	require.Equal(t, "Gemini CLI API key", defaultLabelFor(models.AgentTypeGeminiCLI, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover gemini")
 	require.Equal(t, "Pi API key", defaultLabelFor(models.AgentTypePi, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover pi")
 	require.Equal(t, "OpenCode API key", defaultLabelFor(models.AgentTypeOpenCode, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover opencode")
 	require.Equal(t, "Coding auth", defaultLabelFor("", ""), "defaultLabelFor should cover unknown agents")
@@ -747,11 +746,6 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.NoError(t, err, "codingCredentialConfigFromInput should accept Claude Code api keys")
 	require.Equal(t, models.ProviderAnthropic, provider, "Claude Code api keys should map to anthropic provider")
 	require.Equal(t, models.ProviderAnthropic, cfg.Provider(), "Claude Code config should report anthropic provider")
-
-	cfg, provider, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: models.AgentTypeGeminiCLI, AuthType: models.CodingAuthTypeAPIKey, APIKey: "gemini-key"})
-	require.NoError(t, err, "codingCredentialConfigFromInput should accept Gemini api keys")
-	require.Equal(t, models.ProviderGemini, provider, "Gemini api keys should map to gemini provider")
-	require.Equal(t, models.ProviderGemini, cfg.Provider(), "Gemini config should report gemini provider")
 
 	cfg, provider, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{
 		Agent:    models.AgentTypeOpenCode,

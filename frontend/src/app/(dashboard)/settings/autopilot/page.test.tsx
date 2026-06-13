@@ -60,7 +60,7 @@ describe("AutopilotSettingsPage", () => {
             agent_config: {
               codex: { OPENAI_API_KEY: "sk-***" },
               claude_code: { ANTHROPIC_API_KEY: "sk-ant-***" },
-              gemini_cli: { GEMINI_API_KEY: "AIza-***" },
+              opencode: { OPENCODE_MODEL: "openai/gpt-5.4-mini" },
               amp: { AMP_API_KEY: "amp_***" },
               pi: { PI_API_KEY: "pi_***" },
             },
@@ -81,7 +81,7 @@ describe("AutopilotSettingsPage", () => {
     // (smart/deep/...) read correctly next to model IDs from other agents.
     expect(await screen.findByText("Codex")).toBeInTheDocument();
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
-    expect(screen.getByText("Gemini CLI")).toBeInTheDocument();
+    expect(screen.getByText("OpenCode")).toBeInTheDocument();
     expect(screen.getByText("Amp modes")).toBeInTheDocument();
     expect(screen.getByText("Pi")).toBeInTheDocument();
 

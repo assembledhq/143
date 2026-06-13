@@ -212,9 +212,9 @@ describe("pmUsableResolvedCredentials", () => {
         provider: "anthropic",
       }),
       makeCredential({
-        id: "cc-gemini",
-        agent: "gemini_cli",
-        provider: "gemini",
+        id: "cc-opencode",
+        agent: "opencode",
+        provider: "opencode",
         priority: 2,
       }),
     ]);
@@ -222,12 +222,12 @@ describe("pmUsableResolvedCredentials", () => {
 
     expect(credentials).toEqual([
       { provider: "anthropic", source: "org" },
-      { provider: "gemini", source: "org" },
+      { provider: "opencode", source: "org" },
     ]);
     expect(groups.map((g) => g.key)).toEqual([
       "codex",
       "claude_code",
-      "gemini_cli",
+      "opencode",
     ]);
   });
 
