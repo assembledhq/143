@@ -1445,6 +1445,7 @@ func buildServices(
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
 	pmSvc.SetSessionLogStore(sessionLogStore)
+	pmSvc.SetSessionMessageStore(sessionMessageStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
