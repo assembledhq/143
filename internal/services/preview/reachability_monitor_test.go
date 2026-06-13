@@ -21,6 +21,7 @@ func TestReachabilityMonitorProbeMarksUnreachableRuntime(t *testing.T) {
 			ID:                runtimeID,
 			OrgID:             orgID,
 			PreviewInstanceID: previewID,
+			RuntimeEpoch:      4,
 			EndpointURL:       "http://worker.internal:8081",
 		}},
 	}
@@ -34,10 +35,12 @@ func TestReachabilityMonitorProbeMarksUnreachableRuntime(t *testing.T) {
 	monitor.probeOnce(context.Background())
 
 	require.Equal(t, []reachabilityMarkCall{{
-		orgID:     orgID,
-		previewID: previewID,
-		runtimeID: runtimeID,
-		reason:    "preview reachability probe failed: dial timeout",
+		orgID:             orgID,
+		previewID:         previewID,
+		runtimeID:         runtimeID,
+		runtimeEpoch:      4,
+		reason:            "preview reachability probe failed: dial timeout",
+		unavailableReason: models.PreviewUnavailableReasonEndpointUnreachable,
 	}}, store.markCalls, "reachability monitor should mark the unreachable runtime")
 }
 
@@ -47,22 +50,26 @@ type reachabilityStoreStub struct {
 }
 
 type reachabilityMarkCall struct {
-	orgID     uuid.UUID
-	previewID uuid.UUID
-	runtimeID uuid.UUID
-	reason    string
+	orgID             uuid.UUID
+	previewID         uuid.UUID
+	runtimeID         uuid.UUID
+	runtimeEpoch      int
+	reason            string
+	unavailableReason models.PreviewUnavailableReason
 }
 
 func (s *reachabilityStoreStub) ListActivePreviewRuntimesForReachability(context.Context, int) ([]models.PreviewRuntime, error) {
 	return s.runtimes, nil
 }
 
-func (s *reachabilityStoreStub) MarkPreviewRuntimeUnreachable(_ context.Context, orgID, previewID, runtimeID uuid.UUID, reason string) (bool, error) {
+func (s *reachabilityStoreStub) MarkPreviewRuntimeLostIfCurrent(_ context.Context, orgID, previewID, runtimeID uuid.UUID, runtimeEpoch int, reason string, unavailableReason models.PreviewUnavailableReason) (bool, error) {
 	s.markCalls = append(s.markCalls, reachabilityMarkCall{
-		orgID:     orgID,
-		previewID: previewID,
-		runtimeID: runtimeID,
-		reason:    reason,
+		orgID:             orgID,
+		previewID:         previewID,
+		runtimeID:         runtimeID,
+		runtimeEpoch:      runtimeEpoch,
+		reason:            reason,
+		unavailableReason: unavailableReason,
 	})
 	return true, nil
 }

@@ -651,6 +651,8 @@ func TestDeployRunsPreviewRPCAuthCheckBeforeCutoverAndWorkerDrain(t *testing.T) 
 
 	appProbeIndex := strings.Index(rollingBody, `preview_rpc_auth_preflight "$new_container"`)
 	require.NotEqual(t, -1, appProbeIndex, "app rolling deploy should run the preview RPC auth probe from the new api container")
+	previewAuthPreflightBody := extractShellFunction(t, deployText, "preview_rpc_auth_preflight", "rolling_deploy_service")
+	require.Contains(t, previewAuthPreflightBody, `docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json`, "app preview RPC auth probe should run through docker-entrypoint.sh so SOPS-decrypted production secrets are available to worker-deployctl")
 	appDrainIndex := strings.Index(rollingBody, `echo "Draining $old_count old $service container(s)`)
 	require.NotEqual(t, -1, appDrainIndex, "app rolling deploy should still drain old containers")
 	require.Less(t, appProbeIndex, appDrainIndex, "app rolling deploy should run preview RPC auth check before draining old api containers")
@@ -1503,6 +1505,7 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	}
 	require.True(t, dashboardNames["platform-health.json"], "platform health dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["primary-operations.json"], "primary operations dashboard should be provisioned from the repo")
+	require.True(t, dashboardNames["preview-health.json"], "preview health dashboard should be provisioned from the repo")
 
 	for _, dashboardFile := range dashboardFiles {
 		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
@@ -1550,6 +1553,55 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 				require.Equal(t, "statsRange", target.QueryType, "time-series stats panel %q in dashboard %s should use the VictoriaLogs range query type", panel.Title, dashboardFile.Name())
 			}
 		}
+	}
+}
+
+func TestPreviewHealthDashboardStaysFocused(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/preview-health.json")
+	require.NoError(t, err, "test should read the preview health dashboard")
+
+	var dashboard struct {
+		Title  string `json:"title"`
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				QueryType string `json:"queryType"`
+				Expr      string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "preview health dashboard should be valid JSON")
+	require.Equal(t, "143 - Preview Health", dashboard.Title, "preview health dashboard should have the expected title")
+	require.Len(t, dashboard.Panels, 5, "preview health dashboard should stay focused on the five most important panels")
+
+	required := map[string]string{
+		"Active previews":          `preview health: lifecycle sample`,
+		"Startup p50/p95":          `startup_p50_seconds`,
+		"Ready vs failed previews": `previews_failed_unavailable`,
+		"Cache hit rate":           `preview health: cache event`,
+		"Recent preview errors":    `preview`,
+	}
+	for title, exprFragment := range required {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.Title != title {
+				continue
+			}
+			found = true
+			require.NotEmpty(t, panel.Targets, "panel %q should have a LogsQL target", title)
+			var panelExprs []string
+			for _, target := range panel.Targets {
+				panelExprs = append(panelExprs, target.Expr)
+			}
+			require.Contains(t, strings.Join(panelExprs, "\n"), exprFragment, "panel %q should query the expected preview health signal", title)
+			if panel.Type == "timeseries" {
+				require.Equal(t, "statsRange", panel.Targets[0].QueryType, "preview health timeseries panel %q should use a range query", title)
+			}
+		}
+		require.True(t, found, "preview health dashboard should include panel %q", title)
 	}
 }
 

@@ -1,7 +1,13 @@
-export type StackAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+import {
+  AVAILABLE_OPENCODE_MODELS,
+  OPENCODE_MODEL_GPT_5_2,
+  OPENCODE_MODEL_GPT_5_4_MINI,
+} from "@/lib/model-constants";
+
+export type StackAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi" | "opencode";
 export type ModalProvider = StackAgent;
 export type ApiKeyProvider = StackAgent;
-export type PersonalProvider = "openai" | "anthropic" | "gemini" | "amp" | "pi";
+export type PersonalProvider = "openai" | "anthropic" | "gemini" | "amp" | "pi" | "opencode";
 
 // PERSONAL_PROVIDER_TO_AGENT is the single source of truth for the personal
 // page's provider → agent mapping. Typed as Record<PersonalProvider, StackAgent>
@@ -14,6 +20,7 @@ export const PERSONAL_PROVIDER_TO_AGENT: Record<PersonalProvider, StackAgent> = 
   gemini: "gemini_cli",
   amp: "amp",
   pi: "pi",
+  opencode: "opencode",
 };
 
 // personalProviderToAgent exposes the registry as a function for callers that
@@ -65,6 +72,12 @@ export const ORG_PROVIDER_OPTIONS: Array<{
     supportsSubscription: false,
     supportsStackOrder: true,
   },
+  {
+    key: "opencode",
+    label: "OpenCode",
+    supportsSubscription: false,
+    supportsStackOrder: true,
+  },
 ];
 
 export const PERSONAL_PROVIDER_OPTIONS: Array<{
@@ -83,6 +96,7 @@ export const PERSONAL_PROVIDER_OPTIONS: Array<{
   { key: "gemini", label: "Gemini CLI", iconSrc: "/agents/gemini_cli.svg", supportsSubscription: false },
   { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg", supportsSubscription: false },
   { key: "pi", label: "Pi", iconSrc: "/agents/pi.svg", supportsSubscription: false },
+  { key: "opencode", label: "OpenCode", iconSrc: "/agents/opencode.svg", supportsSubscription: false },
 ];
 
 export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
@@ -125,5 +139,53 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
         href: "https://pi.dev/",
         linkLabel: "Pi dashboard",
       };
+    case "opencode":
+      return {
+        label: "OpenCode",
+        description: "Use an OpenCode-scoped key. If it targets a backing provider, store it here rather than reusing Codex, Claude Code, or Gemini credentials.",
+        href: "https://opencode.ai/docs",
+        linkLabel: "OpenCode docs",
+      };
   }
+}
+
+export type OpenCodeBackingProvider = "opencode" | "anthropic" | "openai" | "gemini" | "openrouter";
+
+export const OPENCODE_BACKING_PROVIDER_OPTIONS: Array<{ value: OpenCodeBackingProvider; label: string }> = [
+  { value: "opencode", label: "OpenCode native" },
+  { value: "anthropic", label: "OpenCode via Anthropic" },
+  { value: "openai", label: "OpenCode via OpenAI" },
+  { value: "gemini", label: "OpenCode via Gemini" },
+  { value: "openrouter", label: "OpenCode via OpenRouter" },
+];
+
+export function openCodeModelsForBackingProvider(provider: OpenCodeBackingProvider): string[] {
+  switch (provider) {
+    case "opencode":
+      return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("opencode/"));
+    case "anthropic":
+      return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("anthropic/"));
+    case "openai":
+      return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("openai/"));
+    case "gemini":
+      return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("google/"));
+    case "openrouter":
+      return [...AVAILABLE_OPENCODE_MODELS];
+  }
+}
+
+export function openCodeDefaultModelForBackingProvider(provider: OpenCodeBackingProvider): string {
+  const models = openCodeModelsForBackingProvider(provider);
+  return models[0] ?? (provider === "opencode" ? OPENCODE_MODEL_GPT_5_2 : OPENCODE_MODEL_GPT_5_4_MINI);
+}
+
+// openCodeAgentDefaults builds the agent_defaults map for an OpenCode
+// credential. If a non-empty customModel is provided it wins over model and
+// is stored as OPENCODE_MODEL_CUSTOM; otherwise only OPENCODE_MODEL is set.
+export function openCodeAgentDefaults(model: string, customModel: string): Record<string, string> {
+  const custom = customModel.trim();
+  if (custom) {
+    return { OPENCODE_MODEL: model, OPENCODE_MODEL_CUSTOM: custom };
+  }
+  return { OPENCODE_MODEL: model };
 }

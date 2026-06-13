@@ -27,6 +27,17 @@ type PreviewStore struct {
 	db TxStarter
 }
 
+// PreviewHealthSample is a platform-wide preview lifecycle snapshot for ops
+// dashboards. It intentionally aggregates across orgs.
+type PreviewHealthSample struct {
+	ActivePreviews              int64
+	PreviewsStarted             int64
+	PreviewsReady               int64
+	PreviewsFailedOrUnavailable int64
+	StartupP50Seconds           float64
+	StartupP95Seconds           float64
+}
+
 // NewPreviewStore creates a new PreviewStore.
 func NewPreviewStore(db TxStarter) *PreviewStore {
 	return &PreviewStore{db: db}
@@ -1425,6 +1436,46 @@ func (s *PreviewStore) UpdatePreviewRuntimeWorkspaceRevision(ctx context.Context
 
 const minPreviewStartupEstimateSamples = 5
 
+// PreviewHealthSample returns a compact platform-wide preview health aggregate
+// for the Grafana lifecycle sampler.
+// lint:allow-no-orgid reason="platform preview health dashboard intentionally aggregates preview lifecycle across orgs"
+func (s *PreviewStore) PreviewHealthSample(ctx context.Context) (PreviewHealthSample, error) {
+	query := fmt.Sprintf(`
+		/* preview health sample */
+		WITH recent_ready AS (
+			SELECT EXTRACT(EPOCH FROM (ready_at - created_at))::double precision AS startup_seconds
+			FROM preview_instances
+			WHERE ready_at IS NOT NULL
+			  AND ready_at >= created_at
+			  AND ready_at >= now() - interval '15 minutes'
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE status IN %s)::bigint AS active_previews,
+			COUNT(*) FILTER (WHERE created_at >= now() - interval '15 minutes')::bigint AS previews_started,
+			COUNT(*) FILTER (WHERE ready_at IS NOT NULL AND ready_at >= now() - interval '15 minutes')::bigint AS previews_ready,
+			COUNT(*) FILTER (WHERE status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')::bigint AS previews_failed_unavailable,
+			COALESCE((SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p50_seconds,
+			COALESCE((SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p95_seconds
+		FROM preview_instances
+		WHERE status IN %s
+		   OR created_at >= now() - interval '15 minutes'
+		   OR ready_at >= now() - interval '15 minutes'
+		   OR (status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')`, activeStatusFilter, activeStatusFilter)
+
+	var sample PreviewHealthSample
+	if err := s.db.QueryRow(ctx, query).Scan(
+		&sample.ActivePreviews,
+		&sample.PreviewsStarted,
+		&sample.PreviewsReady,
+		&sample.PreviewsFailedOrUnavailable,
+		&sample.StartupP50Seconds,
+		&sample.StartupP95Seconds,
+	); err != nil {
+		return PreviewHealthSample{}, fmt.Errorf("preview health sample: %w", err)
+	}
+	return sample, nil
+}
+
 func (s *PreviewStore) GetPreviewStartupEstimate(ctx context.Context, orgID, previewID uuid.UUID, configDigest string) (*models.PreviewStartupEstimate, error) {
 	if strings.TrimSpace(configDigest) == "" {
 		return nil, nil
@@ -2212,37 +2263,59 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 	return tag.RowsAffected(), nil
 }
 
-func (s *PreviewStore) MarkPreviewRuntimeUnreachable(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, reason string) (bool, error) {
+// MarkPreviewRuntimeLostIfCurrent marks one runtime lost and transitions its
+// preview unavailable only if that runtime is still the newest active route.
+func (s *PreviewStore) MarkPreviewRuntimeLostIfCurrent(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, runtimeEpoch int, reason string, unavailableReason models.PreviewUnavailableReason) (bool, error) {
+	if err := unavailableReason.Validate(); err != nil {
+		return false, err
+	}
 	tag, err := s.db.Exec(ctx,
 		fmt.Sprintf(`WITH lost AS (
-			UPDATE preview_runtimes
+			UPDATE preview_runtimes pr
 			SET status = 'lost',
 				error = @reason,
-				unavailable_reason = 'worker_endpoint_unreachable',
+				unavailable_reason = @unavailable_reason,
 				stopped_at = COALESCE(stopped_at, now()),
 				updated_at = now()
-			WHERE id = @runtime_id
-			  AND org_id = @org_id
-			  AND preview_instance_id = @preview_id
-			  AND status IN %s
-			RETURNING org_id, preview_instance_id
+			WHERE pr.org_id = @org_id
+			  AND pr.preview_instance_id = @preview_id
+			  AND pr.id = @runtime_id
+			  AND pr.runtime_epoch = @runtime_epoch
+			  AND pr.status IN %s
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM preview_runtimes newer
+				WHERE newer.org_id = @org_id
+				  AND newer.preview_instance_id = @preview_id
+				  AND newer.runtime_epoch > @runtime_epoch
+				  AND newer.status IN %s
+				  AND newer.lease_expires_at > now()
+			  )
+			RETURNING pr.org_id, pr.preview_instance_id
 		)
 		UPDATE preview_instances pi
 		SET status = 'unavailable',
 			current_phase = 'unavailable',
 			error = @reason,
-			unavailable_reason = 'worker_endpoint_unreachable',
+			unavailable_reason = @unavailable_reason,
 			preview_holding_container = FALSE,
 			stopped_at = COALESCE(stopped_at, now()),
 			updated_at = now()
 		FROM lost
 		WHERE pi.id = lost.preview_instance_id
 		  AND pi.org_id = lost.org_id
-		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
-		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID, "runtime_id": runtimeID, "reason": reason},
+		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeRuntimeStatusFilter, activeStatusFilter),
+		pgx.NamedArgs{
+			"org_id":             orgID,
+			"preview_id":         previewID,
+			"runtime_id":         runtimeID,
+			"runtime_epoch":      runtimeEpoch,
+			"reason":             reason,
+			"unavailable_reason": unavailableReason,
+		},
 	)
 	if err != nil {
-		return false, fmt.Errorf("mark preview runtime unreachable: %w", err)
+		return false, fmt.Errorf("mark preview runtime lost if current: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }

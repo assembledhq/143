@@ -20,7 +20,7 @@ func TestPreviewUnavailableReason_Validate(t *testing.T) {
 		{name: "host maintenance", reason: PreviewUnavailableReasonHostMaintenance},
 		{name: "emergency force", reason: PreviewUnavailableReasonEmergencyForce},
 		{name: "lease expired", reason: PreviewUnavailableReasonLeaseExpired},
-		{name: "worker endpoint unreachable", reason: PreviewUnavailableReasonWorkerEndpointUnreachable},
+		{name: "endpoint unreachable", reason: PreviewUnavailableReasonEndpointUnreachable},
 		{name: "unknown", reason: PreviewUnavailableReason("bad"), expectErr: true},
 	}
 

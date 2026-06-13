@@ -14,7 +14,7 @@ import (
 
 type ReachabilityRuntimeStore interface {
 	ListActivePreviewRuntimesForReachability(ctx context.Context, limit int) ([]models.PreviewRuntime, error)
-	MarkPreviewRuntimeUnreachable(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, reason string) (bool, error)
+	MarkPreviewRuntimeLostIfCurrent(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, runtimeEpoch int, reason string, unavailableReason models.PreviewUnavailableReason) (bool, error)
 }
 
 type ReachabilityDialFunc func(ctx context.Context, network, address string) error
@@ -113,7 +113,15 @@ func (m *ReachabilityMonitor) markUnreachable(ctx context.Context, runtime model
 	if cause != nil {
 		reason += ": " + cause.Error()
 	}
-	updated, err := m.store.MarkPreviewRuntimeUnreachable(ctx, runtime.OrgID, runtime.PreviewInstanceID, runtime.ID, reason)
+	updated, err := m.store.MarkPreviewRuntimeLostIfCurrent(
+		ctx,
+		runtime.OrgID,
+		runtime.PreviewInstanceID,
+		runtime.ID,
+		runtime.RuntimeEpoch,
+		reason,
+		models.PreviewUnavailableReasonEndpointUnreachable,
+	)
 	if err != nil {
 		m.logger.Warn().Err(err).
 			Str("preview_id", runtime.PreviewInstanceID.String()).

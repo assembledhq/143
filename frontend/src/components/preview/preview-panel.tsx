@@ -13,7 +13,6 @@ import {
   Play,
   Square,
   RotateCw,
-  ExternalLink,
   Monitor,
   Loader2,
   AlertTriangle,
@@ -61,13 +60,19 @@ import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { TTLWarning } from "./ttl-warning";
+import { OpenPreviewButton } from "./open-preview-button";
 import {
   buildPreviewBootstrapSrc,
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
 } from "@/lib/preview-bootstrap";
 
-export { PREVIEW_BOOTSTRAP_READY_EVENT, PREVIEW_BOOTSTRAP_TOKEN_EVENT };
+export {
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
+  PREVIEW_BOOTSTRAP_READY_EVENT,
+  PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+};
 
 export function buildPreviewIframeSrc(previewOrigin: string): string {
   return buildPreviewBootstrapSrc(previewOrigin);
@@ -147,6 +152,7 @@ function buildStartupChecklist(
   status: PreviewStatus | undefined,
   services: PreviewService[],
   infrastructure: PreviewInfrastructure[],
+  unavailableReason?: string,
 ): StartupChecklistStep[] {
   // When the parent preview reaches a terminal state, force any child rows
   // that were still pending to render as terminal too. The backend cascades
@@ -197,7 +203,9 @@ function buildStartupChecklist(
         : status === "failed"
           ? "Preview startup failed before the app became reachable."
           : status === "unavailable"
-            ? "The worker runtime that owned this preview is unavailable."
+            ? unavailableReason === "endpoint_unreachable"
+              ? "Worker connection lost before the preview could be opened."
+              : "The worker runtime that owned this preview is unavailable."
             : "Waiting for the preview URL to become reachable.";
 
   const steps: StartupChecklistStep[] = [];
@@ -303,6 +311,22 @@ function getStartupSubtitle(
   }
 
   return "Starting services";
+}
+
+function unavailablePreviewRecoveryCopy(unavailableReason?: string) {
+  if (unavailableReason === "endpoint_unreachable") {
+    return {
+      title: "Preview connection lost",
+      description:
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+    };
+  }
+
+  return {
+    title: "No preview running",
+    description:
+      "Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.",
+  };
 }
 
 function formatPreviewShutdownTime(expiresAt: string): string {
@@ -541,6 +565,9 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const unavailableReason = instance?.unavailable_reason;
+  const isEndpointUnreachable =
+    status === "unavailable" && unavailableReason === "endpoint_unreachable";
   const freshnessState = previewStatus?.freshness?.state;
   const restartReasons = previewStatus?.freshness?.restart_reasons;
   const lastPreviewStoppedAt =
@@ -875,18 +902,6 @@ export function PreviewPanel({
   const isPreviewLiveUpdated = freshnessState === "live_updated";
   const isPreviewRestartRequired = freshnessState === "restart_required";
   const isPreviewFreshnessUnknown = freshnessState === "unknown";
-  const isWorkerEndpointUnreachable =
-    status === "unavailable" &&
-    instance?.unavailable_reason === "worker_endpoint_unreachable";
-  const unavailableTitle = isWorkerEndpointUnreachable
-    ? "Preview disconnected"
-    : "No preview running";
-  const unavailableDescription = isWorkerEndpointUnreachable
-    ? "The preview worker is alive but the app gateway cannot reach its preview endpoint."
-    : "Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.";
-  const unavailableActionLabel = isWorkerEndpointUnreachable
-    ? "Reconnect preview"
-    : "Start Preview";
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
   const freshnessCalloutText =
     isManageable &&
@@ -923,11 +938,12 @@ export function PreviewPanel({
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
-        ? buildStartupChecklist(status, services, infrastructure)
+        ? buildStartupChecklist(status, services, infrastructure, unavailableReason)
         : [],
-    [showStartupProgress, status, services, infrastructure],
+    [showStartupProgress, status, services, infrastructure, unavailableReason],
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
+  const idleRecoveryCopy = unavailablePreviewRecoveryCopy(unavailableReason);
   const showTopControls =
     status !== "starting" &&
     status !== "stopped" &&
@@ -1029,16 +1045,13 @@ export function PreviewPanel({
               )}
 
               {isReady && previewOrigin && (
-                <Button size="sm" asChild>
-                  <a
-                    href={previewOrigin}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <ExternalLink className="size-3.5" />
-                    Open Preview
-                  </a>
-                </Button>
+                <OpenPreviewButton
+                  previewId={instance?.id}
+                  previewUrl={previewOrigin}
+                  label="Open Preview"
+                  size="sm"
+                  bootstrapPreview={() => api.sessions.preview.bootstrap(sessionId)}
+                />
               )}
 
               {shouldShowRetryPreview && (
@@ -1310,7 +1323,7 @@ export function PreviewPanel({
       )}
 
       {/* Failure diagnostics */}
-      {status === "failed" && instance && (
+      {(status === "failed" || (isEndpointUnreachable && hasStartupRows)) && instance && (
         <Card
           role="alert"
           className={cn(
@@ -1326,10 +1339,14 @@ export function PreviewPanel({
                 </div>
                 <div className="min-w-0">
                   <div className="text-sm font-medium leading-5 text-foreground">
-                    Preview failed to start
+                    {isEndpointUnreachable
+                      ? "Preview connection lost"
+                      : "Preview failed to start"}
                   </div>
                   <div className="text-xs leading-5 text-muted-foreground">
-                    The app never became reachable during startup.
+                    {isEndpointUnreachable
+                      ? "The worker that was serving this preview stopped responding."
+                      : "The app never became reachable during startup."}
                   </div>
                 </div>
               </div>
@@ -1488,9 +1505,9 @@ export function PreviewPanel({
               <Monitor className="size-5 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">{unavailableTitle}</p>
+              <p className="text-sm font-medium">{idleRecoveryCopy.title}</p>
               <p className="text-xs text-muted-foreground">
-                {unavailableDescription}
+                {idleRecoveryCopy.description}
               </p>
               {instance?.created_at && lastPreviewStoppedAt && (
                 <div className="flex flex-wrap items-center justify-center gap-2">
@@ -1514,7 +1531,7 @@ export function PreviewPanel({
               loading={startMutation.isPending}
             >
               {!startMutation.isPending && <Play className="size-3.5" />}
-              {unavailableActionLabel}
+              Start Preview
             </Button>
             <p className="text-xs text-muted-foreground"></p>
           </div>

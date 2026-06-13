@@ -46,7 +46,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAuth } from "@/hooks/use-auth";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
@@ -59,7 +59,6 @@ import { CreateSessionDialog } from "@/components/create-session-dialog";
 import { ResizeHandle } from "@/components/resize-handle";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 import { Kbd } from "@/components/ui/kbd";
-import { pollMs } from "@/lib/poll-intervals";
 
 type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
 
@@ -166,12 +165,6 @@ function SidebarBody({
     : "py-[7px] text-xs";
   const iconBtnClasses = isMobile ? "h-11 w-11" : "h-7 w-7";
   const iconSize = isMobile ? "h-5 w-5" : "h-4 w-4";
-  const previewsBadgeQuery = useQuery({
-    queryKey: ["previews", "nav-running-count"],
-    queryFn: () => api.previews.list({ scope: "running", limit: 1 }),
-    refetchInterval: pollMs(60000),
-  });
-  const runningPreviewCount = previewsBadgeQuery.data?.meta?.counts?.running ?? 0;
 
   return (
     <>
@@ -260,11 +253,6 @@ function SidebarBody({
             >
               <item.icon className="h-4 w-4 shrink-0" />
               <span className="flex-1">{item.label}</span>
-              {item.href === "/previews" && runningPreviewCount > 0 ? (
-                <span className="rounded-full bg-primary px-1.5 py-0.5 text-xs font-semibold leading-none text-primary-foreground">
-                  {runningPreviewCount}
-                </span>
-              ) : null}
             </Link>
           );
         })}
@@ -345,13 +333,6 @@ function CompactSidebarRail({
   onCreateSession,
   onLogout,
 }: CompactSidebarRailProps) {
-  const previewsBadgeQuery = useQuery({
-    queryKey: ["previews", "nav-running-count"],
-    queryFn: () => api.previews.list({ scope: "running", limit: 1 }),
-    refetchInterval: pollMs(60000),
-  });
-  const runningPreviewCount = previewsBadgeQuery.data?.meta?.counts?.running ?? 0;
-
   return (
     <TooltipProvider>
       <aside
@@ -410,9 +391,6 @@ function CompactSidebarRail({
                   )}
                 >
                   <item.icon className="h-4 w-4" />
-                  {item.href === "/previews" && runningPreviewCount > 0 ? (
-                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />
-                  ) : null}
                 </Link>
               </TooltipTrigger>
                 <TooltipContent side="right" sideOffset={8}>{item.label}</TooltipContent>

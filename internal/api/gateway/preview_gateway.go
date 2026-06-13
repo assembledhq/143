@@ -1063,6 +1063,7 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 				// The worker no longer recognizes this runtime epoch; drop
 				// the cached runtime so the next request re-resolves.
 				g.evictCachedRuntime(previewID)
+				g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, "preview runtime endpoint mismatch")
 				addPreviewProxyLogFields(g.logger.Warn(), originalReq, orgID, previewID, runtime, upstreamPath).
 					Str("worker_error_code", workerCode).
 					Int("worker_status", workerStatus).
@@ -1090,36 +1091,80 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			g.evictCachedRuntime(previewID)
+			if shouldMarkRuntimeLostOnProxyError(err) {
+				g.markRuntimeEndpointUnreachable(originalReq.Context(), orgID, previewID, runtime, previewProxyErrorReason(err))
+			}
 			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
 				Msg("proxy error")
-			g.markRuntimeUnreachable(originalReq.Context(), orgID, previewID, runtime, err)
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
 }
 
-func (g *Gateway) markRuntimeUnreachable(ctx context.Context, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, proxyErr error) {
+func (g *Gateway) markRuntimeEndpointUnreachable(ctx context.Context, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, reason string) {
 	if g.store == nil || runtime == nil {
 		return
 	}
-	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(proxyErr, context.Canceled) {
-		return
-	}
-	reason := "preview gateway could not reach worker endpoint"
-	if proxyErr != nil {
-		reason += ": " + proxyErr.Error()
-	}
-	updated, err := g.store.MarkPreviewRuntimeUnreachable(ctx, orgID, previewID, runtime.ID, reason)
+	updated, err := g.store.MarkPreviewRuntimeLostIfCurrent(ctx, orgID, previewID, runtime.ID, runtime.RuntimeEpoch, reason, models.PreviewUnavailableReasonEndpointUnreachable)
 	if err != nil {
-		addPreviewProxyLogFields(g.logger.Warn().Err(err), nil, orgID, previewID, runtime, "").
-			Msg("failed to mark preview runtime unreachable")
+		g.logger.Warn().Err(err).
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Msg("failed to mark unreachable preview runtime lost")
 		return
 	}
 	if updated {
-		addPreviewProxyLogFields(g.logger.Warn(), nil, orgID, previewID, runtime, "").
-			Msg("marked preview runtime unreachable")
+		g.logger.Warn().
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Str("worker_node_id", runtime.WorkerNodeID).
+			Str("endpoint_url", runtime.EndpointURL).
+			Msg("marked preview runtime lost after endpoint became unreachable")
 	}
+}
+
+func shouldMarkRuntimeLostOnProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"connection reset by peer",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"no such host",
+		"eof",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func previewProxyErrorReason(err error) string {
+	msg := "unknown error"
+	if err != nil {
+		msg = strings.ReplaceAll(err.Error(), "\n", " ")
+		msg = strings.ReplaceAll(msg, "\r", " ")
+	}
+	const maxReasonLen = 320
+	reason := "preview runtime endpoint unreachable: " + msg
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func previewWorkerProxyPath(previewID uuid.UUID, requestPath string) string {

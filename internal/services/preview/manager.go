@@ -1166,6 +1166,7 @@ func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKe
 		level = "warn"
 		msg = fmt.Sprintf("preview dependency cache restore failed: %v", err)
 	}
+	o.logPreviewHealthCacheEvent("dependency", "restore", status, sizeBytes)
 	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
@@ -1196,6 +1197,7 @@ func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cac
 		level = "warn"
 		msg = fmt.Sprintf("preview package-manager cache restore failed: %v", err)
 	}
+	o.logPreviewHealthCacheEvent("package_manager", "restore", status, sizeBytes)
 	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
@@ -1226,6 +1228,7 @@ func (o *managerServiceObserver) OnBuildCacheRestore(status string, cacheKey str
 		level = "warn"
 		msg = fmt.Sprintf("preview build cache restore failed: %v", err)
 	}
+	o.logPreviewHealthCacheEvent("build", "restore", status, sizeBytes)
 	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
@@ -1266,6 +1269,30 @@ func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey st
 	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
 		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to write preview dependency cache log")
 	}
+}
+
+func (o *managerServiceObserver) logPreviewHealthCacheEvent(cacheKind, operation, status string, sizeBytes int64) {
+	o.manager.logger.Info().
+		Str("org_id", o.orgID.String()).
+		Str("preview_id", o.previewID.String()).
+		Str("cache_kind", cacheKind).
+		Str("operation", operation).
+		Str("status", status).
+		Bool("cache_hit", previewCacheStatusIsHit(status)).
+		Int("cache_hit_value", previewCacheStatusHitValue(status)).
+		Int64("size_bytes", sizeBytes).
+		Msg("preview health: cache event")
+}
+
+func previewCacheStatusIsHit(status string) bool {
+	return status == "restored" || status == "restored_satisfied_install"
+}
+
+func previewCacheStatusHitValue(status string) int {
+	if previewCacheStatusIsHit(status) {
+		return 1
+	}
+	return 0
 }
 
 func (o *managerServiceObserver) enqueueLifecycleLog(level string, step models.PreviewLogStep, msg string, metadata map[string]any) {

@@ -6,10 +6,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, ORG_PROVIDER_OPTIONS } from "@/lib/coding-auth-metadata";
+import { apiKeyHelp, OPENCODE_BACKING_PROVIDER_OPTIONS, openCodeAgentDefaults, openCodeDefaultModelForBackingProvider, openCodeModelsForBackingProvider, ORG_PROVIDER_OPTIONS, type OpenCodeBackingProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
-import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_48 } from "@/lib/model-constants";
+import {
+  AVAILABLE_AMP_MODES,
+  AVAILABLE_PI_MODELS,
+  PI_MODEL_CLAUDE_OPUS_48,
+} from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
 import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
@@ -31,7 +35,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import { capitalizeWords } from "@/lib/utils";
 
-type ModalProvider = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+type ModalProvider = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi" | "opencode";
 type AddFlowAuthType = "subscription" | "api_key";
 type InsertionMode = "make_default" | "next_fallback";
 
@@ -103,6 +107,8 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
       return "Amp API key";
     case "pi":
       return "Pi API key";
+    case "opencode":
+      return "OpenCode API key";
     default:
       return "Coding auth";
   }
@@ -125,6 +131,10 @@ export default function AgentPage() {
   const [renameValue, setRenameValue] = useState("");
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
   const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
+  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(openCodeBackingProvider), [openCodeBackingProvider]);
 
   const { data: codingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
     queryKey: queryKeys.codingCredentials.list("org"),
@@ -169,10 +179,13 @@ export default function AgentPage() {
         auth_type: "api_key",
         label: nextLabel,
         api_key: apiKey,
+        ...(provider === "opencode" ? { api_type: openCodeBackingProvider } : {}),
         ...(provider === "amp"
           ? { agent_defaults: { AMP_MODE: ampMode } }
           : provider === "pi"
             ? { agent_defaults: { PI_MODEL: piModel } }
+            : provider === "opencode"
+              ? { agent_defaults: openCodeAgentDefaults(openCodeModel, openCodeCustomModel) }
             : {}),
       });
     },
@@ -234,6 +247,15 @@ export default function AgentPage() {
     setInsertionMode("next_fallback");
     setAmpMode(AVAILABLE_AMP_MODES[0] ?? "smart");
     setPiModel(PI_MODEL_CLAUDE_OPUS_48);
+    setOpenCodeBackingProvider("opencode");
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeCustomModel("");
+  }
+
+  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider) {
+    setOpenCodeBackingProvider(value);
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(value));
+    setOpenCodeCustomModel("");
   }
 
   function openAddModal(nextProvider: ModalProvider) {
@@ -551,6 +573,45 @@ export default function AgentPage() {
                     </Select>
                   </div>
                 ) : null}
+                {provider === "opencode" ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="opencode-backing-provider">OpenCode provider</Label>
+                      <Select value={openCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
+                        <SelectTrigger id="opencode-backing-provider">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {OPENCODE_BACKING_PROVIDER_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="opencode-model">Default model</Label>
+                      <Select value={openCodeModel} onValueChange={setOpenCodeModel}>
+                        <SelectTrigger id="opencode-model">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {openCodeModelOptions.map((model) => (
+                            <SelectItem key={model} value={model}>{model}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="opencode-model-custom">Custom model override</Label>
+                      <Input
+                        id="opencode-model-custom"
+                        value={openCodeCustomModel}
+                        onChange={(event) => setOpenCodeCustomModel(event.target.value)}
+                        placeholder="provider/model (e.g. xai/grok-code-fast)"
+                      />
+                    </div>
+                  </>
+                ) : null}
                 <div className="space-y-2">
                   <Label htmlFor="auth-api-key-input" className="flex items-center gap-2">
                     API key
@@ -566,7 +627,7 @@ export default function AgentPage() {
                     type="password"
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "gemini_cli" ? "AIza..." : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
+                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "opencode" ? "OpenCode or provider key" : provider === "gemini_cli" ? "AIza..." : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
                   />
                 </div>
               </>

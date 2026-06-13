@@ -1159,6 +1159,14 @@ func TestGetBreakdown_ModelDimension_UsesSessionModelOverrideColumn(t *testing.T
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestBreakdownLabelSQL_AgentLabelsIncludeOpenCode(t *testing.T) {
+	t.Parallel()
+
+	sql := breakdownLabelSQL("agent", "uhe.agent_type")
+
+	require.Contains(t, sql, "WHEN 'opencode' THEN 'OpenCode'", "agent breakdown labels should render OpenCode with the product label")
+}
+
 func TestGetBreakdown_QueryError(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

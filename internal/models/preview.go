@@ -83,13 +83,13 @@ type PreviewRuntime struct {
 type PreviewUnavailableReason string
 
 const (
-	PreviewUnavailableReasonNone                      PreviewUnavailableReason = ""
-	PreviewUnavailableReasonOwnerLost                 PreviewUnavailableReason = "owner_lost"
-	PreviewUnavailableReasonDeployDrainTimeout        PreviewUnavailableReason = "deploy_drain_timeout"
-	PreviewUnavailableReasonHostMaintenance           PreviewUnavailableReason = "host_maintenance"
-	PreviewUnavailableReasonEmergencyForce            PreviewUnavailableReason = "emergency_force"
-	PreviewUnavailableReasonLeaseExpired              PreviewUnavailableReason = "lease_expired"
-	PreviewUnavailableReasonWorkerEndpointUnreachable PreviewUnavailableReason = "worker_endpoint_unreachable"
+	PreviewUnavailableReasonNone                PreviewUnavailableReason = ""
+	PreviewUnavailableReasonOwnerLost           PreviewUnavailableReason = "owner_lost"
+	PreviewUnavailableReasonDeployDrainTimeout  PreviewUnavailableReason = "deploy_drain_timeout"
+	PreviewUnavailableReasonHostMaintenance     PreviewUnavailableReason = "host_maintenance"
+	PreviewUnavailableReasonEmergencyForce      PreviewUnavailableReason = "emergency_force"
+	PreviewUnavailableReasonLeaseExpired        PreviewUnavailableReason = "lease_expired"
+	PreviewUnavailableReasonEndpointUnreachable PreviewUnavailableReason = "endpoint_unreachable"
 )
 
 func (r PreviewUnavailableReason) Validate() error {
@@ -100,7 +100,7 @@ func (r PreviewUnavailableReason) Validate() error {
 		PreviewUnavailableReasonHostMaintenance,
 		PreviewUnavailableReasonEmergencyForce,
 		PreviewUnavailableReasonLeaseExpired,
-		PreviewUnavailableReasonWorkerEndpointUnreachable:
+		PreviewUnavailableReasonEndpointUnreachable:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewUnavailableReason: %q", r)

@@ -125,7 +125,7 @@ export interface PreviewInstance {
     | "host_maintenance"
     | "emergency_force"
     | "lease_expired"
-    | "worker_endpoint_unreachable";
+    | "endpoint_unreachable";
   created_at: string;
   updated_at: string;
   source_workspace_revision?: number;

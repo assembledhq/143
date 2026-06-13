@@ -86,7 +86,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"sessions_agent_type": toStrings(
 			AgentTypeClaudeCode, AgentTypeGeminiCLI,
 			AgentTypeCodex, AgentTypeAmp, AgentTypePi,
-			AgentTypePMAgent,
+			AgentTypeOpenCode, AgentTypePMAgent,
 		),
 		"session_threads_status": toStrings(
 			ThreadStatusPending, ThreadStatusRunning, ThreadStatusIdle,

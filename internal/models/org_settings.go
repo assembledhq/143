@@ -35,13 +35,14 @@ const (
 	AgentTypeCodex      AgentType = "codex"
 	AgentTypeAmp        AgentType = "amp"
 	AgentTypePi         AgentType = "pi"
+	AgentTypeOpenCode   AgentType = "opencode"
 	AgentTypePMAgent    AgentType = "pm_agent"
 )
 
 // Validate returns an error if the agent type is not a recognized value.
 func (a AgentType) Validate() error {
 	switch a {
-	case AgentTypeClaudeCode, AgentTypeGeminiCLI, AgentTypeCodex, AgentTypeAmp, AgentTypePi:
+	case AgentTypeClaudeCode, AgentTypeGeminiCLI, AgentTypeCodex, AgentTypeAmp, AgentTypePi, AgentTypeOpenCode:
 		return nil
 	default:
 		return fmt.Errorf("invalid agent type: %q", a)
