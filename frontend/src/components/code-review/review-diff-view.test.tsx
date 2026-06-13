@@ -57,6 +57,9 @@ vi.mock("./diff-pane", () => ({
         <button onClick={() => (props.onActiveFileChange as (index: number) => void)(1)}>
           ReportActiveFile
         </button>
+        <button onClick={() => (props.onActiveFileChange as (index: number) => void)(2)}>
+          ReportTargetFile
+        </button>
       </div>
     );
   }),
@@ -182,6 +185,90 @@ describe("ReviewDiffView", () => {
     fireEvent.click(screen.getByText("ReportActiveFile"));
 
     expect(mockScrollToFile).not.toHaveBeenCalled();
+  });
+
+  it("ignores intermediate scroll sync while jumping to a selected file", () => {
+    function Harness() {
+      const [activeFileIndex, setActiveFileIndex] = useState(0);
+
+      return (
+        <>
+          <button onClick={() => setActiveFileIndex(2)}>SelectFile</button>
+          <ReviewDiffView
+            {...defaultProps({
+              files: [
+                makeDiffFile("src/a.ts"),
+                makeDiffFile("src/b.ts"),
+                makeDiffFile("src/c.ts"),
+              ],
+              activeFileIndex,
+              onFileChange: setActiveFileIndex,
+            })}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("1 of 3");
+
+    mockScrollToFile.mockClear();
+    fireEvent.click(screen.getByText("SelectFile"));
+
+    expect(mockScrollToFile).toHaveBeenCalledWith(2);
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("3 of 3");
+
+    fireEvent.click(screen.getByText("ReportActiveFile"));
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("3 of 3");
+
+    fireEvent.click(screen.getByText("ReportTargetFile"));
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("3 of 3");
+  });
+
+  it("does not leave a stale skip flag after confirming the scroll target", () => {
+    // Regression: when confirming the pending scroll target, handleVisibleFileChange
+    // called onFileChange(index) even though activeFileIndex was already at that value.
+    // React bailed out (same state), so the effect never ran and skipNextScrollToFileRef
+    // stayed true, causing the very next sidebar jump to silently skip scrollToFile.
+    function Harness() {
+      const [activeFileIndex, setActiveFileIndex] = useState(0);
+
+      return (
+        <>
+          <button onClick={() => setActiveFileIndex(2)}>SelectFile2</button>
+          <button onClick={() => setActiveFileIndex(0)}>SelectFile0</button>
+          <ReviewDiffView
+            {...defaultProps({
+              files: [
+                makeDiffFile("src/a.ts"),
+                makeDiffFile("src/b.ts"),
+                makeDiffFile("src/c.ts"),
+              ],
+              activeFileIndex,
+              onFileChange: setActiveFileIndex,
+            })}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+
+    // Jump to file 2 via sidebar
+    mockScrollToFile.mockClear();
+    fireEvent.click(screen.getByText("SelectFile2"));
+    expect(mockScrollToFile).toHaveBeenCalledWith(2);
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("3 of 3");
+
+    // Scroll animation completes — scroll pane confirms file 2 is visible
+    fireEvent.click(screen.getByText("ReportTargetFile"));
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("3 of 3");
+
+    // Immediately jump to file 0 via sidebar — must not be silently ignored
+    mockScrollToFile.mockClear();
+    fireEvent.click(screen.getByText("SelectFile0"));
+    expect(mockScrollToFile).toHaveBeenCalledWith(0);
+    expect(screen.getByTestId("toolbar-file-position")).toHaveTextContent("1 of 3");
   });
 
   it("renders empty state when files is empty", () => {
