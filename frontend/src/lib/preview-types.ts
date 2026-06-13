@@ -124,7 +124,8 @@ export interface PreviewInstance {
     | "deploy_drain_timeout"
     | "host_maintenance"
     | "emergency_force"
-    | "lease_expired";
+    | "lease_expired"
+    | "endpoint_unreachable";
   created_at: string;
   updated_at: string;
   source_workspace_revision?: number;
