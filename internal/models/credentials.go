@@ -19,6 +19,7 @@ const (
 	ProviderGemini    ProviderName = "gemini"
 	ProviderAmp       ProviderName = "amp"
 	ProviderPi        ProviderName = "pi"
+	ProviderOpenCode  ProviderName = "opencode"
 	// ProviderOpenAISubscription is the canonical name for Codex subscription
 	// credentials on the unified coding_credentials table.
 	ProviderOpenAISubscription ProviderName = "openai_subscription"
@@ -44,7 +45,7 @@ const (
 var AllProviders = []ProviderName{
 	ProviderAnthropic, ProviderAnthropicSubscription,
 	ProviderOpenAI, ProviderOpenAISubscription,
-	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
+	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenCode, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
 	ProviderCircleCI, ProviderVictoriaLogs, ProviderMezmo,
@@ -159,6 +160,13 @@ type AmpConfig struct {
 
 type PiConfig struct {
 	APIKey string `json:"api_key"` // #nosec G117 -- JSON config field
+}
+
+type OpenCodeConfig struct {
+	APIKey          string       `json:"api_key"` // #nosec G117 -- JSON config field
+	BackingProvider ProviderName `json:"backing_provider,omitempty"`
+	BaseURL         string       `json:"base_url,omitempty"`
+	Model           string       `json:"model,omitempty"`
 }
 
 type OpenRouterConfig struct {
@@ -321,6 +329,7 @@ func (c OpenAIConfig) Provider() ProviderName        { return ProviderOpenAI }
 func (c GeminiConfig) Provider() ProviderName        { return ProviderGemini }
 func (c AmpConfig) Provider() ProviderName           { return ProviderAmp }
 func (c PiConfig) Provider() ProviderName            { return ProviderPi }
+func (c OpenCodeConfig) Provider() ProviderName      { return ProviderOpenCode }
 func (c OpenRouterConfig) Provider() ProviderName    { return ProviderOpenRouter }
 func (c GitHubAppConfig) Provider() ProviderName     { return ProviderGitHubApp }
 func (c GitHubAppUserConfig) Provider() ProviderName { return ProviderGitHubAppUser }
@@ -367,6 +376,58 @@ func (c PiConfig) Validate() error {
 		return errors.New("api_key is required")
 	}
 	return nil
+}
+
+func (c OpenCodeConfig) Validate() error {
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
+	}
+	switch c.NormalizedBackingProvider() {
+	case ProviderOpenCode, ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOpenRouter:
+		if err := ValidateOpenCodeBackingProviderModel(c.NormalizedBackingProvider(), c.Model); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported opencode backing_provider: %q", c.BackingProvider)
+	}
+}
+
+func ValidateOpenCodeBackingProviderModel(backing ProviderName, model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	expectedPrefix := openCodeModelPrefixForBackingProvider(backing)
+	if expectedPrefix == "" {
+		return nil
+	}
+	if strings.HasPrefix(model, expectedPrefix+"/") {
+		return nil
+	}
+	return fmt.Errorf("opencode backing_provider %q cannot run model %q; expected model prefix %q", backing, model, expectedPrefix+"/")
+}
+
+func openCodeModelPrefixForBackingProvider(backing ProviderName) string {
+	switch backing {
+	case ProviderOpenCode:
+		return "opencode"
+	case ProviderAnthropic:
+		return "anthropic"
+	case ProviderOpenAI:
+		return "openai"
+	case ProviderGemini:
+		return "google"
+	default:
+		return ""
+	}
+}
+
+func (c OpenCodeConfig) NormalizedBackingProvider() ProviderName {
+	if c.BackingProvider == "" {
+		return ProviderOpenCode
+	}
+	return c.BackingProvider
 }
 
 func (c OpenRouterConfig) Validate() error {
@@ -530,6 +591,15 @@ func (c PiConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
+func (c OpenCodeConfig) MaskedSummary() CredentialSummary {
+	return CredentialSummary{
+		Provider:   ProviderOpenCode,
+		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
+		APIType:    string(c.NormalizedBackingProvider()),
+	}
+}
+
 func (c OpenRouterConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
 		Provider:   ProviderOpenRouter,
@@ -644,6 +714,16 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg PiConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("invalid pi config: %w", err)
+		}
+		return cfg, nil
+	case ProviderOpenCode:
+		var cfg OpenCodeConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid opencode config: %w", err)
+		}
+		cfg.BackingProvider = cfg.NormalizedBackingProvider()
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid opencode config: %w", err)
 		}
 		return cfg, nil
 	case ProviderOpenRouter:
@@ -903,8 +983,8 @@ func (i CreateCodingAuthInput) Validate() error {
 		return errors.New("subscription auth must be created through the provider-specific auth flow")
 	}
 	if len(i.AgentDefaults) > 0 {
-		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi {
-			return errors.New("agent_defaults are only supported for amp and pi")
+		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi && i.Agent != AgentTypeOpenCode {
+			return errors.New("agent_defaults are only supported for amp, pi, and opencode")
 		}
 		if err := ValidateSettingsModels(OrgSettings{
 			AgentConfig: AgentEnvConfig{
@@ -930,7 +1010,7 @@ type UpdateCodingAuthInput struct {
 var CodingAgentProviders = []ProviderName{
 	ProviderAnthropic, ProviderAnthropicSubscription,
 	ProviderOpenAI, ProviderOpenAISubscription,
-	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenRouter,
+	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenCode, ProviderOpenRouter,
 }
 
 // MaskKey preserves the first 6 and last 4 characters of a key.
