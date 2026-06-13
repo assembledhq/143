@@ -202,8 +202,8 @@ func (i CreateCodingCredentialInput) Validate() error {
 		return errors.New("subscription auth must be created through the provider-specific auth flow")
 	}
 	if len(i.AgentDefaults) > 0 {
-		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi {
-			return errors.New("agent_defaults are only supported for amp and pi")
+		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi && i.Agent != AgentTypeOpenCode {
+			return errors.New("agent_defaults are only supported for amp, pi, and opencode")
 		}
 		if err := ValidateSettingsModels(OrgSettings{
 			AgentConfig: AgentEnvConfig{
@@ -451,6 +451,7 @@ func ParseCodingProviderConfig(provider ProviderName, data []byte) (ProviderConf
 		ProviderGemini,
 		ProviderAmp,
 		ProviderPi,
+		ProviderOpenCode,
 		ProviderOpenRouter:
 		return ParseProviderConfig(provider, data)
 	}

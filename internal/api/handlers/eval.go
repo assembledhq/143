@@ -165,10 +165,13 @@ var validGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
 // allowedModels is the set of models that can be used for eval runs.
 var allowedModels = map[string]bool{
-	"claude-opus-4-6":   true,
-	"claude-sonnet-4-6": true,
-	"codex":             true,
-	"gemini-cli":        true,
+	"claude-opus-4-6":                 true,
+	"claude-sonnet-4-6":               true,
+	"codex":                           true,
+	"gemini-cli":                      true,
+	models.OpenCodeModelGPT54Mini:     true,
+	models.OpenCodeModelClaudeHaiku45: true,
+	models.OpenCodeModelDeepSeekChat:  true,
 }
 
 const (

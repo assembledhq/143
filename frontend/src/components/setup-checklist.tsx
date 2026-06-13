@@ -90,6 +90,11 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
+    opencode: {
+      description: "OpenCode uses explicit OpenCode-scoped keys and can route to lower-cost provider/model choices.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
   };
 
   const agentOptions: Array<{

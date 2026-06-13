@@ -19,6 +19,7 @@ func TestPMModelConstants(t *testing.T) {
 	expected = append(expected, AvailableCodexModels...)
 	expected = append(expected, AvailableAmpModes...)
 	expected = append(expected, AvailablePiModels...)
+	expected = append(expected, AvailableOpenCodeModels...)
 	require.Equal(t, expected, AvailablePMModels, "AvailablePMModels should include every agent's models")
 }
 
@@ -49,6 +50,35 @@ func TestCodexModelConstants(t *testing.T) {
 		[]string{CodexModelGPT55, CodexModelGPT55Fast, CodexModelGPT54, CodexModelGPT54Fast, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
 		AvailableCodexModels,
 		"AvailableCodexModels should include the latest Codex model family and fast tiers",
+	)
+}
+
+func TestOpenCodeModelConstants(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t,
+		[]string{
+			OpenCodeModelGPT54Mini,
+			OpenCodeModelGPT53CodexSpark,
+			OpenCodeModelClaudeHaiku45,
+			OpenCodeModelGemini3Flash,
+			OpenCodeModelGemini25Flash,
+			OpenCodeModelMiniMaxM21,
+			OpenCodeModelQwen3Coder,
+			OpenCodeModelDeepSeekChat,
+			OpenCodeModelGPT54,
+			OpenCodeModelGPT52Codex,
+			OpenCodeModelClaudeSonnet46,
+			OpenCodeModelGemini3Pro,
+			OpenCodeModelKimiK2,
+			OpenCodeModelGPT52,
+			OpenCodeModelGPT51Codex,
+			OpenCodeModelClaudeOpus48,
+			OpenCodeModelClaudeOpus47,
+			OpenCodeModelGPT55,
+		},
+		AvailableOpenCodeModels,
+		"AvailableOpenCodeModels should start with cheaper models before balanced and premium options",
 	)
 }
 
@@ -148,11 +178,15 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini31ProPreview},
 		{name: "valid amp mode", agentType: AgentTypeAmp, model: AmpModeSmart},
 		{name: "valid pi model", agentType: AgentTypePi, model: PiModelClaudeSonnet46},
-		{name: "pi accepts non-curated model", agentType: AgentTypePi, model: "moonshot/kimi-k2"},
+		{name: "valid opencode curated model", agentType: AgentTypeOpenCode, model: OpenCodeModelGPT54Mini},
+		{name: "opencode accepts non-curated provider model", agentType: AgentTypeOpenCode, model: "openrouter/qwen/qwen3-coder"},
+		{name: "pi accepts non-curated model", agentType: AgentTypePi, model: "xai/grok-code-fast"},
 		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
 		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},
 		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
 		{name: "invalid amp mode", agentType: AgentTypeAmp, model: "turbo", wantErr: true},
+		{name: "empty opencode model rejected", agentType: AgentTypeOpenCode, model: "", wantErr: true},
+		{name: "opencode model missing provider prefix rejected", agentType: AgentTypeOpenCode, model: "claude-sonnet-4-6", wantErr: true},
 		{name: "empty pi model rejected", agentType: AgentTypePi, model: "", wantErr: true},
 		{name: "pi model missing provider prefix rejected", agentType: AgentTypePi, model: "claude-sonnet-4-6", wantErr: true},
 		{name: "unknown agent type", agentType: "unknown", model: "any", wantErr: true},
@@ -179,6 +213,7 @@ func TestModelEnvVarForAgentType(t *testing.T) {
 	require.Equal(t, "GEMINI_MODEL", ModelEnvVarForAgentType(AgentTypeGeminiCLI))
 	require.Equal(t, "AMP_MODE", ModelEnvVarForAgentType(AgentTypeAmp))
 	require.Equal(t, "PI_MODEL", ModelEnvVarForAgentType(AgentTypePi))
+	require.Equal(t, "OPENCODE_MODEL", ModelEnvVarForAgentType(AgentTypeOpenCode))
 	require.Equal(t, "", ModelEnvVarForAgentType("unknown"))
 }
 
@@ -198,7 +233,7 @@ func TestIsSupportedPiModel(t *testing.T) {
 	for _, model := range AvailablePiModels {
 		require.True(t, IsSupportedPiModel(model), "expected %q to be a curated Pi model", model)
 	}
-	require.False(t, IsSupportedPiModel("moonshot/kimi-k2"), "non-curated Pi model should not be in the curated set")
+	require.False(t, IsSupportedPiModel("xai/grok-code-fast"), "non-curated Pi model should not be in the curated set")
 	require.False(t, IsSupportedPiModel(""), "empty Pi model should be rejected")
 }
 
@@ -214,12 +249,15 @@ func TestAgentTypeForModel(t *testing.T) {
 		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},
 		{GeminiCLIModelGemini25Pro, AgentTypeGeminiCLI},
 		{AmpModeSmart, AgentTypeAmp},
-		// Curated Pi entry contains "/" — must resolve to Pi via the curated
-		// lookup (not the slash heuristic) so we keep precedence stable if a
-		// non-Pi agent later registers a slash-shaped model.
-		{PiModelClaudeOpus48, AgentTypePi},
+		{OpenCodeModelGPT54Mini, AgentTypeOpenCode},
+		// OpenCode registers provider/model IDs explicitly, including some
+		// provider models that Pi can also run. Prefer the first-class OpenCode
+		// mapping for curated overlaps; the slash heuristic below still routes
+		// unknown provider/model strings to Pi.
+		{OpenCodeModelClaudeHaiku45, AgentTypeOpenCode},
+		{PiModelClaudeOpus48, AgentTypeOpenCode},
 		// Slash heuristic only fires after every curated list misses.
-		{"moonshot/kimi-k2", AgentTypePi},
+		{"xai/grok-code-fast", AgentTypePi},
 		{"unknown-model", ""},
 	}
 	for _, tc := range cases {
@@ -235,8 +273,9 @@ func TestValidatePMModel(t *testing.T) {
 	require.NoError(t, ValidatePMModel(ClaudeCodeModelOpus48))
 	require.NoError(t, ValidatePMModel(AmpModeSmart))
 	require.NoError(t, ValidatePMModel(PiModelClaudeOpus48))
+	require.NoError(t, ValidatePMModel(OpenCodeModelGPT54Mini))
 	// Custom Pi provider/model — accepted with parity to ValidateModelForAgentType.
-	require.NoError(t, ValidatePMModel("moonshot/kimi-k2"))
+	require.NoError(t, ValidatePMModel("xai/grok-code-fast"))
 
 	err := ValidatePMModel("not-a-model")
 	require.Error(t, err)
@@ -293,9 +332,15 @@ func TestValidateSettingsModels(t *testing.T) {
 			},
 		},
 		{
+			name: "accepts opencode model as pm model",
+			settings: OrgSettings{
+				PMModel: OpenCodeModelGPT54Mini,
+			},
+		},
+		{
 			name: "accepts custom pi provider/model as pm model (parity with sessions)",
 			settings: OrgSettings{
-				PMModel: "moonshot/kimi-k2",
+				PMModel: "xai/grok-code-fast",
 			},
 		},
 		{
@@ -415,7 +460,7 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "rejects invalid pi model without override",
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{
-					"pi": {"PI_MODEL": "moonshot/kimi-k2"},
+					"pi": {"PI_MODEL": "xai/grok-code-fast"},
 				},
 			},
 			wantErr: true,
@@ -426,7 +471,35 @@ func TestValidateSettingsModels(t *testing.T) {
 				AgentConfig: AgentEnvConfig{
 					"pi": {
 						"PI_MODEL":        "not-in-the-curated-list",
-						"PI_MODEL_CUSTOM": "moonshot/kimi-k2",
+						"PI_MODEL_CUSTOM": "xai/grok-code-fast",
+					},
+				},
+			},
+		},
+		{
+			name: "accepts valid opencode model",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"opencode": {"OPENCODE_MODEL": OpenCodeModelClaudeHaiku45},
+				},
+			},
+		},
+		{
+			name: "rejects invalid opencode model without override",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"opencode": {"OPENCODE_MODEL": "not-a-provider-model"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "opencode_model_custom bypasses curated list check for provider model",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"opencode": {
+						"OPENCODE_MODEL":        "not-in-the-curated-list",
+						"OPENCODE_MODEL_CUSTOM": "xai/grok-code-fast",
 					},
 				},
 			},
@@ -448,6 +521,15 @@ func TestValidateSettingsModels(t *testing.T) {
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{
 					"pi": {"PI_MODEL": PiModelClaudeSonnet46, "LD_PRELOAD": "/tmp/x.so"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects unknown opencode key",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"opencode": {"OPENCODE_MODEL": OpenCodeModelGPT54Mini, "NODE_OPTIONS": "--require /tmp/x.js"},
 				},
 			},
 			wantErr: true,

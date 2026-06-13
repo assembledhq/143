@@ -2203,7 +2203,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	sandboxCfg.SessionID = run.ID.String()
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
-	sandboxCfg.Env = o.env.Resolve(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
+	sandboxCfg.Env = o.env.ResolveForModel(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID, stringPtrValue(run.ModelOverride))
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -3071,7 +3071,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "continue_session"
-	sandboxCfg.Env = o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
+	sandboxCfg.Env = o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -5338,7 +5338,7 @@ func (o *Orchestrator) billingModeForAgent(
 			return TokenBillingModeAPIKey
 		}
 		return TokenBillingModeUnknown
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
+	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return TokenBillingModeAPIKey
 	default:
 		return TokenBillingModeUnknown
@@ -6372,6 +6372,13 @@ func strPtr(s string) *string {
 	return &s
 }
 
+func stringPtrValue(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // updatePrimaryThreadTerminal mirrors a session-level terminal transition onto
 // the seeded primary thread row. When result is non-nil, it persists the same
 // failure_explanation / failure_category / result_summary / diff the session
@@ -6715,7 +6722,7 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 }
 
 func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
-	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
+	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride)), session.AgentType)
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
@@ -6775,6 +6782,23 @@ func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) 
 		delete(env, "AMP_API_KEY")
 	case models.AgentTypePi:
 		delete(env, "PI_API_KEY")
+	case models.AgentTypeOpenCode:
+		delete(env, "OPENCODE_API_KEY")
+		delete(env, "OPENCODE_BASE_URL")
+		delete(env, "OPENCODE_BACKING_PROVIDER")
+		delete(env, "OPENCODE_DISABLE_AUTOUPDATE")
+		delete(env, "OPENCODE_DISABLE_DEFAULT_PLUGINS")
+		delete(env, "OPENCODE_DISABLE_MODELS_FETCH")
+		delete(env, "OPENCODE_CONFIG_CONTENT")
+		delete(env, "OPENCODE_PERMISSION")
+		delete(env, "OPENCODE_MODEL")
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_BASE_URL")
+		delete(env, "OPENAI_API_KEY")
+		delete(env, "OPENAI_BASE_URL")
+		delete(env, "GEMINI_API_KEY")
+		delete(env, "OPENROUTER_API_KEY")
+		delete(env, "OPENROUTER_BASE_URL")
 	}
 }
 
@@ -6910,6 +6934,8 @@ func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 		return models.ProviderAmp
 	case models.AgentTypePi:
 		return models.ProviderPi
+	case models.AgentTypeOpenCode:
+		return models.ProviderOpenCode
 	default:
 		return ""
 	}

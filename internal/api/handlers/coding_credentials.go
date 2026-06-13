@@ -562,6 +562,8 @@ func codingAgentForProvider(p models.ProviderName) models.AgentType {
 		return models.AgentTypeAmp
 	case models.ProviderPi:
 		return models.AgentTypePi
+	case models.ProviderOpenCode:
+		return models.AgentTypeOpenCode
 	default:
 		return ""
 	}
@@ -614,7 +616,7 @@ func usageNoteFor(cred models.DecryptedCodingCredential) string {
 		return cfg.MaskedSummary().MaskedKey
 	case models.OpenAIConfig:
 		return cfg.MaskedSummary().MaskedKey
-	case models.GeminiConfig, models.AmpConfig, models.PiConfig, models.OpenRouterConfig:
+	case models.GeminiConfig, models.AmpConfig, models.PiConfig, models.OpenCodeConfig, models.OpenRouterConfig:
 		return cred.Config.MaskedSummary().MaskedKey
 	}
 	return ""
@@ -636,6 +638,8 @@ func defaultLabelFor(agent models.AgentType, authType models.CodingAuthType) str
 		return "Amp API key"
 	case agent == models.AgentTypePi:
 		return "Pi API key"
+	case agent == models.AgentTypeOpenCode:
+		return "OpenCode API key"
 	}
 	return "Coding auth"
 }
@@ -666,8 +670,38 @@ func codingCredentialConfigFromInput(input models.CreateCodingCredentialInput) (
 		return models.AmpConfig{APIKey: input.APIKey}, models.ProviderAmp, nil
 	case models.AgentTypePi:
 		return models.PiConfig{APIKey: input.APIKey}, models.ProviderPi, nil
+	case models.AgentTypeOpenCode:
+		cfg := models.OpenCodeConfig{
+			APIKey:          input.APIKey,
+			BackingProvider: openCodeBackingProviderFromInput(input.APIType),
+			BaseURL:         input.BaseURL,
+			Model:           openCodeModelFromDefaults(input.AgentDefaults),
+		}
+		if err := cfg.Validate(); err != nil {
+			return nil, "", err
+		}
+		return cfg, models.ProviderOpenCode, nil
 	}
 	return nil, "", fmt.Errorf("unsupported agent: %s", input.Agent)
+}
+
+func openCodeModelFromDefaults(defaults map[string]string) string {
+	if defaults == nil {
+		return ""
+	}
+	if custom := strings.TrimSpace(defaults["OPENCODE_MODEL_CUSTOM"]); custom != "" {
+		return custom
+	}
+	return strings.TrimSpace(defaults["OPENCODE_MODEL"])
+}
+
+func openCodeBackingProviderFromInput(input string) models.ProviderName {
+	switch models.ProviderName(input) {
+	case models.ProviderAnthropic, models.ProviderOpenAI, models.ProviderGemini, models.ProviderOpenRouter:
+		return models.ProviderName(input)
+	default:
+		return models.ProviderOpenCode
+	}
 }
 
 func coalesce(v, fallback string) string {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AccountPage from "./page";
 
@@ -186,9 +186,16 @@ describe("Account settings page", () => {
     await user.click(screen.getByLabelText("Amp"));
     expect(screen.getByPlaceholderText("amp_...")).toBeInTheDocument();
 
-    await user.click(screen.getByLabelText("Pi"));
-    expect(screen.getByPlaceholderText("pi_...")).toBeInTheDocument();
-  });
+	    await user.click(screen.getByLabelText("Pi"));
+	    expect(screen.getByPlaceholderText("pi_...")).toBeInTheDocument();
+
+	    await user.click(screen.getByLabelText("OpenCode"));
+	    const dialog = screen.getByRole("dialog");
+	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
+	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
+	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
+	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
+	  });
 
   it("posts new personal auths against the unified API with scope=personal", async () => {
     const user = userEvent.setup();
@@ -215,16 +222,21 @@ describe("Account settings page", () => {
       }),
     );
 
-    renderWithProviders(<AccountPage />);
+	    renderWithProviders(<AccountPage />);
 
-    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
-    await user.click(await screen.findByLabelText("Claude Code"));
-    await user.click(screen.getByRole("radio", { name: /API key/i }));
-    await user.type(screen.getByLabelText("Label"), "Personal Claude backup");
-    // Use the input id directly — the visible label text is shared with the
-    // help-tooltip button so getByLabelText("API key") would be ambiguous.
-    await user.type(screen.getByPlaceholderText("sk-ant-..."), "sk-ant-test123");
-    await user.click(screen.getByRole("button", { name: "Save auth" }));
+	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
+	    const dialog = await screen.findByRole("dialog");
+	    await user.click(await within(dialog).findByLabelText("Claude Code"));
+	    await user.click(within(dialog).getByRole("radio", { name: /API key/i }));
+	    await user.type(within(dialog).getByLabelText("Label"), "Personal Claude backup");
+	    // Use the input id directly — the visible label text is shared with the
+	    // help-tooltip button so getByLabelText("API key") would be ambiguous.
+	    await user.type(within(dialog).getByPlaceholderText("sk-ant-..."), "sk-ant-test123");
+	    const saveButton = within(dialog).getByRole("button", { name: "Save auth" });
+	    await waitFor(() => {
+	      expect(saveButton).toBeEnabled();
+	    });
+	    await user.click(saveButton);
 
     await waitFor(() => {
       expect(createBody).toEqual({
@@ -235,9 +247,59 @@ describe("Account settings page", () => {
         api_key: "sk-ant-test123",
       });
     });
-  });
+	  });
 
-  it("stores a default coding-agent reasoning preference", async () => {
+	  it("posts personal OpenCode auth with an explicit backing provider", async () => {
+	    const user = userEvent.setup();
+	    let createBody: Record<string, unknown> | null = null;
+	    server.use(
+	      ...emptyCodingCredentialsHandlers(),
+	      http.post("/api/v1/coding-credentials", async ({ request }) => {
+	        createBody = await request.json() as Record<string, unknown>;
+	        return HttpResponse.json({
+	          id: "p-opencode",
+	          org_id: "org-1",
+	          user_id: "user-1",
+	          scope: "personal",
+	          priority: 1,
+	          agent: "opencode",
+	          auth_type: "api_key",
+	          provider: "opencode",
+	          label: "OpenCode API key",
+	          status: "healthy",
+	          is_default: true,
+	          created_at: "2026-01-01T00:00:00Z",
+	          updated_at: "2026-01-01T00:00:00Z",
+	        });
+	      }),
+	    );
+
+	    renderWithProviders(<AccountPage />);
+
+	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
+	    await user.click(await screen.findByLabelText("OpenCode"));
+	    await user.click(screen.getByRole("combobox", { name: "OpenCode provider" }));
+	    await user.click(await screen.findByRole("option", { name: "OpenCode via OpenRouter" }));
+	    await user.type(screen.getByLabelText("Custom model override"), "xai/grok-code-fast");
+	    await user.type(screen.getByPlaceholderText("OpenCode or provider key"), "sk-or-opencode");
+	    await user.click(screen.getByRole("button", { name: "Save auth" }));
+
+	    await waitFor(() => {
+	      expect(createBody).toEqual({
+	        scope: "personal",
+	        agent: "opencode",
+	        auth_type: "api_key",
+	        api_key: "sk-or-opencode",
+	        api_type: "openrouter",
+	        agent_defaults: {
+	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL_CUSTOM: "xai/grok-code-fast",
+	        },
+	      });
+	    });
+	  });
+
+	  it("stores a default coding-agent reasoning preference", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;
     server.use(

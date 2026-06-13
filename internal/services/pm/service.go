@@ -227,7 +227,7 @@ func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, 
 				Detail:    fmt.Sprintf("failed to prepare Anthropic API-key fallback: %v", err),
 			}
 		}
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
+	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return agent.TokenBillingModeAPIKey, nil
 	default:
 		return agent.TokenBillingModeUnknown, nil
@@ -349,6 +349,10 @@ func effectivePMAgentModel(settings models.OrgSettings, agentType models.AgentTy
 		env = map[string]string{}
 	}
 	switch agentType {
+	case models.AgentTypeOpenCode:
+		if env["OPENCODE_MODEL_CUSTOM"] != "" {
+			return env["OPENCODE_MODEL_CUSTOM"]
+		}
 	case models.AgentTypePi:
 		if env["PI_MODEL_CUSTOM"] != "" {
 			return env["PI_MODEL_CUSTOM"]
@@ -387,7 +391,7 @@ func effectivePMBillingMode(agentType models.AgentType, env map[string]string, f
 			return agent.TokenBillingModeAPIKey
 		}
 		return agent.TokenBillingModeUnknown
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
+	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return agent.TokenBillingModeAPIKey
 	default:
 		return agent.TokenBillingModeUnknown

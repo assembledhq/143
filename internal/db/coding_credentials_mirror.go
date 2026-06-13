@@ -625,7 +625,7 @@ func mirrorProviderForOrg(provider models.ProviderName, cfg models.ProviderConfi
 			return models.ProviderAnthropic, clean, true
 		}
 		return "", nil, false
-	case models.ProviderOpenAI, models.ProviderGemini, models.ProviderAmp, models.ProviderPi, models.ProviderOpenRouter:
+	case models.ProviderOpenAI, models.ProviderGemini, models.ProviderAmp, models.ProviderPi, models.ProviderOpenCode, models.ProviderOpenRouter:
 		return provider, cfg, true
 	default:
 		return "", nil, false
@@ -638,7 +638,7 @@ func mirrorProviderForOrg(provider models.ProviderName, cfg models.ProviderConfi
 func mirrorProviderForUser(provider models.ProviderName, cfg models.ProviderConfig) (models.ProviderName, models.ProviderConfig, bool) {
 	switch provider {
 	case models.ProviderAnthropic, models.ProviderOpenAI, models.ProviderGemini,
-		models.ProviderAmp, models.ProviderPi, models.ProviderOpenRouter:
+		models.ProviderAmp, models.ProviderPi, models.ProviderOpenCode, models.ProviderOpenRouter:
 		return provider, cfg, true
 	default:
 		return "", nil, false

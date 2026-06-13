@@ -19,6 +19,7 @@ func TestProviderName_Valid(t *testing.T) {
 		{"anthropic is valid", ProviderAnthropic, true},
 		{"openai is valid", ProviderOpenAI, true},
 		{"gemini is valid", ProviderGemini, true},
+		{"opencode is valid", ProviderOpenCode, true},
 		{"openrouter is valid", ProviderOpenRouter, true},
 		{"github_app is valid", ProviderGitHubApp, true},
 		{"github_app_user is valid", ProviderGitHubAppUser, true},
@@ -168,6 +169,95 @@ func TestParseProviderConfig_Pi(t *testing.T) {
 	pc, ok := cfg.(PiConfig)
 	require.True(t, ok, "config should be PiConfig")
 	require.Equal(t, "pi-provider-key", pc.APIKey, "should parse api_key")
+}
+
+func TestParseProviderConfig_OpenCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected OpenCodeConfig
+	}{
+		{
+			name:  "native opencode key",
+			input: `{"api_key":"oc_test_key","model":"opencode/gpt-5.2"}`,
+			expected: OpenCodeConfig{
+				APIKey:          "oc_test_key",
+				BackingProvider: ProviderOpenCode,
+				Model:           OpenCodeModelGPT52,
+			},
+		},
+		{
+			name:  "explicit anthropic-backed opencode key",
+			input: `{"api_key":"sk-ant-opencode","backing_provider":"anthropic","base_url":"https://api.example.com"}`,
+			expected: OpenCodeConfig{
+				APIKey:          "sk-ant-opencode",
+				BackingProvider: ProviderAnthropic,
+				BaseURL:         "https://api.example.com",
+			},
+		},
+		{
+			name:  "defaults empty backing provider to opencode",
+			input: `{"api_key":"oc_test_key"}`,
+			expected: OpenCodeConfig{
+				APIKey:          "oc_test_key",
+				BackingProvider: ProviderOpenCode,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg, err := ParseProviderConfig(ProviderOpenCode, []byte(tt.input))
+			require.NoError(t, err, "ParseProviderConfig should parse OpenCode config")
+			oc, ok := cfg.(OpenCodeConfig)
+			require.True(t, ok, "config should be OpenCodeConfig")
+			require.Equal(t, tt.expected, oc, "parsed OpenCode config should match expected")
+		})
+	}
+}
+
+func TestOpenCodeConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     OpenCodeConfig
+		wantErr bool
+	}{
+		{name: "native opencode key", cfg: OpenCodeConfig{APIKey: "oc_key", BackingProvider: ProviderOpenCode}},
+		{name: "anthropic backed key", cfg: OpenCodeConfig{APIKey: "sk-ant", BackingProvider: ProviderAnthropic}},
+		{name: "openai backed key", cfg: OpenCodeConfig{APIKey: "sk-openai", BackingProvider: ProviderOpenAI}},
+		{name: "gemini backed key", cfg: OpenCodeConfig{APIKey: "gem-key", BackingProvider: ProviderGemini}},
+		{name: "openrouter backed key", cfg: OpenCodeConfig{APIKey: "sk-or", BackingProvider: ProviderOpenRouter}},
+		{name: "native opencode model matches native key", cfg: OpenCodeConfig{APIKey: "oc_key", BackingProvider: ProviderOpenCode, Model: OpenCodeModelGPT52}},
+		{name: "anthropic model matches anthropic backed key", cfg: OpenCodeConfig{APIKey: "sk-ant", BackingProvider: ProviderAnthropic, Model: OpenCodeModelClaudeHaiku45}},
+		{name: "openai model matches openai backed key", cfg: OpenCodeConfig{APIKey: "sk-openai", BackingProvider: ProviderOpenAI, Model: OpenCodeModelGPT54Mini}},
+		{name: "gemini model matches gemini backed key", cfg: OpenCodeConfig{APIKey: "gem-key", BackingProvider: ProviderGemini, Model: OpenCodeModelGemini25Flash}},
+		{name: "openrouter allows arbitrary provider model", cfg: OpenCodeConfig{APIKey: "sk-or", BackingProvider: ProviderOpenRouter, Model: OpenCodeModelClaudeHaiku45}},
+		{name: "missing key", cfg: OpenCodeConfig{BackingProvider: ProviderOpenCode}, wantErr: true},
+		{name: "unsupported backing provider", cfg: OpenCodeConfig{APIKey: "key", BackingProvider: ProviderSentry}, wantErr: true},
+		{name: "native opencode key rejects openai model", cfg: OpenCodeConfig{APIKey: "oc_key", BackingProvider: ProviderOpenCode, Model: OpenCodeModelGPT54Mini}, wantErr: true},
+		{name: "openai backed key rejects anthropic model", cfg: OpenCodeConfig{APIKey: "sk-openai", BackingProvider: ProviderOpenAI, Model: OpenCodeModelClaudeHaiku45}, wantErr: true},
+		{name: "anthropic backed key rejects openai model", cfg: OpenCodeConfig{APIKey: "sk-ant", BackingProvider: ProviderAnthropic, Model: OpenCodeModelGPT54Mini}, wantErr: true},
+		{name: "gemini backed key rejects google-less model", cfg: OpenCodeConfig{APIKey: "gem-key", BackingProvider: ProviderGemini, Model: OpenCodeModelGPT54Mini}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "OpenCodeConfig should reject invalid config")
+				return
+			}
+			require.NoError(t, err, "OpenCodeConfig should accept valid config")
+		})
+	}
 }
 
 func TestParseProviderConfig_AmpAndPi_InvalidJSON(t *testing.T) {
@@ -905,6 +995,18 @@ func TestCreateCodingAuthInputValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "valid opencode custom model defaults",
+			input: CreateCodingAuthInput{
+				Agent:    AgentTypeOpenCode,
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "oc-provider-key",
+				AgentDefaults: map[string]string{
+					"OPENCODE_MODEL":        "not-in-curated-list",
+					"OPENCODE_MODEL_CUSTOM": "xai/grok-code-fast",
+				},
+			},
+		},
+		{
 			name: "rejects agent defaults for unsupported agents",
 			input: CreateCodingAuthInput{
 				Agent:         AgentTypeCodex,
@@ -912,7 +1014,7 @@ func TestCreateCodingAuthInputValidate(t *testing.T) {
 				APIKey:        "sk-test-123",
 				AgentDefaults: map[string]string{"OPENAI_MODEL": "gpt-5.4"},
 			},
-			expectErr: "agent_defaults are only supported for amp and pi",
+			expectErr: "agent_defaults are only supported for amp, pi, and opencode",
 		},
 		{
 			name: "rejects invalid amp defaults",

@@ -29,6 +29,7 @@ var codingAuthProviders = []models.ProviderName{
 	models.ProviderGemini,
 	models.ProviderAmp,
 	models.ProviderPi,
+	models.ProviderOpenCode,
 }
 
 // codingAuthProviderSQLList renders codingAuthProviders as a parenthesized
@@ -1240,8 +1241,34 @@ func providerConfigForCodingAuthInput(input models.CreateCodingAuthInput) (model
 		return models.PiConfig{
 			APIKey: input.APIKey,
 		}, models.ProviderPi, nil
+	case models.AgentTypeOpenCode:
+		return models.OpenCodeConfig{
+			APIKey:          input.APIKey,
+			BackingProvider: openCodeBackingProviderFromCodingAuthInput(input.APIType),
+			BaseURL:         input.BaseURL,
+			Model:           openCodeModelFromCodingAuthDefaults(input.AgentDefaults),
+		}, models.ProviderOpenCode, nil
 	default:
 		return nil, "", fmt.Errorf("unsupported coding auth agent: %s", input.Agent)
+	}
+}
+
+func openCodeModelFromCodingAuthDefaults(defaults map[string]string) string {
+	if defaults == nil {
+		return ""
+	}
+	if custom := strings.TrimSpace(defaults["OPENCODE_MODEL_CUSTOM"]); custom != "" {
+		return custom
+	}
+	return strings.TrimSpace(defaults["OPENCODE_MODEL"])
+}
+
+func openCodeBackingProviderFromCodingAuthInput(input string) models.ProviderName {
+	switch models.ProviderName(input) {
+	case models.ProviderAnthropic, models.ProviderOpenAI, models.ProviderGemini, models.ProviderOpenRouter:
+		return models.ProviderName(input)
+	default:
+		return models.ProviderOpenCode
 	}
 }
 
@@ -1291,6 +1318,8 @@ func inferCodingAuthAgent(cred models.DecryptedCredential) models.AgentType {
 		return models.AgentTypeAmp
 	case models.ProviderPi:
 		return models.AgentTypePi
+	case models.ProviderOpenCode:
+		return models.AgentTypeOpenCode
 	default:
 		return ""
 	}
@@ -1320,6 +1349,10 @@ func inferCodingAuthType(cred models.DecryptedCredential) models.CodingAuthType 
 			return models.CodingAuthTypeAPIKey
 		}
 	case models.PiConfig:
+		if cfg.APIKey != "" {
+			return models.CodingAuthTypeAPIKey
+		}
+	case models.OpenCodeConfig:
 		if cfg.APIKey != "" {
 			return models.CodingAuthTypeAPIKey
 		}
@@ -1361,6 +1394,8 @@ func codingAuthUsageNote(cred models.DecryptedCredential) string {
 		return cfg.MaskedSummary().MaskedKey
 	case models.PiConfig:
 		return cfg.MaskedSummary().MaskedKey
+	case models.OpenCodeConfig:
+		return cfg.MaskedSummary().MaskedKey
 	default:
 		return ""
 	}
@@ -1382,6 +1417,8 @@ func fallbackLabel(agent models.AgentType, authType models.CodingAuthType) strin
 		return "Amp API key"
 	case agent == models.AgentTypePi && authType == models.CodingAuthTypeAPIKey:
 		return "Pi API key"
+	case agent == models.AgentTypeOpenCode && authType == models.CodingAuthTypeAPIKey:
+		return "OpenCode API key"
 	default:
 		return "Coding auth"
 	}

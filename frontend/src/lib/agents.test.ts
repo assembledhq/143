@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { agentDisplayLabel, availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
+import { AGENTS_BY_KEY, agentDisplayLabel, agentTypeForModel, availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
 import type { CodingAuth, CodingCredentialSummary, ResolvedCredential, UserCredentialSummary } from "./types";
 
 const codexCred: ResolvedCredential = {
@@ -24,6 +24,21 @@ const ampCodingAuth: CodingAuth = {
   label: "Amp",
   scope: "org",
   provider: "amp",
+  status: "healthy",
+  is_default: true,
+  created_at: "2026-03-20T00:00:00Z",
+  updated_at: "2026-03-20T00:00:00Z",
+};
+
+const opencodeCodingAuth: CodingAuth = {
+  id: "ca-opencode",
+  org_id: "org-1",
+  priority: 0,
+  agent: "opencode",
+  auth_type: "api_key",
+  label: "OpenCode",
+  scope: "org",
+  provider: "opencode",
   status: "healthy",
   is_default: true,
   created_at: "2026-03-20T00:00:00Z",
@@ -66,6 +81,12 @@ describe("availableAgentModelGroups", () => {
   it("treats unified personal subscription rows as available for session agents", () => {
     const groups = availableAgentModelGroups([], null, [personalClaudeSubscription], "codex");
     expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
+  });
+
+  it("treats explicit OpenCode credential rows as available for OpenCode", () => {
+    const groups = availableAgentModelGroups([], null, [opencodeCodingAuth], "codex");
+    expect(groups.map((g) => g.key)).toContain("opencode");
+    expect(AGENTS_BY_KEY.opencode.providerKey).toBe("opencode");
   });
 
   it("orgAgentConfig surfaces agents whose API key is set even without user creds (PM scope)", () => {
@@ -113,6 +134,28 @@ describe("agentDisplayLabel", () => {
   it("falls back to display-only labels and then the raw key", () => {
     expect(agentDisplayLabel("pm_agent")).toBe("PM Agent");
     expect(agentDisplayLabel("unknown_agent")).toBe("unknown_agent");
+  });
+});
+
+describe("agentTypeForModel", () => {
+  it("returns the correct agent for curated OpenCode models", () => {
+    expect(agentTypeForModel("anthropic/claude-haiku-4-5")).toBe("opencode");
+    expect(agentTypeForModel("anthropic/claude-opus-4-8")).toBe("opencode");
+  });
+
+  it("returns undefined for unknown provider/model strings so callers fall back to their default agent", () => {
+    // xai/grok-code-fast is not in any curated list; it could be a custom Pi
+    // or custom OpenCode model — the caller owns that context.
+    expect(agentTypeForModel("xai/grok-code-fast")).toBeUndefined();
+  });
+
+  it("exposes explicit OpenCode custom model metadata", () => {
+    expect(AGENTS_BY_KEY.opencode.envVars).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: "OPENCODE_MODEL_CUSTOM",
+        placeholder: "provider/model (e.g. xai/grok-code-fast)",
+      }),
+    ]));
   });
 });
 

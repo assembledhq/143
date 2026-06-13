@@ -1,0 +1,4 @@
+{"type":"session_start","session_id":"ses_fixture_tools"}
+{"type":"tool_call","name":"bash","input":{"command":"go test ./..."}}
+{"type":"tool_result","name":"bash","output":"FAIL ./internal/example"}
+{"type":"error","error":"command failed: go test ./..."}

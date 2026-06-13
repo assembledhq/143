@@ -147,6 +147,24 @@ func TestAnthropicSubscriptionConfigMetadata(t *testing.T) {
 
 func TestParseCodingProviderConfig(t *testing.T) {
 	t.Parallel()
+	t.Run("opencode", func(t *testing.T) {
+		t.Parallel()
+
+		original := OpenCodeConfig{
+			APIKey:          "oc-key",
+			BackingProvider: ProviderOpenAI,
+			Model:           OpenCodeModelGPT54Mini,
+		}
+		data, err := json.Marshal(original)
+		require.NoError(t, err, "test should marshal OpenCode config")
+
+		got, err := ParseCodingProviderConfig(ProviderOpenCode, data)
+		require.NoError(t, err, "ParseCodingProviderConfig should accept OpenCode coding credentials")
+		cfg, ok := got.(OpenCodeConfig)
+		require.True(t, ok, "parsed config should be OpenCodeConfig")
+		require.Equal(t, original, cfg, "parsed OpenCode config should match expected")
+	})
+
 	t.Run("openai_subscription", func(t *testing.T) {
 		t.Parallel()
 
@@ -343,6 +361,20 @@ func TestCreateCodingCredentialInputValidate(t *testing.T) {
 		{
 			"valid amp defaults",
 			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeAmp, AuthType: CodingAuthTypeAPIKey, APIKey: "amp", AgentDefaults: validDefaults},
+			true,
+		},
+		{
+			"valid opencode defaults",
+			CreateCodingCredentialInput{
+				Scope:    CodingCredentialScopeOrg,
+				Agent:    AgentTypeOpenCode,
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "oc-key",
+				AgentDefaults: map[string]string{
+					"OPENCODE_MODEL":        "not-in-curated-list",
+					"OPENCODE_MODEL_CUSTOM": "xai/grok-code-fast",
+				},
+			},
 			true,
 		},
 		{
