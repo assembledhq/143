@@ -450,6 +450,37 @@ func TestPreviewStore_GetPreviewStartupEstimate(t *testing.T) {
 	}
 }
 
+func TestPreviewStore_PreviewHealthSample(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	mock.ExpectQuery("preview health sample").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"active_previews",
+			"previews_started",
+			"previews_ready",
+			"previews_failed_unavailable",
+			"startup_p50_seconds",
+			"startup_p95_seconds",
+		}).AddRow(int64(4), int64(8), int64(7), int64(1), float64(23), float64(61)))
+
+	sample, err := store.PreviewHealthSample(context.Background())
+	require.NoError(t, err, "PreviewHealthSample should not return an error")
+	require.Equal(t, PreviewHealthSample{
+		ActivePreviews:              4,
+		PreviewsStarted:             8,
+		PreviewsReady:               7,
+		PreviewsFailedOrUnavailable: 1,
+		StartupP50Seconds:           23,
+		StartupP95Seconds:           61,
+	}, sample, "PreviewHealthSample should return the aggregate preview health row")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_GetPreviewInstance(t *testing.T) {
 	t.Parallel()
 
