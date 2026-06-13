@@ -1105,6 +1105,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  preview_rpc_auth_preflight() {
+    local cid="$1"
+    echo "Running preview RPC auth compatibility check from candidate api container ${cid:0:12}..."
+    docker exec "$cid" /bin/worker-deployctl preview-auth-check --json
+  }
+
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
   #   1. scale up by 1 alongside the existing container(s)
   #   2. wait for the new container's health check
@@ -1175,6 +1181,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ -n "$old_containers" ]; then
+      if [ "$service" = "api" ]; then
+        preview_rpc_auth_preflight "$new_container"
+      fi
       wait_caddy_upstream_discovery "$service" "$new_container"
       # Stop each old container with a long timeout so in-flight requests and
       # SSE streams have time to drain. Docker sends SIGTERM and only falls
@@ -1783,6 +1792,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     new_cid="$STARTED_WORKER_CID"
     if ! wait_worker_db_heartbeat "$node_id" "${WORKER_BLUE_GREEN_DB_HEARTBEAT_TIMEOUT_SECONDS:-120}"; then
       echo "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure..."
+      docker stop "$new_cid" >/dev/null 2>&1 || true
+      docker rm "$new_cid" >/dev/null 2>&1 || true
+      return 1
+    fi
+    if ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
+      echo "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure..."
       docker stop "$new_cid" >/dev/null 2>&1 || true
       docker rm "$new_cid" >/dev/null 2>&1 || true
       return 1

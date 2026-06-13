@@ -5,13 +5,19 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +40,8 @@ func main() {
 	switch os.Args[1] {
 	case "preflight":
 		runPreflight(ctx, store, os.Args[2:])
+	case "preview-auth-check":
+		runPreviewAuthCheck(ctx, store, cfg, os.Args[2:])
 	case "mark-draining":
 		runMarkDraining(ctx, store, os.Args[2:], models.DrainIntentPlannedRollout)
 	case "force-maintenance":
@@ -61,6 +69,179 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("preview-auth-check", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 5*time.Second, "per-node HTTP timeout")
+	concurrency := fs.Int("concurrency", 16, "maximum concurrent auth-check probes")
+	nodeID := fs.String("node-id", "", "optional worker node id to probe")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	_ = fs.Parse(args)
+
+	keyring, err := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+	if err != nil {
+		exitErr("preview RPC keyring: %v", err)
+	}
+	nodes, err := store.ListPreviewRPCProbeNodes(ctx)
+	if err != nil {
+		exitErr("list preview RPC probe nodes: %v", err)
+	}
+	probeNodes, err := selectPreviewAuthProbeNodes(nodes, *nodeID)
+	if err != nil {
+		exitErr("%v", err)
+	}
+	checked, err := probePreviewRPCAuthNodes(probeNodes, keyring, *timeout, *concurrency, &http.Client{})
+	if err != nil {
+		exitErr("%v", err)
+	}
+	writeOutput(map[string]any{
+		"ok":            true,
+		"checked_count": len(checked),
+		"checked_nodes": checked,
+	}, *jsonOut)
+}
+
+type previewAuthProbeNode struct {
+	ID      string
+	BaseURL string
+}
+
+func selectPreviewAuthProbeNodes(nodes []models.Node, nodeID string) ([]previewAuthProbeNode, error) {
+	probeNodes := make([]previewAuthProbeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if nodeID != "" && node.ID != nodeID {
+			continue
+		}
+		var metadata previewsvc.WorkerNodeMetadata
+		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
+			return nil, fmt.Errorf("decode preview metadata for node %s: %w", node.ID, err)
+		}
+		baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
+		if baseURL == "" {
+			return nil, fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+		}
+		probeNodes = append(probeNodes, previewAuthProbeNode{
+			ID:      node.ID,
+			BaseURL: baseURL,
+		})
+	}
+	if nodeID != "" && len(probeNodes) == 0 {
+		return nil, fmt.Errorf("node %s is not available for preview RPC auth-check", nodeID)
+	}
+	return probeNodes, nil
+}
+
+func probePreviewRPCAuthNodes(nodes []previewAuthProbeNode, keyring auth.PreviewTokenKeyring, timeout time.Duration, concurrency int, client *http.Client) ([]string, error) {
+	if len(nodes) == 0 {
+		return []string{}, nil
+	}
+	if timeout <= 0 {
+		return nil, fmt.Errorf("preview RPC auth-check timeout must be positive")
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > len(nodes) {
+		concurrency = len(nodes)
+	}
+	if client == nil {
+		client = &http.Client{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	checked := make([]bool, len(nodes))
+	jobs := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				if err := probePreviewRPCAuthNode(ctx, client, keyring, nodes[idx], timeout); err != nil {
+					select {
+					case errCh <- err:
+						cancel()
+					default:
+					}
+					continue
+				}
+				checked[idx] = true
+			}
+		}()
+	}
+
+sendJobs:
+	for idx := range nodes {
+		select {
+		case <-ctx.Done():
+			break sendJobs
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return nil, err
+	default:
+	}
+
+	checkedIDs := make([]string, 0, len(nodes))
+	for idx, ok := range checked {
+		if ok {
+			checkedIDs = append(checkedIDs, nodes[idx].ID)
+		}
+	}
+	return checkedIDs, nil
+}
+
+func probePreviewRPCAuthNode(ctx context.Context, client *http.Client, keyring auth.PreviewTokenKeyring, node previewAuthProbeNode, timeout time.Duration) error {
+	baseURL := strings.TrimRight(node.BaseURL, "/")
+	if baseURL == "" {
+		return fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+	}
+	token, err := keyring.Generate(auth.PreviewTokenClaims{
+		OrgID:        uuid.Nil,
+		TargetNodeID: node.ID,
+		Action:       "auth_check",
+		ExpiresAt:    time.Now().UTC().Add(30 * time.Second),
+	})
+	if err != nil {
+		return fmt.Errorf("sign preview RPC auth-check token for node %s: %w", node.ID, err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/internal/preview/auth-check", nil)
+	if err != nil {
+		return fmt.Errorf("build preview RPC auth-check request for node %s: %w", node.ID, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("preview RPC auth-check failed for node %s (%s): %w", node.ID, baseURL, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("read preview RPC auth-check response for node %s (%s): %w", node.ID, baseURL, readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close preview RPC auth-check response for node %s (%s): %w", node.ID, baseURL, closeErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("preview RPC auth-check rejected by node %s (%s): status=%d body=%s", node.ID, baseURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func runExpireBudget(ctx context.Context, nodes *db.NodeStore, executors *db.SessionExecutorStore, args []string) {
@@ -494,7 +675,7 @@ func writeOutput(v any, jsonOut bool) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
+	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
 }
 
 func exitErr(format string, args ...any) {

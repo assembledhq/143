@@ -34,7 +34,7 @@ const (
 	DefaultMaxPreviewsPerOrg    = 5
 	DefaultMaxPreviewsPerWorker = 3
 
-	DefaultIdleTimeout = 15 * time.Minute
+	DefaultIdleTimeout = 30 * time.Minute
 	DefaultHardTTL     = 30 * time.Minute
 	DefaultMaxTTL      = 2 * time.Hour
 	MinLifetimeTTL     = 1 * time.Minute
@@ -110,6 +110,8 @@ type Manager struct {
 	maxPerUser   int
 	maxPerOrg    int
 	maxPerWorker int
+
+	previewIdleTimeout time.Duration
 }
 
 type OrgSettingsStore interface {
@@ -140,6 +142,10 @@ type ManagerConfig struct {
 	MaxPerUser   int
 	MaxPerOrg    int
 	MaxPerWorker int
+
+	// PreviewIdleTimeout is the sliding retention window applied when a live
+	// preview receives real gateway traffic. Zero falls back to DefaultIdleTimeout.
+	PreviewIdleTimeout time.Duration
 
 	// PreviewOriginTemplate is the URL template used to compute the public
 	// origin each preview is served from, with "{id}" replaced by the preview
@@ -175,6 +181,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		maxPerUser:             cfg.MaxPerUser,
 		maxPerOrg:              cfg.MaxPerOrg,
 		maxPerWorker:           cfg.MaxPerWorker,
+		previewIdleTimeout:     cfg.PreviewIdleTimeout,
 	}
 	if m.maxPerUser <= 0 {
 		m.maxPerUser = DefaultMaxPreviewsPerUser
@@ -184,6 +191,9 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if m.maxPerWorker <= 0 {
 		m.maxPerWorker = DefaultMaxPreviewsPerWorker
+	}
+	if m.previewIdleTimeout <= 0 {
+		m.previewIdleTimeout = DefaultIdleTimeout
 	}
 	return m
 }
@@ -422,6 +432,9 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		updatedAt := input.WorkspaceRevisionUpdatedAt
 		instance.SourceWorkspaceRevision = &revision
 		instance.SourceWorkspaceRevisionUpdatedAt = &updatedAt
+		instance.RuntimeWorkspaceRevision = &revision
+		instance.RuntimeWorkspaceRevisionUpdatedAt = &updatedAt
+		instance.RuntimeWorkspaceRevisionSource = models.PreviewRuntimeRevisionSourceLaunch
 	}
 	// Only store recycle bytes if we already have a sandbox at reservation
 	// time. The handler flow reserves before hydrate, so Sandbox is typically
@@ -1570,11 +1583,17 @@ func (m *Manager) GetStatus(ctx context.Context, orgID, previewID uuid.UUID) (*m
 		return nil, fmt.Errorf("list infrastructure: %w", err)
 	}
 
+	startupEstimate, err := m.store.GetPreviewStartupEstimate(ctx, orgID, previewID, instance.ConfigDigest)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to compute preview startup estimate")
+	}
+
 	return &models.PreviewStatusResponse{
-		Instance:       instance,
-		Services:       services,
-		Infrastructure: infra,
-		PreviewOrigin:  m.previewOrigin(previewID),
+		Instance:        instance,
+		Services:        services,
+		Infrastructure:  infra,
+		PreviewOrigin:   m.previewOrigin(previewID),
+		StartupEstimate: startupEstimate,
 	}, nil
 }
 
@@ -1706,7 +1725,7 @@ func (m *Manager) SetLifetime(ctx context.Context, orgID, previewID uuid.UUID, d
 
 // RecordAccess updates the last_accessed_at timestamp for activity-aware timeouts.
 func (m *Manager) RecordAccess(ctx context.Context, orgID, previewID uuid.UUID) error {
-	return m.store.UpdatePreviewAccess(ctx, orgID, previewID)
+	return m.store.UpdatePreviewAccessAndExtend(ctx, orgID, previewID, m.previewIdleTimeout, DefaultMaxTTL)
 }
 
 // =============================================================================
@@ -1887,6 +1906,9 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if revisionStamp != nil && !revisionStamp.updatedAt.IsZero() {
 		if err := m.store.UpdatePreviewSourceWorkspaceRevision(ctx, orgID, previewID, revisionStamp.revision, revisionStamp.updatedAt); err != nil {
+			return err
+		}
+		if err := m.store.UpdatePreviewRuntimeWorkspaceRevision(ctx, orgID, previewID, revisionStamp.revision, revisionStamp.updatedAt, models.PreviewRuntimeRevisionSourceRecycle); err != nil {
 			return err
 		}
 	}

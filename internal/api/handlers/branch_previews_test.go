@@ -54,7 +54,17 @@ var branchPreviewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+}
+
+var branchPreviewStartupCacheTestCols = []string{
+	"id", "org_id", "repo_id", "snapshot_key", "base_key", "commit_sha", "blob_path",
+	"size_bytes", "worker_node_id", "last_used_at", "created_at",
+}
+
+var branchPreviewNodeTestCols = []string{
+	"id", "mode", "host", "status", "drain_intent", "metadata", "started_at", "last_heartbeat_at",
+	"drain_requested_at", "drain_budget_expires_at", "drain_requested_by", "drain_reason",
 }
 
 func (f fakeBranchPreviewGitHub) GetInstallationToken(context.Context, int64) (string, error) {
@@ -370,7 +380,7 @@ func TestBranchPreviewHandler_StopRejectsPreviewTokenWithoutStopScope(t *testing
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -435,7 +445,7 @@ func TestBranchPreviewHandler_RestartRejectsPreviewTokenWithoutCreateScope(t *te
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -508,7 +518,7 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -579,7 +589,7 @@ func TestBranchPreviewHandler_MintBootstrapTokenRejectsPreviewTokenForDifferentR
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -828,7 +838,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			"", "", "hdl-session-1", "", 0,
 			"", head, now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -840,7 +850,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			"", "", "", "", 0,
 			"", head, now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -1316,7 +1326,7 @@ func TestBranchPreviewHandler_StopFailsClosedOnPreviewTargetDBError(t *testing.T
 			"", "", "", "", 0,
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-			(*int64)(nil), (*time.Time)(nil), "",
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
 
@@ -1432,7 +1442,8 @@ func sessionPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, st
 		"", "", "", "", 0,
 		"", "", now, now, stoppedAt,
 		"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil), "",
+		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
+		"",
 		false,
 	}
 }
@@ -1597,6 +1608,111 @@ func TestBranchPreviewHandler_RestartSessionPreviewRejectsPreviewAPIToken(t *tes
 
 	require.Equal(t, http.StatusForbidden, rr.Code, "preview API tokens must not drive session preview restarts")
 	require.Equal(t, 0, restarter.calls, "the session restarter should not be invoked for token-authenticated requests")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_SelectWorkerForRestart_DegradesWhenSnapshotWorkerAtCapacity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	targetID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	warmWorker := "worker-a-warm"
+	fallbackWorker := "worker-z-fallback"
+	workerMetadata := func(baseURL string) []byte {
+		return []byte(fmt.Sprintf(`{"preview_capable":true,"preview_internal_base_url":%q}`, baseURL))
+	}
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:        store,
+		Provider:     &mockPreviewProvider{},
+		Logger:       zerolog.Nop(),
+		MaxPerWorker: 3,
+	})
+	handler := NewBranchPreviewHandler(
+		store,
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		manager,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	handler.SetWorkerRuntime(db.NewJobStore(mock), preview.NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), store, 3))
+
+	mock.ExpectQuery("FROM preview_startup_cache cache").
+		WithArgs(branchPreviewAnyArgs(2)...).
+		WillReturnRows(
+			pgxmock.NewRows(branchPreviewStartupCacheTestCols).
+				AddRow(uuid.New(), orgID, repoID, "snapshot-key", "base-key", "abcdef1", "/cache/snapshot.tar.gz", int64(1024), warmWorker, now, now),
+		)
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+		WithArgs(branchPreviewAnyArgs(1)...).
+		WillReturnRows(
+			pgxmock.NewRows(branchPreviewNodeTestCols).
+				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", ""),
+		)
+	mock.ExpectQuery("SELECT[\\s\\S]+user_standalone[\\s\\S]+worker_total").
+		WithArgs(branchPreviewAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"user_standalone", "org_standalone", "worker_total"}).AddRow(0, 0, 3))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(branchPreviewNodeTestCols).
+				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", "").
+				AddRow(fallbackWorker, models.NodeModeWorker, "fallback.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://fallback.local"), now, now, nil, nil, "", ""),
+		)
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(branchPreviewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}))
+	mock.ExpectQuery("SELECT[\\s\\S]+user_standalone[\\s\\S]+worker_total").
+		WithArgs(branchPreviewAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"user_standalone", "org_standalone", "worker_total"}).AddRow(0, 0, 0))
+
+	worker, err := handler.selectBranchPreviewWorkerForStart(context.Background(), orgID, userID, targetID, true, preview.WorkerSelectionRequirements{})
+
+	require.NoError(t, err, "restart worker selection should degrade when the snapshot worker is at capacity")
+	require.Equal(t, fallbackWorker, worker.ID, "restart should fall back to a normal available worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_DecoratePreviewResponseAddsResumability(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	targetID := uuid.New()
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		nil,
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	resp := branchPreviewResponse{
+		TargetID:  targetID,
+		Status:    string(models.PreviewStatusStopped),
+		StableURL: "https://app.143.dev/previews/" + targetID.String(),
+	}
+
+	mock.ExpectQuery("preview_startup_cache[\\s\\S]+JOIN nodes[\\s\\S]+n\\.status = 'active'").
+		WithArgs(branchPreviewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"resumable"}).AddRow(true))
+
+	handler.decoratePreviewResponse(context.Background(), orgID, &resp)
+
+	require.True(t, resp.Resumable, "stopped preview response should be marked resumable when a startup snapshot exists")
+	require.NotNil(t, resp.ResumeEstimateSeconds, "resumable preview response should include an estimate")
+	require.Equal(t, 30, *resp.ResumeEstimateSeconds, "resumable preview response should use the warm resume estimate")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
