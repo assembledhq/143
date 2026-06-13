@@ -1,3 +1,4 @@
+import { act } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -9,6 +10,18 @@ import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
 import { SessionSidebar } from './session-sidebar';
 import type { SessionDetail, SessionListItem } from '@/lib/types';
+
+const { notifySuccess, notifyError } = vi.hoisted(() => ({
+  notifySuccess: vi.fn(),
+  notifyError: vi.fn(),
+}));
+
+vi.mock('@/lib/notify', () => ({
+  notify: {
+    success: notifySuccess,
+    error: notifyError,
+  },
+}));
 
 // Mock next/link to render a plain anchor
 vi.mock('next/link', () => ({
@@ -140,6 +153,8 @@ describe('SessionSidebar', () => {
     mockAuthState.user = { id: 'user-1' };
     mockAuthState.isLoading = false;
     mockAuthState.logout = vi.fn();
+    notifySuccess.mockReset();
+    notifyError.mockReset();
   });
 
   it('defaults the people scope to Mine', async () => {
@@ -390,56 +405,130 @@ describe('SessionSidebar', () => {
     expect(mockRouterPrefetch).toHaveBeenCalledWith('/sessions/new');
   });
 
-  it('removes a committed mobile archive row immediately while the backend request is pending', async () => {
+  it('shows committed mobile archive feedback before removing the row while the backend request is pending', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     let archiveCalls = 0;
     let archiveSettled = false;
     let resolveArchive: (() => void) | undefined;
-    server.use(
-      http.get('/api/v1/sessions', () => {
-        if (archiveSettled) {
-          return HttpResponse.json({ data: [], meta: {} });
-        }
-        return HttpResponse.json({
-          data: [makeSession({ id: 's1', result_summary: 'Swipe pending' })],
-          meta: {},
-        });
-      }),
-      http.post('/api/v1/sessions/s1/archive', () => {
-        archiveCalls += 1;
-        return new Promise((resolve) => {
-          resolveArchive = () => {
-            archiveSettled = true;
-            resolve(HttpResponse.json({ status: 'archived' }));
-          };
-        });
-      }),
-    );
+    try {
+      server.use(
+        http.get('/api/v1/sessions', () => {
+          if (archiveSettled) {
+            return HttpResponse.json({ data: [], meta: {} });
+          }
+          return HttpResponse.json({
+            data: [makeSession({ id: 's1', result_summary: 'Swipe pending' })],
+            meta: {},
+          });
+        }),
+        http.post('/api/v1/sessions/s1/archive', () => {
+          archiveCalls += 1;
+          return new Promise((resolve) => {
+            resolveArchive = () => {
+              archiveSettled = true;
+              resolve(HttpResponse.json({ status: 'archived' }));
+            };
+          });
+        }),
+      );
 
-    renderWithProviders(<SessionSidebar />);
-    const row = await screen.findByText('Swipe pending');
-    const surface = row.closest('[data-swipe-surface="true"]') as HTMLElement | null;
-    expect(surface).not.toBeNull();
-    const container = surface!.parentElement;
-    expect(container).not.toBeNull();
-    Object.defineProperty(container!, 'offsetWidth', {
-      configurable: true,
-      value: 390,
-    });
+      renderWithProviders(<SessionSidebar />);
+      const row = await screen.findByText('Swipe pending');
+      const surface = row.closest('[data-swipe-surface="true"]') as HTMLElement | null;
+      expect(surface).not.toBeNull();
+      const container = surface!.parentElement;
+      expect(container).not.toBeNull();
+      Object.defineProperty(container!, 'offsetWidth', {
+        configurable: true,
+        value: 390,
+      });
 
-    fireEvent.touchStart(surface!, { touches: [{ clientX: 320, clientY: 24 }] });
-    fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
-    fireEvent.touchEnd(surface!);
+      fireEvent.touchStart(surface!, { touches: [{ clientX: 320, clientY: 24 }] });
+      fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
+      fireEvent.touchEnd(surface!);
 
-    // Committed visual state is set synchronously before onMutate's async cache removal
-    expect(container).toHaveAttribute('data-swipe-state', 'committed');
-    expect(surface!.style.transform).toBe('translateX(-390px)');
+      expect(container).toHaveAttribute('data-swipe-state', 'committed');
+      expect(surface!.style.transform).toBe('translateX(-390px)');
+      expect(container).toHaveTextContent('Archived');
+      expect(screen.getByText('Swipe pending')).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(archiveCalls).toBe(1);
-    });
-    expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(archiveCalls).toBe(1);
+      });
+      expect(notifySuccess).toHaveBeenCalledWith('Session archived', { duration: 2500 });
+      expect(screen.queryByRole('button', { name: /undo/i })).not.toBeInTheDocument();
 
-    resolveArchive?.();
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(container).toHaveAttribute('data-swipe-collapsing', 'true');
+      expect(screen.getByText('Swipe pending')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+      });
+      expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
+
+      await act(async () => { resolveArchive?.(); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps committed mobile archive feedback visible even when the backend responds before the animation completes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let archiveSettled = false;
+    let resolveArchive: (() => void) | undefined;
+    try {
+      server.use(
+        http.get('/api/v1/sessions', () => {
+          if (archiveSettled) {
+            return HttpResponse.json({ data: [], meta: {} });
+          }
+          return HttpResponse.json({
+            data: [makeSession({ id: 's1', result_summary: 'Fast swipe' })],
+            meta: {},
+          });
+        }),
+        http.post('/api/v1/sessions/s1/archive', () =>
+          new Promise((resolve) => {
+            resolveArchive = () => {
+              archiveSettled = true;
+              resolve(HttpResponse.json({ status: 'archived' }));
+            };
+          }),
+        ),
+      );
+
+      renderWithProviders(<SessionSidebar />);
+      const row = await screen.findByText('Fast swipe');
+      const surface = row.closest('[data-swipe-surface="true"]') as HTMLElement | null;
+      expect(surface).not.toBeNull();
+      const container = surface!.parentElement;
+      expect(container).not.toBeNull();
+      Object.defineProperty(container!, 'offsetWidth', { configurable: true, value: 390 });
+
+      fireEvent.touchStart(surface!, { touches: [{ clientX: 320, clientY: 24 }] });
+      fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
+      fireEvent.touchEnd(surface!);
+
+      // Simulate fast server: resolve before any animation timer fires
+      await act(async () => { resolveArchive?.(); });
+
+      // Session must remain visible even though the server already responded
+      expect(screen.getByText('Fast swipe')).toBeInTheDocument();
+      expect(container).toHaveAttribute('data-swipe-state', 'committed');
+      expect(container).toHaveTextContent('Archived');
+
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(container).toHaveAttribute('data-swipe-collapsing', 'true');
+      expect(screen.getByText('Fast swipe')).toBeInTheDocument();
+
+      await act(async () => { vi.advanceTimersByTime(250); });
+      await waitFor(() => expect(screen.queryByText('Fast swipe')).not.toBeInTheDocument());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
