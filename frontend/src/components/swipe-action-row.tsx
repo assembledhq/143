@@ -19,6 +19,8 @@ const MIN_COMMIT_THRESHOLD = 140;
 const READY_HAPTIC_MS = 10;
 const COMMIT_HAPTIC_PATTERN = [16, 24, 40];
 const COMMIT_RESET_DELAY_MS = 200;
+const COMMIT_FEEDBACK_DELAY_MS = 500;
+const COMMIT_COLLAPSE_DELAY_MS = 250;
 // Pre-measurement fallback when a gesture starts before the row has dimensions.
 // Real width is captured from offsetWidth at touchstart.
 const FALLBACK_ROW_WIDTH = ACTION_WIDTH * 4;
@@ -31,6 +33,8 @@ type DragState = {
   swiping: boolean;
   locked: boolean;
 };
+
+export type SwipeActionSource = "mobile-commit" | "mobile-action" | "desktop";
 
 // Resolved synchronously on first client render via useSyncExternalStore so
 // non-touch desktops never paint the swipe overlay (which bleeds amber through
@@ -82,16 +86,20 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 export function SwipeActionRow({
   actionLabel,
   actionText,
+  committedText = actionText,
   actionIcon,
   onAction,
+  onCommitAnimationComplete,
   children,
   className,
   desktopActionVisibility = "always",
 }: {
   actionLabel: string;
   actionText: string;
+  committedText?: string;
   actionIcon?: ReactNode;
-  onAction: () => void | Promise<unknown>;
+  onAction: (source: SwipeActionSource) => void | Promise<unknown>;
+  onCommitAnimationComplete?: () => void;
   children: ReactNode;
   className?: string;
   desktopActionVisibility?: "always" | "hover";
@@ -99,6 +107,7 @@ export function SwipeActionRow({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const commitTimerRef = useRef<number | null>(null);
+  const collapseTimerRef = useRef<number | null>(null);
   const readyHapticPlayedRef = useRef(false);
   // Mirrors isCommitted for use inside touchmove handlers, where the rendered
   // closure can lag behind rapid state transitions.
@@ -107,6 +116,8 @@ export function SwipeActionRow({
   const [offset, setOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [isCommitted, setIsCommitted] = useState(false);
+  const [hasCommittedAction, setHasCommittedAction] = useState(false);
+  const [isCollapsing, setIsCollapsing] = useState(false);
   const [gestureWidth, setGestureWidth] = useState(FALLBACK_ROW_WIDTH);
   const isTouchDevice = useSyncExternalStore(
     subscribeTouchDevice,
@@ -119,6 +130,9 @@ export function SwipeActionRow({
       if (commitTimerRef.current !== null) {
         window.clearTimeout(commitTimerRef.current);
       }
+      if (collapseTimerRef.current !== null) {
+        window.clearTimeout(collapseTimerRef.current);
+      }
     };
   }, []);
 
@@ -126,6 +140,13 @@ export function SwipeActionRow({
     if (commitTimerRef.current !== null) {
       window.clearTimeout(commitTimerRef.current);
       commitTimerRef.current = null;
+    }
+  };
+
+  const clearCollapseTimer = () => {
+    if (collapseTimerRef.current !== null) {
+      window.clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = null;
     }
   };
 
@@ -139,10 +160,13 @@ export function SwipeActionRow({
 
   const close = () => {
     clearCommitTimer();
+    clearCollapseTimer();
     offsetRef.current = 0;
     setOffset(0);
     setIsDragging(false);
     setIsCommitted(false);
+    setHasCommittedAction(false);
+    setIsCollapsing(false);
     committedRef.current = false;
     readyHapticPlayedRef.current = false;
     dragRef.current = null;
@@ -153,9 +177,25 @@ export function SwipeActionRow({
     setOffset(ACTION_WIDTH);
     setIsDragging(false);
     setIsCommitted(false);
+    setHasCommittedAction(false);
+    setIsCollapsing(false);
     committedRef.current = false;
     readyHapticPlayedRef.current = false;
     dragRef.current = null;
+  };
+
+  const scheduleCommitAnimationComplete = () => {
+    clearCommitTimer();
+    clearCollapseTimer();
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      setIsCollapsing(true);
+      collapseTimerRef.current = window.setTimeout(() => {
+        collapseTimerRef.current = null;
+        onCommitAnimationComplete?.();
+        close();
+      }, COMMIT_COLLAPSE_DELAY_MS);
+    }, COMMIT_FEEDBACK_DELAY_MS);
   };
 
   const handleActionPromise = (
@@ -185,8 +225,10 @@ export function SwipeActionRow({
   };
 
   // Slides the row fully off, fires onAction, then resets after the animation.
-  const commitAction = (width: number) => {
+  const commitAction = (width: number, source: SwipeActionSource) => {
     setIsDragging(false);
+    setIsCollapsing(false);
+    setHasCommittedAction(true);
     offsetRef.current = width;
     setOffset(width);
     setIsCommitted(true);
@@ -196,10 +238,13 @@ export function SwipeActionRow({
     vibrate(COMMIT_HAPTIC_PATTERN);
     clearCommitTimer();
     try {
-      handleActionPromise(onAction(), {
-        onResolve: scheduleClose,
+      handleActionPromise(onAction(source), {
+        onResolve: source === "mobile-commit" ? undefined : scheduleClose,
         onReject: close,
       });
+      if (source === "mobile-commit") {
+        scheduleCommitAnimationComplete();
+      }
     } catch (error) {
       close();
       throw error;
@@ -285,7 +330,7 @@ export function SwipeActionRow({
       return;
     }
     if (latestOffset >= commitThresholdFor(width)) {
-      commitAction(width);
+      commitAction(width, "mobile-commit");
       return;
     }
     if (latestOffset >= OPEN_THRESHOLD) {
@@ -308,7 +353,9 @@ export function SwipeActionRow({
   const trailingActionHidden = state === "closed";
   const actionAreaWidth = trailingActionHidden ? 0 : Math.max(ACTION_WIDTH, offset);
   const actionHint = isCommitted
-    ? `Release to ${actionText.toLowerCase()}`
+    ? hasCommittedAction
+      ? committedText
+      : `Release to ${actionText.toLowerCase()}`
     : "Keep swiping";
 
   const swipeSurfaceProps = isTouchDevice
@@ -334,8 +381,13 @@ export function SwipeActionRow({
   return (
     <div
       ref={containerRef}
-      className={cn("group relative overflow-hidden rounded-lg", className)}
+      className={cn(
+        "group relative max-h-48 overflow-hidden rounded-lg transition-[max-height,opacity,margin] duration-200 ease-out",
+        isCollapsing && "max-h-0 opacity-0",
+        className,
+      )}
       data-swipe-state={state}
+      data-swipe-collapsing={isCollapsing ? "true" : undefined}
     >
       {isTouchDevice && (
         <div
@@ -359,7 +411,7 @@ export function SwipeActionRow({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              commitAction(containerRef.current?.offsetWidth || gestureWidth);
+              commitAction(containerRef.current?.offsetWidth || gestureWidth, "mobile-action");
             }}
           >
             <span className="relative flex h-full w-full flex-col items-center justify-center gap-0.5 px-4 text-center">
@@ -394,7 +446,7 @@ export function SwipeActionRow({
           event.stopPropagation();
           close();
           try {
-            handleActionPromise(onAction());
+            handleActionPromise(onAction("desktop"));
           } catch (error) {
             throw error;
           }
