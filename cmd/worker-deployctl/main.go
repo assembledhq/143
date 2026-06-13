@@ -75,6 +75,7 @@ func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.C
 	fs := flag.NewFlagSet("preview-auth-check", flag.ExitOnError)
 	timeout := fs.Duration("timeout", 5*time.Second, "per-node HTTP timeout")
 	concurrency := fs.Int("concurrency", 16, "maximum concurrent auth-check probes")
+	nodeID := fs.String("node-id", "", "optional worker node id to probe")
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	_ = fs.Parse(args)
 
@@ -86,20 +87,9 @@ func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.C
 	if err != nil {
 		exitErr("list preview RPC probe nodes: %v", err)
 	}
-	probeNodes := make([]previewAuthProbeNode, 0, len(nodes))
-	for _, node := range nodes {
-		var metadata previewsvc.WorkerNodeMetadata
-		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
-			exitErr("decode preview metadata for node %s: %v", node.ID, err)
-		}
-		baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
-		if baseURL == "" {
-			exitErr("node %s is preview-capable but has no preview_internal_base_url", node.ID)
-		}
-		probeNodes = append(probeNodes, previewAuthProbeNode{
-			ID:      node.ID,
-			BaseURL: baseURL,
-		})
+	probeNodes, err := selectPreviewAuthProbeNodes(nodes, *nodeID)
+	if err != nil {
+		exitErr("%v", err)
 	}
 	checked, err := probePreviewRPCAuthNodes(probeNodes, keyring, *timeout, *concurrency, &http.Client{})
 	if err != nil {
@@ -115,6 +105,31 @@ func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.C
 type previewAuthProbeNode struct {
 	ID      string
 	BaseURL string
+}
+
+func selectPreviewAuthProbeNodes(nodes []models.Node, nodeID string) ([]previewAuthProbeNode, error) {
+	probeNodes := make([]previewAuthProbeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if nodeID != "" && node.ID != nodeID {
+			continue
+		}
+		var metadata previewsvc.WorkerNodeMetadata
+		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
+			return nil, fmt.Errorf("decode preview metadata for node %s: %w", node.ID, err)
+		}
+		baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
+		if baseURL == "" {
+			return nil, fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+		}
+		probeNodes = append(probeNodes, previewAuthProbeNode{
+			ID:      node.ID,
+			BaseURL: baseURL,
+		})
+	}
+	if nodeID != "" && len(probeNodes) == 0 {
+		return nil, fmt.Errorf("node %s is not available for preview RPC auth-check", nodeID)
+	}
+	return probeNodes, nil
 }
 
 func probePreviewRPCAuthNodes(nodes []previewAuthProbeNode, keyring auth.PreviewTokenKeyring, timeout time.Duration, concurrency int, client *http.Client) ([]string, error) {
