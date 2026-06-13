@@ -32,6 +32,14 @@ func anyArgs(n int) []interface{} {
 	return args
 }
 
+func TestEvalAllowedModelsIncludesOpenCode(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, allowedModels[models.OpenCodeModelGPT54Mini], "eval runs should allow the default inexpensive OpenCode model")
+	require.True(t, allowedModels[models.OpenCodeModelClaudeHaiku45], "eval runs should allow a cheap Anthropic-backed OpenCode model")
+	require.True(t, allowedModels[models.OpenCodeModelDeepSeekChat], "eval runs should allow a cheap non-flagship OpenCode model")
+}
+
 var evalTaskColumns = []string{
 	"id", "org_id", "repo_id", "name", "description",
 	"base_commit_sha", "solution_commit_sha", "solution_diff",

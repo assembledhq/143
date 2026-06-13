@@ -434,6 +434,46 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 				"GEMINI_MODEL":   "gemini-2.5-pro",
 			},
 		},
+		{
+			name:      "opencode uses explicit opencode credential with openai backing",
+			agentType: models.AgentTypeOpenCode,
+			coding: &envCodingCredentialProvider{
+				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+					models.ProviderOpenCode: {
+						{
+							ID:       uuid.New(),
+							OrgID:    orgID,
+							UserID:   &userID,
+							Provider: models.ProviderOpenCode,
+							Status:   models.CodingCredentialStatusActive,
+							Config: models.OpenCodeConfig{
+								APIKey:          "opencode-openai-key",
+								BackingProvider: models.ProviderOpenAI,
+								BaseURL:         "https://openai.opencode.example",
+								Model:           models.OpenCodeModelGPT54Mini,
+							},
+						},
+					},
+				},
+			},
+			orgCreds: &envCredentialProvider{
+				creds: map[models.ProviderName]*models.DecryptedCredential{
+					models.ProviderOpenAI: {
+						Config: models.OpenAIConfig{APIKey: "sibling-openai-key"},
+					},
+				},
+			},
+			expected: map[string]string{
+				"OPENAI_API_KEY":                   "opencode-openai-key",
+				"OPENAI_BASE_URL":                  "https://openai.opencode.example",
+				"OPENCODE_BACKING_PROVIDER":        string(models.ProviderOpenAI),
+				"OPENCODE_MODEL":                   models.OpenCodeModelGPT54Mini,
+				"OPENCODE_DISABLE_AUTOUPDATE":      "true",
+				"OPENCODE_DISABLE_DEFAULT_PLUGINS": "true",
+				"OPENCODE_DISABLE_MODELS_FETCH":    "true",
+				"OPENCODE_PERMISSION":              `{"permission":"allow"}`,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -451,6 +491,71 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 			got := env.Resolve(ctx, orgID, tt.agentType, &userID)
 			for key, expected := range tt.expected {
 				require.Equal(t, expected, got[key], "Resolve should export %s for %s", key, tt.agentType)
+			}
+			if tt.agentType == models.AgentTypeOpenCode {
+				require.NotEqual(t, "sibling-openai-key", got["OPENAI_API_KEY"], "Resolve should not reuse non-OpenCode OpenAI credentials for OpenCode")
+				var config map[string]any
+				require.NoError(t, json.Unmarshal([]byte(got["OPENCODE_CONFIG_CONTENT"]), &config), "Resolve should emit valid OpenCode config JSON")
+				require.Equal(t, "https://opencode.ai/config.json", config["$schema"], "OpenCode config should include the official schema")
+				require.Equal(t, "allow", config["permission"], "OpenCode config should allow permissions for unattended sandbox runs")
+				require.Equal(t, models.OpenCodeModelGPT54Mini, config["model"], "OpenCode config should pin the selected model")
+				providers, ok := config["provider"].(map[string]any)
+				require.True(t, ok, "OpenCode config should include a provider block")
+				openaiProvider, ok := providers["openai"].(map[string]any)
+				require.True(t, ok, "OpenCode config should configure the selected backing provider only")
+				options, ok := openaiProvider["options"].(map[string]any)
+				require.True(t, ok, "OpenCode provider config should include provider options")
+				require.Equal(t, "{env:OPENAI_API_KEY}", options["apiKey"], "OpenCode config should reference the selected OpenCode-scoped key through env")
+				require.Equal(t, "https://openai.opencode.example", options["baseURL"], "OpenCode config should preserve the selected OpenCode base URL")
+			}
+		})
+	}
+}
+
+func TestOpenCodeRuntimeConfigContent_ReferencesSelectedProviderEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		cfg             models.OpenCodeConfig
+		provider        string
+		expectedEnvRef  string
+		expectedBaseURL string
+	}{
+		{
+			name:           "native opencode",
+			cfg:            models.OpenCodeConfig{APIKey: "oc-key", BackingProvider: models.ProviderOpenCode, Model: models.OpenCodeModelGPT54Mini},
+			provider:       "opencode",
+			expectedEnvRef: "{env:OPENCODE_API_KEY}",
+		},
+		{
+			name:            "openrouter backing",
+			cfg:             models.OpenCodeConfig{APIKey: "or-key", BackingProvider: models.ProviderOpenRouter, BaseURL: "https://openrouter.opencode.example", Model: models.OpenCodeModelClaudeHaiku45},
+			provider:        "openrouter",
+			expectedEnvRef:  "{env:OPENROUTER_API_KEY}",
+			expectedBaseURL: "https://openrouter.opencode.example",
+		},
+		{
+			name:           "gemini backing",
+			cfg:            models.OpenCodeConfig{APIKey: "gem-key", BackingProvider: models.ProviderGemini, Model: models.OpenCodeModelGemini25Flash},
+			provider:       "google",
+			expectedEnvRef: "{env:GEMINI_API_KEY}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var config map[string]any
+			require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(tt.cfg)), &config), "OpenCode runtime config should be valid JSON")
+			providers := config["provider"].(map[string]any)
+			require.Len(t, providers, 1, "OpenCode runtime config should only expose the selected provider")
+			provider := providers[tt.provider].(map[string]any)
+			options := provider["options"].(map[string]any)
+			require.Equal(t, tt.expectedEnvRef, options["apiKey"], "OpenCode runtime config should reference the provider key through env")
+			if tt.expectedBaseURL != "" {
+				require.Equal(t, tt.expectedBaseURL, options["baseURL"], "OpenCode runtime config should preserve base URL overrides")
 			}
 		})
 	}
@@ -932,6 +1037,7 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 		assertCompatible(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}, "compatibleCodingProviderConfig should accept Anthropic API keys")
 		assertCompatible(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}, "compatibleCodingProviderConfig should accept OpenAI API keys")
 		assertCompatible(models.ProviderGemini, models.GeminiConfig{APIKey: "gem-key"}, "compatibleCodingProviderConfig should accept Gemini API keys")
+		assertCompatible(models.ProviderOpenCode, models.OpenCodeConfig{APIKey: "oc-key"}, "compatibleCodingProviderConfig should accept OpenCode API keys")
 		assertCompatible(models.ProviderOpenRouter, models.OpenRouterConfig{APIKey: "sk-or"}, "compatibleCodingProviderConfig should accept OpenRouter API keys")
 		assertCompatible(models.ProviderAmp, models.AmpConfig{APIKey: "amp-key"}, "compatibleCodingProviderConfig should accept Amp API keys")
 		assertCompatible(models.ProviderPi, models.PiConfig{APIKey: "pi-key"}, "compatibleCodingProviderConfig should accept Pi API keys")
@@ -962,6 +1068,13 @@ func TestAgentEnvCheckAuth(t *testing.T) {
 
 	require.NoError(t, env.CheckAuth(models.AgentTypePi, map[string]string{"PI_API_KEY": "pi-key"}), "CheckAuth should accept Pi runs with PI_API_KEY configured")
 
+	err = env.CheckAuth(models.AgentTypeOpenCode, map[string]string{})
+	require.Error(t, err, "CheckAuth should reject OpenCode runs with no provider key")
+	require.Contains(t, err.Error(), "OpenCode", "CheckAuth should explain the missing OpenCode credential")
+
+	require.NoError(t, env.CheckAuth(models.AgentTypeOpenCode, map[string]string{"OPENCODE_API_KEY": "oc-key"}), "CheckAuth should accept OpenCode runs with native OpenCode auth")
+	require.NoError(t, env.CheckAuth(models.AgentTypeOpenCode, map[string]string{"OPENAI_API_KEY": "sk-openai", "OPENCODE_BACKING_PROVIDER": string(models.ProviderOpenAI)}), "CheckAuth should accept OpenCode runs with explicit OpenAI-backed auth")
+
 	until := time.Date(2026, 5, 13, 15, 50, 0, 0, time.UTC)
 	err = env.CheckAuth(models.AgentTypeClaudeCode, map[string]string{
 		internalAuthBlockedKey:                              "all Claude Code auths are rate limited until 8:50 AM",
@@ -975,6 +1088,263 @@ func TestAgentEnvCheckAuth(t *testing.T) {
 	require.Equal(t, models.ProviderAnthropic, authErr.Provider, "AuthError should preserve the blocked provider")
 	require.Equal(t, until, *authErr.RateLimitedUntil, "AuthError should preserve the blocked reset time")
 	require.True(t, authErr.FallbackCandidatesUnavailable, "AuthError should report unavailable fallback candidates")
+}
+
+func TestAgentEnvRuntimeCredentialBindingRecordsOpenCodeBackingProvider(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {
+					{
+						ID:       credID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-ant-opencode",
+							BackingProvider: models.ProviderAnthropic,
+							Model:           models.OpenCodeModelClaudeHaiku45,
+						},
+					},
+				},
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	resolved := env.Resolve(context.Background(), orgID, models.AgentTypeOpenCode, &userID)
+	require.Equal(t, "sk-ant-opencode", resolved["ANTHROPIC_API_KEY"], "Resolve should use the explicit OpenCode credential key")
+
+	binding, ok := env.lookupRuntimeCredentialBinding(orgID, &userID, models.ProviderOpenCode)
+	require.True(t, ok, "Resolve should record a runtime credential binding for OpenCode")
+	require.Equal(t, credID, binding.CredentialID, "runtime binding should retain the picked credential id")
+	require.Equal(t, models.AgentTypeOpenCode, binding.AgentType, "runtime binding should retain the agent type")
+	require.Equal(t, models.ProviderOpenCode, binding.Provider, "runtime binding should retain the credential provider")
+	require.Equal(t, models.ProviderAnthropic, binding.BackingProvider, "runtime binding should retain the OpenCode backing provider")
+	require.Equal(t, models.OpenCodeModelClaudeHaiku45, binding.EffectiveModel, "runtime binding should retain the selected effective model")
+}
+
+func TestAgentEnvResolveForModel_PicksOpenCodeCredentialForModelProvider(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	openAIID := uuid.New()
+	anthropicID := uuid.New()
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {
+					{
+						ID:       openAIID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 0,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-openai-opencode",
+							BackingProvider: models.ProviderOpenAI,
+						},
+					},
+					{
+						ID:       anthropicID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 10,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-ant-opencode",
+							BackingProvider: models.ProviderAnthropic,
+						},
+					},
+				},
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, models.OpenCodeModelClaudeHaiku45)
+	require.Equal(t, "sk-ant-opencode", resolved["ANTHROPIC_API_KEY"], "ResolveForModel should pick the OpenCode credential whose backing provider matches the model")
+	require.Empty(t, resolved["OPENAI_API_KEY"], "ResolveForModel should not inject a higher-priority nonmatching OpenCode credential")
+	require.Equal(t, models.OpenCodeModelClaudeHaiku45, resolved["OPENCODE_MODEL"], "ResolveForModel should run the requested OpenCode model")
+
+	binding, ok := env.lookupRuntimeCredentialBinding(orgID, &userID, models.ProviderOpenCode)
+	require.True(t, ok, "ResolveForModel should record the selected OpenCode credential binding")
+	require.Equal(t, anthropicID, binding.CredentialID, "runtime binding should point to the provider-matching OpenCode credential")
+	require.Equal(t, models.ProviderAnthropic, binding.BackingProvider, "runtime binding should preserve the selected backing provider")
+}
+
+func TestAgentEnvResolveForModel_OpenCodeThirdPartyModelsRouteToOpenRouter(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	openrouterID := uuid.New()
+	anthropicID := uuid.New()
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {
+					{
+						ID:       anthropicID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 10,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-ant-opencode",
+							BackingProvider: models.ProviderAnthropic,
+						},
+					},
+					{
+						ID:       openrouterID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 0,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-or-opencode",
+							BackingProvider: models.ProviderOpenRouter,
+						},
+					},
+				},
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	thirdPartyModels := []string{
+		models.OpenCodeModelMiniMaxM21,
+		models.OpenCodeModelKimiK2,
+		models.OpenCodeModelQwen3Coder,
+		models.OpenCodeModelDeepSeekChat,
+	}
+	for _, model := range thirdPartyModels {
+		model := model
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+			resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, model)
+			require.Equal(t, "sk-or-opencode", resolved["OPENROUTER_API_KEY"],
+				"third-party model %s should route to the OpenRouter-backed OpenCode credential", model)
+			require.Empty(t, resolved["ANTHROPIC_API_KEY"],
+				"third-party model %s must not select the Anthropic-backed key", model)
+		})
+	}
+}
+
+func TestAgentEnvResolveForModel_OpenCodeFallsBackForNativeOrUnknownModel(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 0,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "oc-native-key",
+							BackingProvider: models.ProviderOpenCode,
+						},
+					},
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 10,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-openai-opencode",
+							BackingProvider: models.ProviderOpenAI,
+						},
+					},
+				},
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, models.OpenCodeModelGPT52)
+	require.Equal(t, "oc-native-key", resolved["OPENCODE_API_KEY"], "OpenCode-native models should use the native OpenCode credential when available")
+	require.Equal(t, models.OpenCodeModelGPT52, resolved["OPENCODE_MODEL"], "ResolveForModel should retain native OpenCode model overrides")
+}
+
+func TestAgentEnvResolve_OpenCodeUsesOrgDefaultModelForProviderAwarePick(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	env := NewAgentEnv(AgentEnvDeps{
+		Orgs: &envOrgStore{
+			org: models.Organization{
+				ID: orgID,
+				Settings: marshalAgentSettings(t, models.OrgSettings{
+					AgentConfig: models.AgentEnvConfig{
+						string(models.AgentTypeOpenCode): {
+							"OPENCODE_MODEL": models.OpenCodeModelClaudeHaiku45,
+						},
+					},
+				}),
+			},
+		},
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 0,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-openai-opencode",
+							BackingProvider: models.ProviderOpenAI,
+						},
+					},
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderOpenCode,
+						Priority: 10,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.OpenCodeConfig{
+							APIKey:          "sk-ant-opencode",
+							BackingProvider: models.ProviderAnthropic,
+						},
+					},
+				},
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	resolved := env.Resolve(context.Background(), orgID, models.AgentTypeOpenCode, &userID)
+	require.Equal(t, "sk-ant-opencode", resolved["ANTHROPIC_API_KEY"], "Resolve should use the org default OpenCode model to pick a matching backing provider")
+	require.Equal(t, models.OpenCodeModelClaudeHaiku45, resolved["OPENCODE_MODEL"], "Resolve should preserve the org default OpenCode model")
 }
 
 // TestAgentEnvShedAfterPick verifies that the shed-on-failure wiring forwards
