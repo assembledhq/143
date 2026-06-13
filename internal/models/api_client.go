@@ -31,13 +31,16 @@ const (
 	APITokenScopeSessionsWrite     APITokenScope = "sessions:write"
 	APITokenScopeSessionsCancel    APITokenScope = "sessions:cancel"
 	APITokenScopeSessionsPublish   APITokenScope = "sessions:publish"
+	APITokenScopeSessionsAll       APITokenScope = "sessions:all"
 	APITokenScopeAutomationsRead   APITokenScope = "automations:read"
 	APITokenScopeAutomationsCreate APITokenScope = "automations:create" // #nosec G101 -- API permission scope, not a credential
 	APITokenScopeAutomationsWrite  APITokenScope = "automations:write"  // #nosec G101 -- API permission scope, not a credential
 	APITokenScopeAutomationsRun    APITokenScope = "automations:run"    // #nosec G101 -- API permission scope, not a credential
+	APITokenScopeAutomationsAll    APITokenScope = "automations:all"    // #nosec G101 -- API permission scope, not a credential
 	APITokenScopePreviewsRead      APITokenScope = "previews:read"
 	APITokenScopePreviewsCreate    APITokenScope = "previews:create"
 	APITokenScopePreviewsStop      APITokenScope = "previews:stop"
+	APITokenScopePreviewsAll       APITokenScope = "previews:all"
 )
 
 func (s APITokenScope) Validate() error {
@@ -47,13 +50,16 @@ func (s APITokenScope) Validate() error {
 		APITokenScopeSessionsWrite,
 		APITokenScopeSessionsCancel,
 		APITokenScopeSessionsPublish,
+		APITokenScopeSessionsAll,
 		APITokenScopeAutomationsRead,
 		APITokenScopeAutomationsCreate,
 		APITokenScopeAutomationsWrite,
 		APITokenScopeAutomationsRun,
+		APITokenScopeAutomationsAll,
 		APITokenScopePreviewsRead,
 		APITokenScopePreviewsCreate,
-		APITokenScopePreviewsStop:
+		APITokenScopePreviewsStop,
+		APITokenScopePreviewsAll:
 		return nil
 	default:
 		return fmt.Errorf("invalid APITokenScope: %q", s)
@@ -94,6 +100,7 @@ type APIToken struct {
 	TokenPrefix       string      `db:"token_prefix" json:"token_prefix"`
 	Scopes            []string    `db:"scopes" json:"scopes"`
 	RepositoryIDs     []uuid.UUID `db:"repository_ids" json:"repository_ids"`
+	AllowedIPCidrs    []string    `db:"allowed_ip_cidrs" json:"allowed_ip_cidrs"`
 	ExpiresAt         *time.Time  `db:"expires_at" json:"expires_at,omitempty"`
 	LastUsedAt        *time.Time  `db:"last_used_at" json:"last_used_at,omitempty"`
 	LastUsedIP        *string     `db:"last_used_ip" json:"last_used_ip,omitempty"`

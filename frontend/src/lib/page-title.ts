@@ -37,6 +37,7 @@ const PAGE_TITLE_RULES: PageTitleRule[] = [
   { pattern: /^\/settings\/account$/, title: "Account settings" },
   { pattern: /^\/settings\/agent$/, title: "Agent settings" },
   { pattern: /^\/settings\/audit-log$/, title: "Audit log" },
+  { pattern: /^\/settings\/api-keys$/, title: "API keys" },
   { pattern: /^\/settings\/autopilot$/, title: "Autopilot settings" },
   { pattern: /^\/settings\/evals$/, title: "Evals" },
   { pattern: /^\/settings\/evals\/new$/, title: "New eval" },
