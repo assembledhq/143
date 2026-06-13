@@ -2663,6 +2663,44 @@ func TestPreviewStore_GetActivePreviewRuntimeScopesByOrgAndLease(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_ListActivePreviewRuntimesForReachability(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+
+	runtimes, err := store.ListActivePreviewRuntimesForReachability(context.Background(), 100)
+	require.NoError(t, err, "ListActivePreviewRuntimesForReachability should return live runtimes")
+	require.Equal(t, []models.PreviewRuntime{{
+		ID:                runtimeID,
+		OrgID:             orgID,
+		PreviewInstanceID: previewID,
+		RuntimeEpoch:      1,
+		WorkerNodeID:      "worker-1",
+		EndpointURL:       "http://worker-runtime:8080",
+		PreviewHandle:     "handle-1",
+		PrimaryPort:       3000,
+		Status:            models.PreviewRuntimeStatusReady,
+		LeaseExpiresAt:    now.Add(45 * time.Second),
+		LastHeartbeatAt:   now,
+		Error:             "",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}}, runtimes, "ListActivePreviewRuntimesForReachability should scan the runtime rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerMarksPreviewUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -2698,6 +2736,25 @@ func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerRecordsUnavailableRea
 	updated, err := store.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), "worker-1", "drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout)
 	require.NoError(t, err, "MarkActivePreviewRuntimesLostByWorkerWithReason should persist a deploy-specific reason")
 	require.Equal(t, int64(1), updated, "MarkActivePreviewRuntimesLostByWorkerWithReason should report updated previews")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkPreviewRuntimeUnreachableMarksPreviewUnavailable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+UPDATE preview_instances[\\s\\S]+unavailable_reason = 'worker_endpoint_unreachable'[\\s\\S]+preview_holding_container = FALSE").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	updated, err := store.MarkPreviewRuntimeUnreachable(context.Background(), uuid.New(), uuid.New(), uuid.New(), "gateway could not dial worker endpoint")
+	require.NoError(t, err, "MarkPreviewRuntimeUnreachable should mark the runtime lost")
+	require.True(t, updated, "MarkPreviewRuntimeUnreachable should report when the active preview was transitioned")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

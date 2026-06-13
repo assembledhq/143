@@ -1092,10 +1092,34 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 			g.evictCachedRuntime(previewID)
 			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
 				Msg("proxy error")
+			g.markRuntimeUnreachable(originalReq.Context(), orgID, previewID, runtime, err)
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func (g *Gateway) markRuntimeUnreachable(ctx context.Context, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, proxyErr error) {
+	if g.store == nil || runtime == nil {
+		return
+	}
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(proxyErr, context.Canceled) {
+		return
+	}
+	reason := "preview gateway could not reach worker endpoint"
+	if proxyErr != nil {
+		reason += ": " + proxyErr.Error()
+	}
+	updated, err := g.store.MarkPreviewRuntimeUnreachable(ctx, orgID, previewID, runtime.ID, reason)
+	if err != nil {
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), nil, orgID, previewID, runtime, "").
+			Msg("failed to mark preview runtime unreachable")
+		return
+	}
+	if updated {
+		addPreviewProxyLogFields(g.logger.Warn(), nil, orgID, previewID, runtime, "").
+			Msg("marked preview runtime unreachable")
+	}
 }
 
 func previewWorkerProxyPath(previewID uuid.UUID, requestPath string) string {

@@ -875,6 +875,18 @@ export function PreviewPanel({
   const isPreviewLiveUpdated = freshnessState === "live_updated";
   const isPreviewRestartRequired = freshnessState === "restart_required";
   const isPreviewFreshnessUnknown = freshnessState === "unknown";
+  const isWorkerEndpointUnreachable =
+    status === "unavailable" &&
+    instance?.unavailable_reason === "worker_endpoint_unreachable";
+  const unavailableTitle = isWorkerEndpointUnreachable
+    ? "Preview disconnected"
+    : "No preview running";
+  const unavailableDescription = isWorkerEndpointUnreachable
+    ? "The preview worker is alive but the app gateway cannot reach its preview endpoint."
+    : "Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.";
+  const unavailableActionLabel = isWorkerEndpointUnreachable
+    ? "Reconnect preview"
+    : "Start Preview";
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
   const freshnessCalloutText =
     isManageable &&
@@ -1476,10 +1488,9 @@ export function PreviewPanel({
               <Monitor className="size-5 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">No preview running</p>
+              <p className="text-sm font-medium">{unavailableTitle}</p>
               <p className="text-xs text-muted-foreground">
-                Start a preview to see live changes from the agent. Note that it
-                can take a few minutes for the environment to finish booting.
+                {unavailableDescription}
               </p>
               {instance?.created_at && lastPreviewStoppedAt && (
                 <div className="flex flex-wrap items-center justify-center gap-2">
@@ -1503,7 +1514,7 @@ export function PreviewPanel({
               loading={startMutation.isPending}
             >
               {!startMutation.isPending && <Play className="size-3.5" />}
-              Start Preview
+              {unavailableActionLabel}
             </Button>
             <p className="text-xs text-muted-foreground"></p>
           </div>

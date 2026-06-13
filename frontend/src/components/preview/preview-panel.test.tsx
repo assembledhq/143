@@ -1341,6 +1341,24 @@ describe("PreviewPanel component", () => {
     });
   });
 
+  it("shows reconnect copy when the preview runtime endpoint is unreachable", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "unavailable",
+        unavailable_reason: "worker_endpoint_unreachable",
+        error: "gateway could not dial worker endpoint",
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Preview disconnected")).toBeInTheDocument();
+    expect(
+      screen.getByText("The preview worker is alive but the app gateway cannot reach its preview endpoint."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reconnect preview" })).toBeInTheDocument();
+  });
+
   it("shows a retry-the-turn message when the sandbox is busy with a concurrent agent turn", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));

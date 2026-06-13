@@ -29,7 +29,10 @@ describe("ConsoleBadge", () => {
 
     // Wait for query to resolve, then check it renders nothing
     await waitFor(() => {
-      expect(consoleGetMock).toHaveBeenCalledWith("sess-1");
+      expect(consoleGetMock).toHaveBeenCalledWith(
+        "sess-1",
+        expect.objectContaining({ timeoutMs: 5000 }),
+      );
     });
     // With empty messages, component returns null
     expect(container.innerHTML).toBe("");
@@ -42,7 +45,10 @@ describe("ConsoleBadge", () => {
     );
 
     await waitFor(() => {
-      expect(consoleGetMock).toHaveBeenCalledWith("sess-1");
+      expect(consoleGetMock).toHaveBeenCalledWith(
+        "sess-1",
+        expect.objectContaining({ timeoutMs: 5000 }),
+      );
     });
     expect(container.innerHTML).toBe("");
   });

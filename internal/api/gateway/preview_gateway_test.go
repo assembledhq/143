@@ -1406,6 +1406,9 @@ func TestGateway_ProxyToWorker_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
 			endpointURL, "handle-1", 8080, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
 			now, nil, nil, "", "", now, now,
 		))
+	mock.ExpectExec("WITH lost AS[\\s\\S]+worker_endpoint_unreachable").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodGet, "/static/js/ApplicationRoutes.chunk.js?cache=miss", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
@@ -1419,7 +1422,8 @@ func TestGateway_ProxyToWorker_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
 	require.NotEmpty(t, logs.String(), "proxy error should emit a structured log")
 
 	var event map[string]any
-	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "proxy error log should be valid JSON")
+	firstLogLine := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))[0]
+	require.NoError(t, json.Unmarshal(firstLogLine, &event), "proxy error log should be valid JSON")
 	require.Equal(t, "proxy error", event["message"], "proxy error log should keep the event message")
 	require.Equal(t, previewID.String(), event["preview_id"], "proxy error log should include preview id")
 	require.Equal(t, orgID.String(), event["org_id"], "proxy error log should include org id")
@@ -2090,6 +2094,27 @@ func TestGateway_ProxyToWorker_EvictsRuntimeCacheOnProxyError(t *testing.T) {
 		require.Equal(t, http.StatusBadGateway, rr.Code, "proxied request %d should fail against the closed worker", i+1)
 	}
 	require.NoError(t, mock.ExpectationsWereMet(), "proxy errors should evict the runtime cache so the next request re-resolves")
+}
+
+func TestGateway_MarkRuntimeUnreachableSkipsCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	var logs bytes.Buffer
+	gw := NewGateway(GatewayConfig{
+		Store:  db.NewPreviewStore(mock),
+		Logger: zerolog.New(&logs),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	gw.markRuntimeUnreachable(ctx, uuid.New(), uuid.New(), &models.PreviewRuntime{ID: uuid.New()}, context.Canceled)
+
+	require.Empty(t, logs.String(), "canceled requests should not attempt to persist or log worker reachability failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "canceled requests should not issue a runtime update")
 }
 
 func TestGateway_RecordAccessThrottled(t *testing.T) {

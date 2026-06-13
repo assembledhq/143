@@ -948,6 +948,29 @@ func (s *PreviewStore) GetActivePreviewRuntime(ctx context.Context, orgID, previ
 	return &row, nil
 }
 
+// lint:allow-no-orgid reason="cross-org app-side reachability sweep probes active preview runtime endpoints"
+func (s *PreviewStore) ListActivePreviewRuntimesForReachability(ctx context.Context, limit int) ([]models.PreviewRuntime, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM preview_runtimes
+		WHERE status IN %s
+		  AND lease_expires_at > now()
+		ORDER BY last_heartbeat_at ASC, updated_at ASC
+		LIMIT @limit`, previewRuntimeColumns, activeRuntimeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview runtimes for reachability: %w", err)
+	}
+	runtimes, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewRuntime])
+	if err != nil {
+		return nil, fmt.Errorf("scan active preview runtimes for reachability: %w", err)
+	}
+	return runtimes, nil
+}
+
 // MarkPreviewRuntimeReady marks a runtime ready and mirrors routing fields onto
 // preview_instances for API compatibility.
 func (s *PreviewStore) MarkPreviewRuntimeReady(ctx context.Context, orgID, runtimeID uuid.UUID, handle string, port int) error {
@@ -2187,6 +2210,41 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 		return 0, fmt.Errorf("mark active preview runtimes lost by worker: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+func (s *PreviewStore) MarkPreviewRuntimeUnreachable(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, reason string) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`WITH lost AS (
+			UPDATE preview_runtimes
+			SET status = 'lost',
+				error = @reason,
+				unavailable_reason = 'worker_endpoint_unreachable',
+				stopped_at = COALESCE(stopped_at, now()),
+				updated_at = now()
+			WHERE id = @runtime_id
+			  AND org_id = @org_id
+			  AND preview_instance_id = @preview_id
+			  AND status IN %s
+			RETURNING org_id, preview_instance_id
+		)
+		UPDATE preview_instances pi
+		SET status = 'unavailable',
+			current_phase = 'unavailable',
+			error = @reason,
+			unavailable_reason = 'worker_endpoint_unreachable',
+			preview_holding_container = FALSE,
+			stopped_at = COALESCE(stopped_at, now()),
+			updated_at = now()
+		FROM lost
+		WHERE pi.id = lost.preview_instance_id
+		  AND pi.org_id = lost.org_id
+		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID, "runtime_id": runtimeID, "reason": reason},
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark preview runtime unreachable: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // MarkExpiredPreviewRuntimesLost marks runtimes with expired leases lost and

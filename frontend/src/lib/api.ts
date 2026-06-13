@@ -104,6 +104,18 @@ function get<T>(path: string, options?: RequestInit): Promise<T> {
   return request<T>(path, options);
 }
 
+function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  parent?.addEventListener('abort', abort, { once: true });
+  controller.signal.addEventListener('abort', () => {
+    globalThis.clearTimeout(timeout);
+    parent?.removeEventListener('abort', abort);
+  }, { once: true });
+  return controller.signal;
+}
+
 function post<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, {
     method: 'POST',
@@ -618,8 +630,11 @@ export const api = {
         return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
           .then(r => r.data ?? []);
       },
-      console: (sessionId: string) =>
-        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+      console: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(
+          `/api/v1/sessions/${sessionId}/preview/console`,
+          { signal: timeoutSignal(opts?.timeoutMs ?? 5000, opts?.signal) },
+        )
           .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
