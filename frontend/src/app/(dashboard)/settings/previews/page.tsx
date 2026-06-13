@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import {
   useEffect,
   useMemo,
@@ -11,7 +10,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import {
-  Copy,
   Eye,
   HelpCircle,
   KeyRound,
@@ -37,7 +35,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogClose,
@@ -89,7 +86,6 @@ import type {
   ListResponse,
   Organization,
   OrgSettings,
-  PreviewAPIToken,
   PreviewPolicySummary,
   PreviewSecretBundleRevealResult,
   PreviewSecretBundleOutput,
@@ -99,8 +95,6 @@ import type {
   Repository,
   SingleResponse,
 } from "@/lib/types";
-
-const SCOPES = ["previews:create", "previews:read", "previews:stop"] as const;
 
 const SECRET_FILE_KEY = "SECRET_FILE_CONTENT";
 const JSON_FILE_VALIDATION_DEBOUNCE_MS = pollMs(400);
@@ -167,31 +161,18 @@ export default function PreviewSettingsPage() {
       <div className="space-y-8">
         <PageHeader
           title="Preview"
-          description="Configure preview secrets and API access."
+          description="Configure auto-preview policy and preview secrets."
         />
         <Tabs defaultValue="auto-preview" className="space-y-5">
           <TabsList>
             <TabsTrigger value="auto-preview">Auto-preview</TabsTrigger>
             <TabsTrigger value="secrets">Secrets</TabsTrigger>
-            <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
           </TabsList>
           <TabsContent value="auto-preview" className="space-y-4">
             <AutoPreviewSection />
           </TabsContent>
           <TabsContent value="secrets" className="space-y-4">
-            <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
-              <p className="text-xs text-muted-foreground">
-                Shared sandbox networking, lifecycle, and capacity controls live
-                in Runtime.
-              </p>
-              <Button asChild variant="outline" size="sm">
-                <Link href="/settings/runtime">Runtime settings</Link>
-              </Button>
-            </div>
             <PreviewSecretsSection />
-          </TabsContent>
-          <TabsContent value="api-tokens" className="space-y-4">
-            <PreviewAPISection />
           </TabsContent>
         </Tabs>
       </div>
@@ -1420,373 +1401,6 @@ function SaveButton({
   );
 }
 
-function PreviewAPISection() {
-  const queryClient = useQueryClient();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [scopes, setScopes] = useState<string[]>([...SCOPES]);
-  const [repositoryIDs, setRepositoryIDs] = useState<string[]>([]);
-  const [createdToken, setCreatedToken] = useState("");
-
-  const tokensQuery = useQuery<ListResponse<PreviewAPIToken>>({
-    queryKey: queryKeys.previews.apiTokens,
-    queryFn: () => api.previews.apiTokens.list(),
-  });
-  const repositoriesQuery = useQuery<ListResponse<Repository>>({
-    queryKey: queryKeys.repositories.all,
-    queryFn: () => api.repositories.list(),
-  });
-
-  const repositories = repositoriesQuery.data?.data ?? [];
-  const tokens = tokensQuery.data?.data ?? [];
-
-  const createToken = useMutation({
-    mutationFn: () =>
-      api.previews.apiTokens.create({
-        name: name.trim(),
-        scopes,
-        repository_ids: repositoryIDs,
-      }),
-    onSuccess: (response) => {
-      setCreatedToken(response.data.token);
-      setName("");
-      setScopes([...SCOPES]);
-      setRepositoryIDs([]);
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.previews.apiTokens,
-      });
-    },
-  });
-
-  const revokeToken = useMutation({
-    mutationFn: (id: string) => api.previews.apiTokens.revoke(id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.previews.apiTokens,
-      });
-    },
-  });
-
-  function toggleScope(scope: string) {
-    setScopes((current) =>
-      current.includes(scope)
-        ? current.filter((item) => item !== scope)
-        : [...current, scope],
-    );
-  }
-
-  function toggleRepository(id: string) {
-    setRepositoryIDs((current) =>
-      current.includes(id)
-        ? current.filter((item) => item !== id)
-        : [...current, id],
-    );
-  }
-
-  function resetTokenDialog(open: boolean) {
-    setDialogOpen(open);
-    if (!open) {
-      setName("");
-      setScopes([...SCOPES]);
-      setRepositoryIDs([]);
-      setCreatedToken("");
-      createToken.reset();
-    }
-  }
-
-  function copyCreatedToken() {
-    if (!createdToken) return;
-    void navigator.clipboard
-      ?.writeText(createdToken)
-      .then(() => toast.success("Preview API token copied"))
-      .catch(() => toast.error("Could not copy preview API token"));
-  }
-
-  return (
-    <section className="space-y-4" aria-labelledby="preview-api-heading">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h2
-            id="preview-api-heading"
-            className="text-sm font-semibold text-foreground"
-          >
-            Preview API tokens
-          </h2>
-          <p className="text-xs text-muted-foreground">
-            Legacy preview-only tokens. Use API keys for new session,
-            automation, and preview integrations.
-          </p>
-          <Button asChild variant="link" className="h-auto justify-start p-0 text-xs">
-            <Link href="/settings/api-keys">Open API keys</Link>
-          </Button>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => resetTokenDialog(true)}
-        >
-          <Plus className="h-4 w-4" />
-          Create token
-        </Button>
-      </div>
-
-      <TokenInventory
-        tokens={tokens}
-        repositories={repositories}
-        isLoading={tokensQuery.isLoading}
-        onRevoke={(token) => revokeToken.mutate(token.id)}
-        revoking={revokeToken.isPending}
-      />
-
-      <Dialog open={dialogOpen} onOpenChange={resetTokenDialog}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Create token</DialogTitle>
-            <DialogDescription>
-              The token value is shown once after creation.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-5">
-            <div className="space-y-1.5">
-              <Label htmlFor="preview-token-name">Name</Label>
-              <Input
-                id="preview-token-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="CI previews"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Scopes</Label>
-              <div className="grid gap-2 md:grid-cols-3">
-                {SCOPES.map((scope) => (
-                  <Label
-                    key={scope}
-                    className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
-                  >
-                    <Checkbox
-                      id={`scope-${scope}`}
-                      checked={scopes.includes(scope)}
-                      onCheckedChange={() => toggleScope(scope)}
-                    />
-                    {scope}
-                  </Label>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Repository access</Label>
-              <div className="grid max-h-56 gap-2 overflow-auto rounded-md border border-border p-2 md:grid-cols-2">
-                {repositories.map((repo) => (
-                  <Label
-                    key={repo.id}
-                    htmlFor={`repo-${repo.id}`}
-                    className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"
-                  >
-                    <Checkbox
-                      id={`repo-${repo.id}`}
-                      checked={repositoryIDs.includes(repo.id)}
-                      onCheckedChange={() => toggleRepository(repo.id)}
-                    />
-                    <span className="truncate">{repo.full_name}</span>
-                  </Label>
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Leave every repository unchecked to allow all repositories.
-              </p>
-            </div>
-
-            {createdToken ? (
-              <div className="space-y-1.5 rounded-md border border-border bg-muted/30 p-3">
-                <p className="text-xs font-medium text-foreground">
-                  One-time token
-                </p>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="break-all font-mono text-xs text-foreground">
-                    {createdToken}
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={copyCreatedToken}
-                    aria-label="Copy token"
-                  >
-                    <Copy className="h-4 w-4" />
-                    Copy
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            {createToken.isError ? (
-              <p className="text-sm text-destructive">
-                {createToken.error instanceof Error
-                  ? createToken.error.message
-                  : "Token could not be created."}
-              </p>
-            ) : null}
-          </div>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button type="button" variant="outline">
-                Cancel
-              </Button>
-            </DialogClose>
-            <Button
-              type="button"
-              onClick={() => createToken.mutate()}
-              disabled={
-                !name.trim() || scopes.length === 0 || createToken.isPending
-              }
-            >
-              <KeyRound className="h-4 w-4" />
-              Create token
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </section>
-  );
-}
-
-function TokenInventory({
-  tokens,
-  repositories,
-  isLoading,
-  onRevoke,
-  revoking,
-}: {
-  tokens: PreviewAPIToken[];
-  repositories: Repository[];
-  isLoading: boolean;
-  onRevoke: (token: PreviewAPIToken) => void;
-  revoking: boolean;
-}) {
-  if (isLoading) {
-    return (
-      <div className="rounded-md border border-border px-4 py-8 text-center text-xs text-muted-foreground">
-        Loading preview API tokens...
-      </div>
-    );
-  }
-
-  if (tokens.length === 0) {
-    return (
-      <div className="rounded-md border border-border">
-        <EmptyState
-          icon={KeyRound}
-          title="No preview API tokens"
-          description="Use API keys for new integrations; create preview-only tokens only for older preview workflows."
-          action={{ label: "Open API keys", href: "/settings/api-keys" }}
-          variant="inline"
-        />
-      </div>
-    );
-  }
-
-  return (
-    <>
-      <div className="hidden rounded-md border border-border md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Token</TableHead>
-              <TableHead>Scopes</TableHead>
-              <TableHead>Repository access</TableHead>
-              <TableHead>Last used</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {tokens.map((token) => (
-              <TableRow key={token.id}>
-                <TableCell className="font-medium">{token.name}</TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-1">
-                    {token.scopes.map((scope) => (
-                      <Badge key={scope} variant="secondary">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <RepositoryAccessBadge
-                    token={token}
-                    repositories={repositories}
-                  />
-                </TableCell>
-                <TableCell>
-                  {token.last_used_at
-                    ? formatDate(token.last_used_at)
-                    : "Never"}
-                </TableCell>
-                <TableCell className="text-right">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => onRevoke(token)}
-                    disabled={revoking}
-                    aria-label={`Revoke ${token.name}`}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                    Revoke
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <div className="space-y-3 md:hidden">
-        {tokens.map((token) => (
-          <div key={token.id} className="rounded-md border border-border p-3">
-            <div className="space-y-3">
-              <p className="truncate text-sm font-medium text-foreground">
-                {token.name}
-              </p>
-              <LabeledMobileValue label="Scopes">
-                <div className="flex flex-wrap gap-1">
-                  {token.scopes.map((scope) => (
-                    <Badge key={scope} variant="secondary">
-                      {scope}
-                    </Badge>
-                  ))}
-                </div>
-              </LabeledMobileValue>
-              <LabeledMobileValue label="Repository access">
-                <RepositoryAccessBadge
-                  token={token}
-                  repositories={repositories}
-                />
-              </LabeledMobileValue>
-              <LabeledMobileValue label="Last used">
-                {token.last_used_at ? formatDate(token.last_used_at) : "Never"}
-              </LabeledMobileValue>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => onRevoke(token)}
-                disabled={revoking}
-                aria-label={`Revoke ${token.name}`}
-              >
-                <Trash2 className="h-4 w-4" />
-                Revoke
-              </Button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </>
-  );
-}
-
 function LabeledMobileValue({
   label,
   children,
@@ -2006,36 +1620,6 @@ function formatOutputSummary(
     return [`${output.format || "raw"} ${output.path || "file"}`];
   }
   return [output.type];
-}
-
-function repositoryAccessLabel(
-  token: PreviewAPIToken,
-  repositories: Repository[],
-): string {
-  if (token.repository_ids.length === 0) return "All repositories";
-  // Fall back to the raw ID for any repo that has been deleted so the label
-  // stays accurate even when repositories are no longer in the fetched list.
-  const resolvedNames = token.repository_ids.map(
-    (id) => repositories.find((repo) => repo.id === id)?.full_name ?? id,
-  );
-  if (resolvedNames.length <= 2) {
-    return resolvedNames.join(", ");
-  }
-  return `${token.repository_ids.length} repositories`;
-}
-
-function RepositoryAccessBadge({
-  token,
-  repositories,
-}: {
-  token: PreviewAPIToken;
-  repositories: Repository[];
-}) {
-  return (
-    <Badge variant="secondary">
-      {repositoryAccessLabel(token, repositories)}
-    </Badge>
-  );
 }
 
 function normalizeEnvKey(value: string): string {

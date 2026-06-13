@@ -83,6 +83,35 @@ describe("ContextExpander", () => {
     expect(screen.getByTestId("context-expander-label")).toBeEmptyDOMElement();
   });
 
+  it("matches the compact unified diff gutter width", () => {
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={15}
+        hiddenStart={6}
+        hiddenEnd={20}
+      />
+    );
+
+    expect(screen.getByTestId("context-expander-gutter-controls")).toHaveClass("w-[84px]");
+    expect(screen.getByTestId("context-expander-prefix-spacer")).toHaveClass("w-[16px]");
+  });
+
+  it("matches the compact split diff gutter width", () => {
+    render(
+      <ContextExpander
+        kind="middle"
+        viewMode="split"
+        hiddenLineCount={15}
+        hiddenStart={6}
+        hiddenEnd={20}
+      />
+    );
+
+    expect(screen.getByTestId("context-expander-gutter-controls")).toHaveClass("w-[58px]");
+    expect(screen.getByTestId("context-expander-prefix-spacer")).toHaveClass("w-0");
+  });
+
   it("is disabled when sessionId/filePath/startLine are missing", () => {
     render(<ContextExpander kind="middle" hiddenLineCount={10} hiddenStart={6} hiddenEnd={15} />);
     expect(screen.getByRole("button", { name: "Reveal context above" })).toBeDisabled();

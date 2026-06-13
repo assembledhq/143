@@ -1,4 +1,6 @@
-# SOPS configuration — tells sops which encryption keys to use.
+# SOPS configuration template — copy to your PRIVATE secrets repo as
+# .sops.yaml (default location: ../143-infra, see docs/secrets/README.md).
+# Do NOT commit a real .sops.yaml or any .env*.enc files to this public repo.
 #
 # Add your age public key(s) below. Get yours with:
 #   make secrets-setup
@@ -8,30 +10,30 @@
 #
 # Workflow:
 #   1. Run `make secrets-setup` to generate your age keypair
-#   2. Paste your public key below (replace the TODO placeholder)
+#   2. Paste your public key below (replace the TODO placeholders)
 #   3. Encrypt:  make secrets-encrypt              (dev, default)
 #                make secrets-encrypt ENV=staging   (staging)
 #   4. Decrypt:  make secrets-decrypt               (dev)
 #                make secrets-decrypt ENV=staging    (staging)
-#   5. Commit the .env.*.enc files — they're safe, encrypted at rest.
+#   5. Commit the .env.*.enc files in the private secrets repo.
 #
 # To add a new team member:
 #   1. They run `make secrets-setup` and send you their public key
 #   2. Add their key below (comma-separated on the age: line)
 #   3. Re-encrypt all environments: make secrets-rotate
-#   4. Commit .sops.yaml and the updated .enc files
+#   4. Commit .sops.yaml and the updated .enc files in the private repo
 
 creation_rules:
   # Per-environment rules (matched first → last, first match wins)
   # Matches both plaintext (.env.staging) and encrypted (.env.staging.enc)
   - path_regex: \.env\.staging(\.enc)?$
     age: >-
-      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
+      age1TODO_YOUR_PERSONAL_KEY
   - path_regex: \.env\.production(\.enc)?$
     # Personal key, server key, CI deploy key
     age: >-
-      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl,age1javfprksts8jt07rga3ltdnhllstv7rkt09s9lvgz8twy9sgps7q3xtgs5,age1uty3jxw8a5nv27rn4kf7sjn5ugtemyyuadn6wh7lky8acqlxvdnsp6tvhj
+      age1TODO_YOUR_PERSONAL_KEY,age1TODO_SERVER_KEY,age1TODO_CI_DEPLOY_KEY
   # Default: catches .env, .env.enc, and any other .env* files
   - path_regex: \.env(\..*)?$
     age: >-
-      age1xyvl6ral4fq757tpnz30cuzefrpngnuv6zutjsg7wtnmza4uyqlshc2ucl
+      age1TODO_YOUR_PERSONAL_KEY

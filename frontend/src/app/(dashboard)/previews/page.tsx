@@ -417,6 +417,7 @@ export default function PreviewsPage() {
         limit: 50,
       }),
     refetchInterval: pollMs(5000),
+    placeholderData: (previous) => previous,
   });
   const resumableQuery = useQuery<
     ListResponse<BranchPreviewResponse> & { meta: PreviewListMeta }
@@ -430,6 +431,7 @@ export default function PreviewsPage() {
         limit: 50,
       }),
     refetchInterval: pollMs(30000),
+    placeholderData: (previous) => previous,
   });
   const recentQuery = useQuery<
     ListResponse<BranchPreviewResponse> & { meta: PreviewListMeta }
@@ -443,6 +445,7 @@ export default function PreviewsPage() {
         limit: 50,
       }),
     refetchInterval: pollMs(30000),
+    placeholderData: (previous) => previous,
   });
   const sectionQueries = [runningQuery, resumableQuery, recentQuery];
 
@@ -456,6 +459,9 @@ export default function PreviewsPage() {
   // refreshes them as soon as the backend recovers.
   const sectionFailed = (query: (typeof sectionQueries)[number]) =>
     query.data === undefined && (query.isError || query.errorUpdateCount > 0);
+  const previewSectionsSettled = sectionQueries.every(
+    (item) => item.data !== undefined || sectionFailed(item),
+  );
   // Only successfully settled, genuinely empty sections count toward the
   // page-level empty state; loading or failed sections must not flip the page
   // to "No previews yet".
@@ -535,7 +541,9 @@ export default function PreviewsPage() {
           </Select>
         </div>
 
-        {allEmpty ? (
+        {!previewSectionsSettled ? (
+          <div className="min-h-48" aria-hidden="true" />
+        ) : allEmpty ? (
           <EmptyState
             icon={MonitorPlay}
             title="No previews yet"
@@ -597,8 +605,14 @@ export default function PreviewsPage() {
                   </div>
                   <SectionRows
                     scope={section.scope}
-                    previews={section.scope === "recent" ? recentPreviews : (sectionQuery.data?.data ?? [])}
-                    isLoading={sectionQuery.isLoading && !sectionFailed(sectionQuery)}
+                    previews={
+                      section.scope === "recent"
+                        ? recentPreviews
+                        : (sectionQuery.data?.data ?? [])
+                    }
+                    isLoading={
+                      sectionQuery.isLoading && !sectionFailed(sectionQuery)
+                    }
                     isError={sectionFailed(sectionQuery)}
                     onRetry={() => sectionQuery.refetch()}
                     canMutate={canMutate}

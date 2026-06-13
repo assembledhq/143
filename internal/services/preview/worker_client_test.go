@@ -168,6 +168,34 @@ func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T
 	require.True(t, cancelled.Accepted, "CancelSession should decode the accepted result")
 }
 
+func TestWorkerPreviewClient_UsesPreviewTokenKeyringSigner(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	worker := WorkerNode{ID: "worker-1", BaseURL: "", Mode: "worker"}
+	keyring, err := auth.NewPreviewTokenKeyring([]string{"new-secret", "old-secret"})
+	require.NoError(t, err, "test keyring should be created")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		_, oldErr := auth.ValidatePreviewToken("old-secret", token)
+		require.Error(t, oldErr, "worker client should sign with the first configured preview RPC secret")
+		claims, validateErr := auth.ValidatePreviewToken("new-secret", token)
+		require.NoError(t, validateErr, "worker client request should validate with the keyring signer")
+		require.Equal(t, "stop", claims.Action, "StopPreview should sign the stop action")
+		require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[map[string]string]{Data: map[string]string{"status": "stopped"}}), "StopPreview should decode a status response")
+	}))
+	defer server.Close()
+	worker.BaseURL = server.URL
+
+	client := NewWorkerPreviewClientWithKeyring(keyring)
+	client.httpClient.Timeout = 5 * time.Second
+
+	err = client.StopPreview(context.Background(), worker, orgID, previewID)
+	require.NoError(t, err, "StopPreview should succeed with a keyring-backed client")
+}
+
 func TestWorkerPreviewClient_PropagatesStructuredWorkerErrors(t *testing.T) {
 	t.Parallel()
 

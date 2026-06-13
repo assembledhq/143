@@ -614,6 +614,7 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, `--node-id "$preflight_node_id"`, "worker deploy preflight should load status by node id")
 	require.Contains(t, deploy, `wait_worker_db_heartbeat "$node_id"`, "worker deploy should verify the green generation has registered a fresh DB heartbeat before draining blue")
 	require.Contains(t, deploy, "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure", "worker deploy should clean up green if DB heartbeat readiness fails")
+	require.Contains(t, deploy, "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure", "worker deploy should clean up green if preview RPC auth compatibility fails")
 	require.Contains(t, deploy, "drain_old_worker_containers", "worker deploy should drain old worker containers after the new generation is healthy")
 	require.Contains(t, deploy, "run_ctl expire-budget", "worker deploy should mark over-budget blue executors for deploy-specific checkpoint/requeue")
 	require.Contains(t, deploy, "--reason \"$reason\"", "worker deploy should pass the deploy reason into budget-expiry audit events")
@@ -632,6 +633,38 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "refusing to reuse it", "worker deploy should fail closed when runtime endpoint ownership cannot be verified")
 	require.NotContains(t, deploy, "falling back to blocking worker drain", "routine worker deploy should not interrupt old workers when no extra blue/green port is configured")
 	require.Contains(t, deploy, "routine blue/green deploy refuses blocking drain fallback", "worker deploy should explain when it cannot do zero-interruption blue/green without an extra reachable port")
+}
+
+func TestDeployRunsPreviewRPCAuthCheckBeforeCutoverAndWorkerDrain(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	rollingBody := extractShellFunction(t, deployText, "rolling_deploy_service", "resolve_worker_drain_timeout_seconds")
+	workerBody := extractShellFunction(t, deployText, "deploy_worker_blue_green", "dump_diagnostics")
+
+	cliSource, err := os.ReadFile("../cmd/worker-deployctl/main.go")
+	require.NoError(t, err, "test should read worker-deployctl source")
+	require.Contains(t, string(cliSource), `case "preview-auth-check":`, "worker-deployctl should expose a preview RPC auth compatibility probe")
+	require.Contains(t, string(cliSource), "runPreviewAuthCheck", "preview-auth-check should have a dedicated CLI implementation")
+
+	appProbeIndex := strings.Index(rollingBody, `preview_rpc_auth_preflight "$new_container"`)
+	require.NotEqual(t, -1, appProbeIndex, "app rolling deploy should run the preview RPC auth probe from the new api container")
+	previewAuthPreflightBody := extractShellFunction(t, deployText, "preview_rpc_auth_preflight", "rolling_deploy_service")
+	require.Contains(t, previewAuthPreflightBody, `docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json`, "app preview RPC auth probe should run through docker-entrypoint.sh so SOPS-decrypted production secrets are available to worker-deployctl")
+	appDrainIndex := strings.Index(rollingBody, `echo "Draining $old_count old $service container(s)`)
+	require.NotEqual(t, -1, appDrainIndex, "app rolling deploy should still drain old containers")
+	require.Less(t, appProbeIndex, appDrainIndex, "app rolling deploy should run preview RPC auth check before draining old api containers")
+
+	workerProbeIndex := strings.Index(workerBody, `run_worker_deployctl preview-auth-check --node-id "$node_id" --json`)
+	require.NotEqual(t, -1, workerProbeIndex, "worker blue/green deploy should run preview RPC auth check against the candidate node")
+	heartbeatIndex := strings.Index(workerBody, `wait_worker_db_heartbeat "$node_id"`)
+	require.NotEqual(t, -1, heartbeatIndex, "worker blue/green deploy should wait for the green generation heartbeat")
+	workerDrainIndex := strings.Index(workerBody, `drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id"`)
+	require.NotEqual(t, -1, workerDrainIndex, "worker blue/green deploy should drain old worker containers")
+	require.Less(t, heartbeatIndex, workerProbeIndex, "worker deploy should only probe after the green generation is registered")
+	require.Less(t, workerProbeIndex, workerDrainIndex, "worker deploy should run preview RPC auth check before draining old worker containers")
 }
 
 func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testing.T) {
@@ -1472,6 +1505,7 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	}
 	require.True(t, dashboardNames["platform-health.json"], "platform health dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["primary-operations.json"], "primary operations dashboard should be provisioned from the repo")
+	require.True(t, dashboardNames["preview-health.json"], "preview health dashboard should be provisioned from the repo")
 
 	for _, dashboardFile := range dashboardFiles {
 		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
@@ -1519,6 +1553,55 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 				require.Equal(t, "statsRange", target.QueryType, "time-series stats panel %q in dashboard %s should use the VictoriaLogs range query type", panel.Title, dashboardFile.Name())
 			}
 		}
+	}
+}
+
+func TestPreviewHealthDashboardStaysFocused(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/preview-health.json")
+	require.NoError(t, err, "test should read the preview health dashboard")
+
+	var dashboard struct {
+		Title  string `json:"title"`
+		Panels []struct {
+			Title   string `json:"title"`
+			Type    string `json:"type"`
+			Targets []struct {
+				QueryType string `json:"queryType"`
+				Expr      string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "preview health dashboard should be valid JSON")
+	require.Equal(t, "143 - Preview Health", dashboard.Title, "preview health dashboard should have the expected title")
+	require.Len(t, dashboard.Panels, 5, "preview health dashboard should stay focused on the five most important panels")
+
+	required := map[string]string{
+		"Active previews":          `preview health: lifecycle sample`,
+		"Startup p50/p95":          `startup_p50_seconds`,
+		"Ready vs failed previews": `previews_failed_unavailable`,
+		"Cache hit rate":           `preview health: cache event`,
+		"Recent preview errors":    `preview`,
+	}
+	for title, exprFragment := range required {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.Title != title {
+				continue
+			}
+			found = true
+			require.NotEmpty(t, panel.Targets, "panel %q should have a LogsQL target", title)
+			var panelExprs []string
+			for _, target := range panel.Targets {
+				panelExprs = append(panelExprs, target.Expr)
+			}
+			require.Contains(t, strings.Join(panelExprs, "\n"), exprFragment, "panel %q should query the expected preview health signal", title)
+			if panel.Type == "timeseries" {
+				require.Equal(t, "statsRange", panel.Targets[0].QueryType, "preview health timeseries panel %q should use a range query", title)
+			}
+		}
+		require.True(t, found, "preview health dashboard should include panel %q", title)
 	}
 }
 

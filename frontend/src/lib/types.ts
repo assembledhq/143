@@ -212,6 +212,13 @@ export interface BranchPreviewResponse {
   expires_at?: string;
   stopped_at?: string;
   stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  unavailable_reason?:
+    | "owner_lost"
+    | "deploy_drain_timeout"
+    | "host_maintenance"
+    | "emergency_force"
+    | "lease_expired"
+    | "endpoint_unreachable";
   resumable?: boolean;
   resume_estimate_seconds?: number;
   services?: import('./preview-types').PreviewService[];
@@ -244,18 +251,6 @@ export interface BranchPreviewConfigOptions {
   requires_selection: boolean;
   readiness: string;
   validation_errors?: string[];
-}
-
-export interface PreviewAPIToken {
-  id: string;
-  org_id: string;
-  name: string;
-  scopes: string[];
-  repository_ids: string[];
-  created_by_user_id: string;
-  last_used_at?: string;
-  revoked_at?: string;
-  created_at: string;
 }
 
 export interface Integration {
@@ -935,6 +930,7 @@ export interface PullRequestActiveRepair {
 
 export interface PullRequestRepairRequest {
   thread_id?: string;
+  push_changes?: boolean;
 }
 
 export type PullRequestMergeWhenReadyState =

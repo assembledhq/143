@@ -36,6 +36,7 @@ type WorkerNodeMetadata struct {
 	BuildSHA               string `json:"build_sha,omitempty"`
 	Region                 string `json:"region,omitempty"`
 	PreviewCapable         bool   `json:"preview_capable,omitempty"`
+	PreviewRPCAuthCheck    bool   `json:"preview_rpc_auth_check,omitempty"`
 	PreviewInternalBaseURL string `json:"preview_internal_base_url,omitempty"`
 	StaticEgressCapable    bool   `json:"static_egress_capable,omitempty"`
 	StaticEgressPublicIP   string `json:"static_egress_public_ip,omitempty"`
@@ -369,6 +370,12 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExcept(ctx context.Context, exclud
 // satisfies the requested runtime capabilities.
 func (s *WorkerSelector) SelectLeastLoadedNodeWithRequirements(ctx context.Context, req WorkerSelectionRequirements) (WorkerNode, error) {
 	return s.selectLeastLoadedNode(ctx, nil, false, req)
+}
+
+// SelectLeastLoadedNodeExceptWithRequirements picks the least-loaded worker
+// that satisfies the requested runtime capabilities while skipping excluded IDs.
+func (s *WorkerSelector) SelectLeastLoadedNodeExceptWithRequirements(ctx context.Context, excluded map[string]struct{}, req WorkerSelectionRequirements) (WorkerNode, error) {
+	return s.selectLeastLoadedNode(ctx, excluded, false, req)
 }
 
 // HasStaticEgressCapableWorker reports whether all active workers that can

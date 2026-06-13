@@ -292,13 +292,6 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/stop`),
     bootstrap: (id: string) =>
       post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
-    apiTokens: {
-      list: () => get<import('./types').ListResponse<import('./types').PreviewAPIToken>>('/api/v1/previews/api-tokens'),
-      create: (body: { name: string; scopes: string[]; repository_ids: string[] }) =>
-        post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
-      revoke: (id: string) =>
-        del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
-    },
     policies: {
       list: () => get<import('./types').ListResponse<import('./types').PreviewPolicySummary>>('/api/v1/previews/policies'),
       update: (repositoryId: string, body: { auto_mode: 'off' | 'warm' | 'on' }) =>

@@ -72,6 +72,31 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/autopilot")).toBeDefined();
   });
 
+  it("does not fetch preview counts for the primary navigation", async () => {
+    let previewListRequests = 0;
+    server.use(
+      http.get("/api/v1/previews", () => {
+        previewListRequests += 1;
+        return HttpResponse.json({
+          data: [],
+          meta: { counts: { running: 3 } },
+        });
+      })
+    );
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Test Org")).toBeInTheDocument();
+    });
+    expect(previewListRequests).toBe(0);
+    expect(screen.getAllByRole("link", { name: "Previews" }).find((link) => link.getAttribute("href") === "/previews")).toBeDefined();
+  });
+
   it("uses a slightly narrower default sidebar width", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>

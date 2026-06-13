@@ -103,21 +103,75 @@ func (r PreviewStoppedReason) Validate() error {
 type PreviewFreshnessState string
 
 const (
-	PreviewFreshnessCurrent   PreviewFreshnessState = "current"
-	PreviewFreshnessOutOfDate PreviewFreshnessState = "out_of_date"
-	PreviewFreshnessUpdating  PreviewFreshnessState = "updating"
-	PreviewFreshnessUnknown   PreviewFreshnessState = "unknown"
+	PreviewFreshnessCurrent         PreviewFreshnessState = "current"
+	PreviewFreshnessLiveUpdated     PreviewFreshnessState = "live_updated"
+	PreviewFreshnessRestartRequired PreviewFreshnessState = "restart_required"
+	PreviewFreshnessOutOfDate       PreviewFreshnessState = "out_of_date"
+	PreviewFreshnessUpdating        PreviewFreshnessState = "updating"
+	PreviewFreshnessUnknown         PreviewFreshnessState = "unknown"
 )
 
 func (s PreviewFreshnessState) Validate() error {
 	switch s {
 	case PreviewFreshnessCurrent,
+		PreviewFreshnessLiveUpdated,
+		PreviewFreshnessRestartRequired,
 		PreviewFreshnessOutOfDate,
 		PreviewFreshnessUpdating,
 		PreviewFreshnessUnknown:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewFreshnessState: %q", s)
+	}
+}
+
+// PreviewRuntimeRevisionSource identifies how the live preview runtime proved
+// it had observed a session workspace revision.
+type PreviewRuntimeRevisionSource string
+
+const (
+	PreviewRuntimeRevisionSourceNone      PreviewRuntimeRevisionSource = ""
+	PreviewRuntimeRevisionSourceLaunch    PreviewRuntimeRevisionSource = "launch"
+	PreviewRuntimeRevisionSourceRecycle   PreviewRuntimeRevisionSource = "recycle"
+	PreviewRuntimeRevisionSourceHMR       PreviewRuntimeRevisionSource = "hmr"
+	PreviewRuntimeRevisionSourceFileEvent PreviewRuntimeRevisionSource = "file_event"
+)
+
+func (s PreviewRuntimeRevisionSource) Validate() error {
+	switch s {
+	case PreviewRuntimeRevisionSourceNone,
+		PreviewRuntimeRevisionSourceLaunch,
+		PreviewRuntimeRevisionSourceRecycle,
+		PreviewRuntimeRevisionSourceHMR,
+		PreviewRuntimeRevisionSourceFileEvent:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewRuntimeRevisionSource: %q", s)
+	}
+}
+
+// PreviewRestartReasonKind describes why a preview needs a full restart rather
+// than trusting live HMR/file watchers.
+type PreviewRestartReasonKind string
+
+const (
+	PreviewRestartReasonDependencyChanged        PreviewRestartReasonKind = "dependency_changed"
+	PreviewRestartReasonPreviewConfigChanged     PreviewRestartReasonKind = "preview_config_changed"
+	PreviewRestartReasonBuildConfigChanged       PreviewRestartReasonKind = "build_config_changed"
+	PreviewRestartReasonEnvironmentConfigChanged PreviewRestartReasonKind = "environment_config_changed"
+	PreviewRestartReasonDatabaseSchemaChanged    PreviewRestartReasonKind = "database_schema_changed"
+)
+
+func (k PreviewRestartReasonKind) Validate() error {
+	switch k {
+	case PreviewRestartReasonDependencyChanged,
+		PreviewRestartReasonPreviewConfigChanged,
+		PreviewRestartReasonBuildConfigChanged,
+		PreviewRestartReasonEnvironmentConfigChanged,
+		PreviewRestartReasonDatabaseSchemaChanged:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewRestartReasonKind: %q", k)
 	}
 }
 

@@ -214,6 +214,101 @@ func TestInternalPreviewHandler_AuthorizeFailures(t *testing.T) {
 			var resp models.ErrorResponse
 			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "authorize should return a JSON error")
 			require.Equal(t, tt.wantCode, resp.Error.Code, "authorize should return the expected error code")
+			require.Equal(t, "1", rr.Header().Get(auth.PreviewWorkerErrorHeader), "worker auth failures should be marked for the public gateway")
+		})
+	}
+}
+
+func TestInternalPreviewHandler_AuthCheck(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	keyring, err := auth.NewPreviewTokenKeyring([]string{"new-secret", "old-secret"})
+	require.NoError(t, err, "test keyring should be created")
+	handler := NewInternalPreviewHandlerWithKeyring(&PreviewHandler{logger: zerolog.Nop()}, nil, "worker-1", keyring, zerolog.Nop())
+
+	token, err := auth.GeneratePreviewToken("old-secret", auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: "worker-1",
+		Action:       "auth_check",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	})
+	require.NoError(t, err, "secondary-secret test token should be generated")
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/auth-check", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	handler.AuthCheck(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "AuthCheck should accept tokens signed by any configured preview RPC secret")
+	var resp models.SingleResponse[map[string]string]
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "AuthCheck should return a JSON response")
+	require.Equal(t, "worker-1", resp.Data["node_id"], "AuthCheck should identify the worker that accepted the token")
+}
+
+func TestInternalPreviewHandler_AuthCheckAuthorizationFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	handler := newInternalPreviewTestHandler(nil)
+
+	tests := []struct {
+		name       string
+		claims     auth.PreviewTokenClaims
+		rawToken   string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "invalid token",
+			rawToken:   "not-a-token",
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "UNAUTHORIZED",
+		},
+		{
+			name: "wrong worker",
+			claims: auth.PreviewTokenClaims{
+				OrgID:        orgID,
+				TargetNodeID: "worker-2",
+				Action:       "auth_check",
+				ExpiresAt:    time.Now().Add(time.Minute),
+			},
+			wantStatus: http.StatusForbidden,
+			wantCode:   "WRONG_PREVIEW_WORKER",
+		},
+		{
+			name: "wrong action",
+			claims: auth.PreviewTokenClaims{
+				OrgID:        orgID,
+				TargetNodeID: "worker-1",
+				Action:       "proxy",
+				ExpiresAt:    time.Now().Add(time.Minute),
+			},
+			wantStatus: http.StatusForbidden,
+			wantCode:   "PREVIEW_ACTION_MISMATCH",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/internal/preview/auth-check", nil)
+			if tt.rawToken != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.rawToken)
+			} else {
+				req.Header.Set("Authorization", internalPreviewAuthHeader(t, tt.claims))
+			}
+			rr := httptest.NewRecorder()
+
+			handler.AuthCheck(rr, req)
+
+			require.Equal(t, tt.wantStatus, rr.Code, "AuthCheck should reject invalid deploy compatibility probes")
+			var resp models.ErrorResponse
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "AuthCheck should return a JSON error")
+			require.Equal(t, tt.wantCode, resp.Error.Code, "AuthCheck should return the expected worker auth error code")
+			require.Equal(t, "1", rr.Header().Get(auth.PreviewWorkerErrorHeader), "AuthCheck failures should be marked for the public gateway")
 		})
 	}
 }
@@ -718,7 +813,7 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 		require.Equal(t, "/assets/app.js", req.URL.Path, "internal proxy should trim the worker proxy prefix before dialing the preview backend")
 		require.Empty(t, req.Header.Get("Authorization"), "internal proxy should strip authorization headers before dialing the preview backend")
 		require.Equal(t, "csrf_token=csrf-token; session_token=session-token", req.Header.Get("Cookie"), "internal proxy should preserve preview-app cookies for in-sandbox auth and CSRF")
-		_, _ = io.WriteString(serverConn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok")
+		_, _ = io.WriteString(serverConn, "HTTP/1.1 200 OK\r\n"+auth.PreviewWorkerErrorHeader+": 1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok")
 	}()
 
 	store := db.NewPreviewStore(mock)
@@ -747,6 +842,7 @@ func TestInternalPreviewHandler_ProxyHTTP_Success(t *testing.T) {
 
 	handler.Proxy(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, "Proxy should relay successful HTTP responses from the preview backend")
+	require.Empty(t, rr.Header().Get(auth.PreviewWorkerErrorHeader), "Proxy should strip backend-supplied worker error markers")
 	require.Equal(t, "ok", rr.Body.String(), "Proxy should relay the preview backend response body")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/api/gateway"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
@@ -657,8 +658,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		hmrWatcher, hmrErr = preview.NewHMRWatcher(preview.HMRWatcherConfig{
 			Inspector: previewInspector,
 			Store:     previewStore,
-			Logger:    logger,
-			BlobDir:   cfg.PreviewHMRBlobDir,
+			RuntimeStamper: preview.DBPreviewRuntimeRevisionStamper{
+				PreviewStore: previewStore,
+				SessionStore: sessionStore,
+			},
+			Logger:  logger,
+			BlobDir: cfg.PreviewHMRBlobDir,
 		})
 		if hmrErr != nil {
 			logger.Warn().Err(hmrErr).Msg("failed to initialize HMR watcher — auto-screenshot disabled")
@@ -684,6 +689,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		MaxPerUser:             cfg.PreviewMaxPerUser,
 		MaxPerOrg:              cfg.PreviewMaxPerOrg,
 		MaxPerWorker:           cfg.PreviewMaxPerWorker,
+		PreviewIdleTimeout:     cfg.PreviewIdleTimeout,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -693,8 +699,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
 		recycleWorker.Start()
 		cleanupWorker := preview.NewCleanupWorker(preview.CleanupWorkerConfig{
-			Manager: previewManager,
-			Logger:  logger,
+			Manager:     previewManager,
+			Logger:      logger,
+			IdleTimeout: cfg.PreviewIdleTimeout,
 		})
 		cleanupWorker.Start()
 	} else {
@@ -705,7 +712,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 		PreferredRegion:      cfg.NodeRegion,
 	})
-	workerClient := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+	previewRPCSecrets := cfg.PreviewRPCSecrets
+	if len(previewRPCSecrets) == 0 && strings.TrimSpace(cfg.SessionSecret) != "" {
+		previewRPCSecrets = []string{cfg.SessionSecret}
+	}
+	previewRPCKeyring, err := auth.NewPreviewTokenKeyring(previewRPCSecrets)
+	if err != nil {
+		logger.Warn().Err(err).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+		previewRPCKeyring = auth.PreviewTokenKeyring{}
+	}
+	workerClient := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
 	settingsHandler.SetStaticEgressWorkerChecker(workerSelector)
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
@@ -720,7 +736,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			Logger:                logger,
 			AppOrigin:             cfg.FrontendURL,
 			CookieSecret:          []byte(cfg.SessionSecret),
-			PreviewTokenSecret:    cfg.SessionSecret,
+			PreviewTokenKeyring:   previewRPCKeyring,
 			PreviewOriginTemplate: cfg.PreviewOriginTemplate,
 		})
 		addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
@@ -753,7 +769,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
-	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler := handlers.NewInternalPreviewHandlerWithKeyring(previewHandler, previewManager, cfg.NodeID, previewRPCKeyring, logger)
 	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	branchPreviewHandler.SetStopper(previewStopper)
@@ -797,6 +813,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Get("/internal/preview/auth-check", internalPreviewHandler.AuthCheck)
 		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)

@@ -35,6 +35,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 		previewInternalBaseURL string
 		wantPreviewCapable     bool
 		wantInternalBaseURL    string
+		wantAuthCheck          bool
 	}{
 		{
 			name:                   "preview-capable worker advertises both fields",
@@ -42,6 +43,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 			previewInternalBaseURL: "http://worker-1:8080",
 			wantPreviewCapable:     true,
 			wantInternalBaseURL:    "http://worker-1:8080",
+			wantAuthCheck:          true,
 		},
 		{
 			name:                   "non-preview-capable node omits preview_capable",
@@ -86,6 +88,15 @@ func TestBuildBaseMetadata(t *testing.T) {
 			} else if hasURL {
 				t.Errorf("expected preview_internal_base_url to be omitted, got %v", gotURL)
 			}
+
+			gotAuthCheck, hasAuthCheck := metadata["preview_rpc_auth_check"]
+			if tt.wantAuthCheck {
+				if !hasAuthCheck || gotAuthCheck != true {
+					t.Errorf("expected preview_rpc_auth_check=true, got %v (present=%v)", gotAuthCheck, hasAuthCheck)
+				}
+			} else if hasAuthCheck {
+				t.Errorf("expected preview_rpc_auth_check to be omitted, got %v", gotAuthCheck)
+			}
 		})
 	}
 }
@@ -107,6 +118,9 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	if got, ok := metadata["preview_internal_base_url"]; !ok || got != "http://worker-1:8080" {
 		t.Errorf("preview_internal_base_url must persist across worker startup, got %v (present=%v)", got, ok)
 	}
+	if got, ok := metadata["preview_rpc_auth_check"]; !ok || got != true {
+		t.Errorf("preview_rpc_auth_check must persist across worker startup, got %v (present=%v)", got, ok)
+	}
 	if _, ok := metadata["active_job_count"]; !ok {
 		t.Errorf("expected active_job_count to be present in worker metadata")
 	}
@@ -125,6 +139,9 @@ func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	if _, ok := metadata["preview_capable"]; ok {
 		t.Errorf("preview_capable should be omitted when worker is not preview-capable")
 	}
+	if _, ok := metadata["preview_rpc_auth_check"]; ok {
+		t.Errorf("preview_rpc_auth_check should be omitted when worker is not preview-capable")
+	}
 	if _, ok := metadata["preview_internal_base_url"]; ok {
 		t.Errorf("preview_internal_base_url should be omitted when not configured")
 	}
@@ -138,11 +155,13 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 
 	metadata := provider()
 	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
+	require.NotContains(t, metadata, "preview_rpc_auth_check", "preview auth-check capability should be hidden until the HTTP listener is bound")
 	require.Equal(t, "http://worker-1:8080", metadata["preview_internal_base_url"], "preview internal URL should remain available in metadata")
 
 	ready = true
 	metadata = provider()
 	require.Equal(t, true, metadata["preview_capable"], "preview_capable should be advertised once routing is ready")
+	require.Equal(t, true, metadata["preview_rpc_auth_check"], "preview auth-check capability should be advertised once routing is ready")
 }
 
 func TestBuildStaticEgressMetadataRequiresVerifiedCapability(t *testing.T) {

@@ -137,8 +137,8 @@ export function ContextExpander({
       ? `Reveal ${hiddenLineCount} hidden context lines`
       : "Reveal context below"
     : "Context expansion unavailable (sandbox not running)";
-  const gutterWidthClass = viewMode === "split" ? "w-[66px]" : "w-[100px]";
-  const prefixSpacerClass = viewMode === "split" ? "w-0" : "w-[20px]";
+  const gutterWidthClass = viewMode === "split" ? "w-[58px]" : "w-[84px]";
+  const prefixSpacerClass = viewMode === "split" ? "w-0" : "w-[16px]";
 
   function renderControl({
     direction,

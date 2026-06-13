@@ -201,7 +201,8 @@ func (h *PullRequestHandler) startRepair(w http.ResponseWriter, r *http.Request,
 	}
 
 	var body struct {
-		ThreadID string `json:"thread_id"`
+		ThreadID    string `json:"thread_id"`
+		PushChanges *bool  `json:"push_changes"`
 	}
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
@@ -219,13 +220,22 @@ func (h *PullRequestHandler) startRepair(w http.ResponseWriter, r *http.Request,
 		threadID = &parsedThreadID
 	}
 
+	pushChanges := true
+	if body.PushChanges != nil {
+		pushChanges = *body.PushChanges
+	}
 	resp, err := h.service.StartPullRequestRepair(r.Context(), orgID, pullRequestID, user.ID, ghservice.StartPullRequestRepairOptions{
-		Action:   action,
-		ThreadID: threadID,
+		Action:      action,
+		ThreadID:    threadID,
+		PushChanges: &pushChanges,
 	})
 	if err != nil {
 		if errors.Is(err, ghservice.ErrRepairThreadNotFound) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_THREAD_ID", "requested thread does not belong to this pull request's session")
+			return
+		}
+		if errors.Is(err, ghservice.ErrRepairAlreadyInProgress) {
+			writeError(w, r, http.StatusConflict, "REPAIR_ALREADY_IN_PROGRESS", "a repair session is already in progress for this pull request")
 			return
 		}
 		writeError(w, r, http.StatusInternalServerError, "PULL_REQUEST_REPAIR_FAILED", "failed to start pull request repair", err)
