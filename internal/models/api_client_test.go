@@ -48,14 +48,18 @@ func TestAPITokenScopeValidate(t *testing.T) {
 		{name: "sessions write", scope: APITokenScopeSessionsWrite},
 		{name: "sessions cancel", scope: APITokenScopeSessionsCancel},
 		{name: "sessions publish", scope: APITokenScopeSessionsPublish},
+		{name: "sessions all", scope: APITokenScopeSessionsAll},
 		{name: "automations read", scope: APITokenScopeAutomationsRead},
 		{name: "automations create", scope: APITokenScopeAutomationsCreate},
 		{name: "automations write", scope: APITokenScopeAutomationsWrite},
 		{name: "automations run", scope: APITokenScopeAutomationsRun},
+		{name: "automations all", scope: APITokenScopeAutomationsAll},
 		{name: "previews read", scope: APITokenScopePreviewsRead},
 		{name: "previews create", scope: APITokenScopePreviewsCreate},
 		{name: "previews stop", scope: APITokenScopePreviewsStop},
+		{name: "previews all", scope: APITokenScopePreviewsAll},
 		{name: "wildcard rejected", scope: "sessions:*", expectErr: true},
+		{name: "global all rejected", scope: "api:all", expectErr: true},
 		{name: "empty rejected", scope: "", expectErr: true},
 	}
 
@@ -83,6 +87,7 @@ func TestValidateAPITokenScopes(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "valid scopes", scopes: []string{"sessions:create", "sessions:read"}},
+		{name: "valid family scope", scopes: []string{"sessions:all"}},
 		{name: "empty list", scopes: []string{}, expectErr: true},
 		{name: "invalid scope", scopes: []string{"sessions:create", "sessions:*"}, expectErr: true},
 	}

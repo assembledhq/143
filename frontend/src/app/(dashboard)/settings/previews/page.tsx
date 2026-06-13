@@ -1513,9 +1513,12 @@ function PreviewAPISection() {
             Preview API tokens
           </h2>
           <p className="text-xs text-muted-foreground">
-            Legacy preview-only tokens. Prefer external API clients for new
-            session, automation, and preview integrations.
+            Legacy preview-only tokens. Use API keys for new session,
+            automation, and preview integrations.
           </p>
+          <Button asChild variant="link" className="h-auto justify-start p-0 text-xs">
+            <Link href="/settings/api-keys">Open API keys</Link>
+          </Button>
         </div>
         <Button
           type="button"
@@ -1676,7 +1679,8 @@ function TokenInventory({
         <EmptyState
           icon={KeyRound}
           title="No preview API tokens"
-          description="Use external API clients for new integrations; create preview-only tokens for older preview workflows."
+          description="Use API keys for new integrations; create preview-only tokens only for older preview workflows."
+          action={{ label: "Open API keys", href: "/settings/api-keys" }}
           variant="inline"
         />
       </div>

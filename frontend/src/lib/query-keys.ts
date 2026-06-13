@@ -110,4 +110,8 @@ export const queryKeys = {
   previews: {
     apiTokens: ["preview-api-tokens"] as const,
   },
+  apiKeys: {
+    clients: ["api-keys", "clients"] as const,
+    tokens: (clientId: string) => ["api-keys", "clients", clientId, "tokens"] as const,
+  },
 } as const;
