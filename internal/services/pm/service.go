@@ -125,6 +125,10 @@ type sessionLogStore interface {
 	Create(ctx context.Context, log *models.SessionLog) error
 }
 
+type sessionMessageStore interface {
+	Create(ctx context.Context, msg *models.SessionMessage) error
+}
+
 // SkillsBuilder generates integration skills docs for agents running in sandboxes.
 // This is satisfied by the Orchestrator which already builds skills docs from
 // org integration credentials.
@@ -137,6 +141,7 @@ type Service struct {
 	issues            issueStore
 	sessions          sessionStore
 	sessionLogs       sessionLogStore // nil-safe: if nil, PM session logs are not persisted
+	sessionMessages   sessionMessageStore
 	pullRequests      prStore
 	orgs              orgStore
 	repos             repoStore
@@ -451,6 +456,13 @@ func (s *Service) SetSlackStores(integrations integrationStore, credentials cred
 // SetSessionLogStore injects the session log store for PM agent log persistence.
 func (s *Service) SetSessionLogStore(store sessionLogStore) {
 	s.sessionLogs = store
+}
+
+// SetSessionMessageStore injects the session message store for PM-delegated
+// coding sessions. Nil-safe: if nil, delegated sessions fall back to metadata
+// fields only.
+func (s *Service) SetSessionMessageStore(store sessionMessageStore) {
+	s.sessionMessages = store
 }
 
 // SetInternalAPI configures the internal API URL and signing secret for sandbox-to-server
