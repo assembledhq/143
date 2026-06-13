@@ -651,6 +651,8 @@ func TestDeployRunsPreviewRPCAuthCheckBeforeCutoverAndWorkerDrain(t *testing.T) 
 
 	appProbeIndex := strings.Index(rollingBody, `preview_rpc_auth_preflight "$new_container"`)
 	require.NotEqual(t, -1, appProbeIndex, "app rolling deploy should run the preview RPC auth probe from the new api container")
+	previewAuthPreflightBody := extractShellFunction(t, deployText, "preview_rpc_auth_preflight", "rolling_deploy_service")
+	require.Contains(t, previewAuthPreflightBody, `docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json`, "app preview RPC auth probe should run through docker-entrypoint.sh so SOPS-decrypted production secrets are available to worker-deployctl")
 	appDrainIndex := strings.Index(rollingBody, `echo "Draining $old_count old $service container(s)`)
 	require.NotEqual(t, -1, appDrainIndex, "app rolling deploy should still drain old containers")
 	require.Less(t, appProbeIndex, appDrainIndex, "app rolling deploy should run preview RPC auth check before draining old api containers")
