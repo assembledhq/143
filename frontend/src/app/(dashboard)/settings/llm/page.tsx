@@ -243,23 +243,22 @@ export default function LLMPage() {
       <div className="space-y-6">
         <PageHeader
           title="LLM"
-          description="Configure the app-level LLMs used for extra features like PR descriptions, session titles, validation, and project generation."
-          subtitle="These models are separate from the coding agents configured on the Agent page."
+          description="Configure app-level LLMs for PR descriptions, session titles, validation, and project generation. These are separate from coding agents on the Agent page."
         />
 
         {!hasPlatformLLM && (
-          <Card className="border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/20">
+          <Card className="border-warning/30 bg-warning/10">
             <CardContent>
               <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-                <p className="text-xs text-amber-700 dark:text-amber-300">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                <p className="text-xs text-warning">
                   Platform LLM not configured. Background features (session titles, PR descriptions,
                   project generation, validation, prioritization) will be unavailable. See the{" "}
                   <Link
                     href="https://github.com/assembledhq/143/blob/main/docs/self-hosting/platform-llm.md"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
+                    className="underline underline-offset-2 hover:text-warning/80"
                   >
                     self-hosting guide
                   </Link>{" "}

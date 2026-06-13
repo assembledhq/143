@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
-import type { CodingAuth } from "@/lib/types";
+import type { CodingCredentialSummary } from "@/lib/types";
 import AgentPage, { reorderRows } from "./page";
 
 vi.mock("@/hooks/use-auth", () => ({
@@ -13,8 +13,12 @@ vi.mock("@/hooks/use-auth", () => ({
 
 function installHandlers() {
   server.use(
-    http.get("/api/v1/settings/coding-auths", () =>
-      HttpResponse.json({
+    http.get("/api/v1/coding-credentials", ({ request }) => {
+      const scope = new URL(request.url).searchParams.get("scope");
+      if (scope !== "org") {
+        return HttpResponse.json({ data: [], meta: { scope } });
+      }
+      return HttpResponse.json({
         data: [
           {
             id: "auth-1",
@@ -23,8 +27,8 @@ function installHandlers() {
             agent: "codex",
             auth_type: "subscription",
             label: "Team seat A",
-            scope: "organization",
-            provider: "openai_chatgpt",
+            scope: "org",
+            provider: "openai_subscription",
             status: "healthy",
             is_default: true,
             usage_note: "ChatGPT Plus",
@@ -33,8 +37,8 @@ function installHandlers() {
           },
         ],
         meta: {},
-      }),
-    ),
+      });
+    }),
     http.get("/api/v1/settings", () =>
       HttpResponse.json({
         data: {
@@ -55,7 +59,7 @@ function installHandlers() {
 }
 
 describe("Agent settings page", () => {
-  it("renders the stack helper text and restored execution settings", async () => {
+  it("renders the stack helper text without shared runtime controls", async () => {
     installHandlers();
 
     renderWithProviders(<AgentPage />);
@@ -63,8 +67,10 @@ describe("Agent settings page", () => {
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
     expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
-    expect(screen.getByLabelText("Max concurrent sessions")).toHaveValue(5);
-    expect(screen.getByLabelText("Session max time (minutes)")).toHaveValue(25);
+    expect(screen.getByRole("link", { name: "Runtime settings" })).toHaveAttribute("href", "/settings/runtime");
+    expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
   });
 
   it("keeps the details sheet closed after dismissing it", async () => {
@@ -87,8 +93,12 @@ describe("Agent settings page", () => {
     const user = userEvent.setup();
     installHandlers();
     server.use(
-      http.get("/api/v1/settings/coding-auths", () =>
-        HttpResponse.json({
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope !== "org") {
+          return HttpResponse.json({ data: [], meta: { scope } });
+        }
+        return HttpResponse.json({
           data: [
             {
               id: "auth-1",
@@ -97,8 +107,8 @@ describe("Agent settings page", () => {
               agent: "codex",
               auth_type: "subscription",
               label: "Team seat A",
-              scope: "organization",
-              provider: "openai_chatgpt",
+              scope: "org",
+              provider: "openai_subscription",
               status: "needs_reauth",
               is_default: true,
               usage_note: "chatgpt plus",
@@ -107,8 +117,8 @@ describe("Agent settings page", () => {
             },
           ],
           meta: {},
-        }),
-      ),
+        });
+      }),
     );
 
     renderWithProviders(<AgentPage />);
@@ -231,23 +241,22 @@ describe("Agent settings page", () => {
 
     installHandlers();
     server.use(
-      http.post("/api/v1/settings/coding-auths", async ({ request }) => {
+      // The unified create endpoint returns the new row unwrapped.
+      http.post("/api/v1/coding-credentials", async ({ request }) => {
         capturedBody = await request.json() as Record<string, unknown>;
         return HttpResponse.json({
-          data: {
-            id: "auth-2",
-            org_id: "org-1",
-            priority: 2,
-            agent: "amp",
-            auth_type: "api_key",
-            label: "Amp API key",
-            scope: "organization",
-            provider: "amp",
-            status: "healthy",
-            is_default: false,
-            created_at: "2026-04-22T10:00:00Z",
-            updated_at: "2026-04-22T10:00:00Z",
-          },
+          id: "auth-2",
+          org_id: "org-1",
+          priority: 2,
+          agent: "amp",
+          auth_type: "api_key",
+          label: "Amp API key",
+          scope: "org",
+          provider: "amp",
+          status: "healthy",
+          is_default: false,
+          created_at: "2026-04-22T10:00:00Z",
+          updated_at: "2026-04-22T10:00:00Z",
         });
       }),
       http.patch("/api/v1/settings", () => {
@@ -283,6 +292,7 @@ describe("Agent settings page", () => {
       expect(capturedBody).not.toBeNull();
     });
     expect(capturedBody).toMatchObject({
+      scope: "org",
       agent: "amp",
       auth_type: "api_key",
       api_key: "amp_123",
@@ -373,7 +383,7 @@ describe("Agent settings page", () => {
   it("shows a shared empty state when the org fallback stack has no auths", async () => {
     installHandlers();
     server.use(
-      http.get("/api/v1/settings/coding-auths", () =>
+      http.get("/api/v1/coding-credentials", () =>
         HttpResponse.json({
           data: [],
           meta: {},
@@ -389,24 +399,24 @@ describe("Agent settings page", () => {
 });
 
 describe("reorderRows", () => {
-  function makeRows(ids: string[]): CodingAuth[] {
+  function makeRows(ids: string[]): CodingCredentialSummary[] {
     return ids.map((id, index) => ({
       id,
       org_id: "org-1",
       priority: index + 1,
-      agent: "codex",
-      auth_type: "subscription",
+      agent: "codex" as const,
+      auth_type: "subscription" as const,
       label: id,
-      scope: "organization",
-      provider: "openai_chatgpt",
-      status: "healthy",
+      scope: "org" as const,
+      provider: "openai_subscription",
+      status: "healthy" as const,
       is_default: index === 0,
       created_at: "2026-04-22T10:00:00Z",
       updated_at: "2026-04-22T10:00:00Z",
     }));
   }
 
-  function ids(rows: CodingAuth[]) {
+  function ids(rows: CodingCredentialSummary[]) {
     return rows.map((row) => row.id);
   }
 

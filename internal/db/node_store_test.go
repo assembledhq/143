@@ -20,6 +20,13 @@ var nodeStoreTestCols = []string{
 	"drain_requested_at", "drain_budget_expires_at", "drain_requested_by", "drain_reason",
 }
 
+type timestamptzArg struct{}
+
+func (timestamptzArg) Match(v interface{}) bool {
+	_, ok := v.(pgtype.Timestamptz)
+	return ok
+}
+
 func TestNodeStore_GetByID(t *testing.T) {
 	t.Parallel()
 
@@ -162,6 +169,47 @@ func TestNodeStore_ListActive(t *testing.T) {
 	})
 }
 
+func TestNodeStore_ListPreviewRPCProbeNodesRequiresAuthCheckCapability(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	metadata, err := json.Marshal(map[string]any{
+		"preview_capable":           true,
+		"preview_rpc_auth_check":    true,
+		"preview_internal_base_url": "http://worker-1:8080",
+	})
+	require.NoError(t, err, "metadata should marshal")
+
+	mock.ExpectQuery(`SELECT .+ FROM nodes[\s\S]+metadata->>'preview_rpc_auth_check' = 'true'[\s\S]+ORDER BY id ASC`).
+		WillReturnRows(
+			pgxmock.NewRows(nodeStoreTestCols).
+				AddRow("worker-1", "worker", "worker-1.internal", "active", "none", metadata, now, now, nil, nil, "", ""),
+		)
+
+	store := NewNodeStore(mock)
+	nodes, err := store.ListPreviewRPCProbeNodes(context.Background())
+	require.NoError(t, err, "ListPreviewRPCProbeNodes should return probe-capable nodes")
+	require.Equal(t, []models.Node{{
+		ID:                   "worker-1",
+		Mode:                 models.NodeModeWorker,
+		Host:                 "worker-1.internal",
+		Status:               models.NodeStatusActive,
+		DrainIntent:          models.DrainIntentNone,
+		Metadata:             metadata,
+		StartedAt:            now,
+		LastHeartbeatAt:      now,
+		DrainRequestedBy:     "",
+		DrainReason:          "",
+		DrainRequestedAt:     nil,
+		DrainBudgetExpiresAt: nil,
+	}}, nodes, "ListPreviewRPCProbeNodes should preserve matching node rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestNodeStore_WorkerHeartbeatHealth(t *testing.T) {
 	t.Parallel()
 
@@ -276,4 +324,27 @@ func TestNodeStore_WorkerDeployImpactListsRuntimeIdentities(t *testing.T) {
 		},
 	}, impact.Items, "WorkerDeployImpact should preserve affected runtime identities")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestNodeStore_RetainActiveExecutorImagesCastsExpiry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	mock.ExpectExec("INSERT INTO worker_image_retention[\\s\\S]+CAST\\(@expires_at AS timestamptz\\)[\\s\\S]+FROM session_executors").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), timestamptzArg{}, pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 2))
+
+	store := NewNodeStore(mock)
+	count, err := store.RetainActiveExecutorImages(context.Background(), RetainWorkerImagesParams{
+		NodeID:    "worker-1",
+		DeployID:  "deploy-1",
+		Reason:    "test retention",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	require.NoError(t, err, "RetainActiveExecutorImages should retain active image rows")
+	require.Equal(t, int64(2), count, "RetainActiveExecutorImages should return inserted row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "retention insert should cast expires_at for Postgres type inference")
 }

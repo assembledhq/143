@@ -1,10 +1,9 @@
 "use client";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/page-header";
@@ -13,72 +12,14 @@ import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
-import { useAutosave } from "@/hooks/useAutosave";
-import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import {
-  applyOrgSettingsPatch,
-  coalesceSettingsPatch,
-  type SettingsPatch,
-} from "@/lib/settings-autosave";
-import type { MembershipsResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import { useOrgSettingsAutosave } from "@/hooks/use-org-settings-autosave";
+import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
   { value: "app_only", label: "App only", description: "Always create PRs as the 143 GitHub App" },
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
-
-const DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER = 4;
-const MIN_PREVIEW_MAX_PREVIEWS_PER_USER = 1;
-const MAX_PREVIEW_MAX_PREVIEWS_PER_USER = 20;
-
-const settingsTimestampFormatter = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "long",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
-
-function formatUpdatedAt(updatedAt: string | undefined): string | undefined {
-  if (!updatedAt) return undefined;
-  const date = new Date(updatedAt);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return `${settingsTimestampFormatter.format(date)} UTC`;
-}
-
-function useOrgSettingsAutosave() {
-  const queryClient = useQueryClient();
-  return useAutosave<SettingsPatch>({
-    queryKey: queryKeys.settings.all,
-    mutationFn: async (payload) => {
-      const response = await api.settings.update(payload);
-      queryClient.setQueryData(queryKeys.settings.all, response);
-      if (payload.name !== undefined) {
-        queryClient.setQueryData<SingleResponse<MembershipsResponse> | undefined>(
-          queryKeys.auth.memberships,
-          (previous) => {
-            if (!previous?.data) return previous;
-            return {
-              ...previous,
-              data: {
-                ...previous.data,
-                memberships: previous.data.memberships.map((membership) =>
-                  membership.org_id === response.data.id
-                    ? { ...membership, org_name: response.data.name }
-                    : membership,
-                ),
-              },
-            };
-          },
-        );
-      }
-      void queryClient.invalidateQueries({ queryKey: ["audit-logs", "latest"] });
-      return response;
-    },
-    applyOptimistic: applyOrgSettingsPatch,
-    coalesce: coalesceSettingsPatch,
-    invalidateOnSettled: false,
-  });
-}
 
 function PRAuthorshipSettings() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -184,57 +125,6 @@ function PRAuthorshipSettings() {
   );
 }
 
-function PreviewCapacitySettings() {
-  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: queryKeys.settings.all,
-    queryFn: () => api.settings.get(),
-  });
-
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-  const currentMaxPreviewsPerUser =
-    settings.preview_max_previews_per_user ?? DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
-  const autosave = useOrgSettingsAutosave();
-  const maxPreviewsPerUserField = useAutosaveNumericField({
-    serverValue: currentMaxPreviewsPerUser,
-    autosave,
-    toPatch: (value) => ({ settings: { preview_max_previews_per_user: value } }),
-    clamp: (value) =>
-      Math.min(
-        MAX_PREVIEW_MAX_PREVIEWS_PER_USER,
-        Math.max(MIN_PREVIEW_MAX_PREVIEWS_PER_USER, value),
-      ),
-  });
-
-  return (
-    <section className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xs font-medium text-foreground">Preview capacity</h2>
-        <AutosaveIndicator status={autosave.status} />
-      </div>
-      <Card>
-        <CardContent>
-          <div className="max-w-[560px] space-y-2">
-            <Label htmlFor="preview-max-previews-per-user">Active previews per user</Label>
-            <Input
-              id="preview-max-previews-per-user"
-              type="number"
-              inputMode="numeric"
-              min={MIN_PREVIEW_MAX_PREVIEWS_PER_USER}
-              max={MAX_PREVIEW_MAX_PREVIEWS_PER_USER}
-              value={maxPreviewsPerUserField.value}
-              onChange={maxPreviewsPerUserField.onChange}
-              onBlur={maxPreviewsPerUserField.onBlur}
-            />
-            <p className="text-xs text-muted-foreground">
-              Limits how many previews one user can keep running at once. Higher values consume more worker capacity.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
-
 export default function SettingsPage() {
   const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
@@ -249,14 +139,6 @@ export default function SettingsPage() {
         <PageHeader
           title="General settings"
           description="Manage your organization."
-          subtitle={(() => {
-            const formattedUpdatedAt = formatUpdatedAt(settings?.data?.updated_at);
-            return formattedUpdatedAt ? `Updated at ${formattedUpdatedAt}` : undefined;
-          })()}
-        />
-        <AuditLogTrigger
-          filters={{ resource_type: "settings" }}
-          title="Settings activity"
         />
 
         <section className="space-y-3">
@@ -280,8 +162,13 @@ export default function SettingsPage() {
           </Card>
         </section>
 
-        {user?.role === "admin" && <PreviewCapacitySettings />}
         {user?.role === "admin" && <PRAuthorshipSettings />}
+
+        <AuditLogTrigger
+          filters={{ resource_type: "settings" }}
+          title="Settings activity"
+          variant="footer"
+        />
       </div>
     </PageContainer>
   );

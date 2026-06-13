@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent } from "@testing-library/react";
+import { useEffect } from "react";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
-import { AuthenticatedLayout } from "./authenticated-layout";
+import { AuthenticatedLayout, sessionDetailRouteId } from "./authenticated-layout";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/mocks/server";
 
@@ -69,6 +70,31 @@ describe("AuthenticatedLayout", () => {
     );
 
     expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/autopilot")).toBeDefined();
+  });
+
+  it("does not fetch preview counts for the primary navigation", async () => {
+    let previewListRequests = 0;
+    server.use(
+      http.get("/api/v1/previews", () => {
+        previewListRequests += 1;
+        return HttpResponse.json({
+          data: [],
+          meta: { counts: { running: 3 } },
+        });
+      })
+    );
+
+    renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Test Org")).toBeInTheDocument();
+    });
+    expect(previewListRequests).toBe(0);
+    expect(screen.getAllByRole("link", { name: "Previews" }).find((link) => link.getAttribute("href") === "/previews")).toBeDefined();
   });
 
   it("uses a slightly narrower default sidebar width", () => {
@@ -241,6 +267,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
     expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
     expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/settings/autopilot")).toBeDefined();
+    expect(screen.getByRole("link", { name: "Runtime" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
@@ -288,6 +315,7 @@ describe("AuthenticatedLayout", () => {
     // Admin-only entries are hidden.
     expect(screen.queryByRole("link", { name: "General" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "LLM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Runtime" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Usage" })).not.toBeInTheDocument();
   });
@@ -542,6 +570,86 @@ describe("AuthenticatedLayout", () => {
       // Drawer is still in the DOM after a deliberate wait.
       await new Promise((r) => setTimeout(r, 50));
       expect(screen.queryByRole("dialog")).toBeInTheDocument();
+    });
+  });
+
+  describe("sessionDetailRouteId", () => {
+    const sessionId = "93cbcc8c-c12e-4bdf-8622-5865502c8977";
+
+    it("extracts a uuid session id from a session detail path", () => {
+      expect(sessionDetailRouteId(`/sessions/${sessionId}`)).toBe(sessionId);
+    });
+
+    it("returns null for everything that is not /sessions/<uuid>", () => {
+      expect(sessionDetailRouteId("/autopilot")).toBeNull();
+      expect(sessionDetailRouteId("/sessions")).toBeNull();
+      expect(sessionDetailRouteId("/sessions/new")).toBeNull();
+      expect(sessionDetailRouteId("/sessions/not-a-uuid")).toBeNull();
+      expect(sessionDetailRouteId(`/sessions/${sessionId}/extra`)).toBeNull();
+    });
+  });
+
+  describe("auth-gate route warming", () => {
+    const sessionId = "93cbcc8c-c12e-4bdf-8622-5865502c8977";
+    const loadingAuth = {
+      user: null,
+      isLoading: true,
+      isFetching: true,
+      isAuthenticated: false,
+      isUnauthorized: false,
+      isTransientError: false,
+      refetchUser: vi.fn(),
+      logout: logoutMock,
+    };
+
+    function trackSessionDetailRequests(): string[] {
+      const requests: string[] = [];
+      server.use(
+        http.get("/api/v1/sessions/:id", ({ params }) => {
+          requests.push(String(params.id));
+          return HttpResponse.json({ data: { id: params.id, threads: [] } });
+        })
+      );
+      return requests;
+    }
+
+    it("does not mount route children while auth is still loading", async () => {
+      mockPathname = "/previews/preview-1";
+      useAuthMock.mockReturnValue(loadingAuth);
+      const mounted = vi.fn();
+
+      function RouteWithEffect() {
+        useEffect(() => {
+          mounted();
+        }, []);
+        return <div>route child</div>;
+      }
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <RouteWithEffect />
+        </AuthenticatedLayout>
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mounted).not.toHaveBeenCalled();
+      expect(screen.queryByText("route child")).not.toBeInTheDocument();
+    });
+
+    it("prefetches session detail while /auth/me is still in flight", async () => {
+      mockPathname = `/sessions/${sessionId}`;
+      useAuthMock.mockReturnValue(loadingAuth);
+      const requests = trackSessionDetailRequests();
+
+      renderWithProviders(
+        <AuthenticatedLayout>
+          <div>content</div>
+        </AuthenticatedLayout>
+      );
+
+      await waitFor(() => {
+        expect(requests).toEqual([sessionId]);
+      });
     });
   });
 });

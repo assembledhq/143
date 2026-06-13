@@ -16,14 +16,29 @@ func LogContext(logger zerolog.Logger) func(http.Handler) http.Handler {
 			user := UserFromContext(r.Context())
 			orgID := OrgIDFromContext(r.Context())
 			reqID := chiMiddleware.GetReqID(r.Context())
+			apiClient := APIClientFromContext(r.Context())
+			apiToken := APITokenFromContext(r.Context())
+			apiVersion := r.Header.Get(APIVersionHeader)
 
-			l := logger.With().
+			ctx := WithAPIVersion(r.Context(), apiVersion)
+			logCtx := logger.With().
 				Str("org_id", orgID.String()).
-				Str("user_id", user.ID.String()).
-				Str("request_id", reqID).
-				Logger()
+				Str("request_id", reqID)
+			if user != nil {
+				logCtx = logCtx.Str("user_id", user.ID.String())
+			}
+			if apiClient != nil {
+				logCtx = logCtx.Str("api_client_id", apiClient.ID.String())
+			}
+			if apiToken != nil {
+				logCtx = logCtx.Str("api_token_id", apiToken.ID.String())
+			}
+			if apiVersion != "" {
+				logCtx = logCtx.Str("api_version", apiVersion)
+			}
+			l := logCtx.Logger()
+			ctx = l.WithContext(ctx)
 
-			ctx := l.WithContext(r.Context())
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

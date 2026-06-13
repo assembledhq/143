@@ -14,40 +14,43 @@ import (
 
 // PreviewInstance is the core preview lifecycle record.
 type PreviewInstance struct {
-	ID                               uuid.UUID                `db:"id" json:"id"`
-	SessionID                        uuid.UUID                `db:"session_id" json:"session_id"`
-	PreviewTargetID                  *uuid.UUID               `db:"preview_target_id" json:"preview_target_id,omitempty"`
-	OrgID                            uuid.UUID                `db:"org_id" json:"org_id"`
-	UserID                           uuid.UUID                `db:"user_id" json:"user_id"`
-	ProfileName                      string                   `db:"profile_name" json:"profile_name"`
-	Name                             string                   `db:"name" json:"name"`
-	Status                           PreviewStatus            `db:"status" json:"status"`
-	Provider                         string                   `db:"provider" json:"provider"`
-	WorkerNodeID                     string                   `db:"worker_node_id" json:"worker_node_id"`
-	PreviewHandle                    string                   `db:"preview_handle" json:"preview_handle"`
-	PrimaryService                   string                   `db:"primary_service" json:"primary_service"`
-	Port                             int                      `db:"port" json:"port"`
-	ConfigDigest                     string                   `db:"config_digest" json:"config_digest"`
-	BaseCommitSHA                    string                   `db:"base_commit_sha" json:"base_commit_sha"`
-	LastAccessedAt                   time.Time                `db:"last_accessed_at" json:"last_accessed_at"`
-	ExpiresAt                        time.Time                `db:"expires_at" json:"expires_at"`
-	StoppedAt                        *time.Time               `db:"stopped_at" json:"stopped_at,omitempty"`
-	LastPath                         string                   `db:"last_path" json:"last_path"`
-	MemoryLimitMB                    int                      `db:"memory_limit_mb" json:"memory_limit_mb"`
-	CPULimitMillis                   int                      `db:"cpu_limit_millis" json:"cpu_limit_millis"`
-	DiskLimitMB                      int                      `db:"disk_limit_mb" json:"disk_limit_mb"`
-	RecycleConfig                    json.RawMessage          `db:"recycle_config" json:"-"`
-	RecycleSandbox                   json.RawMessage          `db:"recycle_sandbox" json:"-"`
-	CurrentPhase                     string                   `db:"current_phase" json:"current_phase,omitempty"`
-	RequestID                        *string                  `db:"request_id" json:"request_id,omitempty"`
-	Error                            string                   `db:"error" json:"error,omitempty"`
-	CreatedAt                        time.Time                `db:"created_at" json:"created_at"`
-	UpdatedAt                        time.Time                `db:"updated_at" json:"updated_at"`
-	RecycledAt                       time.Time                `db:"recycled_at" json:"recycled_at"`
-	RecycleScheduledAt               *time.Time               `db:"recycle_scheduled_at" json:"recycle_scheduled_at,omitempty"`
-	SourceWorkspaceRevision          *int64                   `db:"source_workspace_revision" json:"source_workspace_revision,omitempty"`
-	SourceWorkspaceRevisionUpdatedAt *time.Time               `db:"source_workspace_revision_updated_at" json:"source_workspace_revision_updated_at,omitempty"`
-	UnavailableReason                PreviewUnavailableReason `db:"unavailable_reason" json:"unavailable_reason,omitempty"`
+	ID                                uuid.UUID                    `db:"id" json:"id"`
+	SessionID                         uuid.UUID                    `db:"session_id" json:"session_id"`
+	PreviewTargetID                   *uuid.UUID                   `db:"preview_target_id" json:"preview_target_id,omitempty"`
+	OrgID                             uuid.UUID                    `db:"org_id" json:"org_id"`
+	UserID                            uuid.UUID                    `db:"user_id" json:"user_id"`
+	ProfileName                       string                       `db:"profile_name" json:"profile_name"`
+	Name                              string                       `db:"name" json:"name"`
+	Status                            PreviewStatus                `db:"status" json:"status"`
+	Provider                          string                       `db:"provider" json:"provider"`
+	WorkerNodeID                      string                       `db:"worker_node_id" json:"worker_node_id"`
+	PreviewHandle                     string                       `db:"preview_handle" json:"preview_handle"`
+	PrimaryService                    string                       `db:"primary_service" json:"primary_service"`
+	Port                              int                          `db:"port" json:"port"`
+	ConfigDigest                      string                       `db:"config_digest" json:"config_digest"`
+	BaseCommitSHA                     string                       `db:"base_commit_sha" json:"base_commit_sha"`
+	LastAccessedAt                    time.Time                    `db:"last_accessed_at" json:"last_accessed_at"`
+	ExpiresAt                         time.Time                    `db:"expires_at" json:"expires_at"`
+	StoppedAt                         *time.Time                   `db:"stopped_at" json:"stopped_at,omitempty"`
+	LastPath                          string                       `db:"last_path" json:"last_path"`
+	MemoryLimitMB                     int                          `db:"memory_limit_mb" json:"memory_limit_mb"`
+	CPULimitMillis                    int                          `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	DiskLimitMB                       int                          `db:"disk_limit_mb" json:"disk_limit_mb"`
+	RecycleConfig                     json.RawMessage              `db:"recycle_config" json:"-"`
+	RecycleSandbox                    json.RawMessage              `db:"recycle_sandbox" json:"-"`
+	CurrentPhase                      string                       `db:"current_phase" json:"current_phase,omitempty"`
+	RequestID                         *string                      `db:"request_id" json:"request_id,omitempty"`
+	Error                             string                       `db:"error" json:"error,omitempty"`
+	CreatedAt                         time.Time                    `db:"created_at" json:"created_at"`
+	UpdatedAt                         time.Time                    `db:"updated_at" json:"updated_at"`
+	RecycledAt                        time.Time                    `db:"recycled_at" json:"recycled_at"`
+	RecycleScheduledAt                *time.Time                   `db:"recycle_scheduled_at" json:"recycle_scheduled_at,omitempty"`
+	SourceWorkspaceRevision           *int64                       `db:"source_workspace_revision" json:"source_workspace_revision,omitempty"`
+	SourceWorkspaceRevisionUpdatedAt  *time.Time                   `db:"source_workspace_revision_updated_at" json:"source_workspace_revision_updated_at,omitempty"`
+	RuntimeWorkspaceRevision          *int64                       `db:"runtime_workspace_revision" json:"runtime_workspace_revision,omitempty"`
+	RuntimeWorkspaceRevisionUpdatedAt *time.Time                   `db:"runtime_workspace_revision_updated_at" json:"runtime_workspace_revision_updated_at,omitempty"`
+	RuntimeWorkspaceRevisionSource    PreviewRuntimeRevisionSource `db:"runtime_workspace_revision_source" json:"runtime_workspace_revision_source,omitempty"`
+	UnavailableReason                 PreviewUnavailableReason     `db:"unavailable_reason" json:"unavailable_reason,omitempty"`
 	// PreviewHoldingContainer marks this preview as a holder of the session's
 	// sandbox container. It pairs with Session.TurnHoldingContainer as the
 	// durable refcount that keeps the container alive between turns.
@@ -80,12 +83,13 @@ type PreviewRuntime struct {
 type PreviewUnavailableReason string
 
 const (
-	PreviewUnavailableReasonNone               PreviewUnavailableReason = ""
-	PreviewUnavailableReasonOwnerLost          PreviewUnavailableReason = "owner_lost"
-	PreviewUnavailableReasonDeployDrainTimeout PreviewUnavailableReason = "deploy_drain_timeout"
-	PreviewUnavailableReasonHostMaintenance    PreviewUnavailableReason = "host_maintenance"
-	PreviewUnavailableReasonEmergencyForce     PreviewUnavailableReason = "emergency_force"
-	PreviewUnavailableReasonLeaseExpired       PreviewUnavailableReason = "lease_expired"
+	PreviewUnavailableReasonNone                PreviewUnavailableReason = ""
+	PreviewUnavailableReasonOwnerLost           PreviewUnavailableReason = "owner_lost"
+	PreviewUnavailableReasonDeployDrainTimeout  PreviewUnavailableReason = "deploy_drain_timeout"
+	PreviewUnavailableReasonHostMaintenance     PreviewUnavailableReason = "host_maintenance"
+	PreviewUnavailableReasonEmergencyForce      PreviewUnavailableReason = "emergency_force"
+	PreviewUnavailableReasonLeaseExpired        PreviewUnavailableReason = "lease_expired"
+	PreviewUnavailableReasonEndpointUnreachable PreviewUnavailableReason = "endpoint_unreachable"
 )
 
 func (r PreviewUnavailableReason) Validate() error {
@@ -95,7 +99,8 @@ func (r PreviewUnavailableReason) Validate() error {
 		PreviewUnavailableReasonDeployDrainTimeout,
 		PreviewUnavailableReasonHostMaintenance,
 		PreviewUnavailableReasonEmergencyForce,
-		PreviewUnavailableReasonLeaseExpired:
+		PreviewUnavailableReasonLeaseExpired,
+		PreviewUnavailableReasonEndpointUnreachable:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewUnavailableReason: %q", r)
@@ -118,6 +123,27 @@ type PreviewTarget struct {
 	CreatedByUserID      uuid.UUID         `db:"created_by_user_id" json:"created_by_user_id"`
 	RequestID            *string           `db:"request_id" json:"request_id,omitempty"`
 	CreatedAt            time.Time         `db:"created_at" json:"created_at"`
+}
+
+// RepositoryPreviewPolicy stores the per-repository auto-preview mode.
+type RepositoryPreviewPolicy struct {
+	ID              uuid.UUID       `db:"id" json:"id"`
+	OrgID           uuid.UUID       `db:"org_id" json:"org_id"`
+	RepositoryID    uuid.UUID       `db:"repository_id" json:"repository_id"`
+	AutoMode        PreviewAutoMode `db:"auto_mode" json:"auto_mode"`
+	UpdatedByUserID uuid.UUID       `db:"updated_by_user_id" json:"updated_by_user_id"`
+	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
+}
+
+// RepositoryPreviewPolicySummary is the settings-page view of repository
+// policy with repository identity and PR volume.
+type RepositoryPreviewPolicySummary struct {
+	RepositoryID       uuid.UUID       `db:"repository_id" json:"repository_id"`
+	RepositoryFullName string          `db:"repository_full_name" json:"repository_full_name"`
+	AutoMode           PreviewAutoMode `db:"auto_mode" json:"auto_mode"`
+	OpenPRCount        int             `db:"open_pr_count" json:"open_pr_count"`
+	UpdatedAt          *time.Time      `db:"updated_at" json:"updated_at,omitempty"`
 }
 
 // PreviewLink is a stable app-owned URL mapping to a branch preview target.
@@ -152,19 +178,26 @@ type PreviewAPIToken struct {
 // BranchPreviewSummary is the list/get shape for stable branch-preview targets
 // plus their latest active runtime, when one exists.
 type BranchPreviewSummary struct {
-	TargetID           uuid.UUID         `db:"target_id" json:"target_id"`
-	PreviewID          *uuid.UUID        `db:"preview_id" json:"preview_id,omitempty"`
-	RepositoryID       uuid.UUID         `db:"repository_id" json:"repository_id"`
-	RepositoryFullName string            `db:"repository_full_name" json:"repository_full_name,omitempty"`
-	Branch             string            `db:"branch" json:"branch"`
-	CommitSHA          string            `db:"commit_sha" json:"commit_sha"`
-	PreviewConfigName  string            `db:"preview_config_name" json:"preview_config_name,omitempty"`
-	SourceType         PreviewSourceType `db:"source_type" json:"source_type"`
-	SourceID           string            `db:"source_id" json:"source_id,omitempty"`
-	SourceURL          string            `db:"source_url" json:"source_url,omitempty"`
-	Status             string            `db:"status" json:"status"`
-	CreatedAt          time.Time         `db:"created_at" json:"created_at"`
-	ExpiresAt          *time.Time        `db:"expires_at" json:"expires_at,omitempty"`
+	TargetID              uuid.UUID            `db:"target_id" json:"target_id"`
+	PreviewID             *uuid.UUID           `db:"preview_id" json:"preview_id,omitempty"`
+	RepositoryID          uuid.UUID            `db:"repository_id" json:"repository_id"`
+	RepositoryFullName    string               `db:"repository_full_name" json:"repository_full_name,omitempty"`
+	Branch                string               `db:"branch" json:"branch"`
+	CommitSHA             string               `db:"commit_sha" json:"commit_sha"`
+	PreviewConfigName     string               `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	SourceType            PreviewSourceType    `db:"source_type" json:"source_type"`
+	SourceID              string               `db:"source_id" json:"source_id,omitempty"`
+	SourceURL             string               `db:"source_url" json:"source_url,omitempty"`
+	Status                string               `db:"status" json:"status"`
+	CreatedAt             time.Time            `db:"created_at" json:"created_at"`
+	SortCreatedAt         time.Time            `db:"sort_created_at" json:"-"`
+	ExpiresAt             *time.Time           `db:"expires_at" json:"expires_at,omitempty"`
+	StoppedAt             *time.Time           `db:"stopped_at" json:"stopped_at,omitempty"`
+	StoppedReason         PreviewStoppedReason `db:"stopped_reason" json:"stopped_reason,omitempty"`
+	CurrentPhase          string               `db:"current_phase" json:"current_phase,omitempty"`
+	Error                 string               `db:"error" json:"error,omitempty"`
+	Resumable             bool                 `db:"resumable" json:"resumable"`
+	ResumeEstimateSeconds *int                 `db:"resume_estimate_seconds" json:"resume_estimate_seconds,omitempty"`
 }
 
 // PreviewService tracks the state of a single service within a multi-service preview.
@@ -238,11 +271,16 @@ type PreviewAccessSession struct {
 }
 
 // PreviewStartupCache tracks filesystem snapshot metadata for fast startup.
+// SnapshotKey is the exact (lockfiles, commit, config) hash; BaseKey drops the
+// commit so a start at a new commit can find a base snapshot to restore and
+// patch with a git diff. CommitSHA records which commit the blob was built at.
 type PreviewStartupCache struct {
 	ID           uuid.UUID `db:"id" json:"id"`
 	OrgID        uuid.UUID `db:"org_id" json:"org_id"`
 	RepoID       uuid.UUID `db:"repo_id" json:"repo_id"`
 	SnapshotKey  string    `db:"snapshot_key" json:"snapshot_key"`
+	BaseKey      string    `db:"base_key" json:"base_key"`
+	CommitSHA    string    `db:"commit_sha" json:"commit_sha"`
 	BlobPath     string    `db:"blob_path" json:"blob_path"`
 	SizeBytes    int64     `db:"size_bytes" json:"size_bytes"`
 	WorkerNodeID string    `db:"worker_node_id" json:"worker_node_id"`
@@ -369,12 +407,109 @@ type PreviewResourceList struct {
 // PreviewInstallConfig defines an optional platform-managed install phase that
 // runs before preview services start.
 type PreviewInstallConfig struct {
-	Command        []string `json:"command"`
-	Cwd            string   `json:"cwd,omitempty"`
-	Lockfiles      []string `json:"lockfiles,omitempty"`
-	CleanPaths     []string `json:"clean_paths,omitempty"`
-	VerifyPaths    []string `json:"verify_paths,omitempty"`
-	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	Command        []string                   `json:"command"`
+	Cwd            string                     `json:"cwd,omitempty"`
+	Lockfiles      []string                   `json:"lockfiles,omitempty"`
+	CleanPaths     []string                   `json:"clean_paths,omitempty"`
+	VerifyPaths    []string                   `json:"verify_paths,omitempty"`
+	TimeoutSeconds int                        `json:"timeout_seconds,omitempty"`
+	Cache          *PreviewInstallCacheConfig `json:"cache,omitempty"`
+}
+
+// PreviewInstallCacheConfig controls optional dependency artifact caching for
+// preview.install. Enabled is a pointer so named config merge/defaulting can
+// distinguish omitted from explicitly false.
+type PreviewInstallCacheConfig struct {
+	Enabled        *bool                             `json:"enabled,omitempty"`
+	Paths          []string                          `json:"paths,omitempty"`
+	PackageManager *PreviewPackageManagerCacheConfig `json:"package_manager,omitempty"`
+	Prewarm        *PreviewInstallPrewarmCacheConfig `json:"prewarm,omitempty"`
+	Build          *PreviewBuildCacheConfig          `json:"build,omitempty"`
+}
+
+type PreviewPackageManagerCacheConfig struct {
+	Enabled *bool    `json:"enabled,omitempty"`
+	Include []string `json:"include,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+}
+
+// PreviewBuildCacheConfig controls caching of incremental build artifacts
+// (e.g. Turborepo's local cache) that services populate while booting. Unlike
+// the install-artifact cache, build caches are saved after services report
+// ready and use latest-wins keying: the build tool is trusted to content-hash
+// its own entries, so a stale blob degrades to partial hits rather than wrong
+// output.
+type PreviewBuildCacheConfig struct {
+	Enabled *bool    `json:"enabled,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
+}
+
+type PreviewInstallPrewarmCacheConfig struct {
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+type PreviewCacheKind string
+
+const (
+	PreviewCacheKindInstallArtifact PreviewCacheKind = "install_artifact"
+	PreviewCacheKindPackageManager  PreviewCacheKind = "package_manager"
+	PreviewCacheKindBuildArtifact   PreviewCacheKind = "build_artifact"
+)
+
+type PreviewCacheRoot string
+
+const (
+	PreviewCacheRootWorkDir PreviewCacheRoot = "workdir"
+	PreviewCacheRootHomeDir PreviewCacheRoot = "homedir"
+)
+
+type PreviewDependencyCache struct {
+	ID           uuid.UUID        `db:"id" json:"id"`
+	OrgID        uuid.UUID        `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID        `db:"repo_id" json:"repo_id"`
+	CacheKind    PreviewCacheKind `db:"cache_kind" json:"cache_kind"`
+	CacheKey     string           `db:"cache_key" json:"cache_key"`
+	PlacementKey string           `db:"placement_key" json:"placement_key"`
+	BlobKey      string           `db:"blob_key" json:"-"`
+	SizeBytes    int64            `db:"size_bytes" json:"size_bytes"`
+	Metadata     json.RawMessage  `db:"metadata" json:"metadata"`
+	LastUsedAt   time.Time        `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time        `db:"created_at" json:"created_at"`
+}
+
+type PreviewDependencyCacheLocation struct {
+	ID           uuid.UUID        `db:"id" json:"id"`
+	OrgID        uuid.UUID        `db:"org_id" json:"org_id"`
+	RepoID       uuid.UUID        `db:"repo_id" json:"repo_id"`
+	CacheKind    PreviewCacheKind `db:"cache_kind" json:"cache_kind"`
+	CacheKey     string           `db:"cache_key" json:"cache_key"`
+	PlacementKey string           `db:"placement_key" json:"placement_key"`
+	WorkerNodeID string           `db:"worker_node_id" json:"worker_node_id"`
+	SizeBytes    int64            `db:"size_bytes" json:"size_bytes"`
+	LastUsedAt   time.Time        `db:"last_used_at" json:"last_used_at"`
+	CreatedAt    time.Time        `db:"created_at" json:"created_at"`
+}
+
+type PreviewCachePrewarmRun struct {
+	ID                     uuid.UUID  `db:"id" json:"id"`
+	OrgID                  uuid.UUID  `db:"org_id" json:"org_id"`
+	RepoID                 uuid.UUID  `db:"repo_id" json:"repo_id"`
+	Source                 string     `db:"source" json:"source"`
+	SourceID               string     `db:"source_id" json:"source_id"`
+	CacheScopeKey          string     `db:"cache_scope_key" json:"cache_scope_key"`
+	JobID                  *uuid.UUID `db:"job_id" json:"job_id,omitempty"`
+	WorkerNodeID           string     `db:"worker_node_id" json:"worker_node_id"`
+	Status                 string     `db:"status" json:"status"`
+	PackageManagerCacheKey string     `db:"package_manager_cache_key" json:"package_manager_cache_key"`
+	DependencyCacheKey     string     `db:"dependency_cache_key" json:"dependency_cache_key"`
+	ConfigDigest           string     `db:"config_digest" json:"config_digest"`
+	CommitSHA              string     `db:"commit_sha" json:"commit_sha"`
+	WorkspaceRevision      int64      `db:"workspace_revision" json:"workspace_revision"`
+	Error                  string     `db:"error" json:"error"`
+	StartedAt              *time.Time `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt            *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	CreatedAt              time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt              time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // ServiceConfig defines a single service within a preview.
@@ -635,20 +770,39 @@ type DOMSnapshot struct {
 
 // PreviewStatusResponse is the API response for GET /sessions/{id}/preview.
 type PreviewStatusResponse struct {
-	Instance       *PreviewInstance        `json:"instance"`
-	Services       []PreviewService        `json:"services"`
-	Infrastructure []PreviewInfrastructure `json:"infrastructure,omitempty"`
-	PreviewOrigin  string                  `json:"preview_origin,omitempty"`
-	Freshness      *PreviewFreshness       `json:"freshness,omitempty"`
+	Instance        *PreviewInstance        `json:"instance"`
+	Services        []PreviewService        `json:"services"`
+	Infrastructure  []PreviewInfrastructure `json:"infrastructure,omitempty"`
+	PreviewOrigin   string                  `json:"preview_origin,omitempty"`
+	Freshness       *PreviewFreshness       `json:"freshness,omitempty"`
+	StartupEstimate *PreviewStartupEstimate `json:"startup_estimate,omitempty"`
 }
 
 type PreviewFreshness struct {
-	State                             PreviewFreshnessState `json:"state"`
-	CurrentWorkspaceRevision          int64                 `json:"current_workspace_revision"`
-	CurrentWorkspaceRevisionUpdatedAt time.Time             `json:"current_workspace_revision_updated_at"`
-	PreviewWorkspaceRevision          *int64                `json:"preview_workspace_revision,omitempty"`
-	PreviewWorkspaceRevisionUpdatedAt *time.Time            `json:"preview_workspace_revision_updated_at,omitempty"`
-	Reason                            string                `json:"reason,omitempty"`
+	State                             PreviewFreshnessState        `json:"state"`
+	CurrentWorkspaceRevision          int64                        `json:"current_workspace_revision"`
+	CurrentWorkspaceRevisionUpdatedAt time.Time                    `json:"current_workspace_revision_updated_at"`
+	PreviewWorkspaceRevision          *int64                       `json:"preview_workspace_revision,omitempty"`
+	PreviewWorkspaceRevisionUpdatedAt *time.Time                   `json:"preview_workspace_revision_updated_at,omitempty"`
+	RuntimeWorkspaceRevision          *int64                       `json:"runtime_workspace_revision,omitempty"`
+	RuntimeWorkspaceRevisionUpdatedAt *time.Time                   `json:"runtime_workspace_revision_updated_at,omitempty"`
+	RuntimeWorkspaceRevisionSource    PreviewRuntimeRevisionSource `json:"runtime_workspace_revision_source,omitempty"`
+	RestartRequired                   bool                         `json:"restart_required"`
+	RestartReasons                    []PreviewRestartReason       `json:"restart_reasons,omitempty"`
+	Reason                            string                       `json:"reason,omitempty"`
+}
+
+type PreviewRestartReason struct {
+	Kind   PreviewRestartReasonKind `json:"kind"`
+	Path   string                   `json:"path,omitempty"`
+	Detail string                   `json:"detail,omitempty"`
+}
+
+type PreviewStartupEstimate struct {
+	Label       string `json:"label"`
+	P50Seconds  int    `json:"p50_seconds"`
+	SampleCount int    `json:"sample_count"`
+	Confidence  string `json:"confidence"`
 }
 
 // PreviewDetectionResult is the API response for GET /repos/{owner}/{repo}/preview/detect.

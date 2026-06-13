@@ -5,6 +5,7 @@ import SettingsPage from './page';
 const {
   settingsGetMock,
   settingsUpdateMock,
+  settingsNetworkStatusMock,
   auditLogsListMock,
   teamListMembersMock,
   useAuthMock,
@@ -27,6 +28,13 @@ const {
       updated_at: '2026-05-06T15:30:00Z',
     },
   }),
+  settingsNetworkStatusMock: vi.fn().mockResolvedValue({
+    data: {
+      static_egress_available: true,
+      static_egress_enabled: false,
+      static_egress_public_ip: '203.0.113.10',
+    },
+  }),
   auditLogsListMock: vi.fn().mockResolvedValue({ data: [] }),
   teamListMembersMock: vi.fn().mockResolvedValue({ data: [] }),
   useAuthMock: vi.fn(() => ({
@@ -39,6 +47,7 @@ vi.mock('@/lib/api', () => ({
     settings: {
       get: settingsGetMock,
       update: settingsUpdateMock,
+      getNetworkStatus: settingsNetworkStatusMock,
     },
     auditLogs: {
       list: auditLogsListMock,
@@ -57,6 +66,7 @@ describe('SettingsPage', () => {
   beforeEach(() => {
     settingsGetMock.mockClear();
     settingsUpdateMock.mockClear();
+    settingsNetworkStatusMock.mockClear();
     useAuthMock.mockReset();
     useAuthMock.mockReturnValue({
       user: { role: 'admin' },
@@ -68,6 +78,13 @@ describe('SettingsPage', () => {
         settings: {},
         created_at: '2026-05-01T12:00:00Z',
         updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsNetworkStatusMock.mockResolvedValue({
+      data: {
+        static_egress_available: true,
+        static_egress_enabled: true,
+        static_egress_public_ip: '203.0.113.10',
       },
     });
     auditLogsListMock.mockClear();
@@ -121,7 +138,7 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('updates the header timestamp after a successful settings save', async () => {
+  it('uses a low-priority activity footer as the only updated timestamp', async () => {
     settingsGetMock.mockResolvedValue({
       data: {
         id: 'org-1',
@@ -131,11 +148,50 @@ describe('SettingsPage', () => {
         updated_at: '2026-05-01T12:00:00Z',
       },
     });
-    settingsUpdateMock.mockResolvedValue({
+    auditLogsListMock.mockResolvedValue({
+      data: [{
+        id: 1,
+        org_id: 'org-1',
+        actor_type: 'system',
+        actor_id: 'system',
+        action: 'settings.updated',
+        resource_type: 'settings',
+        created_at: new Date(Date.now() - 3 * 60000).toISOString(),
+      }],
+      meta: {},
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText(/Last activity:/)).toBeInTheDocument();
+    expect(screen.getByText(/Updated .* ago by System/)).toBeInTheDocument();
+    expect(screen.queryByText(/Updated at .*May 1, 2026.*12:00 PM UTC/)).not.toBeInTheDocument();
+  });
+
+  it('uses the canonical organization returned by the server after saving settings', async () => {
+    settingsGetMock.mockResolvedValue({
       data: {
         id: 'org-1',
-        name: 'Updated Org',
-        settings: {},
+        name: 'Test Org',
+        settings: { builder_permissions: { require_review_before_pr: true, extra_flag: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-01T12:00:00Z',
+      },
+    });
+    settingsUpdateMock.mockResolvedValueOnce({
+      data: {
+        id: 'org-1',
+        name: 'Trimmed Org',
+        settings: { builder_permissions: { require_review_before_pr: true, extra_flag: true } },
+        created_at: '2026-05-01T12:00:00Z',
+        updated_at: '2026-05-06T15:30:00Z',
+      },
+    });
+    settingsUpdateMock.mockResolvedValueOnce({
+      data: {
+        id: 'org-1',
+        name: 'Trimmed Org',
+        settings: { builder_permissions: { require_review_before_pr: false, extra_flag: true } },
         created_at: '2026-05-01T12:00:00Z',
         updated_at: '2026-05-06T15:30:00Z',
       },
@@ -143,57 +199,28 @@ describe('SettingsPage', () => {
 
     renderWithProviders(<SettingsPage />);
 
-    expect(await screen.findByText(/Updated at .*May 1, 2026.*12:00 PM UTC/)).toBeInTheDocument();
-
-    const input = screen.getByLabelText('Organization name');
+    const input = await screen.findByLabelText('Organization name');
     const user = userEvent.setup();
     await user.click(input);
-    await user.keyboard('{Control>}a{/Control}Updated Org');
+    await user.keyboard('{Control>}a{/Control}  Trimmed Org  ');
     await user.tab();
 
     await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({ name: 'Updated Org' });
+      expect(settingsUpdateMock).toHaveBeenCalledWith({ name: '  Trimmed Org  ' });
     });
     await waitFor(() => {
-      expect(screen.getByText(/Updated at .*May 6, 2026.*3:30 PM UTC/)).toBeInTheDocument();
-    });
-  });
-
-  it('shows and saves the active previews per user setting', async () => {
-    settingsGetMock.mockResolvedValue({
-      data: {
-        id: 'org-1',
-        name: 'Test Org',
-        settings: { preview_max_previews_per_user: 7 },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-01T12:00:00Z',
-      },
+      expect(input).toHaveValue('Trimmed Org');
     });
 
-    renderWithProviders(<SettingsPage />);
-
-    const input = await screen.findByLabelText('Active previews per user');
-    await waitFor(() => {
-      expect(input).toHaveValue(7);
-    });
-
-    const user = userEvent.setup();
-    await user.click(input);
-    await user.keyboard('{Control>}a{/Control}4');
-    await user.tab();
+    await user.click(screen.getByLabelText('Require builder review before PR'));
 
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { preview_max_previews_per_user: 4 },
+        settings: { builder_permissions: { require_review_before_pr: false } },
       });
     });
-  });
-
-  it('defaults the active previews per user setting to four', async () => {
-    renderWithProviders(<SettingsPage />);
-
-    await waitFor(() => {
-      expect(screen.getByLabelText('Active previews per user')).toHaveValue(4);
+    expect(settingsUpdateMock).toHaveBeenLastCalledWith({
+      settings: { builder_permissions: { require_review_before_pr: false } },
     });
   });
 
@@ -221,5 +248,14 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByLabelText('Organization name')).toBeDisabled();
     });
+  });
+
+  it('does not render sandbox runtime controls after they move to Runtime settings', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText('Organization')).toBeInTheDocument();
+    expect(screen.queryByText('Network access')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Use static egress IP for sessions and previews')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Active previews per user')).not.toBeInTheDocument();
   });
 });

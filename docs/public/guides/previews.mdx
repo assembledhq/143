@@ -143,6 +143,92 @@ Use `preview.install` when preview services need dependencies installed before t
 
 143 reruns the install when the config or declared lockfiles change, or when a declared verify path is missing.
 
+Declaring `verify_paths` also lets fresh workspaces skip the install entirely: when a dependency artifact cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and skips `command` once every verify path exists. Without `verify_paths`, fresh workspaces always run `command`.
+
+Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
+
+Dependency artifact caching is enabled by default for session previews when `preview.install.lockfiles` and effective cache paths exist. Effective paths are:
+
+```text
+clean_paths + cache.paths + inferred paths from known dependency files
+```
+
+| Dependency file | Inferred cache path |
+|---|---|
+| `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` | `node_modules` |
+| `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
+| `go.mod`, `go.sum` | `vendor` |
+
+Inference is relative to the lockfile directory: `package-lock.json` infers `node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`.
+
+For Python projects, no `cache` object is needed when a listed lockfile has a conventional local virtualenv:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["poetry", "install"],
+      "lockfiles": ["services/api/poetry.lock"],
+      "verify_paths": ["services/api/.venv"]
+    }
+  }
+}
+```
+
+For Go projects that use vendoring, `go.mod` infers `vendor`:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["go", "mod", "vendor"],
+      "lockfiles": ["go.mod", "go.sum"],
+      "verify_paths": ["vendor"]
+    }
+  }
+}
+```
+
+Add framework artifact caches with WorkDir-relative `cache.paths`, and add extra package-manager global caches with HomeDir-relative `cache.package_manager.paths`:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules"],
+      "cache": {
+        "paths": [".next/cache", ".turbo/cache"],
+        "package_manager": {
+          "paths": [".cache/custom-package-manager"]
+        },
+        "prewarm": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+Opt out when dependency artifacts are not safe to reuse:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules"],
+      "cache": { "enabled": false }
+    }
+  }
+}
+```
+
+Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. Package-manager paths are relative to the sandbox home directory; broad or sensitive paths such as `.`, `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, and `.143` are rejected. `requirements.txt` can be unsafe if dependencies are not pinned; use a lockfile or opt out. Mutable image tags such as `latest` can also leave stale dependency artifacts, so prefer immutable digests or versioned tags.
+
+If dependencies look stale, change the lockfile so the cache key changes, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
+
 ## Add local infrastructure
 
 Prefer platform-managed infrastructure for preview-only databases and caches. The credentials are generated per preview, injected as environment variables, and destroyed with the preview.
@@ -216,7 +302,7 @@ For new configs, reference a named secret bundle. The repo declares only the bun
 }
 ```
 
-An org admin creates the `repo-dev` bundle outside the repo. The bundle can deliver env vars and generated files. For example, a file output can render a whole JSON document from one managed secret value:
+An org admin creates the `repo-dev` bundle outside the repo. The bundle can deliver multiple env vars and one generated file. For example, a file output can render a whole JSON document from one managed secret value:
 
 ```json
 {
@@ -252,7 +338,7 @@ The older `preview.credentials` shape is still accepted for an env-var-only mana
 
 In both models, the config only references admin-managed values by name and allowlists which outputs may be injected. Secret values are not committed to git.
 
-Scope env secrets to the smallest service list with `services` or legacy `inject_into`. A frontend service usually should not receive server-only secrets because public frontend frameworks can expose environment variables in browser bundles. File outputs are workspace-wide, so a bundle that generates files must list every preview service.
+Scope env secrets to the smallest service list with `services` or legacy `inject_into`. A frontend service usually should not receive server-only secrets because public frontend frameworks can expose environment variables in browser bundles. The file output is workspace-wide, so a bundle that generates a file must list every preview service.
 
 <Callout type="warning" title="Connected previews">
 Any preview with `preview.secrets`, `preview.credentials.mode` other than `none`, or `preview.network.destinations` is treated as connected. Connected previews pin launch behavior to the base branch so a session diff cannot change commands, ports, env handling, secret bundle names, or generated secret file paths while secrets are in scope.

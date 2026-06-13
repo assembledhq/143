@@ -90,7 +90,7 @@ export function ResizeHandle({ direction = "horizontal", onResize, className, te
       <div
         data-testid="resize-handle-rail"
         aria-hidden="true"
-        className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border/45 transition-colors duration-150 group-hover:bg-border/80 group-data-[dragging=true]:bg-primary/50"
+        className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors duration-150 group-hover:bg-border group-data-[dragging=true]:bg-primary/50"
       />
       <div
         data-testid="resize-handle-grip"

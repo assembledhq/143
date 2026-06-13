@@ -17,7 +17,6 @@ export const KEY_PLACEHOLDERS: Record<string, string> = {
 export function sourceLabel(source: string): string {
   switch (source) {
     case "personal": return "Your key";
-    case "team_default": return "Team default";
     case "org": return "Organization";
     default: return "Not configured";
   }
@@ -26,7 +25,6 @@ export function sourceLabel(source: string): string {
 export function sourceBadgeVariant(source: string): "success" | "secondary" | "outline" | "destructive" {
   switch (source) {
     case "personal": return "success";
-    case "team_default":
     case "org": return "secondary";
     default: return "outline";
   }

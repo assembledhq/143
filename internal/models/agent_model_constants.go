@@ -56,6 +56,7 @@ var AvailablePiModels = []string{
 }
 
 const (
+	ClaudeCodeModelFable5   = "claude-fable-5"
 	ClaudeCodeModelOpus48   = "claude-opus-4-8"
 	ClaudeCodeModelOpus47   = "claude-opus-4-7"
 	ClaudeCodeModelOpus46   = "claude-opus-4-6"
@@ -64,7 +65,7 @@ const (
 	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
 	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
@@ -528,6 +529,40 @@ func providerHostsLLMModel(byProvider map[string][]string, provider, model strin
 func ValidateSettingsModels(settings OrgSettings) error {
 	if settings.PreviewMaxPreviewsPerUser != 0 && (settings.PreviewMaxPreviewsPerUser < MinPreviewMaxPreviewsPerUser || settings.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser) {
 		return fmt.Errorf("preview_max_previews_per_user must be between %d and %d", MinPreviewMaxPreviewsPerUser, MaxPreviewMaxPreviewsPerUser)
+	}
+	if settings.SandboxLifecycle.CompletedSessionRetentionMinutes != 0 &&
+		(settings.SandboxLifecycle.CompletedSessionRetentionMinutes < MinCompletedSessionRetentionMinutes ||
+			settings.SandboxLifecycle.CompletedSessionRetentionMinutes > MaxCompletedSessionRetentionMinutes) {
+		return fmt.Errorf("sandbox_lifecycle.completed_session_retention_minutes must be between %d and %d", MinCompletedSessionRetentionMinutes, MaxCompletedSessionRetentionMinutes)
+	}
+	if settings.SandboxLifecycle.IdlePreviewTTLMinutes != 0 &&
+		(settings.SandboxLifecycle.IdlePreviewTTLMinutes < MinIdlePreviewTTLMinutes ||
+			settings.SandboxLifecycle.IdlePreviewTTLMinutes > MaxIdlePreviewTTLMinutes) {
+		return fmt.Errorf("sandbox_lifecycle.idle_preview_ttl_minutes must be between %d and %d", MinIdlePreviewTTLMinutes, MaxIdlePreviewTTLMinutes)
+	}
+	if err := settings.SandboxResources.AgentDefaultTier.Validate(); err != nil {
+		return fmt.Errorf("sandbox_resources.agent_default_tier: %w", err)
+	}
+	if err := settings.SandboxResources.PreviewDefaultTier.Validate(); err != nil {
+		return fmt.Errorf("sandbox_resources.preview_default_tier: %w", err)
+	}
+	if err := settings.SandboxResources.PreviewMaxTier.Validate(); err != nil {
+		return fmt.Errorf("sandbox_resources.preview_max_tier: %w", err)
+	}
+	if settings.SandboxResources.PreviewMaxCPUMillis != 0 &&
+		(settings.SandboxResources.PreviewMaxCPUMillis < MinPreviewMaxCPUMillis ||
+			settings.SandboxResources.PreviewMaxCPUMillis > MaxPreviewMaxCPUMillis) {
+		return fmt.Errorf("sandbox_resources.preview_max_cpu_millis must be between %d and %d", MinPreviewMaxCPUMillis, MaxPreviewMaxCPUMillis)
+	}
+	if settings.SandboxResources.PreviewMaxMemoryMiB != 0 &&
+		(settings.SandboxResources.PreviewMaxMemoryMiB < MinPreviewMaxMemoryMiB ||
+			settings.SandboxResources.PreviewMaxMemoryMiB > MaxPreviewMaxMemoryMiB) {
+		return fmt.Errorf("sandbox_resources.preview_max_memory_mib must be between %d and %d", MinPreviewMaxMemoryMiB, MaxPreviewMaxMemoryMiB)
+	}
+	if settings.SandboxResources.PreviewMaxEphemeralDiskMiB != 0 &&
+		(settings.SandboxResources.PreviewMaxEphemeralDiskMiB < MinPreviewMaxEphemeralDiskMiB ||
+			settings.SandboxResources.PreviewMaxEphemeralDiskMiB > MaxPreviewMaxEphemeralDiskMiB) {
+		return fmt.Errorf("sandbox_resources.preview_max_ephemeral_disk_mib must be between %d and %d", MinPreviewMaxEphemeralDiskMiB, MaxPreviewMaxEphemeralDiskMiB)
 	}
 	if settings.LLMModel != "" && !IsSupportedLLMModel(settings.LLMModel) {
 		return fmt.Errorf("llm_model must be one of: %v", AvailableLLMModels)

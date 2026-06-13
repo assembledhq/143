@@ -167,6 +167,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			IntegrationProviderGitHub, IntegrationProviderSentry,
 			IntegrationProviderLinear, IntegrationProviderSlack,
 			IntegrationProviderNotion, IntegrationProviderCircleCI,
+			IntegrationProviderMezmo,
 		),
 		// issue_source.go
 		"issues_source": toStrings(
@@ -176,6 +177,10 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		// pm_enums.go
 		"pm_plans_status": toStrings(
 			PMPlanStatusExecuting, PMPlanStatusCompleted, PMPlanStatusFailed,
+		),
+		// organization_domain.go
+		"organization_domains_status": toStrings(
+			OrgDomainStatusPending, OrgDomainStatusVerified,
 		),
 	}
 

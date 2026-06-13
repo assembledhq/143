@@ -7,6 +7,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -230,6 +233,73 @@ func TestDockerFileReader_ListDir(t *testing.T) {
 			require.Equal(t, tt.expected, entries, "ListDir should return the expected entries")
 		})
 	}
+}
+
+// TestRecursiveFindScript_RealShell runs the actual script through a real
+// shell against a temp tree, since the Docker-level tests only assert against
+// mocked exec output. Guards the busybox-portable pieces: positional arg
+// handling after shift, prune args via "$@", literal-tab sed labels, and the
+// head-based entry cap.
+func TestRecursiveFindScript_RealShell(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available on this host")
+	}
+
+	root := t.TempDir()
+	for _, dir := range []string{"docs", "src", "node_modules/pkg"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755), "test tree directories should be created")
+	}
+	for _, file := range []string{"README.md", "docs/guide.md", "src/app.ts", "node_modules/pkg/index.js"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, file), nil, 0o644), "test tree files should be created")
+	}
+
+	run := func(maxEntries int) []FileEntry {
+		argv := recursiveFindArgv(root, []string{"node_modules", ".git"}, maxEntries)
+		out, err := exec.Command(argv[0], argv[1:]...).Output()
+		require.NoError(t, err, "recursive find script should exit zero")
+		return appendFindEntries(nil, root, string(out), maxEntries)
+	}
+
+	unlimited := run(0)
+	byPath := map[string]string{}
+	for _, entry := range unlimited {
+		byPath[entry.Path] = entry.Type
+	}
+	require.Equal(t, map[string]string{
+		"docs":          "dir",
+		"src":           "dir",
+		"README.md":     "file",
+		"docs/guide.md": "file",
+		"src/app.ts":    "file",
+	}, byPath, "the script should label kinds, exclude the root itself, and prune ignored directories")
+
+	capped := run(3)
+	require.Len(t, capped, 3, "the head-based cap should bound the entry count")
+	for _, entry := range capped {
+		require.NotContains(t, entry.Path, "node_modules", "pruned directories should never appear in capped output")
+	}
+}
+
+func TestDockerFileReader_ListDirRecursive(t *testing.T) {
+	t.Parallel()
+
+	client := newMockSequenceClient([]string{
+		"dir\t/workspace/docs\nfile\t/workspace/README.md\nfile\t/workspace/docs/guide.md\ndir\t/workspace/src\nfile\t/workspace/src/app.ts\n",
+	}, []int{0})
+
+	reader := NewDockerFileReader(client)
+	entries, err := reader.ListDirRecursive(context.Background(), "container-1", "/workspace", 3, []string{"node_modules", ".git"})
+	require.NoError(t, err, "ListDirRecursive should not return an error")
+	require.Equal(t, []FileEntry{
+		{Path: "docs", Type: "dir", Size: 0},
+		{Path: "README.md", Type: "file", Size: 0},
+		{Path: "docs/guide.md", Type: "file", Size: 0},
+	}, entries, "ListDirRecursive should parse workspace-relative entries and enforce the requested cap defensively")
+	require.Equal(t, 1, client.callIndex, "ListDirRecursive should use one Docker exec call")
+	require.Contains(t, client.lastExecOptions.Cmd, "3", "recursive find should receive the requested max entry cap")
+	require.Contains(t, client.lastExecOptions.Cmd, "node_modules", "recursive find should prune ignored directory names")
 }
 
 func TestDockerFileReader_ReadFile(t *testing.T) {

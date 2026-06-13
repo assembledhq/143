@@ -462,9 +462,21 @@ Rules:
 | `preview.install.lockfiles` | `string[]` | no | Repo-relative files included in the cache key. |
 | `preview.install.clean_paths` | `string[]` | no | Repo-relative paths or simple globs to remove before reinstalling. 143 never deletes undeclared paths. |
 | `preview.install.verify_paths` | `string[]` | no | Repo-relative paths that must exist before a cached install can be reused. |
+| `preview.install.cache.enabled` | boolean | no | Defaults to true. Set to false to disable dependency artifact restore/save. |
+| `preview.install.cache.paths` | `string[]` | no | Additive WorkDir-relative dependency/build cache paths, such as `.next/cache` or `.turbo/cache`. Requires `lockfiles`. |
+| `preview.install.cache.package_manager.enabled` | boolean | no | Defaults to true. Set to false to disable package-manager global cache restore/save. |
+| `preview.install.cache.package_manager.include` | `string[]` | no | Package-manager IDs to include in addition to inference: `npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `poetry`, `go`. |
+| `preview.install.cache.package_manager.paths` | `string[]` | no | Additive HomeDir-relative package-manager cache paths. Absolute paths, `..`, globs, and sensitive home paths are rejected. |
+| `preview.install.cache.prewarm.enabled` | boolean | no | Per-config prewarm toggle. Runtime rollout is also gated by `PREVIEW_CACHE_PREWARM_ENABLED`. |
 | `preview.install.timeout_seconds` | number | no | Defaults to 420. Max 1800. |
 
 Use this instead of putting package-manager installs in `preview.services.*.command`. 143 writes a platform-owned success marker under `.143/cache/preview-install/` only after the command exits successfully. If the marker is missing, lockfile/config hash changes, or a verify path is missing, 143 removes only `clean_paths` and reruns the install.
+
+Session preview dependency artifact caching is default-on when `lockfiles` and effective cache paths exist. Effective artifact paths are WorkDir-relative: `clean_paths + cache.paths + inferred paths from known dependency files`. JavaScript lockfiles infer `node_modules`, Python lockfiles infer `.venv`, and `go.mod`/`go.sum` infer `vendor`, relative to the lockfile directory.
+
+Package-manager global caches are stored separately and are HomeDir-relative. 143 infers npm `.npm`, pnpm `.local/share/pnpm/store`, yarn `.yarn/berry/cache`, bun `.bun/install/cache`, pip `.cache/pip`, uv `.cache/uv`, poetry `.cache/pypoetry`, and Go `go/pkg/mod` plus `.cache/go-build`. Use `cache.package_manager.paths` only for extra package-manager caches under the sandbox home directory.
+
+Never cache source directories, secret files, `.git`, or `.143/cache/preview-install`. Repos using unpinned `requirements.txt` entries or mutable preview image tags should pin inputs or opt out with `cache.enabled: false`.
 
 For the nested preview reference, use [Preview environments](./previews.md). That guide owns:
 

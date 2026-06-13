@@ -42,7 +42,7 @@ export function AutosaveIndicator({ status, className }: AutosaveIndicatorProps)
       )}
       {status === "saved" && (
         <>
-          <Check className="size-3 text-emerald-600" aria-hidden="true" />
+          <Check className="size-3 text-success" aria-hidden="true" />
           <span>{STATUS_COPY.saved}</span>
         </>
       )}

@@ -72,6 +72,8 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 			Status:         models.SessionStatusPending,
 			PrimaryIssueID: &issueID,
 		}
+		approach := "Linear issue VIR-102 - Make a full screen mode for the file diff viewer"
+		session.PMApproach = &approach
 
 		mock.ExpectBegin()
 		mock.ExpectQuery("INSERT INTO sessions").
@@ -82,7 +84,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(sessionID, now, now))
@@ -95,6 +97,13 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 		mock.ExpectExec("INSERT INTO session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(123), now))
 		mock.ExpectExec("UPDATE linear_agent_sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -123,6 +132,8 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 			Status:         models.SessionStatusPending,
 			PrimaryIssueID: &issueID,
 		}
+		approach := "Linear issue VIR-102 - Make a full screen mode for the file diff viewer"
+		session.PMApproach = &approach
 		attachErr := errors.New("attach failed")
 
 		mock.ExpectBegin()
@@ -134,7 +145,7 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			).
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
 				AddRow(sessionID, now, now))
@@ -147,6 +158,13 @@ func TestCreateAndAttachLinearAgentSessionUsesSingleTransaction(t *testing.T) {
 		mock.ExpectExec("INSERT INTO session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		mock.ExpectQuery("INSERT INTO session_messages").
+			WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).
+			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(123), now))
 		mock.ExpectExec("UPDATE linear_agent_sessions").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(attachErr)

@@ -71,7 +71,8 @@ fi
 
 # Decrypt .env.production.enc to extract secrets locally.
 # Values set as env vars already will take precedence (eval won't overwrite).
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
 if [ -f "$ENC_FILE" ]; then
   echo "Reading secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
@@ -117,6 +118,38 @@ apply_tailscale_worker_host_map() {
       fi
       return
     fi
+  done
+}
+
+apply_static_egress_worker_host_map() {
+  if [ "$ROLE" != "worker" ] || [ -z "${STATIC_EGRESS_WORKER_HOSTS:-}" ]; then
+    return
+  fi
+
+  # STATIC_EGRESS_WORKER_HOSTS is a comma-separated list of worker tunnel
+  # identities. Entries are "<host>@<wg-address>@<private-key>".
+  # Example:
+  # STATIC_EGRESS_WORKER_HOSTS="87.99.158.39@10.143.0.2/32@abc=,54.1.2.3@10.143.0.3/32@def="
+  IFS=',' read -ra mappings <<< "$STATIC_EGRESS_WORKER_HOSTS"
+  for mapping in "${mappings[@]}"; do
+    map_host="${mapping%%@*}"
+    rest="${mapping#*@}"
+    if [ "$map_host" != "$HOST" ]; then
+      continue
+    fi
+    if [ "$rest" = "$mapping" ] || [[ "$rest" != *@* ]]; then
+      echo "ERROR: invalid STATIC_EGRESS_WORKER_HOSTS entry for $HOST; expected host@wg-address@private-key" >&2
+      exit 1
+    fi
+    map_wg_address="${rest%%@*}"
+    map_private_key="${rest#*@}"
+    if [ -z "$map_wg_address" ] || [ -z "$map_private_key" ]; then
+      echo "ERROR: invalid STATIC_EGRESS_WORKER_HOSTS entry for $HOST; wg-address and private-key are required" >&2
+      exit 1
+    fi
+    : "${STATIC_EGRESS_WORKER_WG_ADDRESS:=$map_wg_address}"
+    : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:=$map_private_key}"
+    return
   done
 }
 
@@ -166,6 +199,7 @@ apply_tailscale_role_defaults() {
 
 apply_tailscale_role_defaults
 apply_worker_bucket_overrides "$ROLE" "$HOST"
+apply_static_egress_worker_host_map
 if [ "$ROLE" = "worker" ]; then
   : "${SANDBOX_HEALTH_CHECK_IMAGE:=busybox:1.36.1}"
   : "${SANDBOX_REQUIRE_DISK_QUOTA:=true}"
@@ -250,6 +284,16 @@ configure_tailscale_if_requested() {
       '
 }
 
+list_worker_reprovision_containers() {
+  if [ "$ROLE" != "worker" ]; then
+    return
+  fi
+
+  ssh "${SSH_OPTS[@]}" root@"$HOST" \
+    "command -v docker >/dev/null 2>&1 && docker ps --filter label=com.docker.compose.service=worker --format '{{.ID}}' || true" \
+    2>/dev/null || true
+}
+
 if [ "$MODE" = "--tailscale-only" ]; then
   : "${TS_AUTH_KEY:?TS_AUTH_KEY or a role-specific TS_AUTH_KEY_* is required for Tailscale enrollment}"
 
@@ -276,14 +320,14 @@ resolve_worker_identity() {
     else
       echo "Auto-detecting WORKER_PRIVATE_IP via SSH..."
       # Enumerate every private IPv4 on a real network interface, deliberately
-      # skipping docker/bridge/veth/loopback. A naive "first private IPv4"
+      # skipping docker/bridge/veth/WireGuard/loopback. A naive "first private IPv4"
       # filter would silently return 172.17.0.1 (docker0) on hosts where the
       # bridge enumerates before the NIC, and `ip route get 1.1.1.1` returns
       # the *public* IP because the default route goes through the public NIC.
       # We collect candidates (no awk `exit`) so multi-homed hosts surface as
       # an error rather than silently picking whichever NIC enumerates first.
       WORKER_PRIVATE_IP_CANDIDATES="$(ssh "${SSH_OPTS[@]}" root@"$HOST" \
-        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
+        'ip -4 -o addr show | awk "\$2 !~ /^(docker|br-|veth|virbr|lo|wg)/ && /inet (10\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.|192\\.168\\.)/ { split(\$4, a, \"/\"); print a[1] }"')"
     fi
     CANDIDATE_COUNT="$(printf '%s\n' "$WORKER_PRIVATE_IP_CANDIDATES" | grep -c . || true)"
     if [ "$CANDIDATE_COUNT" -eq 0 ]; then
@@ -342,6 +386,12 @@ resolve_worker_docker_gid() {
 
 # Check if already provisioned
 RUNNING=$(ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE ps -q 2>/dev/null'" 2>/dev/null || true)
+if [ "$ROLE" = "worker" ]; then
+  WORKER_REPROVISION_CONTAINERS="$(list_worker_reprovision_containers)"
+  if [ -n "$WORKER_REPROVISION_CONTAINERS" ]; then
+    RUNNING="$(printf '%s\n%s\n' "$RUNNING" "$WORKER_REPROVISION_CONTAINERS" | grep -v '^$' || true)"
+  fi
+fi
 if [ -n "$RUNNING" ]; then
   if [ "$REPROVISION" != "--reprovision" ]; then
     echo "ERROR: $ROLE node at $HOST is already provisioned and running."
@@ -352,7 +402,13 @@ if [ -n "$RUNNING" ]; then
   fi
 
   echo "=== Reprovisioning $ROLE node at $HOST (tearing down existing) ==="
-  ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+  if [ "$ROLE" = "worker" ]; then
+    "$SCRIPT_DIR/spin-down-worker.sh" "$HOST" "$SSH_KEY" \
+      --timeout "${WORKER_REPROVISION_DRAIN_TIMEOUT_SECONDS:-14400}" \
+      --executor-timeout "${WORKER_REPROVISION_EXECUTOR_TIMEOUT_SECONDS:-900}"
+  else
+    ssh "${SSH_OPTS[@]}" root@"$HOST" "su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE down -v'"
+  fi
 fi
 
 echo "=== Provisioning $ROLE node at $HOST ==="
@@ -484,29 +540,23 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/configure-docker-daemon.sh /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
 
-# Step 2a: Cap docker container log files (max-size/max-file in
-# /etc/docker/daemon.json) BEFORE step 5 starts services. Closes the
-# provision-to-first-deploy window where new containers would log
-# unboundedly. db gets a larger cap because postgres logs every
-# connection / slow query / lock wait, and the db host has no Vector log
-# shipping — the local docker log is the only copy of that trail.
+# Step 2a: Configure Docker daemon hardening in one pass BEFORE step 5
+# starts services. This pins bounded json-file logs and multi-provider DNS
+# resolvers while preserving existing daemon keys such as the worker runsc
+# runtime. Applying both settings through one helper avoids back-to-back
+# Docker restarts on fresh hosts, which can trip systemd's start-rate limit
+# after bootstrap/gVisor has already touched the daemon.
+#
+# db gets a larger log cap because postgres logs every connection / slow
+# query / lock wait, and the db host has no Vector log shipping — the local
+# docker log is the only copy of that trail.
 case "$ROLE" in
   db) LOG_MAX_SIZE="500m" ;;
   *)  LOG_MAX_SIZE="100m" ;;
 esac
-ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-log-rotation.sh $LOG_MAX_SIZE 5"
-
-# Step 2a (continued): Pin Docker daemon DNS to multiple independent
-# resolvers. Without this, the embedded resolver at 127.0.0.11 inherits the
-# host's resolv.conf — usually a single provider DNS — so one upstream
-# outage takes the whole fleet's container DNS down at once. The
-# 2026-05-07T04:15Z incident hit three workers simultaneously this way.
-# Order is fastest first; Docker's embedded resolver falls through to the
-# next on a SERVFAIL/timeout. Cloudflare + Google + Quad9 are independent
-# operators and networks.
-ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-docker-dns.sh 1.1.1.1 8.8.8.8 9.9.9.9"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/configure-docker-daemon.sh --log-max-size $LOG_MAX_SIZE --log-max-file 5 --dns 1.1.1.1 8.8.8.8 9.9.9.9"
 wait_for_docker_daemon
 
 # Optional Tailscale enrollment. This runs before worker identity resolution
@@ -515,6 +565,9 @@ wait_for_docker_daemon
 configure_tailscale_if_requested
 resolve_worker_identity
 resolve_worker_docker_gid
+if [ "$ROLE" = "worker" ]; then
+  ssh "${SSH_OPTS[@]}" root@"$HOST" 'mkdir -p /var/cache/143/preview-dependency-cache && chown 1000:1000 /var/cache/143/preview-dependency-cache && chmod 0750 /var/cache/143/preview-dependency-cache'
+fi
 
 # Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
 # Replaces authorized_keys on the host with exactly the keys in the repo.
@@ -544,11 +597,16 @@ elif [ "$ROLE" = "worker" ]; then
   # and docker-entrypoint.sh decrypts it at boot. Provision the file before the
   # first `docker compose up` — if the source path is missing, Docker creates a
   # directory at /opt/143/.env.production.enc and later deploy-time scp fails.
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nGITHUB_APP_CLIENT_ID=%s\nGITHUB_APP_CLIENT_SECRET=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' \
     "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "${GITHUB_APP_CLIENT_ID:-}" "${GITHUB_APP_CLIENT_SECRET:-}" \
     "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
     "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
+    "${STATIC_EGRESS_PUBLIC_IP:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
+
+  printf 'STATIC_EGRESS_GATEWAY_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_KEY=%s\nSTATIC_EGRESS_WORKER_PRIVATE_KEY=%s\nSTATIC_EGRESS_WORKER_WG_ADDRESS=%s\n' \
+    "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:-}" "${STATIC_EGRESS_WORKER_PRIVATE_KEY:-}" "${STATIC_EGRESS_WORKER_WG_ADDRESS:-}" \
+    | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/static-egress-worker.env && chown deploy:deploy /opt/143/static-egress-worker.env && chmod 600 /opt/143/static-egress-worker.env'
 
   # Per-host identity/runtime values (NODE_ID, WORKER_PRIVATE_IP,
   # PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) live in .env.local and survive
@@ -572,7 +630,7 @@ else
   : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required for app role (set it or add to .env.production.enc)}"
   : "${PREVIEW_ORIGIN_TEMPLATE:=https://{id}.preview.143.dev}"
   : "${NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:=$PREVIEW_ORIGIN_TEMPLATE}"
-  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" \
+  printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nREDIS_TOPOLOGY=%s\nREDIS_PRIVATE_IP=%s\nREDIS_PASSWORD=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "${REDIS_TOPOLOGY:-standalone}" "${REDIS_PRIVATE_IP:-}" "${REDIS_PASSWORD:-}" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" "${STATIC_EGRESS_PUBLIC_IP:-}" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/.env && chown deploy:deploy /opt/143/.env && chmod 600 /opt/143/.env'
   # Copy encrypted production env (baked into the Docker image too, but
   # having it on disk lets you re-decrypt without rebuilding)

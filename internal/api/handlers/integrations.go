@@ -16,9 +16,13 @@ import (
 	"strings"
 	"time"
 
+	"sync"
+
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghapp "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -61,11 +65,21 @@ const (
 type integrationCredentialStore interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	Upsert(ctx context.Context, orgID uuid.UUID, cfg models.ProviderConfig) error
+	// Disable marks the singleton (label="") credential for a provider as
+	// disabled so it stops being injected into sandboxes. Disconnect calls this
+	// so revoking an integration in the UI actually revokes runtime access, not
+	// just the integration row's status. Re-connecting re-activates it via Upsert.
+	Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
 }
 
 // githubAppService provides GitHub App installation tokens for fetching repos.
 type githubAppService interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
+}
+
+type githubOrgAutoJoinService interface {
+	GetInstallationDetails(ctx context.Context, installationID int64) (ghapp.InstallationDetails, error)
+	ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghapp.OrgMember, error)
 }
 
 type githubAppUserCredentialProvider interface {
@@ -74,6 +88,10 @@ type githubAppUserCredentialProvider interface {
 
 type githubMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+}
+
+type slackUserInfoClient interface {
+	FetchUserInfo(ctx context.Context, accessToken, userID string) (ingestion.SlackUser, error)
 }
 
 // --- Linear types ---
@@ -121,6 +139,12 @@ type slackTokenResponse struct {
 	TokenType   string        `json:"token_type"`
 	Scope       string        `json:"scope"`
 	Team        slackTeamInfo `json:"team"`
+	AppID       string        `json:"app_id"`
+	BotUserID   string        `json:"bot_user_id"`
+	BotID       string        `json:"bot_id"`
+	Enterprise  *struct {
+		ID string `json:"id"`
+	} `json:"enterprise,omitempty"`
 }
 
 type slackTeamInfo struct {
@@ -175,15 +199,21 @@ type IntegrationHandler struct {
 
 	// GitHub App service and repo store (for fetching repos on install)
 	githubService       githubAppService
+	githubOrgAutoJoin   githubOrgAutoJoinService
 	repoStore           *db.RepositoryStore
 	githubInstallations *db.GitHubInstallationStore
 	githubAppUserAuth   githubAppUserCredentialProvider
 	memberships         githubMembershipStore
 	setupSigningKey     string
+	audit               *db.AuditEmitter
 
 	// Slack OAuth
-	slackClientID string
-	slackSecret   string
+	slackClientID          string
+	slackSecret            string
+	slackInstallationStore *db.SlackInstallationStore
+	slackUserLinkStore     *db.SlackUserLinkStore
+	slackChannelStore      *db.SlackChannelSettingsStore
+	slackUserInfoClient    slackUserInfoClient
 
 	// PM context auto-trigger (nil-safe: disabled if not configured)
 	pmAutoTriggerJobs   pmAutoTriggerJobStore
@@ -192,6 +222,7 @@ type IntegrationHandler struct {
 
 	// Linear post-install hooks (nil-safe).
 	linearJobStore                *db.JobStore
+	githubRosterJobStore          *db.JobStore
 	linearTeamKeyRefresher        func(ctx context.Context, orgID uuid.UUID) error
 	linearTeamKeyCacheInvalidator func(orgID uuid.UUID)
 	linearAgentBootstrapper       func(ctx context.Context, orgID uuid.UUID) error
@@ -203,6 +234,10 @@ type IntegrationHandler struct {
 // detection won't work right after install.
 func (h *IntegrationHandler) SetLinearJobStore(jobs *db.JobStore) {
 	h.linearJobStore = jobs
+}
+
+func (h *IntegrationHandler) SetGitHubRosterJobStore(jobs *db.JobStore) {
+	h.githubRosterJobStore = jobs
 }
 
 // SetLinearTeamKeyRefresher wires an inline refresh hook (typically
@@ -259,6 +294,9 @@ func NewIntegrationHandler(
 		baseURL:          baseURL,
 		frontendURL:      frontendURL,
 		client:           http.DefaultClient,
+		slackUserInfoClient: ingestion.NewSlackAPIClient(
+			zerolog.Nop(),
+		),
 	}
 	for _, opt := range opts {
 		opt(h)
@@ -298,7 +336,18 @@ func WithGitHubAppSlug(slug string) IntegrationHandlerOption {
 func WithGitHubApp(svc githubAppService, repoStore *db.RepositoryStore) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.githubService = svc
+		if autoJoin, ok := svc.(githubOrgAutoJoinService); ok {
+			h.githubOrgAutoJoin = autoJoin
+		} else {
+			zerolog.Ctx(context.Background()).Warn().Msg("github app service does not implement githubOrgAutoJoinService; org auto-join permission checks disabled — use WithGitHubOrgAutoJoinService to wire it explicitly")
+		}
 		h.repoStore = repoStore
+	}
+}
+
+func WithGitHubOrgAutoJoinService(svc githubOrgAutoJoinService) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.githubOrgAutoJoin = svc
 	}
 }
 
@@ -326,6 +375,10 @@ func WithGitHubSetupSigningKey(key string) IntegrationHandlerOption {
 	}
 }
 
+func (h *IntegrationHandler) SetAuditEmitter(audit *db.AuditEmitter) {
+	h.audit = audit
+}
+
 // pmAutoTriggerJobStore is the minimal job enqueue interface for PM context auto-triggers.
 type pmAutoTriggerJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
@@ -350,6 +403,30 @@ func WithSlackOAuth(clientID, secret string) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.slackClientID = clientID
 		h.slackSecret = secret
+	}
+}
+
+func WithSlackInstallationStore(store *db.SlackInstallationStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackInstallationStore = store
+	}
+}
+
+func WithSlackUserLinkStore(store *db.SlackUserLinkStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackUserLinkStore = store
+	}
+}
+
+func WithSlackChannelSettingsStore(store *db.SlackChannelSettingsStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackChannelStore = store
+	}
+}
+
+func WithSlackUserInfoClient(client slackUserInfoClient) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.slackUserInfoClient = client
 	}
 }
 
@@ -453,7 +530,7 @@ func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, i
 	}
 
 	switch integration.Provider {
-	case models.IntegrationProviderNotion, models.IntegrationProviderCircleCI:
+	case models.IntegrationProviderNotion, models.IntegrationProviderCircleCI, models.IntegrationProviderMezmo:
 	default:
 		return
 	}
@@ -474,6 +551,10 @@ func (h *IntegrationHandler) deriveSafeCredentialMetadata(ctx context.Context, i
 	case models.CircleCIConfig:
 		if cfg.ProjectSlug != "" {
 			integration.CircleCIProjectSlug = integrationStringPtr(cfg.ProjectSlug)
+		}
+	case models.MezmoConfig:
+		if cfg.BaseURL != "" {
+			integration.MezmoBaseURL = integrationStringPtr(cfg.BaseURL)
 		}
 	}
 }
@@ -555,6 +636,19 @@ func (h *IntegrationHandler) DisconnectIntegration(w http.ResponseWriter, r *htt
 				writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disconnect github installation links", err)
 				return
 			}
+		}
+	}
+
+	// Disable the stored org credential so sandboxes stop receiving this
+	// provider's secrets. The sandbox env-injection path reads org_credentials
+	// (status != 'disabled') independently of integrations.status, so without
+	// this a "disconnected" provider would keep being injected and remain
+	// usable by agents. Reconnecting re-activates the row via Upsert. No-op for
+	// providers whose credentials don't live in org_credentials (e.g. GitHub).
+	if h.credentialStore != nil {
+		if err := h.credentialStore.Disable(r.Context(), orgID, models.ProviderName(provider)); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to disable integration credential", err)
+			return
 		}
 	}
 
@@ -1089,6 +1183,8 @@ func (h *IntegrationHandler) HandleGitHubAppInstalled(w http.ResponseWriter, r *
 		}
 		if err := h.githubInstallations.UpsertOrgLink(ctx, link); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to link github installation to org")
+		} else {
+			h.tryEnableGitHubOrgAutoJoin(ctx, orgID, userID, installationID, accountLogin)
 		}
 	}
 	configJSON, marshalErr := json.Marshal(map[string]any{
@@ -1114,6 +1210,271 @@ func isGitHubAppSetupAction(action string) bool {
 	default:
 		return false
 	}
+}
+
+type githubOrgAutoJoinResponse struct {
+	GitHubOrgs []githubOrgAutoJoinRow `json:"github_orgs"`
+}
+
+type githubOrgAutoJoinRow struct {
+	InstallationID     int64      `json:"installation_id"`
+	AccountLogin       string     `json:"account_login"`
+	AccountType        *string    `json:"account_type,omitempty"`
+	AutoJoinEnabled    bool       `json:"auto_join_enabled"`
+	MembersPermission  string     `json:"members_permission"`
+	RosterSyncedAt     *time.Time `json:"roster_synced_at,omitempty"`
+	CapturedByOtherOrg bool       `json:"captured_by_other_org"`
+	SettingsURL        string     `json:"settings_url,omitempty"`
+}
+
+func (h *IntegrationHandler) ListGitHubOrgAutoJoin(w http.ResponseWriter, r *http.Request) {
+	if h.githubInstallations == nil {
+		writeJSON(w, http.StatusOK, githubOrgAutoJoinResponse{GitHubOrgs: []githubOrgAutoJoinRow{}})
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	summaries, err := h.githubInstallations.ListOrgAutoJoinSummaries(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_ORGS_LOOKUP_FAILED", "failed to list github organizations", err)
+		return
+	}
+	// Fetch installation permission state concurrently — one GitHub API call per
+	// installation would otherwise serialize and stall the page load.
+	permissions := make([]string, len(summaries))
+	for i := range permissions {
+		permissions[i] = "missing"
+	}
+	if h.githubOrgAutoJoin != nil {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for i, summary := range summaries {
+			wg.Add(1)
+			go func(idx int, installationID int64) {
+				defer wg.Done()
+				if details, err := h.githubOrgAutoJoin.GetInstallationDetails(r.Context(), installationID); err == nil && details.Permissions.Members == "read" {
+					mu.Lock()
+					permissions[idx] = "granted"
+					mu.Unlock()
+				}
+			}(i, summary.InstallationID)
+		}
+		wg.Wait()
+	}
+	rows := make([]githubOrgAutoJoinRow, 0, len(summaries))
+	for i, summary := range summaries {
+		rows = append(rows, githubOrgAutoJoinRow{
+			InstallationID:     summary.InstallationID,
+			AccountLogin:       summary.AccountLogin,
+			AccountType:        summary.AccountType,
+			AutoJoinEnabled:    summary.AutoJoinEnabled,
+			MembersPermission:  permissions[i],
+			RosterSyncedAt:     summary.RosterSyncedAt,
+			CapturedByOtherOrg: summary.CapturedByOtherOrg,
+			SettingsURL:        githubInstallationSettingsURL(summary.AccountLogin, summary.InstallationID),
+		})
+	}
+	writeJSON(w, http.StatusOK, githubOrgAutoJoinResponse{GitHubOrgs: rows})
+}
+
+func (h *IntegrationHandler) UpdateGitHubOrgAutoJoin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	installationID, ok := parseInstallationIDParam(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		AutoJoinEnabled bool `json:"auto_join_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	actorID := uuid.Nil
+	if user != nil {
+		actorID = user.ID
+	}
+	if body.AutoJoinEnabled {
+		result := h.tryEnableGitHubOrgAutoJoin(r.Context(), orgID, actorID, installationID, "")
+		if result.err != nil {
+			writeGitHubOrgAutoJoinError(w, r, result.err, result.settingsURL)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result.link})
+		return
+	}
+	link, err := h.githubInstallations.SetOrgLinkAutoJoin(r.Context(), orgID, installationID, false)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "GITHUB_ORG_NOT_FOUND", "github organization link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_ORG_AUTO_JOIN_UPDATE_FAILED", "failed to update github organization auto-join", err)
+		return
+	}
+	if err := h.githubInstallations.ClearRosterForInstallation(r.Context(), installationID); err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to clear github org roster after disabling auto-join")
+	}
+	h.emitGitHubOrgAutoJoinAudit(r.Context(), orgID, actorID, models.AuditActionTeamGitHubOrgAutoJoinDisabled, link.AccountLogin, installationID, "admin_disabled")
+	writeJSON(w, http.StatusOK, map[string]any{"data": link})
+}
+
+type githubOrgAutoJoinEnableResult struct {
+	link        models.GitHubInstallationOrgLink
+	settingsURL string
+	err         error
+}
+
+var (
+	errGitHubOrgMembersPermissionMissing = errors.New("github members permission missing")
+	errGitHubAutoJoinNotOrganization     = errors.New("github installation is not an organization")
+)
+
+func (h *IntegrationHandler) tryEnableGitHubOrgAutoJoin(ctx context.Context, orgID, actorID uuid.UUID, installationID int64, accountLogin string) githubOrgAutoJoinEnableResult {
+	result := githubOrgAutoJoinEnableResult{}
+	if h.githubInstallations == nil || h.githubOrgAutoJoin == nil {
+		result.err = errors.New("github org auto-join dependencies not configured")
+		return result
+	}
+	link, err := h.githubInstallations.GetOrgLink(ctx, orgID, installationID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	inst, err := h.githubInstallations.GetByInstallationID(ctx, installationID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	if accountLogin == "" {
+		accountLogin = link.AccountLogin
+	}
+	result.settingsURL = githubInstallationSettingsURL(accountLogin, installationID)
+	details, err := h.githubOrgAutoJoin.GetInstallationDetails(ctx, installationID)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	accountType := ""
+	if inst.AccountType != nil {
+		accountType = *inst.AccountType
+	}
+	if accountType == "" {
+		accountType = details.Account.Type
+	}
+	if accountType != "Organization" {
+		result.err = errGitHubAutoJoinNotOrganization
+		return result
+	}
+	if accountLogin == "" || accountLogin == "unknown" {
+		accountLogin = details.Account.Login
+	}
+	result.settingsURL = githubInstallationSettingsURL(accountLogin, installationID)
+	if details.Permissions.Members != "read" {
+		result.err = errGitHubOrgMembersPermissionMissing
+		return result
+	}
+	enabled, err := h.githubInstallations.SetOrgLinkAutoJoin(ctx, orgID, installationID, true)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.link = enabled
+	h.emitGitHubOrgAutoJoinAudit(ctx, orgID, actorID, models.AuditActionTeamGitHubOrgAutoJoinEnabled, enabled.AccountLogin, installationID, "admin_enabled")
+	if err := h.enqueueGitHubOrgRosterSync(ctx, orgID, installationID, enabled.AccountLogin); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Int64("installation_id", installationID).Msg("failed to enqueue github org roster sync after enabling auto-join")
+	}
+	return result
+}
+
+func (h *IntegrationHandler) enqueueGitHubOrgRosterSync(ctx context.Context, orgID uuid.UUID, installationID int64, accountLogin string) error {
+	if h.githubRosterJobStore == nil {
+		return fmt.Errorf("github roster job store not configured")
+	}
+	dedupe := fmt.Sprintf("sync_github_org_roster:%d", installationID)
+	_, err := h.githubRosterJobStore.Enqueue(ctx, orgID, "github", models.JobTypeSyncGitHubOrgRoster, map[string]any{
+		"org_id":          orgID.String(),
+		"installation_id": installationID,
+		"account_login":   accountLogin,
+	}, 5, &dedupe)
+	return err
+}
+
+func parseInstallationIDParam(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	raw := chi.URLParam(r, "installation_id")
+	installationID, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || installationID <= 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_INSTALLATION_ID", "invalid github installation id")
+		return 0, false
+	}
+	return installationID, true
+}
+
+func writeGitHubOrgAutoJoinError(w http.ResponseWriter, r *http.Request, err error, settingsURL string) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, r, http.StatusNotFound, "GITHUB_ORG_NOT_FOUND", "github organization link not found")
+	case errors.Is(err, db.ErrGitHubOrgAlreadyCaptured):
+		writeError(w, r, http.StatusConflict, "GITHUB_ORG_ALREADY_CAPTURED", "this GitHub organization is already connected to another workspace")
+	case errors.Is(err, errGitHubOrgMembersPermissionMissing):
+		zerolog.Ctx(r.Context()).Info().Str("settings_url", settingsURL).Msg("github members permission missing")
+		writeJSON(w, http.StatusPreconditionFailed, models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "MEMBERS_PERMISSION_MISSING",
+				Message: "an owner must approve updated GitHub App permissions",
+				Details: map[string]any{"settings_url": settingsURL},
+			},
+		})
+	case errors.Is(err, errGitHubAutoJoinNotOrganization):
+		writeError(w, r, http.StatusUnprocessableEntity, "NOT_AN_ORGANIZATION", "auto-join requires a GitHub organization installation")
+	default:
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_ORG_AUTO_JOIN_UPDATE_FAILED", "failed to update github organization auto-join", err)
+	}
+}
+
+func githubInstallationSettingsURL(accountLogin string, installationID int64) string {
+	if accountLogin == "" || accountLogin == "unknown" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/organizations/%s/settings/installations/%d", url.PathEscape(accountLogin), installationID)
+}
+
+func (h *IntegrationHandler) emitGitHubOrgAutoJoinAudit(ctx context.Context, orgID, actorID uuid.UUID, action models.AuditAction, accountLogin string, installationID int64, reason string) {
+	resourceID := fmt.Sprintf("%d", installationID)
+	details := marshalAuditDetails(zerolog.Ctx(ctx).With().Logger(), map[string]any{
+		"account_login":   accountLogin,
+		"installation_id": installationID,
+		"reason":          reason,
+	})
+	if h.audit != nil {
+		if actorID != uuid.Nil {
+			h.audit.EmitUserAction(ctx, db.UserActionParams{
+				OrgID:        orgID,
+				UserID:       actorID,
+				Action:       action,
+				ResourceType: models.AuditResourceIntegration,
+				ResourceID:   &resourceID,
+				Details:      details,
+			})
+		} else {
+			h.audit.EmitSystemAction(ctx, db.SystemActionParams{
+				OrgID:        orgID,
+				ActorID:      "github_org_auto_join",
+				Action:       action,
+				ResourceType: models.AuditResourceIntegration,
+				ResourceID:   &resourceID,
+				Details:      details,
+			})
+		}
+	}
+	zerolog.Ctx(ctx).Info().
+		Str("org_id", orgID.String()).
+		Str("actor_user_id", actorID.String()).
+		Str("action", string(action)).
+		Str("account_login", accountLogin).
+		Int64("installation_id", installationID).
+		Str("reason", reason).
+		Msg("github org auto-join policy changed")
 }
 
 // SyncGitHubRepos reports repositories visible to the GitHub App installation.
@@ -1654,8 +2015,22 @@ func (h *IntegrationHandler) StartSlackOAuth(w http.ResponseWriter, r *http.Requ
 	params := url.Values{
 		"client_id":    {h.slackClientID},
 		"redirect_uri": {h.slackRedirectURL()},
-		"scope":        {"channels:history,channels:read,groups:read,groups:history,users:read"},
-		"state":        {state},
+		"scope": {strings.Join([]string{
+			"app_mentions:read",
+			"channels:history",
+			"channels:read",
+			"chat:write",
+			"commands",
+			"files:read",
+			"groups:history",
+			"groups:read",
+			"im:history",
+			"im:read",
+			"im:write",
+			"users:read",
+			"users:read.email",
+		}, ",")},
+		"state": {state},
 	}
 
 	http.Redirect(w, r, slackAuthorizeURL+"?"+params.Encode(), http.StatusTemporaryRedirect)
@@ -1684,6 +2059,8 @@ func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *
 		AccessToken: token.AccessToken,
 		TeamID:      token.Team.ID,
 		TeamName:    token.Team.Name,
+		BotUserID:   token.BotUserID,
+		BotID:       token.BotID,
 		Scope:       token.Scope,
 	}
 	if err := h.credentialStore.Upsert(r.Context(), orgID, slackConfig); err != nil {
@@ -1691,9 +2068,37 @@ func (h *IntegrationHandler) HandleSlackOAuthCallback(w http.ResponseWriter, r *
 		return
 	}
 
-	if _, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack); err != nil {
+	integration, _, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderSlack)
+	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to connect slack integration", err)
 		return
+	}
+	if h.slackInstallationStore != nil {
+		var enterpriseID *string
+		if token.Enterprise != nil && token.Enterprise.ID != "" {
+			enterpriseID = &token.Enterprise.ID
+		}
+		var installedBy *uuid.UUID
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			installedBy = &user.ID
+		}
+		installation := &models.SlackInstallation{
+			OrgID:             orgID,
+			IntegrationID:     integration.ID,
+			TeamID:            token.Team.ID,
+			TeamName:          token.Team.Name,
+			EnterpriseID:      enterpriseID,
+			APIAppID:          token.AppID,
+			BotUserID:         token.BotUserID,
+			BotID:             token.BotID,
+			Scope:             strings.FieldsFunc(token.Scope, func(r rune) bool { return r == ',' || r == ' ' }),
+			Status:            models.SlackInstallationStatusActive,
+			InstalledByUserID: installedBy,
+		}
+		if err := h.slackInstallationStore.Upsert(r.Context(), installation); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CONNECT_SLACK_FAILED", "failed to store slack bot installation", err)
+			return
+		}
 	}
 
 	http.Redirect(w, r, h.frontendURL+"/integrations?slack=connected", http.StatusTemporaryRedirect)
@@ -1724,7 +2129,7 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
-		slackAPIURL+"/conversations.list?types=public_channel&exclude_archived=true&limit=200", nil)
+		slackAPIURL+"/conversations.list?types=public_channel,private_channel&exclude_archived=true&limit=200", nil)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create request", err)
 		return
@@ -1756,11 +2161,18 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 	}
 
 	type channelEntry struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Selected bool   `json:"selected"`
+		ID       string                       `json:"id"`
+		Name     string                       `json:"name"`
+		Selected bool                         `json:"selected"`
+		Settings *models.SlackChannelSettings `json:"settings,omitempty"`
 	}
 	channels := make([]channelEntry, 0, len(slackResp.Channels))
+	var installation *models.SlackInstallation
+	if h.slackInstallationStore != nil {
+		if active, lookupErr := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID); lookupErr == nil {
+			installation = &active
+		}
+	}
 	for _, ch := range slackResp.Channels {
 		selected := false
 		for _, id := range cred.ChannelIDs {
@@ -1769,7 +2181,17 @@ func (h *IntegrationHandler) ListSlackChannels(w http.ResponseWriter, r *http.Re
 				break
 			}
 		}
-		channels = append(channels, channelEntry{ID: ch.ID, Name: ch.Name, Selected: selected})
+		entry := channelEntry{ID: ch.ID, Name: ch.Name, Selected: selected}
+		if installation != nil && h.slackChannelStore != nil {
+			settings, settingsErr := h.slackChannelStore.GetByChannel(r.Context(), orgID, installation.TeamID, ch.ID)
+			if settingsErr == nil {
+				entry.Settings = &settings
+			} else if !errors.Is(settingsErr, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusInternalServerError, "SLACK_CHANNEL_SETTINGS_FAILED", "failed to load slack channel settings", settingsErr)
+				return
+			}
+		}
+		channels = append(channels, entry)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": channels})
@@ -1800,6 +2222,303 @@ func (h *IntegrationHandler) UpdateSlackChannels(w http.ResponseWriter, r *http.
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"channel_ids": body.ChannelIDs}})
+}
+
+func (h *IntegrationHandler) GetSlackBot(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackInstallationStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SLACK_LOOKUP_FAILED", "failed to load slack bot installation", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackInstallation]{Data: installation})
+}
+
+func (h *IntegrationHandler) ReinstallSlackBot(w http.ResponseWriter, r *http.Request) {
+	h.StartSlackOAuth(w, r)
+}
+
+func (h *IntegrationHandler) ListSlackUserLinks(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	links, err := h.slackUserLinkStore.ListByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINKS_FAILED", "failed to list slack user links", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SlackUserLink]{Data: links, Meta: models.PaginationMeta{}})
+}
+
+func (h *IntegrationHandler) UpsertSlackUserLinkAdmin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	if h.memberships == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "MEMBERSHIP_STORE_NOT_CONFIGURED", "membership validation is not configured")
+		return
+	}
+	var body struct {
+		UserID           uuid.UUID `json:"user_id"`
+		SlackUserID      string    `json:"slack_user_id"`
+		SlackEmail       string    `json:"slack_email"`
+		SlackDisplayName string    `json:"slack_display_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	body.SlackUserID = strings.TrimSpace(body.SlackUserID)
+	body.SlackEmail = strings.TrimSpace(body.SlackEmail)
+	body.SlackDisplayName = strings.TrimSpace(body.SlackDisplayName)
+	if body.UserID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "MISSING_USER_ID", "user_id is required")
+		return
+	}
+	if body.SlackUserID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_SLACK_USER_ID", "slack_user_id is required")
+		return
+	}
+	if _, err := h.memberships.Get(r.Context(), body.UserID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusBadRequest, "USER_NOT_IN_ORG", "user_id must belong to the current org")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "MEMBERSHIP_LOOKUP_FAILED", "failed to validate user membership", err)
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	var emailPtr *string
+	if body.SlackEmail != "" {
+		emailPtr = &body.SlackEmail
+	}
+	link := &models.SlackUserLink{
+		OrgID:               orgID,
+		SlackInstallationID: installation.ID,
+		UserID:              &body.UserID,
+		SlackTeamID:         installation.TeamID,
+		SlackUserID:         body.SlackUserID,
+		SlackEmail:          emailPtr,
+		SlackDisplayName:    body.SlackDisplayName,
+	}
+	if err := h.slackUserLinkStore.UpsertAdminLink(r.Context(), link); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to upsert slack user link", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
+}
+
+func (h *IntegrationHandler) DeleteSlackUserLinkAdmin(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slack user links are not configured")
+		return
+	}
+	linkID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LINK_ID", "id must be a valid UUID")
+		return
+	}
+	if err := h.slackUserLinkStore.DeleteByID(r.Context(), orgID, linkID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SLACK_USER_LINK_NOT_FOUND", "slack user link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_DELETE_FAILED", "failed to delete slack user link", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *IntegrationHandler) LinkSlackUserMe(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "user is required")
+		return
+	}
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil || h.credentialStore == nil || h.slackUserInfoClient == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	var body struct {
+		SlackUserID string `json:"slack_user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	body.SlackUserID = strings.TrimSpace(body.SlackUserID)
+	if body.SlackUserID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_SLACK_USER_ID", "slack_user_id is required")
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	cred, err := h.credentialStore.Get(r.Context(), orgID, models.ProviderSlack)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_CREDENTIAL_FAILED", "failed to load slack credentials", err)
+		return
+	}
+	if cred == nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot credentials are not connected")
+		return
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok || strings.TrimSpace(slackCfg.AccessToken) == "" {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_CREDENTIAL_INVALID", "slack bot credentials are invalid")
+		return
+	}
+	slackUser, err := h.slackUserInfoClient.FetchUserInfo(r.Context(), slackCfg.AccessToken, body.SlackUserID)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "SLACK_USER_LOOKUP_FAILED", "failed to verify slack user", err)
+		return
+	}
+	slackEmail := strings.TrimSpace(slackUser.Profile.Email)
+	if slackEmail == "" || !strings.EqualFold(slackEmail, strings.TrimSpace(user.Email)) {
+		writeError(w, r, http.StatusForbidden, "SLACK_USER_EMAIL_MISMATCH", "slack user email does not match the authenticated user")
+		return
+	}
+	displayName := strings.TrimSpace(slackUser.Profile.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(slackUser.RealName)
+	}
+	if displayName == "" {
+		displayName = strings.TrimSpace(slackUser.Name)
+	}
+	emailPtr := &slackEmail
+	link := &models.SlackUserLink{
+		OrgID:               orgID,
+		SlackInstallationID: installation.ID,
+		UserID:              &user.ID,
+		SlackTeamID:         installation.TeamID,
+		SlackUserID:         body.SlackUserID,
+		SlackEmail:          emailPtr,
+		SlackDisplayName:    displayName,
+	}
+	if err := h.slackUserLinkStore.UpsertSelfLink(r.Context(), link); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to link slack user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
+}
+
+func (h *IntegrationHandler) UnlinkSlackUserMe(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "user is required")
+		return
+	}
+	if h.slackInstallationStore == nil || h.slackUserLinkStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	if err := h.slackUserLinkStore.DeleteSelfLink(r.Context(), orgID, user.ID, installation.TeamID); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_UNLINK_FAILED", "failed to unlink slack user", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *IntegrationHandler) PatchSlackChannelSettings(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	channelID := chi.URLParam(r, "slack_channel_id")
+	if channelID == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_CHANNEL_ID", "slack_channel_id is required")
+		return
+	}
+	if h.slackInstallationStore == nil || h.slackChannelStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
+		return
+	}
+	var body struct {
+		SlackChannelName          string          `json:"slack_channel_name"`
+		ChannelType               string          `json:"channel_type"`
+		DefaultRepositoryID       *uuid.UUID      `json:"default_repository_id"`
+		DefaultBranch             *string         `json:"default_branch"`
+		ResponseVisibility        string          `json:"response_visibility"`
+		AllowedActions            []string        `json:"allowed_actions"`
+		NotificationSubscriptions json.RawMessage `json:"notification_subscriptions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if body.ChannelType == "" {
+		body.ChannelType = "channel"
+	}
+	if body.ResponseVisibility == "" {
+		body.ResponseVisibility = "thread"
+	}
+	if len(body.AllowedActions) == 0 {
+		body.AllowedActions = []string{"session", "preview"}
+	}
+	if len(body.NotificationSubscriptions) == 0 {
+		body.NotificationSubscriptions = json.RawMessage(`{}`)
+	}
+	installation, err := h.slackInstallationStore.GetActiveByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "SLACK_NOT_CONNECTED", "slack bot is not connected", err)
+		return
+	}
+	if body.DefaultRepositoryID != nil {
+		if h.repoStore == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "REPOSITORY_STORE_NOT_CONFIGURED", "repository validation is not configured")
+			return
+		}
+		if _, err := h.repoStore.GetByID(r.Context(), orgID, *body.DefaultRepositoryID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY", "default_repository_id must belong to the current org")
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to validate default repository", err)
+			return
+		}
+	}
+	settings := &models.SlackChannelSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installation.ID,
+		SlackTeamID:               installation.TeamID,
+		SlackChannelID:            channelID,
+		SlackChannelName:          body.SlackChannelName,
+		ChannelType:               body.ChannelType,
+		DefaultRepositoryID:       body.DefaultRepositoryID,
+		DefaultBranch:             body.DefaultBranch,
+		ResponseVisibility:        body.ResponseVisibility,
+		AllowedActions:            body.AllowedActions,
+		NotificationSubscriptions: body.NotificationSubscriptions,
+		Active:                    true,
+	}
+	if err := h.slackChannelStore.Upsert(r.Context(), settings); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SLACK_CHANNEL_UPDATE_FAILED", "failed to update slack channel settings", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackChannelSettings]{Data: *settings})
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2596,4 +3315,144 @@ func (h *IntegrationHandler) validateCircleCIToken(ctx context.Context, token st
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// mezmoDefaultBaseURL is the public Mezmo API host. Kept in sync with the
+// runtime provider default in internal/services/integration.NewMezmoProvider.
+const mezmoDefaultBaseURL = "https://api.mezmo.com"
+
+// ConnectMezmo accepts a Mezmo access token or legacy service key (plus optional
+// base URL), validates it against the export endpoint, stores the
+// credential, and creates an active integration record. Mezmo uses a
+// paste-the-key flow because its log-query API authenticates with a long-lived
+// token rather than OAuth. The stored credential is injected into sandboxes as
+// MEZMO_* env vars by the orchestrator (see internal/services/agent/env.go) so
+// the agent's 143-tools log commands query this org's Mezmo with its own key.
+func (h *IntegrationHandler) ConnectMezmo(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+
+	var req struct {
+		APIKey  string `json:"api_key"`
+		BaseURL string `json:"base_url"`
+		Dataset string `json:"dataset"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	req.APIKey = strings.TrimSpace(req.APIKey)
+	req.BaseURL = strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	req.Dataset = strings.TrimSpace(req.Dataset)
+	if req.APIKey == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_API_KEY", "api_key is required")
+		return
+	}
+	if req.Dataset != "" {
+		writeError(w, r, http.StatusBadRequest, "UNSUPPORTED_DATASET", "Mezmo dataset scoping is not supported by the current export API; leave dataset blank")
+		return
+	}
+	if req.BaseURL != "" {
+		if u, err := url.Parse(req.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_URL", "base_url must be an absolute URL (e.g. https://api.mezmo.com)")
+			return
+		}
+	}
+
+	cfg := models.MezmoConfig{
+		APIKey:  req.APIKey,
+		BaseURL: req.BaseURL,
+		Dataset: req.Dataset,
+	}
+	if err := h.validateMezmoToken(r.Context(), cfg); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN", "failed to validate Mezmo key: "+err.Error())
+		return
+	}
+
+	if err := h.credentialStore.Upsert(r.Context(), orgID, cfg); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CREDENTIAL_SAVE_FAILED", "failed to save Mezmo credentials", err)
+		return
+	}
+
+	integration, created, err := h.ensureIntegration(r.Context(), orgID, models.IntegrationProviderMezmo)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CONNECT_MEZMO_FAILED", "failed to create Mezmo integration", err)
+		return
+	}
+	h.deriveIntegrationStatus(r.Context(), &integration, map[models.IntegrationProvider]bool{
+		models.IntegrationProviderMezmo: true,
+	})
+
+	if created {
+		writeJSON(w, http.StatusCreated, models.SingleResponse[models.Integration]{Data: integration})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Integration]{Data: integration})
+}
+
+// validateMezmoToken issues a minimal export request against the Mezmo API to
+// confirm the key is accepted. It mirrors the runtime provider's documented
+// GET /v2/export path and prefers the current Authorization token auth, with a
+// fallback for legacy service keys.
+func (h *IntegrationHandler) validateMezmoToken(ctx context.Context, cfg models.MezmoConfig) error {
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = mezmoDefaultBaseURL
+	}
+	now := time.Now()
+	values := url.Values{}
+	values.Set("query", "*")
+	values.Set("from", strconv.FormatInt(now.Add(-time.Minute).Unix(), 10))
+	values.Set("to", strconv.FormatInt(now.Unix(), 10))
+	values.Set("size", "1")
+	values.Set("prefer", "tail")
+
+	statusCode, err := h.validateMezmoTokenRequest(ctx, baseURL, values, "Authorization", "Token "+cfg.APIKey)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		fallbackStatus, fallbackErr := h.validateMezmoTokenRequest(ctx, baseURL, values, "servicekey", cfg.APIKey)
+		if fallbackErr != nil {
+			return fmt.Errorf("request failed: %w", fallbackErr)
+		}
+		statusCode = fallbackStatus
+	}
+
+	// We're validating the key, not the query. Only an auth rejection is a
+	// definitive "bad key", 404/405 means the configured endpoint is wrong or
+	// no longer serves the export API, and a 5xx means Mezmo is unhealthy right
+	// now (worth surfacing so the user retries). Other 4xx responses can be
+	// query-shape/rate-limit quirks after auth, so do not block a valid key.
+	switch {
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+		return fmt.Errorf("invalid or expired key")
+	case statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed:
+		return fmt.Errorf("mezmo API endpoint not found")
+	case statusCode >= 500:
+		return fmt.Errorf("mezmo API returned %d", statusCode)
+	default:
+		return nil
+	}
+}
+
+func (h *IntegrationHandler) validateMezmoTokenRequest(ctx context.Context, baseURL string, values url.Values, authHeader, authValue string) (int, error) {
+	endpoint := strings.TrimRight(baseURL, "/") + "/v2/export"
+	if encoded := values.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set(authHeader, authValue)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return 0, err
+	}
+	return resp.StatusCode, nil
 }

@@ -20,6 +20,7 @@ vi.mock('next/link', () => ({
 let mockPathname = '/sessions';
 let mockSelectedSegment: string | null = null;
 const mockRouterPush = vi.fn();
+const mockRouterPrefetch = vi.fn();
 const mockAuthState: {
   isAuthenticated: boolean;
   user: { id: string } | null;
@@ -33,7 +34,7 @@ const mockAuthState: {
 };
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: mockRouterPush, replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: mockRouterPush, prefetch: mockRouterPrefetch, replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
   useSelectedLayoutSegment: () => mockSelectedSegment,
@@ -44,12 +45,13 @@ vi.mock('@/hooks/use-auth', () => ({
 }));
 
 const mockOptimisticSessions: { id: string; title: string; status: 'pending'; created_at: string; resolvedId?: string }[] = [];
+const mockRemoveOptimisticSession = vi.fn();
 
 vi.mock('@/contexts/optimistic-sessions', () => ({
   useOptimisticSessions: () => ({
     optimisticSessions: mockOptimisticSessions,
     addOptimisticSession: vi.fn(),
-    removeOptimisticSession: vi.fn(),
+    removeOptimisticSession: mockRemoveOptimisticSession,
     markOptimisticResolved: vi.fn(),
   }),
   OptimisticSessionsProvider: ({ children }: { children: React.ReactNode }) => children,
@@ -131,6 +133,8 @@ describe('SessionSidebar', () => {
     mockPathname = '/sessions';
     mockSelectedSegment = null;
     mockRouterPush.mockReset();
+    mockRouterPrefetch.mockReset();
+    mockRemoveOptimisticSession.mockReset();
     mockOptimisticSessions.length = 0;
     mockAuthState.isAuthenticated = true;
     mockAuthState.user = { id: 'user-1' };
@@ -240,7 +244,153 @@ describe('SessionSidebar', () => {
     resolveArchiveRefetch?.();
   });
 
-  it('keeps a committed mobile archive row displaced until the backend removes it', async () => {
+  it('optimistically removes an archived session before the archive request settles', async () => {
+    let resolveArchive: (() => void) | undefined;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Immediate archive' })],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        return new Promise((resolve) => {
+          resolveArchive = () => resolve(HttpResponse.json({ status: 'archived' }));
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Immediate archive');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive session' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Immediate archive')).not.toBeInTheDocument();
+    });
+
+    resolveArchive?.();
+  });
+
+  it('rolls back an optimistic archive when the archive request fails', async () => {
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Archive rollback' })],
+          meta: {},
+        });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        return HttpResponse.json(
+          { error: { code: 'ARCHIVE_FAILED', message: 'Archive failed' } },
+          { status: 500 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Archive rollback');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive session' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Archive rollback')).toBeInTheDocument();
+    });
+  });
+
+  it('optimistically removes an archived session from loaded extra pages', async () => {
+    server.use(
+      http.get('/api/v1/sessions', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor');
+        if (cursor === 'page-2') {
+          return HttpResponse.json({
+            data: [makeSession({ id: 's2', result_summary: 'Second page archive' })],
+            meta: {},
+          });
+        }
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'First page session' })],
+          meta: { next_cursor: 'page-2' },
+        });
+      }),
+      http.post('/api/v1/sessions/s2/archive', () => {
+        return HttpResponse.json({ status: 'archived' });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('First page session');
+    await userEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    await screen.findByText('Second page archive');
+
+    const archiveButtons = screen.getAllByRole('button', { name: 'Archive session' });
+    await userEvent.click(archiveButtons[archiveButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Second page archive')).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps capped session counts capped during optimistic archive updates', async () => {
+    let resolveArchive: (() => void) | undefined;
+    server.use(
+      http.get('/api/v1/sessions', () => {
+        return HttpResponse.json({
+          data: [makeSession({ id: 's1', result_summary: 'Capped count archive', status: 'running' })],
+          meta: {},
+        });
+      }),
+      http.get('/api/v1/sessions/counts', () => {
+        return HttpResponse.json({ data: { all: 100, active: 100, archived: 100, cap: 100 } });
+      }),
+      http.post('/api/v1/sessions/s1/archive', () => {
+        return new Promise((resolve) => {
+          resolveArchive = () => resolve(HttpResponse.json({ status: 'archived' }));
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionSidebar />);
+    await screen.findByText('Capped count archive');
+    await screen.findAllByText('99+');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive session' }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('99+')).toHaveLength(3);
+    });
+    expect(screen.queryByText('99')).not.toBeInTheDocument();
+
+    resolveArchive?.();
+  });
+
+  it('prefetches session detail when a session row is hovered or focused', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Prefetch me' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+    const link = (await screen.findByText('Prefetch me')).closest('a');
+    expect(link).not.toBeNull();
+
+    fireEvent.mouseEnter(link!);
+    fireEvent.focus(link!);
+
+    expect(mockRouterPrefetch).toHaveBeenCalledWith('/sessions/s1');
+  });
+
+  it('prefetches the new-session route when the new-session affordance is hovered', async () => {
+    serveSessions([]);
+
+    renderWithProviders(<SessionSidebar />);
+    const link = await screen.findByRole('link', { name: 'New session' });
+
+    fireEvent.mouseEnter(link);
+
+    expect(mockRouterPrefetch).toHaveBeenCalledWith('/sessions/new');
+  });
+
+  it('removes a committed mobile archive row immediately while the backend request is pending', async () => {
     let archiveCalls = 0;
     let archiveSettled = false;
     let resolveArchive: (() => void) | undefined;
@@ -280,18 +430,16 @@ describe('SessionSidebar', () => {
     fireEvent.touchMove(surface!, { touches: [{ clientX: 170, clientY: 26 }] });
     fireEvent.touchEnd(surface!);
 
-    await waitFor(() => {
-      expect(archiveCalls).toBe(1);
-    });
-    expect(screen.getByText('Swipe pending')).toBeInTheDocument();
+    // Committed visual state is set synchronously before onMutate's async cache removal
     expect(container).toHaveAttribute('data-swipe-state', 'committed');
     expect(surface!.style.transform).toBe('translateX(-390px)');
 
-    resolveArchive?.();
-
     await waitFor(() => {
-      expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
+      expect(archiveCalls).toBe(1);
     });
+    expect(screen.queryByText('Swipe pending')).not.toBeInTheDocument();
+
+    resolveArchive?.();
   });
 
   it('keeps the desktop archive action de-emphasized until hover or focus', async () => {
@@ -357,14 +505,14 @@ describe('SessionSidebar', () => {
     const selectedRow = selectedLink.parentElement;
 
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/20', 'bg-background', 'shadow-sm');
+    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/25', 'bg-card', 'shadow-sm');
 
     fireEvent.click(selectedRow!);
 
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s1');
   });
 
-  it('shows a pending opening state immediately when a session row is clicked', async () => {
+  it('uses direct session links without an intermediate opening state', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Slow session' }),
       makeSession({ id: 's2', result_summary: 'Other session' }),
@@ -377,18 +525,29 @@ describe('SessionSidebar', () => {
 
     await userEvent.click(link!);
 
-    expect(link).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByText('Opening')).toBeInTheDocument();
-    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveClass(
-      'border-primary/20',
-      'bg-background',
-      'shadow-sm',
-    );
+    expect(link).not.toHaveAttribute('aria-busy');
+    expect(screen.queryByText('Opening')).not.toBeInTheDocument();
+    expect(screen.getByText('Slow session').closest('[role="option"]')).toHaveTextContent('Completed');
     expect(screen.getByText('Other session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
   });
 
-  it('keeps the target row pending when switching from one selected session to another', async () => {
+  it('lets plain row links navigate through Next Link instead of imperative router push', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Native link session' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Native link session')).closest('a');
+    expect(link).not.toBeNull();
+
+    await userEvent.click(link!);
+
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
+  });
+
+  it('does not hold a target row pending when switching from one selected session to another', async () => {
     mockSelectedSegment = 's1';
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Current session' }),
@@ -402,14 +561,10 @@ describe('SessionSidebar', () => {
 
     await userEvent.click(nextLink!);
 
-    expect(nextLink).toHaveAttribute('aria-busy', 'true');
-    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByText('Current session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
-    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveClass(
-      'border-primary/20',
-      'bg-background',
-      'shadow-sm',
-    );
+    expect(nextLink).not.toHaveAttribute('aria-busy');
+    expect(screen.queryByText('Opening')).not.toBeInTheDocument();
+    expect(screen.getByText('Next session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByText('Current session').closest('[role="option"]')).toHaveAttribute('aria-selected', 'true');
   });
 
   it('uses the same row padding frame for the new-session draft and normal sessions', async () => {
@@ -494,6 +649,27 @@ describe('SessionSidebar', () => {
       expect(input).toHaveValue('');
       expect(screen.getByText('Alpha fix')).toBeInTheDocument();
     });
+  });
+
+  it('opens a clicked session through its direct link', async () => {
+    const session = makeSession({
+      id: 's1',
+      result_summary: 'Instant open session',
+      status: 'running',
+      diff_stats: { added: 12, removed: 4, files_changed: 3 },
+    });
+    serveSessions([session]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    const link = (await screen.findByText('Instant open session')).closest('a');
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
+
+    await userEvent.click(link!);
+
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute('href', '/sessions/s1');
   });
 
   // -----------------------------------------------------------------------
@@ -602,6 +778,53 @@ describe('SessionSidebar', () => {
     renderWithProviders(<SessionSidebar />);
 
     await screen.findByText('Real session');
+    expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
+  });
+
+  it('keeps resolved optimistic ownership during the real-session handoff', async () => {
+    serveSessions([makeSession({ id: 's-real', result_summary: 'Real session', status: 'pending' })]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Optimistic placeholder',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      resolvedId: 's-real',
+    });
+
+    renderWithProviders(<SessionSidebar />);
+
+    const realSessionLink = await screen.findByRole('link', { name: /Real session/ });
+    expect(realSessionLink).toHaveAttribute('href', '/sessions/s-real');
+    expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Real session')).toHaveLength(1);
+    expect(mockRemoveOptimisticSession).not.toHaveBeenCalled();
+  });
+
+  it('shows the real session exactly once after the fallback timer removes the optimistic entry', async () => {
+    serveSessions([makeSession({ id: 's-real', result_summary: 'Real session', status: 'pending' })]);
+    mockOptimisticSessions.push({
+      id: 'opt-1',
+      title: 'Optimistic placeholder',
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      resolvedId: 's-real',
+    });
+
+    const { rerender } = renderWithProviders(<SessionSidebar />);
+
+    // Resolved row is showing the real session.
+    await screen.findByRole('link', { name: /Real session/ });
+    expect(screen.getAllByText('Real session')).toHaveLength(1);
+
+    // Simulate the fallback timer firing: the optimistic entry is removed from context.
+    mockOptimisticSessions.length = 0;
+    rerender(<SessionSidebar />);
+
+    // Real session still appears exactly once — no duplication or disappearance
+    // during the React key transition from optimistic.id → session.id.
+    await waitFor(() => {
+      expect(screen.getAllByText('Real session')).toHaveLength(1);
+    });
     expect(screen.queryByText('Optimistic placeholder')).not.toBeInTheDocument();
   });
 
@@ -882,7 +1105,7 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
     expect(selectedRow?.className).toContain('ring-primary/10');
     expect(selectedRow?.className).toContain('shadow-sm');
@@ -904,7 +1127,7 @@ describe('SessionSidebar', () => {
     const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
 
     expect(selectedRow).toHaveClass('border', 'p-1');
-    expect(selectedRow).toHaveClass('border-primary/20');
+    expect(selectedRow).toHaveClass('border-primary/25');
     expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
   });
 
@@ -927,7 +1150,7 @@ describe('SessionSidebar', () => {
     expect(selectedLink?.className).toContain('shadow-none');
     expect(selectedLink?.className).toContain('ring-0');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/20');
+    expect(selectedRow?.className).toContain('border-primary/25');
     expect(selectedRow?.className).toContain('ring-1');
     expect(selectedRow?.className).toContain('ring-primary/10');
     expect(selectedRow?.className).toContain('shadow-sm');
@@ -1019,6 +1242,19 @@ describe('SessionSidebar', () => {
 
     const link = screen.getByText('Member-scoped session').closest('a');
     expect(link).toHaveAttribute('href', '/sessions/s1?people=user-2%2Cuser-3');
+  });
+
+  it('shows in-flight PR creation and push statuses on session rows', async () => {
+    serveSessions([
+      makeSession({ id: 's1', result_summary: 'Opening a pull request', pr_creation_state: 'queued' }),
+      makeSession({ id: 's2', result_summary: 'Updating an existing pull request', pr_push_state: 'pushing' }),
+    ]);
+
+    renderWithProviders(<SessionSidebar />);
+
+    await screen.findByText('Opening a pull request');
+    expect(screen.getByText('Creating PR')).toBeInTheDocument();
+    expect(screen.getByText('Pushing changes')).toBeInTheDocument();
   });
 
   it('only serializes the filters that are actually set', async () => {
@@ -1304,6 +1540,8 @@ describe('SessionSidebar', () => {
 
     await user.keyboard('{Enter}');
     expect(mockRouterPush).toHaveBeenCalledWith('/sessions/s3');
+    expect(screen.queryByText('Opening')).not.toBeInTheDocument();
+    expect(screen.getByText('Gamma keyboard').closest('a')).not.toHaveAttribute('aria-busy');
   });
 
   it('focuses search, starts a new session, and archives the active session by shortcut', async () => {

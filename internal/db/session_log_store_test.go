@@ -181,6 +181,34 @@ func TestSessionLogStore_ListByRunID_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionLogStore_GetByID_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_logs sl WHERE sl.id .+ sl.session_id .+ sl.org_id").
+		WithArgs(int64(42), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(logColumns).
+				AddRow(int64(42), sessionID, orgID, nil, now, "output", "full output", json.RawMessage(`{"type":"tool_result"}`), 3),
+		)
+
+	log, err := store.GetByID(context.Background(), orgID, sessionID, 42)
+	require.NoError(t, err, "GetByID should return the scoped log")
+	require.Equal(t, int64(42), log.ID, "GetByID should return the requested log")
+	require.Equal(t, sessionID, log.SessionID, "GetByID should preserve session ID")
+	require.Equal(t, orgID, log.OrgID, "GetByID should preserve org ID")
+	require.Equal(t, "full output", log.Message, "GetByID should return the full message")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionLogStore_ListByRunID_Empty(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
@@ -353,6 +381,46 @@ func TestSessionLogStore_ListByThreadTurns(t *testing.T) {
 	require.Len(t, logs, 1, "ListByThreadTurns should return matching log entries")
 	require.Equal(t, int64(1), logs[0].ID, "ListByThreadTurns should scan the returned log")
 	require.NoError(t, mock.ExpectationsWereMet(), "ListByThreadTurns should apply the expected SQL filter")
+}
+
+func TestSessionLogStore_ListByThreadLatestTurns(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	orgID := uuid.New()
+	threadID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`SELECT .+ FROM session_logs sl WHERE sl.thread_id = @thread_id AND sl.org_id = @org_id AND sl.turn_number > \( SELECT COALESCE\(MAX\(inner_sl.turn_number\), 0\) - @latest_turns`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(logColumns).
+				AddRow(newLogRow(1, sessionID, now)...),
+		)
+
+	logs, err := store.ListByThreadLatestTurns(context.Background(), orgID, threadID, 50)
+	require.NoError(t, err, "ListByThreadLatestTurns should not return an error")
+	require.Len(t, logs, 1, "ListByThreadLatestTurns should return matching log entries")
+	require.Equal(t, int64(1), logs[0].ID, "ListByThreadLatestTurns should scan the returned log")
+	require.NoError(t, mock.ExpectationsWereMet(), "ListByThreadLatestTurns should anchor on the thread's max turn")
+}
+
+func TestSessionLogStore_ListByThreadLatestTurnsNonPositive(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+
+	logs, err := store.ListByThreadLatestTurns(context.Background(), uuid.New(), uuid.New(), 0)
+	require.NoError(t, err, "non-positive window should be a no-op, not an error")
+	require.Empty(t, logs, "non-positive window should return no logs without querying")
+	require.NoError(t, mock.ExpectationsWereMet(), "non-positive window must not hit the database")
 }
 
 func TestSessionLogStore_DeleteExpired(t *testing.T) {

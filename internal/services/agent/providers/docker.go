@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -22,7 +23,6 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
@@ -579,6 +579,18 @@ func (d *DockerProvider) configLogger(cfg agent.SandboxConfig) zerolog.Logger {
 // sandbox image — because sudo's setuid bit is stripped under gVisor /
 // nosuid mounts and the provider runs with CapDrop=ALL.
 func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	networkName := cfg.NetworkName
+	if networkName == "" {
+		networkName = d.network
+	}
+	resolvConf := cfg.ResolvConfPath
+	if resolvConf == "" {
+		resolvConf = d.resolvConf
+	}
+	egressMode := cfg.EgressMode
+	if egressMode == "" {
+		egressMode = agent.SandboxEgressModeDirect
+	}
 	log := d.configLogger(cfg)
 	log.Info().
 		Str("image", cfg.Image).
@@ -586,6 +598,8 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		Int("memory_limit_mb", cfg.MemoryLimitMB).
 		Int("disk_limit_gb", cfg.DiskLimitGB).
 		Str("runtime", d.runtime).
+		Str("network", networkName).
+		Str("egress_mode", egressMode).
 		Msg("creating sandbox container")
 
 	pidsLimit := int64(256)
@@ -635,7 +649,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 			Memory:    int64(cfg.MemoryLimitMB) * 1024 * 1024,
 			PidsLimit: &pidsLimit,
 		},
-		NetworkMode: container.NetworkMode(d.network),
+		NetworkMode: container.NetworkMode(networkName),
 		CapDrop:     []string{"ALL"},
 		// No CapAdd: sudo was removed from the sandbox image (setuid bits
 		// are stripped under gVisor / nosuid), and bootstrap provisioning
@@ -668,10 +682,10 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 	// host-managed resolv.conf bypasses the embedded resolver entirely and
 	// works for any runtime. The host path is provisioned out-of-band; see
 	// deploy/scripts/provision.sh and the SANDBOX_RESOLV_CONF env var.
-	if d.resolvConf != "" {
+	if resolvConf != "" {
 		hostCfg.Mounts = append(hostCfg.Mounts, mount.Mount{
 			Type:     mount.TypeBind,
-			Source:   d.resolvConf,
+			Source:   resolvConf,
 			Target:   "/etc/resolv.conf",
 			ReadOnly: true,
 		})
@@ -747,8 +761,9 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		HomeDir:  cfg.HomeDir,
 		Env:      cloneEnv(cfg.Env),
 		Metadata: map[string]string{
-			"runtime": d.runtime,
-			"network": d.network,
+			"runtime":                       d.runtime,
+			"network":                       networkName,
+			agent.SandboxMetadataEgressMode: egressMode,
 		},
 		SessionID: cfg.SessionID,
 		OrgID:     cfg.OrgID,
@@ -807,32 +822,28 @@ func sandboxContainerLabels(cfg agent.SandboxConfig, createdAt time.Time) map[st
 	return labels
 }
 
-// CountLiveSandboxes counts running local sandbox containers attached to the
-// configured sandbox network. Labels are preferred for newly-created
-// containers; image-name matching keeps existing unlabeled sandboxes visible.
+// CountLiveSandboxes counts running local sandbox containers across all
+// sandbox bridges. Labels are preferred for newly-created containers; image-name
+// matching keeps existing unlabeled sandboxes visible on the default bridge.
 func (d *DockerProvider) CountLiveSandboxes(ctx context.Context) (int, error) {
-	args := filters.NewArgs()
-	if d.network != "" {
-		args.Add("network", d.network)
-	}
-	containers, err := d.client.ContainerList(ctx, container.ListOptions{Filters: args})
+	containers, err := d.client.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return 0, fmt.Errorf("list live sandbox containers: %w", err)
 	}
 	count := 0
 	for _, summary := range containers {
-		if isLiveSandboxContainer(summary) {
+		if isLiveSandboxContainer(summary, d.network) {
 			count++
 		}
 	}
 	return count, nil
 }
 
-func isLiveSandboxContainer(summary container.Summary) bool {
+func isLiveSandboxContainer(summary container.Summary, sandboxNetwork string) bool {
 	if summary.Labels != nil && (summary.Labels[sandboxLabelLegacySandbox] == "true" || isManagedSandboxLabels(summary.Labels)) {
 		return true
 	}
-	return isLegacySandboxImage(summary)
+	return isLegacySandboxImage(summary) && isContainerAttachedToNetwork(summary, sandboxNetwork)
 }
 
 func isLegacySandboxImage(summary container.Summary) bool {
@@ -1001,11 +1012,79 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 	return inspectResp.ExitCode, nil
 }
 
+// ExecWithStdin runs a command inside the sandbox while streaming stdin into
+// the exec session. It is used for large payloads where staging a sandbox temp
+// file would create avoidable disk pressure.
+func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	log := d.scopedLogger(sb)
+	log.Debug().Str("cmd", redactSandboxCommandForLog(cmd)).Msg("executing stdin command in sandbox")
+
+	execCfg := container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir:   sb.WorkDir,
+		Env:          envSliceFromMap(sb.Env),
+	}
+
+	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
+	if err != nil {
+		return -1, fmt.Errorf("create exec: %w", err)
+	}
+
+	attachResp, err := d.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, fmt.Errorf("attach exec: %w", err)
+	}
+	defer attachResp.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			attachResp.Close()
+		case <-done:
+		}
+	}()
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(attachResp.Conn, stdin)
+		closeErr := attachResp.CloseWrite()
+		writeErrCh <- errors.Join(copyErr, closeErr)
+	}()
+
+	if _, err := stdcopy.StdCopy(stdout, stderr, attachResp.Reader); err != nil {
+		attachResp.Close()
+		<-writeErrCh
+		return -1, fmt.Errorf("read exec output: %w", err)
+	}
+	if err := <-writeErrCh; err != nil {
+		return -1, fmt.Errorf("write exec stdin: %w", err)
+	}
+
+	inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return -1, fmt.Errorf("inspect exec: %w", err)
+	}
+
+	return inspectResp.ExitCode, nil
+}
+
+// cliTokenPattern matches the distinctive 143-credential prefixes (user CLI
+// tokens "143u_", org join tokens "143j_") wherever they appear in logged
+// command lines. The prefixes exist partly so leaked tokens are
+// machine-findable — the log layer must therefore strip them before
+// shipping.
+var cliTokenPattern = regexp.MustCompile(`143[uj]_[A-Za-z0-9_-]{8,}`)
+
 func redactSandboxCommandForLog(cmd string) string {
 	if strings.Contains(cmd, "__143_SECRET_FILE__") {
 		return "[redacted preview secret file write]"
 	}
-	return cmd
+	return cliTokenPattern.ReplaceAllString(cmd, "143?_***")
 }
 
 // ReadFile reads a file from the sandbox filesystem by exec-ing cat.
@@ -1026,9 +1105,18 @@ func (d *DockerProvider) ReadFile(ctx context.Context, sb *agent.Sandbox, path s
 
 // WriteFile writes data to a file inside the sandbox.
 func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, filePath string, data []byte) error {
+	return d.WriteFileFromReader(ctx, sb, filePath, bytes.NewReader(data), int64(len(data)))
+}
+
+// WriteFileFromReader writes a file into the sandbox without requiring callers
+// to materialize the entire payload as a byte slice.
+func (d *DockerProvider) WriteFileFromReader(ctx context.Context, sb *agent.Sandbox, filePath string, reader io.Reader, sizeBytes int64) error {
 	cleanPath := filepath.ToSlash(filepath.Clean(filePath))
 	if cleanPath == "." {
 		return fmt.Errorf("write file %s: invalid path", filePath)
+	}
+	if sizeBytes < 0 {
+		return fmt.Errorf("write file %s: invalid size", filePath)
 	}
 	relPath := strings.TrimPrefix(cleanPath, "/")
 	if relPath == "" {
@@ -1040,21 +1128,6 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, fileP
 		}
 	}
 	extractDir, archiveName := writeFileTarTarget(sb, cleanPath, relPath)
-
-	var archive bytes.Buffer
-	tw := tar.NewWriter(&archive)
-	if err := writeTarDirs(tw, path.Dir(archiveName)); err != nil {
-		return fmt.Errorf("write file %s: build tar dirs: %w", filePath, err)
-	}
-	if err := tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: int64(len(data))}); err != nil {
-		return fmt.Errorf("write file %s: build tar header: %w", filePath, err)
-	}
-	if _, err := tw.Write(data); err != nil {
-		return fmt.Errorf("write file %s: build tar body: %w", filePath, err)
-	}
-	if err := tw.Close(); err != nil {
-		return fmt.Errorf("write file %s: close tar: %w", filePath, err)
-	}
 
 	execCfg := container.ExecOptions{
 		Cmd:          []string{"tar", "xf", "-", "-C", extractDir},
@@ -1071,8 +1144,36 @@ func (d *DockerProvider) WriteFile(ctx context.Context, sb *agent.Sandbox, fileP
 		return fmt.Errorf("write file %s: attach: %w", filePath, err)
 	}
 	defer attachResp.Close()
-	if _, err := io.Copy(attachResp.Conn, &archive); err != nil {
+
+	pr, pw := io.Pipe()
+	writeErrCh := make(chan error, 1)
+	go func() {
+		tw := tar.NewWriter(pw)
+		var err error
+		if err = writeTarDirs(tw, path.Dir(archiveName)); err == nil {
+			err = tw.WriteHeader(&tar.Header{Name: archiveName, Mode: 0o600, Size: sizeBytes})
+		}
+		if err == nil {
+			_, err = io.Copy(tw, reader)
+		}
+		if closeErr := tw.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			writeErrCh <- err
+			return
+		}
+		writeErrCh <- pw.Close()
+	}()
+	if _, err := io.Copy(attachResp.Conn, pr); err != nil {
+		// Close the read end so the writer goroutine unblocks and exits.
+		_ = pr.CloseWithError(err)
+		<-writeErrCh // wait for goroutine to finish before returning
 		return fmt.Errorf("write file %s: stream tar: %w", filePath, err)
+	}
+	if err := <-writeErrCh; err != nil {
+		return fmt.Errorf("write file %s: build tar stream: %w", filePath, err)
 	}
 	_ = attachResp.CloseWrite()
 	stderrBuf := newCappedBuffer(tarStderrCap)
@@ -1561,10 +1662,11 @@ func shellEscape(s string) string {
 }
 
 // redactToken removes an auth token from a string so it is safe to surface in
-// error messages or logs.
+// error messages or logs. CLI/join-token shapes are stripped by pattern as
+// well, since those can appear without the caller knowing the exact value.
 func redactToken(s, token string) string {
 	if token != "" {
 		s = strings.ReplaceAll(s, token, "***")
 	}
-	return s
+	return cliTokenPattern.ReplaceAllString(s, "143?_***")
 }

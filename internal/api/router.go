@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/api/gateway"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
@@ -32,6 +33,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -70,6 +72,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionLogStore := db.NewSessionLogStore(pool)
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
+	slackInstallationStore := db.NewSlackInstallationStore(pool)
+	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
+	sessionAttributionStore := db.NewSessionAttributionStore(pool)
+	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
+	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
@@ -102,9 +109,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	evalRunStore := db.NewEvalRunStore(pool)
 	evalBatchStore := db.NewEvalBatchStore(pool)
 	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
+	evalDatasetStore := db.NewEvalDatasetStore(pool)
+	evalReleaseGateStore := db.NewEvalReleaseGateStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	previewStore := db.NewPreviewStore(pool)
 	previewAPITokenStore := db.NewPreviewAPITokenStore(pool)
+	apiClientStore := db.NewAPIClientStore(pool)
+	apiTokenStore := db.NewAPITokenStore(pool)
+	apiIdempotencyStore := db.NewAPIIdempotencyStore(pool)
+	externalAPIRateLimiter := middleware.NewExternalAPIRateLimiter(middleware.DefaultExternalAPIRateLimitConfig())
 	nodeStore := db.NewNodeStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
@@ -130,17 +143,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		}
 	}
 	previewSecretBundleStore := db.NewPreviewSecretBundleStore(pool, previewSecretCrypto, cfg.PreviewSecretBundleKEKVersion)
-	// Mirror legacy writes into the unified `coding_credentials` table during the
-	// migration window. Removed in the cleanup PR. See
-	// docs/design/future/65-unified-coding-credentials.md.
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	mirrorLog := func(format string, args ...any) {
-		logger.Warn().Msgf(format, args...)
-	}
-	credentialStore.SetMirrorLogger(mirrorLog)
-	userCredentialStore.SetMirrorLogger(mirrorLog)
-	codingCredentialStore.SetMirrorLogger(mirrorLog)
 
 	// Create services
 	ingestionSvc := ingestion.NewService(issueStore, webhookDeliveryStore, jobStore, logger)
@@ -176,6 +178,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
+	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
+	userCLITokenStore := db.NewUserCLITokenStore(pool)
+	orgJoinTokenStore := db.NewOrgJoinTokenStore(pool)
+	authHandler.SetCLIAuthStores(cliAuthCodeStore, userCLITokenStore, orgJoinTokenStore, orgStore)
+	joinTokenHandler := handlers.NewJoinTokenHandler(orgJoinTokenStore, cfg.BaseURL)
+	// Local agent gateway: executes integration tools server-side for
+	// logged-in CLIs, so org credentials never land on laptops.
+	cliToolsHandler := handlers.NewCLIToolsHandler(credentialStore, logger)
+	cliToolsHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler := handlers.NewOrganizationsHandler(pool)
 	repoHandler := handlers.NewRepositoryHandler(repoStore)
 	if prService != nil {
@@ -189,6 +201,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithIntegrationMembershipStore(membershipStore),
 		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
+		handlers.WithSlackInstallationStore(slackInstallationStore),
+		handlers.WithSlackUserLinkStore(slackUserLinkStore),
+		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
 	}
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
@@ -196,6 +211,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
 			integrationOpts = append(integrationOpts, handlers.WithGitHubApp(ghSvc, repoStore))
+			authHandler.SetGitHubOrgAutoJoinDeps(githubInstallationStore, ghSvc)
 		}
 	}
 	if appUserAuthSvc != nil {
@@ -212,8 +228,24 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		integrationOpts...,
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
+	integrationHandler.SetGitHubRosterJobStore(jobStore)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
+	slackbotHandler := handlers.NewSlackbotHandler(
+		handlers.SlackbotHandlerConfig{
+			SigningSecret: cfg.SlackSigningSecret,
+			FrontendURL:   cfg.FrontendURL,
+		},
+		slackInstallationStore,
+		slackInboundEventStore,
+		jobStore,
+	)
+	slackbotHandler.SetLogger(logger)
+	if slackMetrics, err := metrics.NewSlackbotMetrics(); err == nil {
+		slackbotHandler.SetMetrics(slackMetrics)
+	} else {
+		logger.Warn().Err(err).Msg("failed to initialize Slackbot metrics")
+	}
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
 	usageHandler := handlers.NewUsageHandler(
@@ -222,6 +254,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithMembershipStore(membershipStore),
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
+	settingsHandler.SetStaticEgressStatus(handlers.StaticEgressStatus{
+		Available:         cfg.StaticEgressPublicIP != "",
+		PublicIP:          cfg.StaticEgressPublicIP,
+		UnavailableReason: agent.StaticEgressUnavailableReason(cfg.StaticEgressPublicIP),
+	})
+	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
 	sessionMessageStore := db.NewSessionMessageStore(pool)
@@ -308,6 +346,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		})
 	}
 	sessionHandler.SetLinearLinker(linearService)
+	// Refresh-aware Linear tokens for the local agent gateway, same resolver
+	// the sandbox env injection uses.
+	cliToolsHandler.SetLinearTokenResolver(linearService)
 	// Wire the inline team-key refresh hook so the Linear OAuth callback
 	// can populate the allowlist synchronously before falling back to the
 	// worker enqueue. See HandleLinearOAuthCallback for the two-tier
@@ -440,8 +481,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	previewSecretBundleHandler := handlers.NewPreviewSecretBundleHandler(previewSecretBundleStore)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
-	userCredentialHandler := handlers.NewUserCredentialHandler(userCredentialStore, credentialStore, userStore)
-	codingAuthHandler := handlers.NewCodingAuthHandler(credentialStore, orgStore)
 	// Unified coding-credentials handler — see docs/design/future/65-unified-coding-credentials.md.
 	codingCredentialHandler := handlers.NewCodingCredentialHandler(codingCredentialStore, orgStore)
 	var emailSender email.Sender
@@ -457,6 +496,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 	teamHandler := handlers.NewTeamHandler(userStore, membershipStore, authSessionStore, invitationStore, orgStore, cfg.FrontendURL, emailSender)
 	teamHandler.SetRepositoryStore(repoStore)
+	teamHandler.SetCLITokenStore(userCLITokenStore)
+	orgDomainStore := db.NewOrganizationDomainStore(pool)
+	orgDomainsHandler := handlers.NewOrgDomainsHandler(orgDomainStore, membershipStore, userStore, domains.NewVerifier())
+	authHandler.SetOrgDomainStore(orgDomainStore)
+	// emailSender may still be nil here (SMTP unset) — the verification flow
+	// degrades to logged links rather than disabling itself.
+	authHandler.SetEmailVerificationDeps(db.NewEmailVerificationStore(pool), emailSender)
+	apiClientHandler := handlers.NewAPIClientHandler(apiClientStore, apiTokenStore)
+	apiClientHandler.SetTxStarter(pool)
+	apiClientHandler.SetLogger(logger)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
 		if err == nil {
@@ -474,9 +523,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler.SetJobStore(jobStore)
 	automationHandler.SetRepositoryStore(repoStore)
 	automationHandler.SetOrgStore(orgStore)
-	automationHandler.SetOrgCredentialStore(credentialStore)
-	automationHandler.SetUserCredentialStore(userCredentialStore)
-	automationHandler.SetCodingAuthStore(credentialStore)
 	automationHandler.SetCodingCredentialStore(codingCredentialStore)
 	automationHandler.SetPool(pool)
 	automationHandler.SetLogger(logger)
@@ -492,14 +538,15 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
-		prService.SetUserCredentialStore(userCredentialStore)
 		prService.SetSessionMessageStore(sessionMessageStore)
+		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
 		prService.SetUserStore(userStore)
 		prService.SetOrgStore(orgStore)
 		prService.SetLLMClient(llmClient)
 		prService.SetPRTemplateStore(prTemplateStore)
 		prService.SetAuditEmitter(auditEmitter)
+		prService.SetRedisClient(redisClient)
 		prService.SetPullRequestStreams(prHealthStreams)
 	}
 
@@ -508,17 +555,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
+	integrationHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
+	sessionHandler.SetAttributionStore(sessionAttributionStore)
 	if canceller != nil {
 		sessionHandler.SetCanceller(canceller)
 	}
 	teamHandler.SetAuditEmitter(auditEmitter)
+	orgDomainsHandler.SetAuditEmitter(auditEmitter)
+	apiClientHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetAuditEmitter(auditEmitter)
 	settingsHandler.SetLogger(logger)
 	if orgSettingsInvalidator != nil {
 		settingsHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
-		codingAuthHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 		codingCredentialHandler.SetOrgSettingsInvalidator(orgSettingsInvalidator)
 	}
 	credentialHandler.SetAuditEmitter(auditEmitter)
@@ -537,6 +587,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmDocumentHandler.SetAuditEmitter(auditEmitter)
 	evalHandler := handlers.NewEvalHandler(evalTaskStore, evalRunStore, evalBatchStore, evalBootstrapStore, jobStore, pool)
 	evalHandler.SetAuditEmitter(auditEmitter)
+	evalHandler.SetSessionStore(sessionStore)
+	evalHandler.SetDatasetStore(evalDatasetStore)
+	evalHandler.SetReleaseGateStore(evalReleaseGateStore)
+	evalHandler.SetRepositoryStore(repoStore)
+	if prService != nil && sandboxProvider != nil {
+		evalHandler.SetCandidateValidator(handlers.NewEvalCandidateValidator(repoStore, prService, sandboxProvider))
+	}
 	// Redis-backed pub/sub for the eval batch + bootstrap detail SSEs. nil
 	// when redisClient is nil — handlers will return 503 and the frontend
 	// will continue to fall back to its existing polling path.
@@ -601,8 +658,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		hmrWatcher, hmrErr = preview.NewHMRWatcher(preview.HMRWatcherConfig{
 			Inspector: previewInspector,
 			Store:     previewStore,
-			Logger:    logger,
-			BlobDir:   cfg.PreviewHMRBlobDir,
+			RuntimeStamper: preview.DBPreviewRuntimeRevisionStamper{
+				PreviewStore: previewStore,
+				SessionStore: sessionStore,
+			},
+			Logger:  logger,
+			BlobDir: cfg.PreviewHMRBlobDir,
 		})
 		if hmrErr != nil {
 			logger.Warn().Err(hmrErr).Msg("failed to initialize HMR watcher — auto-screenshot disabled")
@@ -628,6 +689,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		MaxPerUser:             cfg.PreviewMaxPerUser,
 		MaxPerOrg:              cfg.PreviewMaxPerOrg,
 		MaxPerWorker:           cfg.PreviewMaxPerWorker,
+		PreviewIdleTimeout:     cfg.PreviewIdleTimeout,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -637,16 +699,30 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
 		recycleWorker.Start()
 		cleanupWorker := preview.NewCleanupWorker(preview.CleanupWorkerConfig{
-			Manager: previewManager,
-			Logger:  logger,
+			Manager:     previewManager,
+			Logger:      logger,
+			IdleTimeout: cfg.PreviewIdleTimeout,
 		})
 		cleanupWorker.Start()
 	} else {
 		recycleWorker = nil
 	}
 
-	workerSelector := preview.NewWorkerSelector(nodeStore, previewStore)
-	workerClient := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+	workerSelector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+		MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+		PreferredRegion:      cfg.NodeRegion,
+	})
+	previewRPCSecrets := cfg.PreviewRPCSecrets
+	if len(previewRPCSecrets) == 0 && strings.TrimSpace(cfg.SessionSecret) != "" {
+		previewRPCSecrets = []string{cfg.SessionSecret}
+	}
+	previewRPCKeyring, err := auth.NewPreviewTokenKeyring(previewRPCSecrets)
+	if err != nil {
+		logger.Warn().Err(err).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+		previewRPCKeyring = auth.PreviewTokenKeyring{}
+	}
+	workerClient := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
+	settingsHandler.SetStaticEgressWorkerChecker(workerSelector)
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
 	// gwSrv is stored so callers can shut it down gracefully.
@@ -660,7 +736,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			Logger:                logger,
 			AppOrigin:             cfg.FrontendURL,
 			CookieSecret:          []byte(cfg.SessionSecret),
-			PreviewTokenSecret:    cfg.SessionSecret,
+			PreviewTokenKeyring:   previewRPCKeyring,
 			PreviewOriginTemplate: cfg.PreviewOriginTemplate,
 		})
 		addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
@@ -682,18 +758,24 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 	previewHandler.SetAuditEmitter(auditEmitter)
+	branchPreviewHandler.SetAuditEmitter(auditEmitter)
 	previewHandler.SetJobStore(jobStore)
 	previewHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
+	previewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
 	branchPreviewHandler.SetWorkerRuntime(jobStore, workerSelector)
+	branchPreviewHandler.SetSessionPreviewRestarter(previewHandler)
+	branchPreviewHandler.SetPreviewCachePrewarm(cfg.PreviewCachePrewarmEnabled, cfg.PreviewCachePrewarmPriority)
+	branchPreviewHandler.SetStaticEgressSettings(orgStore, cfg.StaticEgressPublicIP)
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
-	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler := handlers.NewInternalPreviewHandlerWithKeyring(previewHandler, previewManager, cfg.NodeID, previewRPCKeyring, logger)
 	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	branchPreviewHandler.SetStopper(previewStopper)
 	if prService != nil {
 		prService.SetPreviewTeardown(previewStore, previewStopper)
+		prService.SetAutoPreviewStarter(branchPreviewHandler)
 		prService.SetPreviewOriginTemplate(cfg.PreviewOriginTemplate)
 	}
 
@@ -731,6 +813,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Get("/internal/preview/auth-check", internalPreviewHandler.AuthCheck)
 		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
@@ -754,6 +837,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
 
 	apiRoutes.Group(func(r chi.Router) {
+		// CLI distribution routes (no auth — fetched by `curl | sh` and the
+		// CLI's update command, not the JSON API client). Served outside
+		// /api/v1 except for the version endpoint; the production Caddyfile
+		// routes /install* and /download/* to this server explicitly.
+		cliDistHandler := handlers.NewCLIDistributionHandler(cfg.BaseURL, cfg.CLIDistDir, cfg.CLIMinSupportedVersion)
+		r.Get("/install.sh", cliDistHandler.InstallScript)
+		r.Get("/install/{join_token}", cliDistHandler.InstallScript)
+		r.Get("/download/143-tools/checksums.txt", cliDistHandler.Checksums)
+		r.Get("/download/143-tools/{os}/{arch}", cliDistHandler.DownloadBinary)
+		r.Get("/api/v1/cli/version", cliDistHandler.Version)
+
 		// Webhook routes (no auth — called by external services, signature verified per-provider)
 		r.Route("/api/v1/webhooks", func(r chi.Router) {
 			r.Post("/github", webhookHandler.HandleGitHub)
@@ -765,10 +859,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
+		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
+		internalEvalHandler := handlers.NewInternalEvalHandler(evalBootstrapStore, sessionStore, cfg.SessionSecret, logger)
+		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
 			r.Post("/projects/propose", internalProjectHandler.Propose)
+			r.Post("/eval/candidates", internalEvalHandler.AddCandidate)
+			r.Post("/evals/bootstrap/{bootstrap_run_id}/candidates", internalEvalHandler.AddCandidate)
+			r.Get("/session-tabs", internalSessionTabsHandler.List)
+			r.Post("/session-tabs", internalSessionTabsHandler.Create)
+			r.Get("/session-tabs/{thread_id}", internalSessionTabsHandler.Get)
+			r.Get("/session-tabs/{thread_id}/messages", internalSessionTabsHandler.Messages)
+			r.Post("/session-tabs/{thread_id}/messages", internalSessionTabsHandler.SendMessage)
 		})
 
 		// Public team routes (token-based, no auth). AcceptInvitation looks the
@@ -779,6 +883,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// bucket only — exactly the guarantee this public route needs.
 		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/team/invitations/accept", teamHandler.AcceptInvitation)
 
+		// CLI code-for-token exchange. Deliberately OUTSIDE the CSRF-wrapped
+		// auth group: the CLI has no CSRF cookie/header, and the one-time
+		// code + verifier binding is a strictly stronger anti-forgery
+		// guarantee than the double-submit cookie. Same 10/min brute-force
+		// budget as the invitation endpoints — each request names an opaque
+		// code the server looks up.
+		r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/auth/cli/exchange", authHandler.CLIExchange)
+
 		// Auth routes (no auth). CSRF still wraps this group so safe public
 		// auth reads warm the double-submit cookie before email login/register.
 		r.Group(func(r chi.Router) {
@@ -786,11 +898,25 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/providers", authHandler.Providers)
 			r.Get("/api/v1/auth/github/login", authHandler.Login)
 			r.Get("/api/v1/auth/github/callback", authHandler.Callback)
+			// CLI browser-login entry point: stores the loopback port /
+			// challenge / join cookies and chains into the GitHub Login
+			// redirect above.
+			r.Get("/api/v1/auth/cli/start", authHandler.CLIStart)
 			r.Get("/api/v1/auth/google/login", authHandler.GoogleLogin)
 			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
 			r.Post("/api/v1/auth/register", authHandler.Register)
 			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+			// Public: the verification link may be opened on a device with
+			// no session; the single-use token is the credential. Shares the
+			// claim endpoints' rate limit — same token-guessing surface.
+			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/auth/email-verifications/confirm", authHandler.ConfirmEmailVerification)
 		})
+
+		// Slack callbacks are public from the session-cookie perspective and
+		// authenticate with Slack's request signature before any payload routing.
+		r.Post("/api/v1/webhooks/slack/events", slackbotHandler.Events)
+		r.Post("/api/v1/webhooks/slack/commands", slackbotHandler.Commands)
+		r.Post("/api/v1/webhooks/slack/interactions", slackbotHandler.Interactions)
 
 		// Protected routes (authenticated)
 		r.Group(func(r chi.Router) {
@@ -799,8 +925,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				Users:            userStore,
 				Memberships:      membershipStore,
 				PreviewAPITokens: previewAPITokenStore,
+				APITokens:        apiTokenStore,
+				UserCLITokens:    userCLITokenStore,
+				Audit:            auditEmitter,
 			}, []byte(cfg.CSRFSigningKey), logger))
+			r.Use(middleware.CLIVersionGate(cfg.CLIMinSupportedVersion))
 			r.Use(middleware.LogContext(logger))
+			r.Use(externalAPIRateLimiter.Middleware())
+			r.Use(middleware.ExternalAPIIdempotency(apiIdempotencyStore, logger))
 			r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
 
 			// Zero-membership-safe endpoints: a user whose only membership was
@@ -818,6 +950,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/memberships", authHandler.Memberships)
 			r.Post("/api/v1/auth/active-org", authHandler.SetActiveOrg)
 			r.Post("/api/v1/auth/logout", authHandler.Logout)
+			// Self-service CLI token management (list devices, revoke).
+			// Zero-membership-safe: a user removed from their last org must
+			// still be able to see and kill their own CLI credentials, and
+			// `143-tools logout` must work for them.
+			r.Get("/api/v1/auth/cli-tokens", authHandler.ListCLITokens)
+			r.Delete("/api/v1/auth/cli-tokens/{id}", authHandler.RevokeCLIToken)
 			// GitHub App setup callbacks are validated against a signed setup
 			// intent inside the handler. Keep them outside OrgContext so a
 			// stale active org in another tab cannot block linking to the
@@ -845,6 +983,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/{id}/accept", authHandler.AcceptInvitationByID)
 			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/invitations/{id}/decline", authHandler.DeclineInvitationByID)
 
+			// Domain-based joinable-workspace surface ("Join Acme — your
+			// domain is verified"). Same placement rationale as the pending
+			// invitations routes: spans orgs and must work for users with
+			// zero memberships. Join shares the claim rate limit — it is the
+			// same shape of brute-force surface (caller names a target org,
+			// server re-validates eligibility against the session's
+			// provider-verified email domain).
+			r.Get("/api/v1/orgs/joinable", orgDomainsHandler.ListJoinable)
+			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/orgs/{id}/join", orgDomainsHandler.Join)
+
+			// Resend the email-verification link to the caller's own
+			// address. Tight limit: each call sends an email, so the
+			// budget is "user mashing resend", not bulk traffic.
+			r.With(middleware.ClaimRateLimit(3)).Post("/api/v1/auth/email-verifications", authHandler.SendEmailVerification)
+
 			// Creating a new org is zero-membership-safe for the same reason the
 			// other routes in this block are: a user whose only membership was
 			// just revoked must be able to create a fresh org to recover, and
@@ -866,9 +1019,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
 
 				// Personal and resolved credential views
-				r.Get("/api/v1/settings/credentials/personal", userCredentialHandler.ListPersonal)
-				r.Get("/api/v1/settings/credentials/resolved", userCredentialHandler.ListResolved)
-				r.Get("/api/v1/settings/credentials/team", userCredentialHandler.ListTeamDefaults)
+				r.Get("/api/v1/settings/credentials/personal", handlers.LegacyCredentialsGone)
+				r.Get("/api/v1/settings/credentials/resolved", handlers.LegacyCredentialsGone)
+				r.Get("/api/v1/settings/credentials/team", handlers.LegacyCredentialsGone)
 				// Unified coding-credentials reads are safe for every org role:
 				// personal/resolved reads are scoped to the caller, and org rows
 				// are the same read-only fallback metadata already shown on
@@ -901,6 +1054,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/logs/stream", sessionHandler.StreamLogs)
+				r.Get("/api/v1/sessions/{id}/logs/{log_id}", sessionHandler.GetLogDetail)
 				r.Get("/api/v1/sessions/{id}/pr", sessionHandler.GetPullRequest)
 				r.Get("/api/v1/sessions/{id}/questions", sessionHandler.ListQuestions)
 				r.Get("/api/v1/sessions/{id}/human-input-requests", sessionHandler.ListHumanInputRequests)
@@ -936,6 +1090,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/files/context", sessionFileHandler.GetFileContext)
 				r.Get("/api/v1/sessions/{id}/composer/files", sessionComposerHandler.ListSessionFileMentions)
 				r.Get("/api/v1/settings", settingsHandler.Get)
+				r.Get("/api/v1/settings/network", settingsHandler.GetNetworkStatus)
+				r.Get("/api/v1/settings/runtime/status", settingsHandler.GetRuntimeStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
 				r.Get("/api/v1/pm/current", pmHandler.Current)
@@ -974,10 +1130,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.OrgContext)
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
 
+				// Local agent gateway: tool list + server-proxied execution for
+				// `143-tools mcp serve` and local CLI tool calls. Builder-tier
+				// like the rest of the create-and-iterate surface; viewers
+				// cannot reach integration write tools.
+				r.Get("/api/v1/cli/tools", cliToolsHandler.ListTools)
+				r.Post("/api/v1/cli/tools/invoke", cliToolsHandler.Invoke)
+
 				// Coding-agents config reads. Builders and members can view what's
 				// configured (so /settings/agent renders read-only when needed);
 				// org-scope mutations stay admin-only.
-				r.Get("/api/v1/settings/coding-auths", codingAuthHandler.List)
+				r.Get("/api/v1/settings/coding-auths", handlers.LegacyCredentialsGone)
 				r.Get("/api/v1/settings/codex-auth/subscriptions", codexAuthHandler.List)
 				r.Get("/api/v1/settings/claude-code-auth/subscriptions", claudeCodeAuthHandler.List)
 
@@ -1013,8 +1176,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/coding-credentials/reorder", codingCredentialHandler.Reorder)
 
 				// Personal credential management
-				r.Put("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.UpsertPersonal)
-				r.Delete("/api/v1/settings/credentials/personal/{provider}", userCredentialHandler.DeletePersonal)
+				r.Put("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)
+				r.Delete("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)
+				r.Post("/api/v1/integrations/slack/user-links/me", integrationHandler.LinkSlackUserMe)
+				r.Delete("/api/v1/integrations/slack/user-links/me", integrationHandler.UnlinkSlackUserMe)
 
 				// GitHub connection for user-authored PRs
 				r.Get("/api/v1/users/me/github/connect", githubStatusHandler.StartConnect)
@@ -1025,6 +1190,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post(uploadAPIPath, uploadHandler.Upload)
 
 				r.Post("/api/v1/sessions/{id}/view", sessionHandler.RecordView)
+				r.Post("/api/v1/sessions", sessionHandler.CreateExternal)
 				r.Post("/api/v1/sessions/manual", sessionHandler.CreateManual)
 				r.Post("/api/v1/sessions/{id}/questions/{qid}/answer", sessionHandler.AnswerQuestion)
 				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
@@ -1110,6 +1276,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
 				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
 				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
+				r.Get("/api/v1/evals/datasets", evalHandler.ListDatasets)
+				r.Get("/api/v1/evals/release-gates", evalHandler.ListReleaseGates)
 
 				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
 				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
@@ -1118,7 +1286,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/pull-requests/{id}/merge-when-ready", pullRequestHandler.CancelMergeWhenReady)
 
 				// Automations (write)
-				r.Post("/api/v1/automations", automationHandler.Create)
+				r.Post("/api/v1/automations", automationHandler.CreatePublic)
 				r.Patch("/api/v1/automations/{id}", automationHandler.Update)
 				r.Delete("/api/v1/automations/{id}", automationHandler.Delete)
 				r.Post("/api/v1/automations/{id}/run", automationHandler.RunNow)
@@ -1164,6 +1332,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/analyze", pmHandler.Analyze)
 				r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
+				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
+				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
 				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
 				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)
@@ -1187,14 +1357,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/credentials", credentialHandler.List)
 				r.Put("/api/v1/settings/credentials/{provider}", credentialHandler.Update)
 				r.Delete("/api/v1/settings/credentials/{provider}", credentialHandler.Delete)
-				r.Post("/api/v1/settings/coding-auths", codingAuthHandler.Create)
-				r.Patch("/api/v1/settings/coding-auths/reorder", codingAuthHandler.Reorder)
-				r.Patch("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Update)
-				r.Delete("/api/v1/settings/coding-auths/{id}", codingAuthHandler.Delete)
+				r.Post("/api/v1/settings/coding-auths", handlers.LegacyCredentialsGone)
+				r.Patch("/api/v1/settings/coding-auths/reorder", handlers.LegacyCredentialsGone)
+				r.Patch("/api/v1/settings/coding-auths/{id}", handlers.LegacyCredentialsGone)
+				r.Delete("/api/v1/settings/coding-auths/{id}", handlers.LegacyCredentialsGone)
 
 				// Team default credential management
-				r.Put("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.SetTeamDefault)
-				r.Delete("/api/v1/settings/credentials/team/{provider}", userCredentialHandler.DeleteTeamDefault)
+				r.Put("/api/v1/settings/credentials/team/{provider}", handlers.LegacyCredentialsGone)
+				r.Delete("/api/v1/settings/credentials/team/{provider}", handlers.LegacyCredentialsGone)
 
 				// Codex / Claude OAuth subscription endpoints moved to the
 				// admin+member group above. The handlers' resolveOAuthScope
@@ -1210,17 +1380,43 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Audit logs
 				r.Get("/api/v1/audit-logs", auditLogHandler.List)
 				r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
+				r.Post("/api/v1/api-keys", apiClientHandler.CreateAPIKey)
+				r.Get("/api/v1/api-keys", apiClientHandler.List)
+				r.Get("/api/v1/api-keys/{id}", apiClientHandler.Get)
+				r.Patch("/api/v1/api-keys/{id}", apiClientHandler.Update)
+				r.Delete("/api/v1/api-keys/{id}", apiClientHandler.Delete)
+				r.Get("/api/v1/api-keys/{id}/tokens", apiClientHandler.ListTokens)
+				r.Post("/api/v1/api-keys/{id}/tokens", apiClientHandler.CreateToken)
+				r.Delete("/api/v1/api-keys/{id}/tokens/{token_id}", apiClientHandler.RevokeToken)
 
 				// Team management. The roster read (GET /team/members) is registered
 				// in the admin+member group above; mutations and invite flows stay
 				// admin-only here.
 				r.Patch("/api/v1/team/members/{id}/role", teamHandler.ChangeRole)
 				r.Delete("/api/v1/team/members/{id}", teamHandler.RemoveMember)
+
+				// Org join links for zero-config CLI onboarding
+				// (curl .../install/<token> | sh). Admin-only: creating one
+				// hands out org membership.
+				r.Post("/api/v1/org/join-tokens", joinTokenHandler.Create)
+				r.Get("/api/v1/org/join-tokens", joinTokenHandler.List)
+				r.Delete("/api/v1/org/join-tokens/{id}", joinTokenHandler.Revoke)
 				r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
 				r.Post("/api/v1/team/invitations", teamHandler.CreateInvitation)
 				r.Delete("/api/v1/team/invitations/{id}", teamHandler.RevokeInvitation)
 				r.Get("/api/v1/team/github/status", teamHandler.GitHubInviteStatus)
 				r.Get("/api/v1/team/github/users", teamHandler.SearchGitHubUsers)
+
+				// Verified email domains for auto-join (domain capture).
+				// Admin-only: verifying a domain changes who can enter the
+				// org without an invitation.
+				r.Get("/api/v1/team/domains", orgDomainsHandler.List)
+				r.Post("/api/v1/team/domains", orgDomainsHandler.Create)
+				r.Post("/api/v1/team/domains/{id}/verify", orgDomainsHandler.Verify)
+				r.Patch("/api/v1/team/domains/{id}", orgDomainsHandler.Update)
+				r.Delete("/api/v1/team/domains/{id}", orgDomainsHandler.Delete)
+				r.Get("/api/v1/team/github-orgs", integrationHandler.ListGitHubOrgAutoJoin)
+				r.Patch("/api/v1/team/github-orgs/{installation_id}", integrationHandler.UpdateGitHubOrgAutoJoin)
 
 				// Integration management (OAuth flows + connect/disconnect/sync).
 				// Connecting an integration is an org-wide trust decision, so members
@@ -1251,8 +1447,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/integrations/slack/login", integrationHandler.StartSlackOAuth)
 				r.Get("/api/v1/integrations/slack/callback", integrationHandler.HandleSlackOAuthCallback)
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
+				r.Get("/api/v1/integrations/slack/bot", integrationHandler.GetSlackBot)
+				r.Post("/api/v1/integrations/slack/bot/reinstall", integrationHandler.ReinstallSlackBot)
 				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
+				r.Patch("/api/v1/integrations/slack/channels/{slack_channel_id}", integrationHandler.PatchSlackChannelSettings)
+				r.Get("/api/v1/integrations/slack/user-links", integrationHandler.ListSlackUserLinks)
+				r.Post("/api/v1/integrations/slack/user-links", integrationHandler.UpsertSlackUserLinkAdmin)
+				r.Delete("/api/v1/integrations/slack/user-links/{id}", integrationHandler.DeleteSlackUserLinkAdmin)
 				r.Delete("/api/v1/integrations/github/disconnect", integrationHandler.DisconnectIntegration)
 				r.Delete("/api/v1/integrations/sentry/disconnect", integrationHandler.DisconnectIntegration)
 				r.Delete("/api/v1/integrations/linear/disconnect", integrationHandler.DisconnectIntegration)
@@ -1261,6 +1463,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/notion/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/circleci/connect", integrationHandler.ConnectCircleCI)
 				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
+				r.Post("/api/v1/integrations/mezmo/connect", integrationHandler.ConnectMezmo)
+				r.Delete("/api/v1/integrations/mezmo/disconnect", integrationHandler.DisconnectIntegration)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
@@ -1268,8 +1472,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/evals/tasks/{id}", evalHandler.ArchiveTask)
 				r.Post("/api/v1/evals/tasks/{id}/runs", evalHandler.StartRun)
 				r.Post("/api/v1/evals/batch", evalHandler.StartBatch)
+				r.Post("/api/v1/evals/compare", evalHandler.StartCompare)
 				r.Post("/api/v1/evals/bootstrap", evalHandler.Bootstrap)
 				r.Post("/api/v1/evals/bootstrap/accept", evalHandler.AcceptBootstrapCandidates)
+				r.Patch("/api/v1/evals/bootstrap/candidates/{candidate_id}", evalHandler.ReviewBootstrapCandidate)
+				r.Post("/api/v1/evals/datasets", evalHandler.CreateDataset)
+				r.Post("/api/v1/evals/datasets/{datasetId}/tasks", evalHandler.AddDatasetTask)
+				r.Post("/api/v1/evals/release-gates", evalHandler.UpsertReleaseGate)
 			})
 		})
 	})

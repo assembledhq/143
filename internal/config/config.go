@@ -30,15 +30,19 @@ type Config struct {
 	Env string `env:"ENV" envDefault:"development"`
 
 	// Core
-	DatabaseURL        string   `env:"DATABASE_URL"          envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
-	Port               int      `env:"PORT"                  envDefault:"8080"`
-	LogLevel           string   `env:"LOG_LEVEL"             envDefault:"info"`
-	SessionSecret      string   `env:"SESSION_SECRET"` // #nosec G117 -- env config field
-	NodeID             string   `env:"NODE_ID"`
-	BaseURL            string   `env:"BASE_URL"              envDefault:"http://localhost:8080"`
-	FrontendURL        string   `env:"FRONTEND_URL"`
-	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
-	Mode               string   `env:"MODE"                  envDefault:"all"`
+	DatabaseURL             string        `env:"DATABASE_URL"                envDefault:"postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"`
+	DatabaseMaxConns        int32         `env:"DATABASE_MAX_CONNS"          envDefault:"0"`
+	DatabaseMaxConnIdleTime time.Duration `env:"DATABASE_MAX_CONN_IDLE_TIME" envDefault:"0"`
+	Port                    int           `env:"PORT"                  envDefault:"8080"`
+	LogLevel                string        `env:"LOG_LEVEL"             envDefault:"info"`
+	SessionSecret           string        `env:"SESSION_SECRET"` // #nosec G117 -- env config field
+	PreviewRPCSecrets       []string      `env:"PREVIEW_RPC_SECRETS"   envSeparator:","`
+	NodeID                  string        `env:"NODE_ID"`
+	NodeRegion              string        `env:"NODE_REGION"`
+	BaseURL                 string        `env:"BASE_URL"              envDefault:"http://localhost:8080"`
+	FrontendURL             string        `env:"FRONTEND_URL"`
+	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
+	Mode                    string        `env:"MODE"                  envDefault:"all"`
 	// DemoMode tells the server it is running a public demo/dogfood preview
 	// with seeded data and no real GitHub App. Enables a credential banner
 	// on the login page and short-circuits GitHub client construction.
@@ -49,6 +53,19 @@ type Config struct {
 	// only if you also regenerate the bcrypt hash in the seed.
 	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
 	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
+	// CLIDistDir is the directory holding the cross-compiled 143-tools
+	// binaries plus checksums.txt, baked into the server image by the
+	// Dockerfile cli stage. The /install.sh and /download/143-tools/*
+	// routes serve from here; they 404 when the directory is absent
+	// (e.g. `go run` in local dev without `make build-cli`).
+	CLIDistDir string `env:"CLI_DIST_DIR" envDefault:"/opt/143/cli"`
+	// CLIMinSupportedVersion, when set to an orderable version (dotted
+	// numerics, e.g. "1.4.0"), causes authenticated requests from a CLI
+	// advertising an older `User-Agent: 143-tools/<version>` to fail with
+	// 426 CLI_UPDATE_REQUIRED so breaking API changes have a clean failure
+	// mode. Empty (the default) disables enforcement; non-orderable CLI
+	// versions (git SHAs, "dev") are never blocked.
+	CLIMinSupportedVersion string `env:"CLI_MIN_SUPPORTED_VERSION"`
 	// WorkerProcessCount controls how many worker loops run inside a single
 	// server process when MODE is "worker" or "all". Increase this on larger
 	// hosts to process more jobs/sandboxes in parallel.
@@ -133,6 +150,7 @@ type Config struct {
 	// Slack OAuth
 	SlackOAuthClientID     string `env:"SLACK_OAUTH_CLIENT_ID"`
 	SlackOAuthClientSecret string `env:"SLACK_OAUTH_CLIENT_SECRET"`
+	SlackSigningSecret     string `env:"SLACK_SIGNING_SECRET"`
 	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5.4-nano"`
 
 	// GitHub App
@@ -194,6 +212,8 @@ type Config struct {
 	// and typically contains "nameserver 1.1.1.1\nnameserver 8.8.8.8". Leaving
 	// this empty falls back to whatever resolv.conf Docker injects.
 	SandboxResolvConf string `env:"SANDBOX_RESOLV_CONF"`
+	// StaticEgressPublicIP is the public IPv4 customers should allowlist.
+	StaticEgressPublicIP string `env:"STATIC_EGRESS_PUBLIC_IP"`
 	// SandboxAuthSocketDir is the on-host directory under which per-session
 	// GitHub credential sockets are created (one Unix-domain socket per
 	// session, bind-mounted into the container). The orchestrator must be
@@ -247,12 +267,27 @@ type Config struct {
 	SessionFilesCacheMaxBytes int64 `env:"SESSION_FILES_CACHE_MAX_BYTES" envDefault:"5368709120"`
 
 	// Preview system
-	ChromeWSURL             string `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
-	PreviewOriginTemplate   string `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
-	PreviewGatewayPort      int    `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
-	PreviewInternalBaseURL  string `env:"PREVIEW_INTERNAL_BASE_URL"`
-	PreviewSnapshotCacheDir string `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
-	PreviewHMRBlobDir       string `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	ChromeWSURL                             string        `env:"CHROME_WS_URL"`                                                            // e.g. "ws://chrome:9222"
+	PreviewOriginTemplate                   string        `env:"PREVIEW_ORIGIN_TEMPLATE"  envDefault:"http://{id}.preview.localhost:9090"` // {id} replaced with preview ID
+	PreviewGatewayPort                      int           `env:"PREVIEW_GATEWAY_PORT"     envDefault:"9090"`
+	PreviewInternalBaseURL                  string        `env:"PREVIEW_INTERNAL_BASE_URL"`
+	PreviewSnapshotCacheDir                 string        `env:"PREVIEW_SNAPSHOT_CACHE_DIR" envDefault:".data/preview-snapshots"`
+	PreviewHMRBlobDir                       string        `env:"PREVIEW_HMR_BLOB_DIR"     envDefault:".data/preview-hmr"`
+	PreviewDependencyCacheBucket            string        `env:"PREVIEW_DEPENDENCY_CACHE_BUCKET"`
+	PreviewDependencyCachePrefix            string        `env:"PREVIEW_DEPENDENCY_CACHE_PREFIX" envDefault:"preview-dependency-cache"`
+	PreviewDependencyCacheS3Region          string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_REGION"`
+	PreviewDependencyCacheS3Endpoint        string        `env:"PREVIEW_DEPENDENCY_CACHE_S3_ENDPOINT"`
+	PreviewDependencyCacheS3UsePathStyle    bool          `env:"PREVIEW_DEPENDENCY_CACHE_S3_USE_PATH_STYLE" envDefault:"false"`
+	PreviewDependencyCacheLocalDir          string        `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR" envDefault:"/var/cache/143/preview-dependency-cache"`
+	PreviewDependencyCacheLocalMaxBytes     int64         `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES" envDefault:"10737418240"`
+	PreviewDependencyCacheRetentionDays     int           `env:"PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS" envDefault:"30"`
+	PreviewDependencyCacheKeepNewestPerRepo int           `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO" envDefault:"50"`
+	PreviewDependencyCacheCleanupInterval   time.Duration `env:"PREVIEW_DEPENDENCY_CACHE_CLEANUP_INTERVAL" envDefault:"1h"`
+	PreviewPackageManagerCacheEnabled       bool          `env:"PREVIEW_PACKAGE_MANAGER_CACHE_ENABLED" envDefault:"true"`
+	PreviewCachePrewarmEnabled              bool          `env:"PREVIEW_CACHE_PREWARM_ENABLED" envDefault:"false"`
+	PreviewCachePrewarmTimeout              time.Duration `env:"PREVIEW_CACHE_PREWARM_TIMEOUT" envDefault:"15m"`
+	PreviewCachePrewarmPriority             int           `env:"PREVIEW_CACHE_PREWARM_PRIORITY" envDefault:"-50"`
+	PreviewIdleTimeout                      time.Duration `env:"PREVIEW_IDLE_TIMEOUT" envDefault:"30m"`
 
 	// Concurrency caps for the preview subsystem. Each StartPreview checks
 	// these before hydrating a sandbox, so an overloaded worker returns a
@@ -295,6 +330,19 @@ type Config struct {
 	RedisPoolSize   int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
 }
 
+// ResolvePreviewDependencyCacheLocalDir normalizes the optional worker-local
+// dependency cache path. Sentinel values disable L1 while keeping shared L2
+// dependency caching available.
+func ResolvePreviewDependencyCacheLocalDir(value string) string {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(trimmed) {
+	case "", "off", "none", "disabled":
+		return ""
+	default:
+		return trimmed
+	}
+}
+
 // Load reads configuration from env files and environment variables.
 //
 // Precedence (highest wins):
@@ -333,6 +381,13 @@ func Load() *Config {
 	if cfg.WorkerMaxActiveSandboxes < 0 {
 		cfg.WorkerMaxActiveSandboxes = 0
 	}
+	if cfg.DatabaseMaxConns < 0 {
+		cfg.DatabaseMaxConns = 0
+	}
+	if cfg.DatabaseMaxConnIdleTime < 0 {
+		cfg.DatabaseMaxConnIdleTime = 0
+	}
+	cfg.PreviewRPCSecrets = normalizePreviewRPCSecrets(cfg.PreviewRPCSecrets, cfg.SessionSecret)
 
 	// Fall back to SessionSecret for CSRF signing if not explicitly set.
 	if cfg.CSRFSigningKey == "" {
@@ -344,6 +399,21 @@ func Load() *Config {
 	}
 
 	return cfg
+}
+
+func normalizePreviewRPCSecrets(secrets []string, sessionSecret string) []string {
+	normalized := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			continue
+		}
+		normalized = append(normalized, secret)
+	}
+	if len(normalized) == 0 && strings.TrimSpace(sessionSecret) != "" {
+		normalized = append(normalized, strings.TrimSpace(sessionSecret))
+	}
+	return normalized
 }
 
 // GitHubAppEnabled reports whether the GitHub App integration should be
@@ -556,8 +626,8 @@ func (c *Config) SentryEnvironmentOrDefault() string {
 // minimum strength requirements when running in production.
 func (c *Config) ValidateSecrets() error {
 	// Retention day validation applies in all environments.
-	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 {
-		return errors.New("DATA_RETENTION_*_DAYS values must not be negative")
+	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
+		return errors.New("DATA_RETENTION_*_DAYS, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")
 	}
 
 	if c.Env != "production" {

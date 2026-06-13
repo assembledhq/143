@@ -87,6 +87,48 @@ func TestGenerateSessionToken_IncludesSessionID(t *testing.T) {
 	require.Equal(t, repoID, claims.RepoID)
 	require.NotNil(t, claims.SessionID, "session-scoped token must include session ID")
 	require.Equal(t, sessionID, *claims.SessionID)
+	require.Nil(t, claims.ThreadID, "session-scoped token should not include thread ID by default")
+}
+
+func TestGenerateSessionThreadToken_IncludesThreadID(t *testing.T) {
+	t.Parallel()
+
+	secret := "test-secret-key-for-hmac-signing"
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	token, err := GenerateSessionThreadToken(secret, orgID, repoID, sessionID, &threadID, 5*time.Minute)
+	require.NoError(t, err, "GenerateSessionThreadToken should sign a token")
+
+	claims, err := ValidateInternalToken(secret, token)
+	require.NoError(t, err, "ValidateInternalToken should accept the signed thread token")
+	require.NotNil(t, claims.SessionID, "thread token should include session ID")
+	require.Equal(t, sessionID, *claims.SessionID, "thread token should preserve session ID")
+	require.NotNil(t, claims.ThreadID, "thread token should include source thread ID")
+	require.Equal(t, threadID, *claims.ThreadID, "thread token should preserve source thread ID")
+}
+
+func TestGenerateSessionThreadTokenWithClaims_IncludesEvalToolClaims(t *testing.T) {
+	t.Parallel()
+
+	secret := "test-secret-key-for-hmac-signing"
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	bootstrapRunID := uuid.New()
+
+	token, err := GenerateSessionThreadTokenWithClaims(secret, orgID, repoID, sessionID, &threadID, []string{"eval:add"}, "eval_bootstrap", &bootstrapRunID, 5*time.Minute)
+	require.NoError(t, err, "GenerateSessionThreadTokenWithClaims should sign a token")
+
+	claims, err := ValidateInternalToken(secret, token)
+	require.NoError(t, err, "ValidateInternalToken should accept the signed token")
+	require.Equal(t, []string{"eval:add"}, claims.AllowedToolScopes, "token should preserve allowed tool scopes")
+	require.Equal(t, "eval_bootstrap", claims.SessionOrigin, "token should preserve session origin")
+	require.NotNil(t, claims.EvalBootstrapRunID, "token should include eval bootstrap run id")
+	require.Equal(t, bootstrapRunID, *claims.EvalBootstrapRunID, "token should preserve eval bootstrap run id")
 }
 
 func TestGenerateInternalToken_HasNoSessionID(t *testing.T) {

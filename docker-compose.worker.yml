@@ -57,11 +57,11 @@ services:
         # Static IP so /etc/143/sandbox-resolv.conf can hard-code it. Pinned
         # to the network's first usable host after the gateway (.1).
         ipv4_address: 172.30.0.2
+      static-egress-sandbox:
+        # Static IP so /etc/143/sandbox-static-egress-resolv.conf can
+        # hard-code the resolver on the static egress bridge.
+        ipv4_address: 172.31.0.2
     healthcheck:
-      # Resolve a name from dnsmasq's own /etc/hosts via the local listener.
-      # Doesn't touch upstream, so the check stays green when the bridge
-      # gateway or 127.0.0.11 is briefly unhealthy — we only fail when
-      # dnsmasq itself isn't answering.
       test: ["CMD-SHELL", "nslookup localhost 127.0.0.1 >/dev/null 2>&1"]
       interval: 15s
       timeout: 3s
@@ -98,7 +98,7 @@ services:
     # or the node could heartbeat without a preview_internal_base_url.
     # If any error below fires, run: make provision-worker HOST=<this-host>
     environment:
-      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
+      DATABASE_URL: "postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable&pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}"
       ENV: production
       MODE: worker
       CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
@@ -113,10 +113,12 @@ services:
       SANDBOX_RUNTIME: runsc
       SANDBOX_REQUIRE_GVISOR: "true"
       SANDBOX_HEALTH_CHECK_IMAGE: ${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}
+      PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR: ${PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR:-/var/cache/143/preview-dependency-cache}
       # Bind-mounted into every sandbox at /etc/resolv.conf. The path here is
       # the *host* path because docker.sock resolves bind sources against the
       # host, not this worker container. Provisioned by provision.sh.
       SANDBOX_RESOLV_CONF: /etc/143/sandbox-resolv.conf
+      STATIC_EGRESS_PUBLIC_IP: ${STATIC_EGRESS_PUBLIC_IP:-}
     env_file:
       - .env
     # App nodes reach this worker at http://${WORKER_PRIVATE_IP}:${WORKER_HOST_PORT}
@@ -135,10 +137,13 @@ services:
         gw_priority: 1
       sandbox:
         gw_priority: 0
+      static-egress-sandbox:
+        gw_priority: 0
     group_add:
       - ${DOCKER_GID:?missing in /opt/143/.env.local}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/143:/etc/143:ro
       # Per-session GitHub credential sockets. Bind-mounted into this
       # container so the orchestrator (running as appuser uid 1000) can
       # create per-session unix sockets here, AND so the host docker
@@ -147,10 +152,15 @@ services:
       # path. The host directory is provisioned 0750 and owned 1000:1000
       # via systemd-tmpfiles in deploy/scripts/provision.sh.
       - /var/run/143/sandbox-auth:/var/run/143/sandbox-auth
+      # Worker-local preview dependency cache L1. This must be host-backed so
+      # DB cache-location hints remain useful after worker container recreates.
+      - /var/cache/143/preview-dependency-cache:/var/cache/143/preview-dependency-cache
       # Provisioning must stage this file before the first `docker compose up`.
       # If the bind source is missing, Docker creates a directory at the host
       # path and later deploy-time scp of the encrypted env file fails.
-      - .env.production.enc:/.env.production.enc:ro
+      # Mounted at /app (the workdir) — docker-entrypoint.sh resolves the
+      # bundle relative to the workdir; the image itself carries no secrets.
+      - .env.production.enc:/app/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
       interval: 15s
@@ -184,3 +194,6 @@ networks:
   sandbox:
     external: true
     name: 143-sandbox
+  static-egress-sandbox:
+    external: true
+    name: 143-sandbox-static-egress

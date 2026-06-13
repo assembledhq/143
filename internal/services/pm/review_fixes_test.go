@@ -226,14 +226,16 @@ func TestAnalyze_PiUsesDedicatedCredentialBeforeSandboxCreate(t *testing.T) {
 	repoID := uuid.New()
 	sandbox := &reviewSandboxProvider{cloneErr: fmt.Errorf("clone failed")}
 	usage := &reviewUsageRecorder{}
-	env := agent.NewAgentEnv(agent.AgentEnvDeps{
-		Credentials: &mockCredStore{
-			creds: map[models.ProviderName]*models.DecryptedCredential{
-				models.ProviderPi: {Config: models.PiConfig{APIKey: "pi-review-key"}},
-			},
+	piCreds := &mockCredStore{
+		creds: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderPi: {Config: models.PiConfig{APIKey: "pi-review-key"}},
 		},
-		Provider: sandbox,
-		Logger:   zerolog.Nop(),
+	}
+	env := agent.NewAgentEnv(agent.AgentEnvDeps{
+		Credentials:       piCreds,
+		CodingCredentials: codingCredsFromLegacyStore(piCreds),
+		Provider:          sandbox,
+		Logger:            zerolog.Nop(),
 	})
 
 	svc := &Service{

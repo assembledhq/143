@@ -190,9 +190,56 @@ Use `preview.install` when a preview needs dependencies before services can boot
 | `lockfiles` | `string[]` | Repo-relative files included in the install cache key. Missing files fail the install phase. |
 | `clean_paths` | `string[]` | Repo-relative paths or simple globs to remove before reinstalling. Nothing is auto-deleted unless listed here. |
 | `verify_paths` | `string[]` | Repo-relative paths that must exist for a cached install to be reused. |
+| `cache.enabled` | `boolean` | Optional. Defaults to `true`; set to `false` to opt out of dependency artifact caching. |
+| `cache.paths` | `string[]` | Optional additive dependency/build cache paths to persist in addition to `clean_paths` and inferred paths. Requires `lockfiles`. |
+| `cache.package_manager.enabled` | `boolean` | Optional. Defaults to `true`; set to `false` to opt out of package-manager global caching. |
+| `cache.package_manager.include` | `string[]` | Optional package-manager IDs to include in addition to inference: `npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `poetry`, `go`. |
+| `cache.package_manager.paths` | `string[]` | Optional HomeDir-relative package-manager cache paths. Absolute paths, `..`, and globs are rejected. |
+| `cache.prewarm.enabled` | `boolean` | Optional per-config prewarm toggle. Runtime rollout is also gated by `PREVIEW_CACHE_PREWARM_ENABLED`. |
 | `timeout_seconds` | `int` | Defaults to 420 seconds. Max 1800 seconds. |
 
 143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
+
+Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
+
+Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
+
+Session previews also use dependency artifact and package-manager global caches when object storage is configured. The dependency artifact path set is WorkDir-relative:
+
+```text
+clean_paths + cache.paths + inferred paths from known dependency files
+```
+
+Platform-owned preview cache paths are excluded from dependency caching. Do not declare `.143/cache` or any descendant as a dependency cache path. `clean_paths` may still remove broad build output before a fresh install, but those paths are not automatically safe to persist as reusable artifacts.
+
+Initial inferred paths:
+
+| Dependency file | Inferred cache path |
+|---|---|
+| `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb` | `node_modules` |
+| `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
+| `go.mod`, `go.sum` | `vendor` |
+
+Inference is relative to the lockfile directory, so `frontend/package-lock.json` infers `frontend/node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. `cache.paths` is additive and is useful for specific repo-local build paths such as `.next/cache` or `.turbo/cache`.
+
+Package-manager global caches are separate from dependency artifacts and restore relative to the sandbox `HomeDir`, not the repo `WorkDir`.
+
+| Package manager | HomeDir-relative cache paths |
+|---|---|
+| npm | `.npm` |
+| pnpm | `.local/share/pnpm/store` |
+| yarn | `.yarn/berry/cache` |
+| bun | `.bun/install/cache` |
+| pip | `.cache/pip` |
+| uv | `.cache/uv` |
+| poetry | `.cache/pypoetry` |
+| go | `go/pkg/mod`, `.cache/go-build` |
+
+Use `cache.package_manager.paths` only for additional package-manager caches under the sandbox home directory, for example `.cache/custom-package-manager`. 143 rejects broad or sensitive home paths such as `.`, `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, and `.143`.
+
+Do not cache source directories, secret files, `.git`, `.143/cache`, or preview install markers. Large caches are best handled by narrowing `cache.paths` to high-value dependency/build-cache directories or setting `cache.enabled: false` for that preview config. Raising `preview.resources.limits.ephemeral-storage` can help final extracted dependencies fit, but it should not be required for cache restore correctness and is capped by platform policy. `requirements.txt` can be unsafe when it contains unpinned ranges such as `flask>=2.0`; pin dependencies, use a real lockfile, or set `cache.enabled: false`. Mutable preview image tags such as `latest` can also produce stale caches; prefer immutable digests or versioned tags.
+
+Deployment operators enable shared dependency caching by setting `PREVIEW_DEPENDENCY_CACHE_BUCKET`. Package-manager global cache support defaults on when the shared cache is configured and can be disabled with `PREVIEW_PACKAGE_MANAGER_CACHE_ENABLED=false`. Worker-local L1 cache defaults to `/var/cache/143/preview-dependency-cache` and is host-mounted by the production worker compose file; set `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR=off` to disable only the worker-local L1 layer while keeping shared object-storage restores enabled. Low-priority prewarming is disabled by default; enable it with `PREVIEW_CACHE_PREWARM_ENABLED=true`.
 
 Npm workspace example:
 
@@ -224,7 +271,22 @@ Pnpm example:
 }
 ```
 
-Keep package-manager details explicit. 143 does not auto-detect npm, yarn, pnpm, bun, or delete `node_modules` unless you declare that path in `clean_paths`.
+Opt out when a repo cannot safely reuse dependency artifacts:
+
+```json
+{
+  "preview": {
+    "install": {
+      "command": ["npm", "ci"],
+      "lockfiles": ["package-lock.json"],
+      "clean_paths": ["node_modules"],
+      "cache": { "enabled": false }
+    }
+  }
+}
+```
+
+If dependencies look stale, change the lockfile so the cache key changes, or temporarily opt out with `cache.enabled: false`.
 
 ### Services
 

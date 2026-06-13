@@ -97,6 +97,7 @@ Under **Permissions**, configure:
 | **Repository > Checks** | Read | Monitor CI status on PRs |
 | **Repository > Deployments** | Read | Detect when fixes are deployed |
 | **Repository > Metadata** | Read | Required for all GitHub Apps (auto-selected) |
+| **Organization > Members** | Read | Sync org membership rosters for GitHub organization auto-join |
 
 ### Step 4: Subscribe to events
 
@@ -108,6 +109,7 @@ Under **Subscribe to events**, check:
 - [x] **Pull request review** — capture review decisions (approved, changes requested)
 - [x] **Pull request review comment** — capture inline review comments
 - [x] **Deployment status** — detect deploys after merge
+- [x] **Organization** — keep GitHub organization auto-join rosters current when members are added, removed, or the org is renamed
 
 ### Step 5: Choose where the app can be installed
 

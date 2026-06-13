@@ -59,7 +59,10 @@ func runSessionExecutorMain() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
+		MaxConns:        cfg.DatabaseMaxConns,
+		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -137,9 +140,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	scopedCredentialStore := db.NewScopedCredentialStore(codingCredentialStore)
 	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
@@ -221,6 +222,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	projectCycleStore := db.NewProjectCycleStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
+	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
 
 	services := buildServices(
@@ -250,6 +252,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		integrationStore,
 		sessionMessageStore,
 		automationRunStore,
+		evalBootstrapStore,
 		snapshotStore,
 		billingMetrics,
 		agent.NewCancelRegistry(logger),
@@ -281,7 +284,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		EvalTasks:           db.NewEvalTaskStore(pool),
 		EvalRuns:            db.NewEvalRunStore(pool),
 		EvalBatches:         db.NewEvalBatchStore(pool),
-		EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+		EvalBootstraps:      evalBootstrapStore,
+		EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 		Repositories:        repoStore,
 		SessionMessages:     sessionMessageStore,
 		SessionThreads:      sessionThreadStore,
@@ -290,6 +294,8 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		AutomationRuns:      automationRunStore,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+		Previews:            db.NewPreviewStore(pool),
+		PullRequests:        pullRequestStore,
 	}
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores

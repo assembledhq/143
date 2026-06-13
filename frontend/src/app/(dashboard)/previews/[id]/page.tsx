@@ -1,9 +1,10 @@
 "use client";
 
 import { use, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, GitBranch, GitPullRequest, KeyRound, Loader2, RotateCw, Square } from "lucide-react";
+import { AlertTriangle, ArrowLeft, GitBranch, GitPullRequest, KeyRound, Loader2, RotateCw, Square } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -18,8 +19,22 @@ import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+  PREVIEW_LAUNCH_COMPLETE_EVENT,
 } from "@/lib/preview-bootstrap";
 import { safeExternalUrl } from "@/lib/utils";
+import { pollMs } from "@/lib/poll-intervals";
+
+function previewUnavailableRecoveryCopy(unavailableReason?: string) {
+  if (unavailableReason === "endpoint_unreachable") {
+    return {
+      title: "Preview connection lost",
+      description:
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+    };
+  }
+
+  return null;
+}
 
 export default function PreviewLandingPage({
   params,
@@ -34,6 +49,10 @@ export function PreviewLandingContent({ id }: { id: string }) {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const launchMode = searchParams.get("launch") === "1";
+  // Popup mode: this page was opened by the preview-domain control overlay,
+  // which stays put and waits for a launch-complete message instead of being
+  // navigated away from.
+  const popupMode = launchMode && searchParams.get("popup") === "1";
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bootstrappedPreviewIdRef = useRef<string | null>(null);
   const launchStartAttemptedRef = useRef<string | null>(null);
@@ -43,7 +62,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
     queryFn: () => api.previews.get(id),
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      return status === "starting" ? 3000 : false;
+      return status === "starting" ? pollMs(3000) : false;
     },
   });
   const stopPreview = useMutation({
@@ -82,6 +101,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
       ? `Preview ${(preview.target_id ?? preview.preview_id ?? "").slice(0, 8)}`
       : "Preview";
   const status = preview?.status ? formatPreviewStatus(preview.status) : "Loading";
+  const unavailableRecovery = previewUnavailableRecoveryCopy(preview?.unavailable_reason);
   const stoppedAtText = preview?.stopped_at ? new Date(preview.stopped_at).toLocaleString() : null;
   const launchTargetId = preview?.preview_id ?? preview?.target_id;
   const shouldStartForLaunch =
@@ -107,6 +127,17 @@ export function PreviewLandingContent({ id }: { id: string }) {
       if (event.origin !== previewOrigin) return;
       if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
         if (bootstrappedPreviewIdRef.current === activePreviewId) {
+          if (popupMode && window.opener) {
+            // Include the preview URL so an overlay served on an alias host
+            // (runtime instance ID vs stable target ID) can navigate to the
+            // host the session cookie was actually minted for.
+            (window.opener as Window).postMessage(
+              { type: PREVIEW_LAUNCH_COMPLETE_EVENT, url: previewUrl },
+              previewOrigin,
+            );
+            window.close();
+            return;
+          }
           window.location.href = previewUrl;
         }
         return;
@@ -132,7 +163,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [bootstrapPreview, isReady, launchMode, preview?.preview_id, previewOrigin, previewUrl]);
+  }, [bootstrapPreview, isReady, launchMode, popupMode, preview?.preview_id, previewOrigin, previewUrl]);
 
   if (launchMode) {
     const launchError =
@@ -146,11 +177,13 @@ export function PreviewLandingContent({ id }: { id: string }) {
     const launchTitle = isReady ? "Opening preview" : isExpired ? "Restarting preview" : "Starting preview";
     const launchDescription = isReady
       ? "Connecting this browser to the preview."
-      : preview?.status === "starting"
-        ? "The preview is starting. This page will open it when it is ready."
-        : stoppedAtText
-          ? `Last stopped at ${stoppedAtText}. Starting the latest runtime for this preview.`
-          : "Starting the latest runtime for this preview.";
+        : preview?.status === "starting"
+          ? "The preview is starting. This page will open it when it is ready."
+          : unavailableRecovery
+            ? unavailableRecovery.description
+          : stoppedAtText
+            ? `Last stopped at ${stoppedAtText}. Starting the latest runtime for this preview.`
+            : "Starting the latest runtime for this preview.";
 
     return (
       <PageContainer size="narrow">
@@ -209,6 +242,12 @@ export function PreviewLandingContent({ id }: { id: string }) {
   return (
     <PageContainer size="default">
       <div className="space-y-4">
+        <Button asChild variant="ghost" size="sm" className="w-fit">
+          <Link href="/previews">
+            <ArrowLeft className="h-4 w-4" />
+            Previews
+          </Link>
+        </Button>
         <PageHeader
           title={title}
           description={preview?.branch ? `Branch preview for ${preview.branch}` : "Branch preview"}
@@ -264,11 +303,11 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
                 {/* Alerts */}
                 {preview.new_commits_available ? (
-                  <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                  <div className="flex items-start gap-3 rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <div className="min-w-0">
                       <p className="font-medium">New commits available</p>
-                      <p className="break-all text-amber-800 dark:text-amber-300">
+                      <p className="break-all text-warning/80">
                         Latest: {preview.latest_commit_sha?.slice(0, 12) ?? "unknown"}
                       </p>
                     </div>
@@ -281,6 +320,16 @@ export function PreviewLandingContent({ id }: { id: string }) {
                     <div>
                       <p className="font-medium text-foreground">Preview expired</p>
                       <p className="text-muted-foreground">Use &quot;Start latest&quot; to launch a fresh runtime.</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {unavailableRecovery ? (
+                  <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div>
+                      <p className="font-medium text-foreground">{unavailableRecovery.title}</p>
+                      <p className="text-muted-foreground">{unavailableRecovery.description}</p>
                     </div>
                   </div>
                 ) : null}

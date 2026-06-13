@@ -3,7 +3,7 @@ title: 143.dev docs
 description: Guides and reference for setting up 143, running coding-agent sessions, and operating self-hosted deployments.
 section: Get started
 order: 0
-status: beta
+status: stable
 audience: engineer
 tags:
   - overview
@@ -11,20 +11,40 @@ tags:
 llm_summary: Start here for public 143.dev documentation, including setup guides, repo configuration, previews, Linear, self-hosting, and reference material.
 ---
 
-Start with the shortest path to a reviewable change, then move into repo configuration, previews, integrations, and self-hosting only when those details become relevant. The docs are organized around what a team needs to make agent work predictable enough to trust.
+143 is built for engineering teams that want coding agents to feel like shared execution infrastructure, not a set of solo terminal sessions. It defaults to team-level workflows: shared context, sandboxed runs, visible diffs, live previews, pull requests, and a clear link back to the issue, error, or automation that started the work.
+
+The core idea is simple: keep agent work close to the systems engineers already trust. GitHub stays the source of truth for branches, PRs, review, CI, and merge rules. 143 owns the workflow around the agent: setup, context, credentials, sandbox execution, previews, follow-ups, auditability, and automation.
+
+- **A shared execution layer:** Sessions are visible to the team, not trapped in one developer's terminal. The transcript, sandbox, diff, validation output, preview, and PR state all live together.
+- **Live previews:** Run frontend or full-stack changes from inside the session so reviewers can click through the result before a PR is opened.
+- **Useful integrations:** Start work from GitHub, Linear or an API, and let agents query connected systems such as Sentry, logs, Slack, Notion, GitHub, and CI through `143-tools`.
+- **Team-level automation:** Autopilot can pick up eligible work when the repo, issue complexity, autonomy settings, and concurrency limits say it is safe. Manual kickoff stays available for anything risky or underspecified.
+- **Credential and provider control:** Configure personal and organization coding-agent auth without pasting provider keys into prompts, issues, or repo config.
+- **Self-hostable operations:** Run 143 on your own infrastructure with your GitHub App, Postgres, Redis, workers, logs, and LLM provider settings.
+
+Start with the shortest path to a reviewable change, then add repo configuration, previews, integrations, automation, and self-hosting only when those details become relevant.
 
 <Cards>
-  <Card title="Get started" href="/docs/getting-started" description="Connect GitHub, start a session, and review the first PR." />
-  <Card title="Guides" href="/docs/guides" description="Configure repos, previews, Linear, Autopilot, and agent auth." />
-  <Card title="Self-hosting" href="/docs/self-hosting" description="Run 143 on your own infrastructure." />
-  <Card title="Reference" href="/docs/reference" description="Field-level config references for operators and agents." />
+  <Card title="Get started" href="/docs/getting-started" description="Connect GitHub, start a session, inspect the diff, and open the first PR." />
+  <Card title="Guides" href="/docs/guides" description="Configure repo setup, previews, Linear, Autopilot, and coding-agent auth." />
+  <Card title="Self-hosting" href="/docs/self-hosting" description="Operate 143 with your own app, workers, data stores, secrets, and providers." />
+  <Card title="Reference" href="/docs/reference" description="Look up repo config, preview config, environment variables, API auth, and agent tools." />
 </Cards>
 
-## Popular guides
+## Good first path
 
-- [Repo config](/docs/guides/repo-config): define `.143/config.json` for setup, validation, and previews.
-- [Preview environments](/docs/guides/previews): run live app previews inside a session.
-- [Linear agent](/docs/guides/linear-agent): assign a Linear issue to `@143` and let it open a PR.
+- [Connect GitHub](/docs/getting-started/connect-github): install the GitHub App and import the repositories 143 can work in.
+- [Start a session](/docs/getting-started/start-a-session): choose a repo, branch, agent, prompt, and any files or screenshots the agent needs.
+- [Review and ship](/docs/getting-started/review-and-ship): inspect the transcript, diff, validation output, preview, and PR state before merging through normal repo rules.
+
+## Build toward production use
+
+- [Repo config](/docs/guides/repo-config): define deterministic setup, validation, and preview behavior in `.143/config.json`.
+- [Preview environments](/docs/guides/previews): run session and branch previews for UI and full-stack review.
+- [Linear agent](/docs/guides/linear-agent): assign or mention `@143` in Linear and keep progress tied to the issue.
+- [Autopilot](/docs/guides/autopilot): let eligible work run automatically behind visible gates.
+- [Coding-agent auth](/docs/guides/coding-agent-auth): configure personal and organization credentials for reliable agent execution.
+- [External API](/docs/reference/external-api): start sessions and automations from internal systems using scoped service-account tokens.
 - [Production deployment checklist](/docs/self-hosting/production-deployment-checklist): verify a self-hosted deployment before sending real work to agents.
 
 ## For AI agents

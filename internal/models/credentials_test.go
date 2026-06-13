@@ -456,7 +456,7 @@ func TestProviderConfig_Provider(t *testing.T) {
 		{"SentryConfig", SentryConfig{}, ProviderSentry},
 		{"LinearConfig", LinearConfig{}, ProviderLinear},
 		{"SlackConfig", SlackConfig{}, ProviderSlack},
-		{"OpenAIChatGPTConfig", OpenAIChatGPTConfig{}, ProviderOpenAIChatGPT},
+		{"OpenAISubscriptionConfig", OpenAISubscriptionConfig{}, ProviderOpenAISubscription},
 	}
 
 	for _, tt := range tests {
@@ -477,10 +477,9 @@ func TestProviderConfig_Validate(t *testing.T) {
 	}{
 		{"anthropic valid api key", AnthropicConfig{APIKey: "sk-ant-test"}, false},
 		{"anthropic empty", AnthropicConfig{}, true},
-		{"anthropic subscription valid", AnthropicConfig{Subscription: &AnthropicSubscription{AccessToken: "cla_tok", RefreshToken: "clr_tok"}}, false},
-		{"anthropic subscription missing access_token", AnthropicConfig{Subscription: &AnthropicSubscription{RefreshToken: "clr_tok"}}, true},
-		{"anthropic subscription missing refresh_token", AnthropicConfig{Subscription: &AnthropicSubscription{AccessToken: "cla_tok"}}, true},
-		{"anthropic both api key and subscription", AnthropicConfig{APIKey: "sk-ant-test", Subscription: &AnthropicSubscription{AccessToken: "cla_tok", RefreshToken: "clr_tok"}}, true},
+		{"anthropic subscription valid", AnthropicSubscriptionConfig{AccessToken: "cla_tok", RefreshToken: "clr_tok"}, false},
+		{"anthropic subscription missing access_token", AnthropicSubscriptionConfig{RefreshToken: "clr_tok"}, true},
+		{"anthropic subscription missing refresh_token", AnthropicSubscriptionConfig{AccessToken: "cla_tok"}, true},
 		{"openai valid", OpenAIConfig{APIKey: "sk-test", APIType: "chat"}, false},
 		{"openai empty key", OpenAIConfig{APIKey: ""}, true},
 		{"openrouter valid", OpenRouterConfig{APIKey: "sk-or-test"}, false},
@@ -508,9 +507,9 @@ func TestProviderConfig_Validate(t *testing.T) {
 		{"linear empty", LinearConfig{WebhookSecret: ""}, true},
 		{"slack valid", SlackConfig{AccessToken: "xoxb-test-token"}, false},
 		{"slack missing access_token", SlackConfig{AccessToken: ""}, true},
-		{"openai_chatgpt valid", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: "chr_tok"}, false},
-		{"openai_chatgpt missing access_token", OpenAIChatGPTConfig{AccessToken: "", RefreshToken: "chr_tok"}, true},
-		{"openai_chatgpt missing refresh_token", OpenAIChatGPTConfig{AccessToken: "cha_tok", RefreshToken: ""}, true},
+		{"openai_subscription valid", OpenAISubscriptionConfig{AccessToken: "cha_tok", RefreshToken: "chr_tok"}, false},
+		{"openai_subscription missing access_token", OpenAISubscriptionConfig{AccessToken: "", RefreshToken: "chr_tok"}, true},
+		{"openai_subscription missing refresh_token", OpenAISubscriptionConfig{AccessToken: "cha_tok", RefreshToken: ""}, true},
 	}
 
 	for _, tt := range tests {
@@ -595,13 +594,13 @@ func TestMaskedSummary_Anthropic(t *testing.T) {
 func TestMaskedSummary_AnthropicSubscription(t *testing.T) {
 	t.Parallel()
 
-	cfg := AnthropicConfig{Subscription: &AnthropicSubscription{
+	cfg := AnthropicSubscriptionConfig{
 		AccessToken: "cla_access_token_abcdef",
 		AccountType: "max",
-	}}
+	}
 	summary := cfg.MaskedSummary()
 
-	require.Equal(t, ProviderAnthropic, summary.Provider)
+	require.Equal(t, ProviderAnthropicSubscription, summary.Provider)
 	require.True(t, summary.Configured)
 	require.Equal(t, "max", summary.AccountType, "subscription summary should include account_type")
 	require.Empty(t, summary.MaskedKey, "subscription summary should omit the masked access token")
@@ -626,17 +625,15 @@ func TestAnthropicSubscription_NeedsRefresh(t *testing.T) {
 func TestParseProviderConfig_AnthropicSubscription(t *testing.T) {
 	t.Parallel()
 
-	input := `{"subscription":{"access_token":"cla_tok","refresh_token":"clr_tok","account_type":"pro"}}`
-	cfg, err := ParseProviderConfig(ProviderAnthropic, []byte(input))
+	input := `{"access_token":"cla_tok","refresh_token":"clr_tok","account_type":"pro"}`
+	cfg, err := ParseProviderConfig(ProviderAnthropicSubscription, []byte(input))
 	require.NoError(t, err)
 
-	ac, ok := cfg.(AnthropicConfig)
-	require.True(t, ok, "config should be AnthropicConfig")
-	require.Empty(t, ac.APIKey, "subscription-only config should not carry an API key")
-	require.NotNil(t, ac.Subscription)
-	require.Equal(t, "cla_tok", ac.Subscription.AccessToken)
-	require.Equal(t, "clr_tok", ac.Subscription.RefreshToken)
-	require.Equal(t, "pro", ac.Subscription.AccountType)
+	ac, ok := cfg.(AnthropicSubscriptionConfig)
+	require.True(t, ok, "config should be AnthropicSubscriptionConfig")
+	require.Equal(t, "cla_tok", ac.AccessToken)
+	require.Equal(t, "clr_tok", ac.RefreshToken)
+	require.Equal(t, "pro", ac.AccountType)
 }
 
 func TestMaskedSummary_OpenAI(t *testing.T) {
@@ -746,28 +743,16 @@ func TestMaskedSummary_Linear(t *testing.T) {
 	require.Empty(t, summary.MaskedKey, "linear summary should not include masked key")
 }
 
-func TestMaskedSummary_OpenAIChatGPT(t *testing.T) {
-	t.Parallel()
-
-	cfg := OpenAIChatGPTConfig{AccessToken: "cha_test_access_token_12345", AccountType: "plus"}
-	summary := cfg.MaskedSummary()
-
-	require.Equal(t, ProviderOpenAIChatGPT, summary.Provider, "summary should have correct provider")
-	require.True(t, summary.Configured, "summary should be configured")
-	require.Equal(t, "cha_te...2345", summary.MaskedKey, "summary should mask access token")
-	require.Equal(t, "plus", summary.AccountType, "summary should include account type")
-}
-
-func TestOpenAIChatGPTConfig_IsExpired(t *testing.T) {
+func TestOpenAISubscriptionConfig_IsExpired(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		cfg      OpenAIChatGPTConfig
+		cfg      OpenAISubscriptionConfig
 		expected bool
 	}{
-		{"expired token", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(-1 * time.Hour)}, true},
-		{"valid token", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, false},
+		{"expired token", OpenAISubscriptionConfig{ExpiresAt: time.Now().Add(-1 * time.Hour)}, true},
+		{"valid token", OpenAISubscriptionConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, false},
 	}
 
 	for _, tt := range tests {
@@ -778,18 +763,18 @@ func TestOpenAIChatGPTConfig_IsExpired(t *testing.T) {
 	}
 }
 
-func TestOpenAIChatGPTConfig_NeedsRefresh(t *testing.T) {
+func TestOpenAISubscriptionConfig_NeedsRefresh(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		cfg      OpenAIChatGPTConfig
+		cfg      OpenAISubscriptionConfig
 		window   time.Duration
 		expected bool
 	}{
-		{"expires within window", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(2 * time.Minute)}, 5 * time.Minute, true},
-		{"expires outside window", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, 5 * time.Minute, false},
-		{"already expired", OpenAIChatGPTConfig{ExpiresAt: time.Now().Add(-1 * time.Minute)}, 5 * time.Minute, true},
+		{"expires within window", OpenAISubscriptionConfig{ExpiresAt: time.Now().Add(2 * time.Minute)}, 5 * time.Minute, true},
+		{"expires outside window", OpenAISubscriptionConfig{ExpiresAt: time.Now().Add(1 * time.Hour)}, 5 * time.Minute, false},
+		{"already expired", OpenAISubscriptionConfig{ExpiresAt: time.Now().Add(-1 * time.Minute)}, 5 * time.Minute, true},
 	}
 
 	for _, tt := range tests {
@@ -800,24 +785,24 @@ func TestOpenAIChatGPTConfig_NeedsRefresh(t *testing.T) {
 	}
 }
 
-func TestParseProviderConfig_OpenAIChatGPT(t *testing.T) {
+func TestParseProviderConfig_OpenAISubscription(t *testing.T) {
 	t.Parallel()
 
 	input := `{"access_token":"cha_tok","refresh_token":"chr_tok","account_type":"plus"}`
-	cfg, err := ParseProviderConfig(ProviderOpenAIChatGPT, []byte(input))
+	cfg, err := ParseProviderConfig(ProviderOpenAISubscription, []byte(input))
 	require.NoError(t, err)
 
-	chatCfg, ok := cfg.(OpenAIChatGPTConfig)
-	require.True(t, ok, "config should be OpenAIChatGPTConfig")
-	require.Equal(t, "cha_tok", chatCfg.AccessToken)
-	require.Equal(t, "chr_tok", chatCfg.RefreshToken)
-	require.Equal(t, "plus", chatCfg.AccountType)
+	subCfg, ok := cfg.(OpenAISubscriptionConfig)
+	require.True(t, ok, "config should be OpenAISubscriptionConfig")
+	require.Equal(t, "cha_tok", subCfg.AccessToken)
+	require.Equal(t, "chr_tok", subCfg.RefreshToken)
+	require.Equal(t, "plus", subCfg.AccountType)
 }
 
-func TestParseProviderConfig_OpenAIChatGPT_Invalid(t *testing.T) {
+func TestParseProviderConfig_OpenAISubscription_Invalid(t *testing.T) {
 	t.Parallel()
 
-	_, err := ParseProviderConfig(ProviderOpenAIChatGPT, []byte(`{bad json`))
+	_, err := ParseProviderConfig(ProviderOpenAISubscription, []byte(`{bad json`))
 	require.Error(t, err)
 }
 
@@ -894,6 +879,52 @@ func TestParseProviderConfig_Notion_Invalid(t *testing.T) {
 	t.Parallel()
 
 	_, err := ParseProviderConfig(ProviderNotion, []byte(`{bad json`))
+	require.Error(t, err)
+}
+
+func TestMaskedSummary_Mezmo(t *testing.T) {
+	t.Parallel()
+
+	cfg := MezmoConfig{APIKey: "mezmo_service_key_12345"}
+	summary := cfg.MaskedSummary()
+
+	require.Equal(t, ProviderMezmo, summary.Provider, "summary should have correct provider")
+	require.True(t, summary.Configured, "summary should be configured")
+	require.Equal(t, MaskKey("mezmo_service_key_12345"), summary.MaskedKey, "summary should mask the api key")
+	require.NotContains(t, summary.MaskedKey, "mezmo_service_key_12345", "summary must not leak the raw key")
+}
+
+func TestMezmoConfig_Validate(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, MezmoConfig{APIKey: "key"}.Validate())
+	require.NoError(t, MezmoConfig{APIKey: "key", BaseURL: "https://logs.example.com", Dataset: "prod"}.Validate())
+	require.Error(t, MezmoConfig{APIKey: ""}.Validate())
+}
+
+func TestMezmoConfig_Provider(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, ProviderMezmo, MezmoConfig{}.Provider())
+}
+
+func TestParseProviderConfig_Mezmo(t *testing.T) {
+	t.Parallel()
+
+	input := `{"api_key":"mezmo_key","base_url":"https://logs.example.com","dataset":"prod"}`
+	cfg, err := ParseProviderConfig(ProviderMezmo, []byte(input))
+	require.NoError(t, err)
+
+	mc, ok := cfg.(MezmoConfig)
+	require.True(t, ok, "config should be MezmoConfig")
+	require.Equal(t, "mezmo_key", mc.APIKey)
+	require.Equal(t, "https://logs.example.com", mc.BaseURL)
+	require.Equal(t, "prod", mc.Dataset)
+}
+
+func TestParseProviderConfig_Mezmo_Invalid(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseProviderConfig(ProviderMezmo, []byte(`{bad json`))
 	require.Error(t, err)
 }
 

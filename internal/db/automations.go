@@ -27,7 +27,7 @@ const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
-	priority, created_at, updated_at, deleted_at`
+	priority, external_metadata, created_at, updated_at, deleted_at`
 
 // maxDueAutomationsPerTick caps how many due automations the scheduler claims
 // in one tick. Combined with the 10-minute tick cadence, this gives a global
@@ -45,7 +45,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
 		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
-		&a.Priority, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
+		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
 	)
 	return a, err
 }
@@ -69,14 +69,18 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 			identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
-			next_run_at, enabled, created_by, priority
+			next_run_at, enabled, created_by, priority, external_metadata
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
 			@identity_scope, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
-			@next_run_at, @enabled, @created_by, @priority
+			@next_run_at, @enabled, @created_by, @priority, @external_metadata
 		) RETURNING id, created_at, updated_at`
+	metadata := a.ExternalMetadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":              a.OrgID,
@@ -104,6 +108,7 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"enabled":             a.Enabled,
 		"created_by":          a.CreatedBy,
 		"priority":            a.Priority,
+		"external_metadata":   metadata,
 	})
 	return row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
 }
@@ -132,10 +137,12 @@ func (s *AutomationStore) LockByIDForUpdate(ctx context.Context, tx pgx.Tx, orgI
 }
 
 type AutomationFilters struct {
-	Enabled *bool
-	Limit   int
-	Cursor  string
-	Search  string
+	Enabled       *bool
+	Limit         int
+	Cursor        string
+	Search        string
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
 }
 
 func (s *AutomationStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters AutomationFilters) ([]models.Automation, error) {
@@ -150,6 +157,14 @@ func (s *AutomationStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filter
 		query += ` AND (name ILIKE @search OR goal ILIKE @search)`
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(filters.Search)
 		args["search"] = "%" + escaped + "%"
+	}
+	if filters.CreatedAfter != nil {
+		query += ` AND created_at >= @created_after`
+		args["created_after"] = *filters.CreatedAfter
+	}
+	if filters.CreatedBefore != nil {
+		query += ` AND created_at <= @created_before`
+		args["created_before"] = *filters.CreatedBefore
 	}
 	if filters.Cursor != "" {
 		cursorID, err := uuid.Parse(filters.Cursor)
@@ -192,8 +207,12 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
 			timezone = @timezone, next_run_at = @next_run_at,
 			enabled = @enabled, paused_by = @paused_by, paused_at = @paused_at,
-			priority = @priority, updated_at = now()
+			priority = @priority, external_metadata = @external_metadata, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	metadata := a.ExternalMetadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                  a.ID,
@@ -223,6 +242,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		"paused_by":           a.PausedBy,
 		"paused_at":           a.PausedAt,
 		"priority":            a.Priority,
+		"external_metadata":   metadata,
 	})
 	return err
 }
@@ -656,6 +676,34 @@ func (s *AutomationRunStore) GetByRunID(ctx context.Context, orgID, runID uuid.U
 		"org_id": orgID,
 	})
 	return scanAutomationRun(row)
+}
+
+func (s *AutomationRunStore) CountConsecutiveFailures(ctx context.Context, orgID, automationID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		WITH ordered AS (
+			SELECT status,
+			       row_number() OVER (ORDER BY triggered_at DESC, id DESC) AS rn
+			FROM automation_runs
+			WHERE org_id = @org_id
+			  AND automation_id = @automation_id
+			  AND status IN ('completed', 'completed_noop', 'failed', 'skipped')
+		),
+		boundary AS (
+			SELECT COALESCE(MIN(rn), 2147483647) AS first_non_failed
+			FROM ordered
+			WHERE status <> 'failed'
+		)
+		SELECT count(*)
+		FROM ordered, boundary
+		WHERE status = 'failed'
+		  AND rn < boundary.first_non_failed`,
+		pgx.NamedArgs{"org_id": orgID, "automation_id": automationID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count consecutive automation failures: %w", err)
+	}
+	return count, nil
 }
 
 type AutomationRunFilters struct {

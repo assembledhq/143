@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
@@ -54,6 +56,109 @@ func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context,
 	return models.Integration{}, pgx.ErrNoRows
 }
 
+type fakeGitHubOrgRosterService struct {
+	members []ghservice.OrgMember
+	err     error
+}
+
+func (s fakeGitHubOrgRosterService) ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghservice.OrgMember, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.members, nil
+}
+
+type fakeHTTPStatusError struct {
+	status int
+}
+
+func (e fakeHTTPStatusError) Error() string {
+	return http.StatusText(e.status)
+}
+
+func (e fakeHTTPStatusError) HTTPStatus() int {
+	return e.status
+}
+
+func TestSyncGitHubOrgRosterHandlerReplacesRoster(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	payload, err := json.Marshal(syncGitHubOrgRosterPayload{
+		OrgID:          orgID.String(),
+		InstallationID: 12345,
+		AccountLogin:   "acme",
+	})
+	require.NoError(t, err, "test payload should marshal")
+
+	mock.ExpectBegin()
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(workerAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 2))
+	mock.ExpectCopyFrom(pgx.Identifier{"github_org_members"}, []string{"installation_id", "github_user_id", "github_login"}).
+		WillReturnResult(2)
+	mock.ExpectExec("UPDATE github_installations").
+		WithArgs(workerAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	handler := newSyncGitHubOrgRosterHandler(
+		&Stores{GitHubInstallations: db.NewGitHubInstallationStore(mock)},
+		&Services{GitHubOrgRoster: fakeGitHubOrgRosterService{members: []ghservice.OrgMember{
+			{ID: 111, Login: "alice"},
+			{ID: 222, Login: "bob"},
+		}}},
+		zerolog.Nop(),
+	)
+
+	err = handler(context.Background(), models.JobTypeSyncGitHubOrgRoster, payload)
+
+	require.NoError(t, err, "roster sync should replace the installation roster")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSyncGitHubOrgRosterHandlerDisablesAutoJoinOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	payload, err := json.Marshal(syncGitHubOrgRosterPayload{
+		OrgID:          orgID.String(),
+		InstallationID: 12345,
+		AccountLogin:   "acme",
+	})
+	require.NoError(t, err, "test payload should marshal")
+
+	mock.ExpectQuery("UPDATE github_installation_org_links").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+		}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", false, now, now))
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(workerAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 10))
+
+	handler := newSyncGitHubOrgRosterHandler(
+		&Stores{GitHubInstallations: db.NewGitHubInstallationStore(mock)},
+		&Services{GitHubOrgRoster: fakeGitHubOrgRosterService{err: fakeHTTPStatusError{status: http.StatusForbidden}}},
+		zerolog.Nop(),
+	)
+
+	err = handler(context.Background(), models.JobTypeSyncGitHubOrgRoster, payload)
+
+	require.NoError(t, err, "forbidden roster sync should disable auto-join without retrying")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionHandlersRetryActiveThreadRuntimeConflict(t *testing.T) {
 	t.Parallel()
 
@@ -64,6 +169,661 @@ func TestSessionHandlersRetryActiveThreadRuntimeConflict(t *testing.T) {
 	require.Contains(t, body, "errors.Is(err, agent.ErrThreadRuntimeAlreadyActive)", "session handlers should classify active thread runtime conflicts as retryable")
 	require.Contains(t, body, "thread runtime already active; retrying after lease recovery", "active-runtime retries should be logged distinctly from sandbox races")
 	require.Contains(t, body, "BypassMaxRetryDuration: true", "active-runtime retries should allow bounded lease recovery without consuming the normal retry window")
+}
+
+func TestSlackNotificationSubscriptionMatches(t *testing.T) {
+	t.Parallel()
+
+	automationID := uuid.New()
+	otherAutomationID := uuid.New()
+	tests := []struct {
+		name         string
+		raw          json.RawMessage
+		eventKind    string
+		automationID *uuid.UUID
+		expected     bool
+	}{
+		{
+			name:      "event list matches event",
+			raw:       json.RawMessage(`{"events":["session.completed"]}`),
+			eventKind: "session.completed",
+			expected:  true,
+		},
+		{
+			name:      "wildcard matches event",
+			raw:       json.RawMessage(`{"events":["*"]}`),
+			eventKind: "preview.ready",
+			expected:  true,
+		},
+		{
+			name:      "event family wildcard matches event",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "preview.stale",
+			expected:  true,
+		},
+		{
+			name:      "event family wildcard rejects other family",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "session.completed",
+			expected:  false,
+		},
+		{
+			name:         "automation list matches automation event",
+			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, automationID)),
+			eventKind:    "automation.run.completed",
+			automationID: &automationID,
+			expected:     true,
+		},
+		{
+			name:         "automation list rejects different automation",
+			raw:          json.RawMessage(fmt.Sprintf(`{"events":["automation.run.completed"],"automations":["%s"]}`, otherAutomationID)),
+			eventKind:    "automation.run.completed",
+			automationID: &automationID,
+			expected:     false,
+		},
+		{
+			name:      "empty settings do not subscribe",
+			raw:       json.RawMessage(`{}`),
+			eventKind: "session.failed",
+			expected:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationSubscriptionMatches(tt.raw, tt.eventKind, tt.automationID)
+			require.Equal(t, tt.expected, got, "subscription matcher should return the expected decision")
+		})
+	}
+}
+
+func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) {
+	t.Parallel()
+
+	subscriber := "U999"
+	tests := []struct {
+		name          string
+		settings      models.SlackChannelSettings
+		expectedDests []slackNotificationDestination
+	}{
+		{
+			name: "thread visibility sends channel plus explicit DM subscribers",
+			settings: models.SlackChannelSettings{
+				SlackTeamID:               "T123",
+				SlackChannelID:            "C123",
+				ResponseVisibility:        "thread",
+				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
+			},
+			expectedDests: []slackNotificationDestination{
+				{TeamID: "T123", ChannelID: "C123"},
+				{TeamID: "T123", SlackUserID: subscriber},
+			},
+		},
+		{
+			name: "dm visibility suppresses general channel notification and sends configured DMs",
+			settings: models.SlackChannelSettings{
+				SlackTeamID:               "T123",
+				SlackChannelID:            "C123",
+				ResponseVisibility:        "dm",
+				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
+			},
+			expectedDests: []slackNotificationDestination{
+				{TeamID: "T123", SlackUserID: subscriber},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationDestinations(tt.settings, slackNotificationFanoutInput{EventKind: "session.completed"})
+
+			require.Equal(t, tt.expectedDests, got, "notification destinations should honor response visibility")
+		})
+	}
+}
+
+func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
+	t.Parallel()
+
+	got := renderSlackPrompt(
+		"please inspect https://github.com/acme/repo/pull/42",
+		"https://slack.example/thread",
+		nil,
+		[]slackContextReference{
+			{Kind: slackReferenceKindSentry, Value: "https://sentry.io/issues/123"},
+			{Kind: slackReferenceKindFilePath, Value: "src/app.ts"},
+		},
+		[]slackContextFile{{Name: "trace.log", Title: "Trace", Mimetype: "text/plain", Permalink: "https://slack.example/file"}},
+	)
+
+	require.Contains(t, got, "Detected references:", "prompt should include detected references")
+	require.Contains(t, got, "- sentry: https://sentry.io/issues/123", "prompt should include typed external references")
+	require.Contains(t, got, "- file_path: src/app.ts", "prompt should include typed file path references")
+	require.Contains(t, got, "Attached files:", "prompt should include attached file metadata")
+	require.Contains(t, got, "trace.log", "prompt should include Slack file names")
+}
+
+func TestDetectSlackContextReferencesClassifiesProductContext(t *testing.T) {
+	t.Parallel()
+
+	refs := detectSlackContextReferences(
+		"@143 check https://github.com/acme/repo/pull/42 and ENG-123 on branch jsmith/navbar-redesign",
+		[]ingestion.SlackMessage{{Text: "Sentry is https://acme.sentry.io/issues/123 and stack mentions src/app.ts:44"}},
+	)
+
+	require.Equal(t, []slackContextReference{
+		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42"},
+		{Kind: slackReferenceKindIssue, Value: "ENG-123"},
+		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign"},
+		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123"},
+		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44"},
+	}, refs, "Slack context detection should preserve ordered typed references")
+}
+
+func TestSlackModalsUseInputLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		view ingestion.SlackHomeView
+	}{
+		{
+			name: "start session modal",
+			view: slackStartSessionModal(),
+		},
+		{
+			name: "configure channel modal",
+			view: slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}}),
+		},
+		{
+			name: "human input freeform modal",
+			view: slackHumanInputFreeformModal("{}"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NotEmpty(t, tt.view.Blocks, "modal should include input blocks")
+			for _, block := range tt.view.Blocks {
+				require.Equal(t, "input", block.Type, "test modal block should be an input block")
+				require.NotNil(t, block.Label, "Slack input blocks should serialize label")
+				require.Nil(t, block.Text, "Slack input blocks should not serialize unsupported text field")
+			}
+		})
+	}
+}
+
+func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	view := slackConfigureChannelModal(models.SlackInteractionJobPayload{ChannelID: "C123"}, []models.Repository{{FullName: "assembledhq/143", ID: uuid.New()}})
+
+	require.Contains(t, slackBlockIDs(view.Blocks), "notification_events", "channel config modal should include Slack-native notification event selection")
+	blocksJSON, err := json.Marshal(view.Blocks)
+	require.NoError(t, err, "channel config modal blocks should marshal to JSON")
+	blocksStr := string(blocksJSON)
+	require.Contains(t, blocksStr, "automation.run.failure_streak", "channel config modal should expose automation failure-streak notifications")
+	require.Contains(t, blocksStr, `"preview.*"`, "channel config modal should expose all-preview-events wildcard subscription")
+}
+
+func TestSlackHomeOrgSelectorBlockIsActionable(t *testing.T) {
+	t.Parallel()
+
+	activeOrgID := uuid.New()
+	otherOrgID := uuid.New()
+	block := slackHomeOrgSelectorBlock([]models.MembershipSummary{
+		{OrgID: activeOrgID, OrgName: "Active", Role: models.RoleAdmin},
+		{OrgID: otherOrgID, OrgName: "Other", Role: models.RoleMember},
+	}, activeOrgID)
+
+	require.Equal(t, "actions", block.Type, "multi-org Slack App Home should render an actionable organization selector")
+	require.NotEmpty(t, block.Elements, "organization selector should include select elements")
+	require.Equal(t, "slack_select_org", block.Elements[0]["action_id"], "organization selector should route to Slack org selection")
+}
+
+func TestRenderSlackFinalBlocksIncludesSpecializedOutcomeActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	_, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:              sessionID,
+			PRCreationState: models.PRCreationStateFailed,
+		},
+		PullRequest: &models.PullRequest{GitHubPRURL: "https://github.com/acme/repo/pull/42", Status: models.PullRequestStatusOpen},
+	})
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_repair_pr"), "failed PR outcome should include a repair action")
+	require.True(t, slackBlocksContainAction(blocks, "slack_merge_pr"), "open PR outcome should include a merge action")
+}
+
+func TestSlackTeamSessionLabel(t *testing.T) {
+	t.Parallel()
+
+	require.Contains(t, slackTeamSessionLine(models.SlackSessionLink{TeamSession: true}), "team session", "team sessions should be clearly labeled")
+	require.Empty(t, slackTeamSessionLine(models.SlackSessionLink{}), "mapped user sessions should not include team-session copy")
+}
+
+func TestSlackSessionAttributionMetadataIsSanitized(t *testing.T) {
+	t.Parallel()
+
+	mappedUserID := uuid.New()
+	raw := slackSessionAttributionMetadata(models.SlackSessionLink{
+		SlackTeamID:           "T123",
+		SlackChannelID:        "C123",
+		SlackThreadTS:         "1710000000.000000",
+		SlackRootTS:           "1710000000.000000",
+		SlackMessagePermalink: "https://slack.example/thread",
+		SlackUserID:           "U123",
+		MappedUserID:          &mappedUserID,
+		TeamSession:           false,
+	})
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got), "metadata should be valid JSON")
+	require.Equal(t, "T123", got["slack_team_id"], "metadata should include Slack team attribution")
+	require.Equal(t, "C123", got["slack_channel_id"], "metadata should include Slack channel attribution")
+	require.Equal(t, "1710000000.000000", got["slack_thread_ts"], "metadata should include Slack thread attribution")
+	require.Equal(t, mappedUserID.String(), got["mapped_user_id"], "metadata should include mapped user attribution")
+	require.NotContains(t, got, "text", "metadata should not store raw Slack message text")
+	require.NotContains(t, got, "raw_payload", "metadata should not duplicate raw Slack payloads")
+}
+
+func TestSlackPreviewIsStaleForSession(t *testing.T) {
+	t.Parallel()
+
+	oldRevision := int64(2)
+	currentRevision := int64(4)
+	tests := []struct {
+		name     string
+		session  models.Session
+		preview  models.PreviewInstance
+		expected bool
+	}{
+		{
+			name:     "active preview behind session is stale",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &oldRevision, Status: models.PreviewStatusReady},
+			expected: true,
+		},
+		{
+			name:     "matching revision is current",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &currentRevision, Status: models.PreviewStatusReady},
+			expected: false,
+		},
+		{
+			name:     "terminal preview is not notified as stale",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{SourceWorkspaceRevision: &oldRevision, Status: models.PreviewStatusStopped},
+			expected: false,
+		},
+		{
+			name:     "preview without source revision is unknown",
+			session:  models.Session{WorkspaceRevision: currentRevision},
+			preview:  models.PreviewInstance{Status: models.PreviewStatusReady},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackPreviewIsStaleForSession(tt.session, tt.preview)
+			require.Equal(t, tt.expected, got, "stale preview detection should match session and preview revisions")
+		})
+	}
+}
+
+func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	text, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+		Preview: &models.PreviewInstance{ID: previewID, Status: models.PreviewStatusReady},
+	})
+
+	require.Contains(t, text, "Session: https://143.test/sessions/"+sessionID.String(), "final text should include the session link")
+	require.True(t, slackBlocksContainAction(blocks, "slack_open_preview"), "final Slack blocks should include open-preview button when preview exists")
+	require.Contains(t, slackBlocksActionValue(blocks, "slack_open_preview"), orgID.String(), "open-preview action value must contain the correct org_id")
+}
+
+func TestSlackHumanInputAuthorizationAllowsTeamSessionClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	requestID := uuid.New()
+	link := models.SlackSessionLink{
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		SlackTeamID:    "T123",
+		SlackChannelID: "C123",
+		TeamSession:    true,
+	}
+	slackLink := models.SlackUserLink{UserID: &userID}
+	membership := models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: models.RoleMember}
+
+	decision, err := authorizeSlackHumanInputAnswer(context.Background(), workerSlackHumanInputAuthStores{
+		sessionLinks: workerSlackSessionLinkLookup{link: link},
+		userLinks:    workerSlackUserLinkLookup{link: slackLink},
+		memberships:  workerSlackMembershipLookup{membership: membership},
+	}, orgID, sessionID, requestID, models.SlackInteractionJobPayload{
+		TeamID:    "T123",
+		ChannelID: "C123",
+		UserID:    "U123",
+	})
+
+	require.NoError(t, err, "authorized mapped Slack users should be able to claim human input on originating team sessions")
+	require.Equal(t, userID, decision.AnsweredByUserID, "human input should be answered as the mapped 143 user")
+}
+
+func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
+	ids := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.BlockID != "" {
+			ids = append(ids, block.BlockID)
+		}
+	}
+	return ids
+}
+
+func slackBlocksContainAction(blocks []ingestion.SlackBlock, actionID string) bool {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID {
+				return true
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID {
+			return true
+		}
+	}
+	return false
+}
+
+func slackBlocksActionValue(blocks []ingestion.SlackBlock, actionID string) string {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID {
+				if v, ok := element["value"].(string); ok {
+					return v
+				}
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID {
+			if v, ok := block.Accessory["value"].(string); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+type workerSlackSessionLinkLookup struct {
+	link models.SlackSessionLink
+	err  error
+}
+
+func (s workerSlackSessionLinkLookup) GetBySession(context.Context, uuid.UUID, uuid.UUID) (models.SlackSessionLink, error) {
+	if s.err != nil {
+		return models.SlackSessionLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerSlackUserLinkLookup struct {
+	link models.SlackUserLink
+	err  error
+}
+
+func (s workerSlackUserLinkLookup) GetBySlackUser(context.Context, uuid.UUID, string, string) (models.SlackUserLink, error) {
+	if s.err != nil {
+		return models.SlackUserLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerSlackMembershipLookup struct {
+	membership models.OrganizationMembership
+	err        error
+}
+
+func (s workerSlackMembershipLookup) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	if s.err != nil {
+		return models.OrganizationMembership{}, s.err
+	}
+	return s.membership, nil
+}
+
+func TestSlackThreadRoutingBySource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		source              string
+		messageTS           string
+		threadTS            string
+		expectedReplyThread string
+		expectedLinkThread  string
+		expectedPermalink   bool
+	}{
+		{
+			name:                "message event replies in source thread",
+			source:              "app_mention",
+			messageTS:           "1700000000.000100",
+			expectedReplyThread: "1700000000.000100",
+			expectedLinkThread:  "1700000000.000100",
+			expectedPermalink:   true,
+		},
+		{
+			name:                "threaded message event keeps explicit thread",
+			source:              "message.im",
+			messageTS:           "1700000000.000200",
+			threadTS:            "1700000000.000100",
+			expectedReplyThread: "1700000000.000100",
+			expectedLinkThread:  "1700000000.000100",
+			expectedPermalink:   true,
+		},
+		{
+			name:               "slash command posts unthreaded with synthetic link",
+			source:             "slash_command",
+			messageTS:          "slash-trigger-123",
+			expectedLinkThread: "slash:slash-trigger-123",
+		},
+		{
+			name:               "app home modal posts unthreaded with synthetic link",
+			source:             "app_home",
+			messageTS:          "V12345",
+			expectedLinkThread: "app_home:V12345",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := models.SlackStartSessionJobPayload{
+				Source:    tt.source,
+				MessageTS: tt.messageTS,
+				ThreadTS:  tt.threadTS,
+			}
+			replyThread := slackStartSessionReplyThreadTS(payload)
+			linkThread := slackStartSessionLinkThreadTS(payload, replyThread)
+
+			require.Equal(t, tt.expectedReplyThread, replyThread, "start handler should choose the expected Slack reply thread")
+			require.Equal(t, tt.expectedLinkThread, linkThread, "start handler should choose the expected persisted link thread")
+			require.Equal(t, tt.expectedReplyThread, slackReplyThreadTS(linkThread), "outbound replies should use only real Slack thread timestamps")
+			require.Equal(t, tt.expectedPermalink, slackSourceHasMessagePermalink(tt.source), "permalink resolution should only run for real Slack messages")
+		})
+	}
+}
+
+func TestSlackDeliveryTargetFromVisibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		link            models.SlackSessionLink
+		replyThreadTS   string
+		responseVis     string
+		dmChannelID     string
+		expectedChannel string
+		expectedThread  string
+		expectedDM      bool
+	}{
+		{
+			name: "thread visibility keeps source channel and thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "thread",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+		{
+			name: "dm visibility uses opened dm channel without thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "dm",
+			dmChannelID:     "D123",
+			expectedChannel: "D123",
+			expectedDM:      true,
+		},
+		{
+			name: "dm visibility without a Slack user falls back to thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "dm",
+			dmChannelID:     "D123",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+		{
+			name: "unknown visibility is treated as thread",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackUserID:    "U123",
+			},
+			replyThreadTS:   "1710000000.000000",
+			responseVis:     "unexpected",
+			dmChannelID:     "D123",
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			channelID, threadTS, usedDM := slackDeliveryTargetFromVisibility(tt.link, tt.replyThreadTS, tt.responseVis, tt.dmChannelID)
+
+			require.Equal(t, tt.expectedChannel, channelID, "Slack delivery target should choose the expected channel")
+			require.Equal(t, tt.expectedThread, threadTS, "Slack delivery target should choose the expected thread")
+			require.Equal(t, tt.expectedDM, usedDM, "Slack delivery target should report whether DM routing was used")
+		})
+	}
+}
+
+func TestAppendSlackSessionOutcomeIncludesConcreteLinksAndDiffStats(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	branchURL := "https://github.com/acme/repo/tree/143/session"
+	text := appendSlackSessionOutcomeDetails("Done.", slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:              sessionID,
+			BranchURL:       &branchURL,
+			DiffStats:       json.RawMessage(`{"files_changed":3,"added":42,"removed":7}`),
+			PRCreationState: models.PRCreationStateSucceeded,
+		},
+		PullRequest: &models.PullRequest{
+			GitHubPRURL:    "https://github.com/acme/repo/pull/42",
+			GitHubPRNumber: 42,
+			GitHubRepo:     "acme/repo",
+			Status:         models.PullRequestStatusOpen,
+			CIStatus:       models.PullRequestCIStatusPending,
+		},
+		Preview: &models.PreviewInstance{
+			ID:     previewID,
+			Name:   "web",
+			Status: models.PreviewStatusReady,
+		},
+		PreviewURL: "https://143.test/previews/" + previewID.String(),
+	})
+
+	require.Contains(t, text, "PR: https://github.com/acme/repo/pull/42", "Slack outcome should include concrete PR URL")
+	require.Contains(t, text, "Preview: ready - https://143.test/previews/"+previewID.String(), "Slack outcome should include preview status and URL")
+	require.Contains(t, text, "Branch: https://github.com/acme/repo/tree/143/session", "Slack outcome should include branch URL")
+	require.Contains(t, text, "Changes: 3 files, +42/-7", "Slack outcome should summarize diff stats")
+}
+
+func TestAppendSlackSessionOutcomeFallsBackForPRStateWithoutRow(t *testing.T) {
+	t.Parallel()
+
+	text := appendSlackSessionOutcomeDetails("Done.", slackSessionOutcomeDetails{
+		Session: models.Session{
+			PRCreationState: models.PRCreationStateSucceeded,
+		},
+	})
+
+	require.Contains(t, text, "PR: opened", "Slack outcome should preserve existing fallback when PR row is unavailable")
+}
+
+func TestSlackDiffStatsOutcomeLineSuppressesAllZeros(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", slackDiffStatsOutcomeLine(json.RawMessage(`{"files_changed":0,"added":0,"removed":0}`)), "zero diff stats should produce no output line")
+	require.Equal(t, "", slackDiffStatsOutcomeLine(json.RawMessage(`null`)), "null diff stats should produce no output line")
+	require.NotEmpty(t, slackDiffStatsOutcomeLine(json.RawMessage(`{"files_changed":1,"added":5,"removed":2}`)), "non-zero diff stats should produce an output line")
+}
+
+func TestSlackShouldContinueLinkedSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   models.SessionStatus
+		expected bool
+	}{
+		{name: "pending linked session continues", status: models.SessionStatusPending, expected: true},
+		{name: "running linked session continues", status: models.SessionStatusRunning, expected: true},
+		{name: "idle linked session continues", status: models.SessionStatusIdle, expected: true},
+		{name: "completed linked session is resumable", status: models.SessionStatusCompleted, expected: true},
+		{name: "failed linked session is resumable", status: models.SessionStatusFailed, expected: true},
+		{name: "cancelled linked session is resumable", status: models.SessionStatusCancelled, expected: true},
+		{name: "skipped linked session starts fresh", status: models.SessionStatusSkipped, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := slackShouldContinueLinkedSession(tt.status)
+
+			require.Equal(t, tt.expected, actual, "Slack thread reuse should follow session resumability")
+		})
+	}
 }
 
 type workerLinearCredentialReader struct{}
@@ -188,6 +948,7 @@ var workerSessionThreadColumns = []string{
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
+	"created_by_source", "created_by_thread_id",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
 }
@@ -207,6 +968,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil,
 		nowPtr, nil, now,
+		models.ThreadCreatedBySourceUser, nil,
 		nil, nil, float64(0), 0, nil,
 		"", nil, "", "", []byte("[]"),
 	}
@@ -595,6 +1357,15 @@ func (c capturingStringArg) Match(v interface{}) bool {
 	}
 	*c.dest = s
 	return true
+}
+
+type prCreationStateArg struct {
+	state models.PRCreationState
+}
+
+func (a prCreationStateArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == string(a.state)
 }
 
 func expectWorkerLoadSamples(mock pgxmock.PgxPoolIface) {
@@ -2017,6 +2788,7 @@ type stubPRService struct {
 	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
 	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
+	queueMergeWhenReadyFn     func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn   func(context.Context, uuid.UUID, uuid.UUID) error
 }
 
@@ -2060,6 +2832,13 @@ func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pull
 		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
 	}
 	return nil
+}
+
+func (s *stubPRService) QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+	if s.queueMergeWhenReadyFn != nil {
+		return s.queueMergeWhenReadyFn(ctx, orgID, pullRequestID, userID)
+	}
+	return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
 }
 
 func (s *stubPRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -2653,6 +3432,101 @@ func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_QueuesMergeWhenReadyAfterPRCreation(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	triggeredByUserID := uuid.New()
+	requestedByUserID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-merge-when-ready-success"
+	row := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(row, "triggered_by_user_id", &triggeredByUserID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStateSucceeded}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	var queuedUserID uuid.UUID
+	var queuedPRID uuid.UUID
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				require.Equal(t, sessionID, run.ID, "open_pr should pass the fetched session into PRService")
+				return &models.PullRequest{ID: prID, OrgID: orgID}, nil
+			},
+			queueMergeWhenReadyFn: func(ctx context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				require.Equal(t, orgID, gotOrgID, "merge-when-ready queue should use the job org")
+				queuedPRID = gotPRID
+				queuedUserID = gotUserID
+				return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","merge_when_ready":true,"requested_by_user_id":"` + requestedByUserID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "open_pr handler should succeed and queue merge when ready")
+	require.Equal(t, prID, queuedPRID, "merge-when-ready queue should target the created PR")
+	require.Equal(t, requestedByUserID, queuedUserID, "merge-when-ready queue should use the requesting user from the job payload")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestOpenPRHandler_MergeWhenReadyFailureMarksPRCreationFailed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	requestedByUserID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-merge-when-ready-failure"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(prCreationStateArg{state: models.PRCreationStateFailed}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return &models.PullRequest{ID: prID, OrgID: orgID}, nil
+			},
+			queueMergeWhenReadyFn: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+				return nil, ghservice.ErrPullRequestMergeWhenReadyNotQueueable
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","merge_when_ready":true,"requested_by_user_id":"` + requestedByUserID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.Error(t, err, "open_pr handler should return the merge-when-ready queue failure")
+	require.ErrorIs(t, err, ghservice.ErrPullRequestMergeWhenReadyNotQueueable, "open_pr handler should preserve the queue failure cause")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCreateBranchHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 	t.Parallel()
 
@@ -3204,12 +4078,34 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 	require.True(t, ok, "automation_run handler should be registered when automation stores are available")
 }
 
+func TestRegisterHandlers_LegacyEvalJobsRemainRegisteredDuringRollout(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.EvalTasks = db.NewEvalTaskStore(mock)
+	stores.EvalRuns = db.NewEvalRunStore(mock)
+	stores.EvalBootstraps = db.NewEvalBootstrapStore(mock)
+
+	logger := zerolog.Nop()
+	w := New(nil, logger, "test-node")
+
+	RegisterHandlers(w, stores, &Services{}, DataRetentionConfig{}, logger)
+
+	_, ok := w.handlers["run_eval"]
+	require.True(t, ok, "legacy run_eval jobs should remain registered so pending jobs do not dead-letter during rollout")
+	_, ok = w.handlers["run_eval_bootstrap"]
+	require.True(t, ok, "legacy run_eval_bootstrap jobs should remain registered so pending jobs do not dead-letter during rollout")
+}
+
 type mockPreviewStarter struct {
-	called        bool
-	payload       previewsvc.StartPreviewJobPayload
-	branchCalled  bool
-	branchPayload previewsvc.StartBranchPreviewJobPayload
-	err           error
+	called         bool
+	payload        previewsvc.StartPreviewJobPayload
+	branchCalled   bool
+	branchPayload  previewsvc.StartBranchPreviewJobPayload
+	prewarmCalled  bool
+	prewarmPayload previewsvc.PreviewCachePrewarmJobPayload
+	err            error
 }
 
 func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error {
@@ -3221,6 +4117,12 @@ func (m *mockPreviewStarter) StartReservedPreview(ctx context.Context, payload p
 func (m *mockPreviewStarter) StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error {
 	m.branchCalled = true
 	m.branchPayload = payload
+	return m.err
+}
+
+func (m *mockPreviewStarter) PrewarmPreviewCaches(ctx context.Context, payload previewsvc.PreviewCachePrewarmJobPayload) error {
+	m.prewarmCalled = true
+	m.prewarmPayload = payload
 	return m.err
 }
 
@@ -3240,6 +4142,8 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	require.True(t, ok, "start_preview handler should be registered when preview starter is available")
 	_, ok = w.handlers[models.JobTypeStartBranchPreview]
 	require.True(t, ok, "start_branch_preview handler should be registered when preview starter is available")
+	_, ok = w.handlers[models.JobTypePreviewCachePrewarm]
+	require.True(t, ok, "preview cache prewarm handler should be registered when preview starter is available")
 
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -3258,6 +4162,115 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	require.NoError(t, err, "start_preview handler should delegate successfully")
 	require.True(t, starter.called, "start_preview handler should call the preview starter")
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestPreviewCachePrewarmHandler_DelegatesToPreviewStarter(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{}
+	handler := newPreviewCachePrewarmHandler(&Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:           uuid.New(),
+		RepositoryID:    uuid.New(),
+		UserID:          uuid.New(),
+		Source:          previewsvc.PreviewCachePrewarmSourceBranch,
+		PreviewTargetID: uuid.New(),
+		Branch:          "main",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "preview cache prewarm payload should marshal")
+
+	err = handler(context.Background(), models.JobTypePreviewCachePrewarm, raw)
+
+	require.NoError(t, err, "preview cache prewarm handler should delegate successfully")
+	require.True(t, starter.prewarmCalled, "preview cache prewarm handler should call the preview starter")
+	require.Equal(t, payload, starter.prewarmPayload, "preview cache prewarm handler should pass the decoded payload")
+}
+
+func TestPreviewCachePrewarmHandler_CapacitySkipIsNotFatal(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: previewsvc.ErrPreviewCachePrewarmCapacitySkipped}
+	handler := newPreviewCachePrewarmHandler(&Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             uuid.New(),
+		RepositoryID:      uuid.New(),
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         uuid.New(),
+		WorkspaceRevision: 3,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "preview cache prewarm payload should marshal")
+
+	err = handler(context.Background(), models.JobTypePreviewCachePrewarm, raw)
+
+	require.NoError(t, err, "capacity skips should complete the prewarm job without dead-lettering")
+	require.True(t, starter.prewarmCalled, "preview cache prewarm handler should still delegate capacity-skipped payloads")
+}
+
+func TestPreviewCachePrewarmHandler_InvalidPayloadIsFatal(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{}
+	handler := newPreviewCachePrewarmHandler(&Services{PreviewStarter: starter}, logger)
+
+	err := handler(context.Background(), models.JobTypePreviewCachePrewarm, json.RawMessage(`{"source":"branch"}`))
+
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "preview cache prewarm handler should return fatal error for invalid payload")
+	require.False(t, starter.prewarmCalled, "preview cache prewarm handler should not call starter for invalid payload")
+}
+
+func TestEnqueueSessionPreviewCachePrewarm_TargetsLiveSessionWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
+	containerID := "session-container"
+	workerNodeID := "worker-a"
+	row := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(row, "repository_id", &repoID)
+	setWorkerSessionColumn(row, "triggered_by_user_id", &userID)
+	setWorkerSessionColumn(row, "workspace_revision", int64(7))
+	setWorkerSessionColumn(row, "container_id", &containerID)
+	setWorkerSessionColumn(row, "worker_node_id", &workerNodeID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "preview", models.JobTypePreviewCachePrewarm, pgxmock.AnyArg(), -50, pgxmock.AnyArg(), &workerNodeID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	enqueueSessionPreviewCachePrewarm(context.Background(), stores, &Services{
+		PreviewCachePrewarmEnabled:  true,
+		PreviewCachePrewarmPriority: -50,
+	}, zerolog.Nop(), orgID, sessionID, "turn_complete")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "session prewarm enqueue should target the live session worker")
+}
+
+func setWorkerSessionColumn(row []any, name string, value any) {
+	for i, column := range workerSessionColumns {
+		if column == name {
+			row[i] = value
+			return
+		}
+	}
 }
 
 func TestStartBranchPreviewHandler_DelegatesToPreviewStarter(t *testing.T) {
@@ -3375,6 +4388,127 @@ func TestStartPreviewHandler_StaleSandboxClearedRetries(t *testing.T) {
 	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
 }
 
+func TestStartPreviewHandler_SandboxBusyRetries(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_BUSY: %w: another process attached first", previewsvc.ErrSandboxBusy)}
+	handler := newStartPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     uuid.New(),
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		PreviewID: uuid.New(),
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox-busy preview starts should requeue instead of dead-lettering")
+	require.ErrorIs(t, retryable.Err, previewsvc.ErrSandboxBusy, "retryable error should preserve the sandbox-busy sentinel")
+	require.NotNil(t, retryable.RetryAfter, "sandbox-busy retry should use an explicit short delay")
+	require.Equal(t, 2*time.Second, *retryable.RetryAfter, "sandbox-busy retry should run after the competing holder publishes or releases")
+	require.True(t, starter.called, "start_preview handler should call the preview starter before deciding retry behavior")
+	require.Equal(t, payload, starter.payload, "start_preview handler should pass the decoded payload")
+}
+
+func TestStartPreviewHandler_SandboxBusyTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	workerNodeID := "worker-recorded"
+	containerID := "container-on-recorded-worker"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_BUSY: %w: another process attached first", previewsvc.ErrSandboxBusy)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "sandbox-busy preview starts should requeue onto the session owner")
+	require.NotNil(t, retryable.TargetNodeID, "sandbox-busy retry should pin to the worker that owns the live session sandbox")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "sandbox-busy retry should target the recorded session worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartPreviewHandler_SandboxWrongNodeTargetsRecordedWorker(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	workerNodeID := "worker-recorded"
+	containerID := "container-on-recorded-worker"
+	snapshotKey := "snapshots/test/session.tar"
+
+	row := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 1, nil, &snapshotKey)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+	setWorkerSessionColumnValue(row, "sandbox_state", string(models.SandboxStateRunning))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(row...),
+		)
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("SANDBOX_WRONG_NODE: %w", agent.ErrSandboxOnDifferentNode)}
+	handler := newStartPreviewHandler(stores, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartPreviewJobPayload{
+		OrgID:     orgID,
+		UserID:    userID,
+		SessionID: sessionID,
+		PreviewID: previewID,
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "wrong-node preview starts should requeue onto the session owner")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxOnDifferentNode, "retry should preserve the wrong-node sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "wrong-node retry should pin to the worker that owns the live session sandbox")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "wrong-node retry should target the recorded session worker")
+	require.True(t, retryable.BypassMaxRetryDuration, "wrong-node retry should bypass the generic retry window")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestStartPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(t *testing.T) {
 	t.Parallel()
 
@@ -3456,7 +4590,7 @@ func automationRowColumns() []string {
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
 }
 
@@ -3543,7 +4677,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// 3. Atomically claim pending → running BEFORE creating the session, so
@@ -3570,7 +4704,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedReasoning, pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -3635,7 +4769,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// 3. The conditional transition finds the row already non-pending (the
@@ -3771,7 +4905,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, false, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	// Run gets marked skipped via the conditional pending → skipped transition.
@@ -3825,7 +4959,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -3839,7 +4973,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &creatorID,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -3898,7 +5032,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &clickerID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -3912,7 +5046,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), (*uuid.UUID)(nil),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -3977,7 +5111,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, &creatorID, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -3991,7 +5125,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &creatorID,
-			pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &runID,
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
@@ -4048,7 +5182,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			nil, nil, true, nil, nil, nil,
-			50, now, now, nil,
+			50, []byte("{}"), now, now, nil,
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -4390,6 +5524,81 @@ func (s *stubSandboxProvider) Restore(ctx context.Context, sb *agent.Sandbox, re
 }
 func (s *stubSandboxProvider) ExecStream(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
 	return 0, nil
+}
+
+type recordingEvalSandboxProvider struct {
+	commands []string
+	exitCode int
+	stdout   string
+	stderr   string
+	execErr  error
+}
+
+func (p *recordingEvalSandboxProvider) Name() string { return "recording" }
+func (p *recordingEvalSandboxProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+	return &agent.Sandbox{ID: "sandbox-eval", Provider: "recording", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+}
+func (p *recordingEvalSandboxProvider) CloneRepo(context.Context, *agent.Sandbox, string, string, string) error {
+	return nil
+}
+func (p *recordingEvalSandboxProvider) Exec(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+	p.commands = append(p.commands, cmd)
+	if p.stdout != "" {
+		_, _ = stdout.Write([]byte(p.stdout))
+	}
+	if p.stderr != "" {
+		_, _ = stderr.Write([]byte(p.stderr))
+	}
+	return p.exitCode, p.execErr
+}
+func (p *recordingEvalSandboxProvider) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+func (p *recordingEvalSandboxProvider) WriteFile(context.Context, *agent.Sandbox, string, []byte) error {
+	return nil
+}
+func (p *recordingEvalSandboxProvider) Destroy(context.Context, *agent.Sandbox) error {
+	return nil
+}
+func (p *recordingEvalSandboxProvider) IsAlive(context.Context, *agent.Sandbox) (bool, error) {
+	return true, nil
+}
+func (p *recordingEvalSandboxProvider) ConnectionInfo(context.Context, *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+	return nil, nil
+}
+func (p *recordingEvalSandboxProvider) Snapshot(context.Context, *agent.Sandbox) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(nil)), nil
+}
+func (p *recordingEvalSandboxProvider) Restore(_ context.Context, _ *agent.Sandbox, reader io.Reader) error {
+	_, err := io.Copy(io.Discard, reader)
+	return err
+}
+func (p *recordingEvalSandboxProvider) ExecStream(context.Context, *agent.Sandbox, string, func([]byte), io.Writer) (int, error) {
+	return 0, nil
+}
+
+type fakeSnapshotStore struct {
+	load func(context.Context, string, io.Writer) error
+}
+
+func (s fakeSnapshotStore) Save(context.Context, string, io.Reader) error { return nil }
+func (s fakeSnapshotStore) Load(ctx context.Context, key string, writer io.Writer) error {
+	if s.load != nil {
+		return s.load(ctx, key, writer)
+	}
+	return nil
+}
+func (s fakeSnapshotStore) Delete(context.Context, string) error { return nil }
+
+type fakeEvalLLM struct {
+	response   string
+	err        error
+	userPrompt string
+}
+
+func (l *fakeEvalLLM) Complete(_ context.Context, _, userPrompt string) (string, error) {
+	l.userPrompt = userPrompt
+	return l.response, l.err
 }
 
 // ---------------------------------------------------------------------------
@@ -6688,6 +7897,7 @@ func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
 
 var evalRunTestCols = []string{
 	"id", "task_id", "org_id", "batch_id",
+	"session_id", "thread_id",
 	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
@@ -6696,34 +7906,18 @@ var evalRunTestCols = []string{
 	"started_at", "completed_at", "error_message", "created_at",
 }
 
-var evalTaskTestCols = []string{
-	"id", "org_id", "repo_id", "name", "description",
-	"base_commit_sha", "solution_commit_sha", "solution_diff",
-	"issue_description", "issue_context",
-	"server_deploy_sha", "pm_document_set_pin_id", "org_settings_version_id",
-	"memory_snapshot", "sandbox_image_digest", "context_overrides",
-	"scoring_criteria", "pass_threshold",
-	"source", "source_pr_number", "complexity", "tags",
-	"snapshot_broken",
-	"created_by", "created_at", "updated_at", "archived_at",
-}
-
-func newEvalTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
-	t.Helper()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	return &Stores{
-		EvalTasks:      db.NewEvalTaskStore(mock),
-		EvalRuns:       db.NewEvalRunStore(mock),
-		EvalBatches:    db.NewEvalBatchStore(mock),
-		EvalBootstraps: db.NewEvalBootstrapStore(mock),
-		Repositories:   db.NewRepositoryStore(mock),
-	}, mock
+func anyArgs(n int) []interface{} {
+	args := make([]interface{}, n)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
 }
 
 func evalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		runID, taskID, orgID, nil,
+		nil, nil,
 		nil, "claude-sonnet-4-6", nil, nil,
 		nil, json.RawMessage(`{}`),
 		nil, nil, nil,
@@ -6733,1163 +7927,229 @@ func evalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
 	}
 }
 
-func evalTaskRow(taskID, orgID uuid.UUID, now time.Time, criteria json.RawMessage) []interface{} {
-	return []interface{}{
-		taskID, orgID, uuid.New(), "Test Task", "desc",
-		"abc123", nil, nil,
-		"Fix the bug", json.RawMessage(`{}`),
-		nil, nil, nil,
-		nil, nil, json.RawMessage(`{}`),
-		criteria, 0.7,
-		"manual", nil, "moderate", []string{"test"},
-		false,
-		nil, now, now, nil,
-	}
-}
-
-func TestExecuteEvalRun(t *testing.T) {
+func TestFinalizeSessionBackedEvalRun(t *testing.T) {
 	t.Parallel()
 
-	t.Run("returns failed with placeholder message for valid criteria", func(t *testing.T) {
-		t.Parallel()
-
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			ScoringCriteria: json.RawMessage(`[{"name":"tests_pass","grader_type":"code_check","weight":1.0}]`),
-		}
-		logger := zerolog.Nop()
-
-		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "repository store not configured")
-	})
-
-	t.Run("returns failed on invalid scoring criteria JSON", func(t *testing.T) {
-		t.Parallel()
-
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			ScoringCriteria: json.RawMessage(`not valid json`),
-		}
-		logger := zerolog.Nop()
-
-		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "failed to parse scoring criteria")
-	})
-
-	t.Run("returns failed when repository store is nil", func(t *testing.T) {
-		t.Parallel()
-
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			ScoringCriteria: json.RawMessage(`[]`),
-		}
-		logger := zerolog.Nop()
-
-		result := executeEvalRun(context.Background(), &Stores{}, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "repository store not configured")
-	})
-
-	t.Run("returns failed when sandbox provider is nil", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		repoID := uuid.New()
-		run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-		task := &models.EvalTask{
-			OrgID:           orgID,
-			RepoID:          repoID,
-			ScoringCriteria: json.RawMessage(`[]`),
-		}
-		logger := zerolog.Nop()
-
-		// Mock repository lookup
-		mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}).
-				AddRow(repoID, orgID, uuid.New(), int64(123), "org/repo", "main", false, nil, nil, "https://github.com/org/repo.git", int64(456), "active", nil, nil, json.RawMessage(`{}`), time.Now(), time.Now()))
-
-		result := executeEvalRun(context.Background(), stores, &Services{}, run, task, logger)
-		require.Equal(t, models.EvalRunStatusFailed, result.Status)
-		require.NotNil(t, result.ErrorMessage)
-		require.Contains(t, *result.ErrorMessage, "sandbox provider not configured")
-	})
-}
-
-func TestRunEvalHandler(t *testing.T) {
-	t.Parallel()
-
-	t.Run("invalid JSON payload returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", json.RawMessage(`{invalid`))
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "unmarshal run_eval payload")
-	})
-
-	t.Run("missing org ID returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		payload := json.RawMessage(`{"eval_run_id":"` + uuid.New().String() + `"}`)
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "parse org ID")
-	})
-
-	t.Run("invalid eval run ID returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		payload := json.RawMessage(`{"eval_run_id":"not-a-uuid","org_id":"` + uuid.New().String() + `"}`)
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "parse eval run ID")
-	})
-
-	t.Run("successful run executes full lifecycle", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-		taskID := uuid.New()
-		now := time.Now()
-
-		// GetByID for run
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
-
-		// GetByID for task
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
-				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
-
-		// UpdateStatus to running
-		mock.ExpectExec("UPDATE eval_runs SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		// UpdateResult
-		mock.ExpectExec("UPDATE eval_runs SET").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("batch run completes batch when all runs done", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-		taskID := uuid.New()
-		batchID := uuid.New()
-		now := time.Now()
-
-		// GetByID for run — this time with a batch_id set
-		runRow := evalRunRow(runID, taskID, orgID, now)
-		runRow[3] = &batchID // batch_id field
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(runRow...))
-
-		// GetByID for task
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
-				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
-
-		// UpdateStatus to running
-		mock.ExpectExec("UPDATE eval_runs SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		// UpdateResult
-		mock.ExpectExec("UPDATE eval_runs SET").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		// CompleteBatchIfDone
-		mock.ExpectExec("UPDATE eval_batches SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-			"batch_id":    batchID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.NoError(t, err)
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("fetch run failure returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "fetch eval run")
-	})
-
-	t.Run("update status failure returns error", func(t *testing.T) {
-		t.Parallel()
-
-		stores, mock := newEvalTestStores(t)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		runID := uuid.New()
-		taskID := uuid.New()
-		now := time.Now()
-
-		mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
-
-		mock.ExpectQuery("SELECT .+ FROM eval_tasks WHERE id").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows(evalTaskTestCols).AddRow(
-				evalTaskRow(taskID, orgID, now, json.RawMessage(`[]`))...))
-
-		mock.ExpectExec("UPDATE eval_runs SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnError(errors.New("db connection lost"))
-
-		payload, _ := json.Marshal(map[string]string{
-			"eval_run_id": runID.String(),
-			"org_id":      orgID.String(),
-		})
-
-		handler := newRunEvalHandler(stores, &Services{}, zerolog.Nop())
-		err := handler(context.Background(), "run_eval", payload)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "update eval run status to running")
-	})
-}
-
-func TestComputeWeightedScore(t *testing.T) {
-	t.Parallel()
-
-	t.Run("simple pass", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 1.0, Required: false},
-			{Name: "quality", Weight: 1.0, Required: false},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 1.0, Pass: true},
-			{Name: "quality", Score: 0.8, Pass: true},
-		}
-		score, passed := computeWeightedScore(criteria, results, 0.7)
-		require.InDelta(t, 0.9, score, 0.01)
-		require.True(t, passed)
-	})
-
-	t.Run("required criterion fails overall", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 1.0, Required: true},
-			{Name: "quality", Weight: 1.0, Required: false},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 0.0, Pass: false},
-			{Name: "quality", Score: 1.0, Pass: true},
-		}
-		score, passed := computeWeightedScore(criteria, results, 0.3)
-		require.InDelta(t, 0.5, score, 0.01) // weighted avg is 0.5
-		require.False(t, passed)             // but fails due to required criterion
-	})
-
-	t.Run("below threshold fails", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 1.0},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 0.5, Pass: true},
-		}
-		_, passed := computeWeightedScore(criteria, results, 0.7)
-		require.False(t, passed)
-	})
-
-	t.Run("empty results return zero", func(t *testing.T) {
-		t.Parallel()
-		score, passed := computeWeightedScore(nil, nil, 0.5)
-		require.Equal(t, 0.0, score)
-		require.False(t, passed)
-	})
-
-	t.Run("unequal weights", func(t *testing.T) {
-		t.Parallel()
-		criteria := []models.ScoringCriterion{
-			{Name: "tests", Weight: 3.0},
-			{Name: "quality", Weight: 1.0},
-		}
-		results := []models.CriterionResult{
-			{Name: "tests", Score: 1.0, Pass: true},
-			{Name: "quality", Score: 0.0, Pass: false},
-		}
-		score, _ := computeWeightedScore(criteria, results, 0.5)
-		require.InDelta(t, 0.75, score, 0.01) // (3*1.0 + 1*0.0) / 4
-	})
-}
-
-func TestExtractJSON(t *testing.T) {
-	t.Parallel()
-
-	t.Run("extracts from markdown fences", func(t *testing.T) {
-		t.Parallel()
-		input := "Here is the result:\n```json\n{\"pass\": true}\n```"
-		result := extractJSON(input)
-		require.Equal(t, "{\"pass\": true}", result)
-	})
-
-	t.Run("plain JSON passthrough", func(t *testing.T) {
-		t.Parallel()
-		input := `{"pass": false, "reasoning": "bad"}`
-		result := extractJSON(input)
-		require.Equal(t, input, result)
-	})
-
-	t.Run("no JSON returns input", func(t *testing.T) {
-		t.Parallel()
-		input := "no json here"
-		result := extractJSON(input)
-		require.Equal(t, input, result)
-	})
-}
-
-func TestTruncateString(t *testing.T) {
-	t.Parallel()
-
-	t.Run("short string unchanged", func(t *testing.T) {
-		t.Parallel()
-		require.Equal(t, "hello", truncateString("hello", 10))
-	})
-
-	t.Run("long string truncated", func(t *testing.T) {
-		t.Parallel()
-		result := truncateString("hello world", 5)
-		require.Equal(t, "hello...(truncated)", result)
-	})
-}
-
-func TestEvalFailed(t *testing.T) {
-	t.Parallel()
-
-	result := evalFailed("test error: %v", "details")
-	require.Equal(t, models.EvalRunStatusFailed, result.Status)
-	require.NotNil(t, result.ErrorMessage)
-	require.Equal(t, "test error: details", *result.ErrorMessage)
-}
-
-func TestBuildEvalManifest(t *testing.T) {
-	t.Parallel()
-
-	pinID := uuid.New()
-	settingsID := uuid.New()
-	digest := "sha256:abc123"
-	task := &models.EvalTask{
-		BaseCommitSHA:        "abc123",
-		PMDocumentSetPinID:   &pinID,
-		OrgSettingsVersionID: &settingsID,
-		SandboxImageDigest:   &digest,
-	}
-	run := &models.EvalRun{Model: "claude-sonnet-4-6"}
-
-	manifest := buildEvalManifest(task, run)
-	require.Equal(t, "abc123", manifest.RepoBaseCommitSHA)
-	require.Equal(t, "claude-sonnet-4-6", manifest.Model)
-	require.Equal(t, &pinID, manifest.PMDocumentSetPinID)
-	require.Equal(t, &settingsID, manifest.OrgSettingsVersionID)
-	require.Equal(t, "sha256:abc123", manifest.SandboxImageDigest)
-}
-
-// ---------------------------------------------------------------------------
-// configurable sandbox provider for grading tests
-// ---------------------------------------------------------------------------
-
-// execFunc allows per-test control of sandbox Exec behavior.
-type execFunc func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error)
-
-// configurableSandboxProvider embeds stubSandboxProvider but overrides Exec.
-type configurableSandboxProvider struct {
-	stubSandboxProvider
-	execFn execFunc
-}
-
-func (c *configurableSandboxProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-	if c.execFn != nil {
-		return c.execFn(ctx, sb, cmd, stdout, stderr)
-	}
-	return 0, nil
-}
-
-// ---------------------------------------------------------------------------
-// mock LLM client for gradeLLMJudge tests
-// ---------------------------------------------------------------------------
-
-type mockLLMClient struct {
-	response string
-	err      error
-}
-
-func (m *mockLLMClient) Complete(_ context.Context, _, _ string) (string, error) {
-	return m.response, m.err
-}
-
-// ---------------------------------------------------------------------------
-// gradeCodeCheck tests
-// ---------------------------------------------------------------------------
-
-func TestGradeCodeCheck(t *testing.T) {
-	t.Parallel()
-
-	t.Run("passing command returns score 1", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, "build", result.Name)
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-		require.Contains(t, result.Details, "exit_code=0")
-	})
-
-	t.Run("failing command returns score 0", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, stderr io.Writer) (int, error) {
-				_, _ = stderr.Write([]byte("build failed"))
-				return 1, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, "build", result.Name)
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "exit_code=1")
-	})
-
-	t.Run("exec error returns score 0", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return -1, errors.New("sandbox unreachable")
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "exec_error")
-	})
-
-	t.Run("invalid grader config returns score 0", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{invalid`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "invalid code_check config")
-	})
-
-	t.Run("JSON stdout with custom score overrides exit code", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
-				_, _ = stdout.Write([]byte(`{"score": 0.75}`))
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "quality",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.InDelta(t, 0.75, result.Score, 0.001)
-		require.True(t, result.Pass) // 0.75 >= 0.5
-	})
-
-	t.Run("JSON stdout score below 0.5 fails", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, stdout, _ io.Writer) (int, error) {
-				_, _ = stdout.Write([]byte(`{"score": 0.3}`))
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "quality",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"check_quality"}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.InDelta(t, 0.3, result.Score, 0.001)
-		require.False(t, result.Pass) // 0.3 < 0.5
-	})
-
-	t.Run("custom timeout from config is respected", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return 0, nil
-			},
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "build",
-			GraderType:   "code_check",
-			GraderConfig: json.RawMessage(`{"command":"make test","timeout_seconds":10}`),
-			Weight:       1.0,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		result := gradeCodeCheck(context.Background(), provider, sb, criterion, zerolog.Nop())
-
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-	})
-}
-
-// ---------------------------------------------------------------------------
-// gradeLLMJudge tests
-// ---------------------------------------------------------------------------
-
-func TestGradeLLMJudge(t *testing.T) {
-	t.Parallel()
-
-	solutionDiff := "diff --git a/main.go b/main.go\n+fixed"
-	task := &models.EvalTask{
-		IssueDescription: "Fix the bug in main.go",
-		SolutionDiff:     &solutionDiff,
-	}
-
-	t.Run("nil LLM client returns error result", func(t *testing.T) {
-		t.Parallel()
-
-		criterion := models.ScoringCriterion{
-			Name:       "correctness",
-			GraderType: "llm_judge",
-		}
-		result := gradeLLMJudge(context.Background(), nil, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, "correctness", result.Name)
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "LLM client not configured")
-	})
-
-	t.Run("pass_fail mode with passing judgment", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": true, "reasoning": "The diff correctly fixes the bug."}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, "correctness", result.Name)
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-		require.Equal(t, "The diff correctly fixes the bug.", result.Reasoning)
-	})
-
-	t.Run("pass_fail mode with failing judgment", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": false, "reasoning": "The fix is incorrect."}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-	})
-
-	t.Run("score mode uses numeric score", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": true, "score": 0.85, "reasoning": "Mostly correct."}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "quality",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"score"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.InDelta(t, 0.85, result.Score, 0.001)
-		require.True(t, result.Pass)
-	})
-
-	t.Run("LLM error returns failure result", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			err: errors.New("rate limited"),
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "LLM judge call failed")
-	})
-
-	t.Run("unparseable LLM response returns failure", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: "I'm not sure what to say here",
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 0.0, result.Score)
-		require.False(t, result.Pass)
-		require.Contains(t, result.Details, "failed to parse judge response")
-	})
-
-	t.Run("markdown-fenced JSON is extracted", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: "Here is my judgment:\n```json\n{\"pass\": true, \"reasoning\": \"Good fix.\"}\n```",
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "some diff", task, zerolog.Nop())
-
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-	})
-
-	t.Run("nil solution diff handled gracefully", func(t *testing.T) {
-		t.Parallel()
-
-		taskNoSolution := &models.EvalTask{
-			IssueDescription: "Fix the bug",
-		}
-		llm := &mockLLMClient{
-			response: `{"pass": true, "reasoning": "ok"}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{"output":"pass_fail"}`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", taskNoSolution, zerolog.Nop())
-
-		require.True(t, result.Pass)
-	})
-
-	t.Run("invalid grader config defaults to pass_fail", func(t *testing.T) {
-		t.Parallel()
-
-		llm := &mockLLMClient{
-			response: `{"pass": true, "reasoning": "ok"}`,
-		}
-		criterion := models.ScoringCriterion{
-			Name:         "correctness",
-			GraderType:   "llm_judge",
-			GraderConfig: json.RawMessage(`{invalid`),
-			Weight:       1.0,
-		}
-		result := gradeLLMJudge(context.Background(), llm, criterion, "diff", task, zerolog.Nop())
-
-		require.Equal(t, 1.0, result.Score)
-		require.True(t, result.Pass)
-	})
-}
-
-// ---------------------------------------------------------------------------
-// applyConfigOverlay tests
-// ---------------------------------------------------------------------------
-
-func TestApplyConfigOverlay(t *testing.T) {
-	t.Parallel()
-
-	t.Run("calls exec for fetch and each config file and dir", func(t *testing.T) {
-		t.Parallel()
-
-		var commands []string
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, _, _ io.Writer) (int, error) {
-				commands = append(commands, cmd)
-				return 0, nil
-			},
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/my-branch", zerolog.Nop())
-
-		// Should have: 1 fetch + 2 config files + 2 config dirs = 5 commands
-		require.Len(t, commands, 5)
-		require.Contains(t, commands[0], "git fetch origin refs/heads/my-branch")
-		// Config files: AGENTS.md and CLAUDE.md
-		require.Contains(t, commands[1], "AGENTS.md")
-		require.Contains(t, commands[2], "CLAUDE.md")
-		// Config dirs: .claude and .143
-		require.Contains(t, commands[3], ".claude")
-		require.Contains(t, commands[4], ".143")
-	})
-
-	t.Run("exec failures are non-fatal", func(t *testing.T) {
-		t.Parallel()
-
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				return 1, errors.New("command failed")
-			},
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-
-		// Should not panic
-		applyConfigOverlay(context.Background(), provider, sb, "refs/heads/broken", zerolog.Nop())
-	})
-}
-
-// ---------------------------------------------------------------------------
-// weightedAverage tests
-// ---------------------------------------------------------------------------
-
-func TestWeightedAverage(t *testing.T) {
-	t.Parallel()
-
-	t.Run("equal weights", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 1.0},
-			{Name: "b", Weight: 1.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-			"b": {Name: "b", Score: 0.5},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.75, avg, 0.001)
-	})
-
-	t.Run("unequal weights", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 3.0},
-			{Name: "b", Weight: 1.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-			"b": {Name: "b", Score: 0.0},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.75, avg, 0.001)
-	})
-
-	t.Run("zero weight defaults to 1", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 0},
-			{Name: "b", Weight: 0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-			"b": {Name: "b", Score: 0.0},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.5, avg, 0.001)
-	})
-
-	t.Run("missing result treated as zero", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: 1.0},
-			{Name: "b", Weight: 1.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 1.0},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.5, avg, 0.001)
-	})
-
-	t.Run("empty criteria returns zero", func(t *testing.T) {
-		t.Parallel()
-
-		avg := weightedAverage(nil, nil)
-		require.Equal(t, 0.0, avg)
-	})
-
-	t.Run("negative weight defaults to 1", func(t *testing.T) {
-		t.Parallel()
-
-		criteria := []models.ScoringCriterion{
-			{Name: "a", Weight: -5.0},
-		}
-		results := map[string]models.CriterionResult{
-			"a": {Name: "a", Score: 0.8},
-		}
-		avg := weightedAverage(criteria, results)
-		require.InDelta(t, 0.8, avg, 0.001)
-	})
-}
-
-// ---------------------------------------------------------------------------
-// runCodingAgent tests
-// ---------------------------------------------------------------------------
-
-func TestRunCodingAgent(t *testing.T) {
-	t.Parallel()
-
-	t.Run("successful agent execution returns diff", func(t *testing.T) {
-		t.Parallel()
-
-		callCount := 0
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
-				callCount++
-				if callCount == 1 {
-					// Write issue description to temp file
-					return 0, nil
-				}
-				if callCount == 2 {
-					// The claude CLI call
-					_, _ = stdout.Write([]byte("agent output"))
-					return 0, nil
-				}
-				// The git diff call
-				_, _ = stdout.Write([]byte("diff --git a/file.go b/file.go\n+new line"))
-				return 0, nil
-			},
-		}
-		services := &Services{
-			SandboxProvider: provider,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		diff, trace, tokenUsage := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix the bug", zerolog.Nop())
-
-		require.Contains(t, diff, "diff --git")
-		require.NotNil(t, trace)
-		require.Equal(t, 0, trace["exit_code"])
-		require.Nil(t, tokenUsage)
-	})
-
-	t.Run("agent exec error is captured in trace", func(t *testing.T) {
-		t.Parallel()
-
-		callCount := 0
-		provider := &configurableSandboxProvider{
-			execFn: func(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
-				callCount++
-				if callCount == 1 {
-					// Write issue description to temp file succeeds
-					return 0, nil
-				}
-				// CLI call fails
-				return 1, errors.New("sandbox crashed")
-			},
-		}
-		services := &Services{
-			SandboxProvider: provider,
-		}
-		sb := &agent.Sandbox{ID: "test-sb"}
-		_, trace, _ := runCodingAgent(context.Background(), services, sb, "claude-sonnet-4-6", "Fix", zerolog.Nop())
-
-		require.Equal(t, 1, trace["exit_code"])
-		require.Equal(t, "sandbox crashed", trace["exec_error"])
-	})
-}
-
-// ---------------------------------------------------------------------------
-// bootstrapLogWriter tests
-// ---------------------------------------------------------------------------
-
-func TestBootstrapLogWriter_NilStore(t *testing.T) {
-	t.Parallel()
-	w := &bootstrapLogWriter{store: nil, sessionID: uuid.New(), orgID: uuid.New()}
-	// Should not panic with nil store.
-	w.log(context.Background(), "info", "test message")
-}
-
-func TestBootstrapLogWriter_NilSessionID(t *testing.T) {
-	t.Parallel()
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	store := db.NewSessionLogStore(mock)
-	w := &bootstrapLogWriter{store: store, sessionID: uuid.Nil, orgID: uuid.New()}
-	// Should skip writing when sessionID is nil.
-	w.log(context.Background(), "info", "test message")
-
-	// No expectations set on mock — if it tried to write, mock would fail.
-	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestBootstrapLogWriter_WritesLog(t *testing.T) {
-	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer mock.Close()
-
+	orgID := uuid.New()
 	sessionID := uuid.New()
-	orgID := uuid.New()
-	store := db.NewSessionLogStore(mock)
-	w := &bootstrapLogWriter{store: store, sessionID: sessionID, orgID: orgID}
+	threadID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
+	now := time.Now()
+	diff := "diff --git a/app.go b/app.go"
 
-	mock.ExpectQuery(`INSERT INTO session_logs`).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(1), time.Now()))
+	mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+	mock.ExpectQuery("SELECT").
+		WithArgs(anyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"diff", "diff_stats", "diff_history", "diff_truncated", "diff_history_truncated",
+			"diff_chars", "diff_history_bytes", "diff_max_chars", "diff_history_max_bytes",
+		}).AddRow(&diff, nil, nil, false, false, int64(len(diff)), int64(0), int64(1_000_000), int64(1_000_000)))
+	mock.ExpectExec("UPDATE eval_runs SET").
+		WithArgs(anyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "eval", "run_eval_grader", pgxmock.AnyArg(), 5, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
-	// Call log — errors are silently swallowed, so verify via mock expectations.
-	w.log(context.Background(), "info", "Fetching repository details...")
-
-	err = mock.ExpectationsWereMet()
-	if err != nil {
-		// If pgxmock didn't match (e.g. due to named args), at least verify the
-		// method doesn't panic and the nil/zero-ID guards work correctly.
-		// The nil-store and nil-sessionID tests above cover the guard paths.
-		t.Skipf("pgxmock did not match QueryRow with named args (known limitation): %v", err)
+	stores := &Stores{
+		Sessions: db.NewSessionStore(mock),
+		EvalRuns: db.NewEvalRunStore(mock),
+		Jobs:     db.NewJobStore(mock),
 	}
+	finalizeSessionBackedEvalRun(context.Background(), stores, &Services{}, zerolog.Nop(), models.Session{
+		ID:              sessionID,
+		PrimaryThreadID: &threadID,
+		OrgID:           orgID,
+		Origin:          models.SessionOriginEvalRun,
+		Status:          models.SessionStatusCompleted,
+	})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "finalizer should capture the diff and enqueue post-session grading")
 }
 
-func TestShellSingleQuote(t *testing.T) {
+func TestFinalizeSessionBackedEvalRun_DiffLoadError(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"plain", "hello", `'hello'`},
-		{"backticks", "a `cmd` b", "'a `cmd` b'"},
-		{"dollar", "$VAR", `'$VAR'`},
-		{"backslash_n", "line1\\nline2", `'line1\nline2'`},
-		{"embedded_quote", "it's", `'it'\''s'`},
-		{"triple_backtick_json", "```\n{\n  \"x\": 1\n}\n```", "'```\n{\n  \"x\": 1\n}\n```'"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := shellSingleQuote(tc.in)
-			require.Equal(t, tc.want, got)
-		})
-	}
-}
 
-func TestBootstrapAgentCommand(t *testing.T) {
-	t.Parallel()
-	// The prompt deliberately contains the characters that broke the
-	// previous %q-based implementation: triple-backtick fences, embedded
-	// $VAR, and a literal single quote.
-	prompt := "scan ```\n{\n  \"x\": $VAR\n}\n``` for it's candidates"
-	cmd := bootstrapAgentCommand(prompt)
-
-	require.Equal(
-		t,
-		"claude --print 'scan ```\n{\n  \"x\": $VAR\n}\n``` for it'\\''s candidates' 2>&1",
-		cmd,
-	)
-}
-
-// stubGitHubTokenProvider implements agent.GitHubTokenProvider.
-type stubGitHubTokenProvider struct{ token string }
-
-func (s *stubGitHubTokenProvider) GetInstallationToken(_ context.Context, _ int64) (string, error) {
-	return s.token, nil
-}
-
-// captureExecSandbox records the cmd passed to ExecStream so tests can
-// assert how the bootstrap command is assembled. The sandbox returns
-// exit code 0 with empty stdout, which causes executeBootstrapScan to
-// fail at JSON parsing — that's fine for our purposes because line 2001
-// (the cmd assignment) has already run.
-type captureExecSandbox struct {
-	stubSandboxProvider
-	lastCmd string
-}
-
-func (c *captureExecSandbox) ExecStream(_ context.Context, _ *agent.Sandbox, cmd string, _ func(line []byte), _ io.Writer) (int, error) {
-	c.lastCmd = cmd
-	return 0, nil
-}
-
-func TestExecuteBootstrapScan_ShellEscapesPrompt(t *testing.T) {
-	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
 
 	orgID := uuid.New()
-	repoID := uuid.New()
-	integrationID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
 	now := time.Now()
 
-	repoMock, err := pgxmock.NewPool()
-	require.NoError(t, err)
-	defer repoMock.Close()
+	mock.ExpectQuery("SELECT .+ FROM eval_runs WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(evalRunTestCols).AddRow(evalRunRow(runID, taskID, orgID, now)...))
+	// GetDiffByID returns an error
+	mock.ExpectQuery("SELECT").
+		WithArgs(anyArgs(4)...).
+		WillReturnError(fmt.Errorf("connection reset"))
+	// Should immediately mark the run failed — no grader job enqueued.
+	// UpdateResult sets 13 named args: id, org_id, status, agent_diff, agent_trace,
+	// token_usage, criterion_results, final_score, passed, duration_seconds, sandbox_id,
+	// error_message, input_manifest.
+	mock.ExpectExec("UPDATE eval_runs SET").
+		WithArgs(anyArgs(13)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{
-				"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
-				"private", "language", "description", "clone_url", "installation_id", "status",
-				"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
-			}).AddRow(
-				repoID, orgID, integrationID, int64(12345), "assembledhq/143", "main",
-				false, nil, nil, "https://github.com/assembledhq/143.git", int64(99),
-				"active", nil, nil, json.RawMessage(`{}`), now, now,
-			),
-		)
-
-	stores := &Stores{Repositories: db.NewRepositoryStore(repoMock)}
-	capSB := &captureExecSandbox{}
-	services := &Services{
-		SandboxProvider: capSB,
-		GitHub:          &stubGitHubTokenProvider{token: "ghp_test"},
+	stores := &Stores{
+		Sessions: db.NewSessionStore(mock),
+		EvalRuns: db.NewEvalRunStore(mock),
 	}
-	logWriter := &bootstrapLogWriter{}
+	finalizeSessionBackedEvalRun(context.Background(), stores, &Services{}, zerolog.Nop(), models.Session{
+		ID:              sessionID,
+		PrimaryThreadID: &threadID,
+		OrgID:           orgID,
+		Origin:          models.SessionOriginEvalRun,
+		Status:          models.SessionStatusCompleted,
+	})
 
-	// The scan will ultimately fail on JSON parsing (stdout is empty), but
-	// it must reach line 2001 first — that's the line diff-cover was
-	// flagging.
-	_, scanErr := executeBootstrapScan(context.Background(), stores, services, orgID, repoID, logWriter, zerolog.Nop())
-	require.Error(t, scanErr)
+	require.NoError(t, mock.ExpectationsWereMet(), "diff load failure should mark run failed without enqueuing grader")
+}
 
-	require.True(t, strings.HasPrefix(capSB.lastCmd, "claude --print '"), "cmd should single-quote the prompt, got: %s", capSB.lastCmd)
-	require.Contains(t, capSB.lastCmd, "assembledhq/143", "prompt should include repo full name")
-	// The template contains triple-backtick fences; they must survive
-	// intact inside single quotes rather than being escaped or stripped.
-	require.Contains(t, capSB.lastCmd, "```", "triple-backtick JSON fences should remain in cmd")
+func TestEvalRunStatusForSession_Skipped(t *testing.T) {
+	t.Parallel()
+
+	session := models.Session{Status: models.SessionStatusSkipped}
+	status, errMsg, terminal := evalRunStatusForSession(session)
+	require.True(t, terminal, "Skipped should be a terminal session status for eval runs")
+	require.Equal(t, models.EvalRunStatusFailed, status, "Skipped session should map to Failed eval run status, not Grading")
+	require.NotNil(t, errMsg, "Skipped session should produce a non-nil error message")
+}
+
+func TestGradeEvalRunArtifacts_CodeCheckRequiresSnapshot(t *testing.T) {
+	t.Parallel()
+
+	diff := "diff --git a/app.go b/app.go"
+	criteria := json.RawMessage(`[
+		{"name":"tests","grader_type":"code_check","weight":2,"required":true,"notes":"unit tests pass","grader_config":{"command":"make test"}}
+	]`)
+	run := models.EvalRun{
+		AgentDiff:     &diff,
+		AgentTrace:    json.RawMessage(`{"session_id":"s1"}`),
+		InputManifest: json.RawMessage(`{"base_commit_sha":"abc123"}`),
+	}
+	task := models.EvalTask{
+		ScoringCriteria: criteria,
+		PassThreshold:   0.75,
+	}
+
+	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{})
+
+	require.NoError(t, err, "gradeEvalRunArtifacts should record non-executable code checks as criterion failures")
+	require.Equal(t, models.EvalRunStatusCompleted, result.Status, "graded eval run should be completed")
+	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
+	require.False(t, *result.Passed, "required code checks without a snapshot should fail the run")
+	require.NotNil(t, result.FinalScore, "graded eval run should persist final score")
+	require.Equal(t, 0.0, *result.FinalScore, "failed required code check should score zero")
+	require.Contains(t, string(result.CriterionResults), "completed session snapshot is required", "criterion result should explain missing snapshot dependency")
+	require.Equal(t, run.InputManifest, result.InputManifest, "grader should preserve the pinned input manifest")
+}
+
+func TestGradeEvalRunArtifacts_CodeCheckExecutesCommand(t *testing.T) {
+	t.Parallel()
+
+	diff := "diff --git a/app.go b/app.go"
+	snapshotKey := "snapshots/eval/run.tar.zst"
+	criteria := json.RawMessage(`[
+		{"name":"tests","grader_type":"code_check","weight":1,"required":true,"notes":"unit tests pass","grader_config":{"command":"make test","timeout_seconds":30}}
+	]`)
+	provider := &recordingEvalSandboxProvider{exitCode: 0, stdout: "ok"}
+	run := models.EvalRun{AgentDiff: &diff}
+	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 1}
+	session := models.Session{ID: uuid.New(), OrgID: uuid.New(), SnapshotKey: &snapshotKey}
+
+	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{
+		session:  &session,
+		provider: provider,
+		snapshots: fakeSnapshotStore{
+			load: func(_ context.Context, key string, writer io.Writer) error {
+				require.Equal(t, snapshotKey, key, "grader should hydrate the completed session snapshot")
+				_, err := writer.Write([]byte("snapshot"))
+				return err
+			},
+		},
+	})
+
+	require.NoError(t, err, "gradeEvalRunArtifacts should run configured code checks")
+	require.Equal(t, []string{"make test"}, provider.commands, "grader should execute the configured deterministic command")
+	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
+	require.True(t, *result.Passed, "successful required code check should pass")
+	require.Contains(t, string(result.CriterionResults), `"tests"`, "criterion results should include the code check")
+	require.Contains(t, string(result.CriterionResults), "ok", "criterion details should include command output")
+}
+
+func TestGradeEvalRunArtifacts_LLMJudgeParsesJSON(t *testing.T) {
+	t.Parallel()
+
+	diff := "diff --git a/app.go b/app.go"
+	criteria := json.RawMessage(`[
+		{"name":"quality","grader_type":"llm_judge","weight":1,"required":true,"notes":"solution is focused","grader_config":{"output":"score"}}
+	]`)
+	llm := &fakeEvalLLM{response: `{"score":0.8,"pass":true,"reasoning":"focused fix","details":"looks good"}`}
+	run := models.EvalRun{AgentDiff: &diff}
+	task := models.EvalTask{ScoringCriteria: criteria, PassThreshold: 0.75, IssueDescription: "Fix the bug"}
+
+	result, err := gradeEvalRunArtifacts(context.Background(), run, task, evalGraderDeps{llm: llm})
+
+	require.NoError(t, err, "gradeEvalRunArtifacts should run LLM judge criteria")
+	require.NotEmpty(t, llm.userPrompt, "LLM judge should receive the eval prompt and diff")
+	require.NotNil(t, result.Passed, "graded eval run should persist pass/fail")
+	require.True(t, *result.Passed, "passing LLM judge should pass")
+	require.NotNil(t, result.FinalScore, "LLM judge should contribute to final score")
+	require.Equal(t, 0.8, *result.FinalScore, "LLM judge score should be used in weighted scoring")
+	require.Contains(t, string(result.CriterionResults), "focused fix", "criterion result should include judge reasoning")
+}
+
+func TestFinalizeSessionBackedEvalBootstrapLoadsPrimaryThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM session_threads WHERE org_id = @org_id AND session_id = @session_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).
+			AddRow(workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusCompleted)...))
+	mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE org_id = @org_id AND session_id = @session_id AND thread_id = @thread_id").
+		WithArgs(anyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "status", "candidates", "session_id",
+			"thread_id", "created_by", "created_at", "completed_at", "error_message",
+		}).AddRow(runID, orgID, repoID, string(models.EvalBootstrapStatusRunning), nil, &sessionID, &threadID, nil, now, nil, nil))
+	mock.ExpectExec("UPDATE eval_bootstrap_runs").
+		WithArgs(anyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	stores := &Stores{
+		SessionThreads: db.NewSessionThreadStore(mock),
+		EvalBootstraps: db.NewEvalBootstrapStore(mock),
+	}
+	finalizeSessionBackedEvalBootstrap(context.Background(), stores, &Services{}, zerolog.Nop(), models.Session{
+		ID:     sessionID,
+		OrgID:  orgID,
+		Origin: models.SessionOriginEvalBootstrap,
+		Status: models.SessionStatusCompleted,
+	})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "bootstrap finalizer should resolve the primary thread and update the bootstrap run")
 }

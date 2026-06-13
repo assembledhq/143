@@ -79,7 +79,7 @@ export function LinkedIssueChips({ session }: { session: Session }) {
               <a
                 key="linear-prepare-failed"
                 href="/settings/integrations"
-                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30 hover:bg-amber-500/20"
+                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-warning/10 text-warning border border-warning/30 hover:bg-warning/20"
                 aria-describedby="linear-prepare-failed-detail"
               >
                 Linear: prepare failed
@@ -188,7 +188,7 @@ export function LinkedIssueChips({ session }: { session: Session }) {
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span
-                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                        className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-warning/10 text-warning border border-warning/30"
                         aria-label={linearSkipDetail}
                       >
                         Linear sync skipped
@@ -224,7 +224,7 @@ export function LinkedIssueChips({ session }: { session: Session }) {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span
-                      className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/30"
+                      className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-warning/10 text-warning border border-warning/30"
                       aria-label={linearSkipDetail}
                     >
                       Linear sync skipped

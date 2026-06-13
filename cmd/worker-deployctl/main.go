@@ -5,13 +5,19 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
 )
 
@@ -24,7 +30,7 @@ func main() {
 	cfg := config.Load()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{MaxConns: 1})
 	if err != nil {
 		exitErr("connect database: %v", err)
 	}
@@ -34,6 +40,8 @@ func main() {
 	switch os.Args[1] {
 	case "preflight":
 		runPreflight(ctx, store, os.Args[2:])
+	case "preview-auth-check":
+		runPreviewAuthCheck(ctx, store, cfg, os.Args[2:])
 	case "mark-draining":
 		runMarkDraining(ctx, store, os.Args[2:], models.DrainIntentPlannedRollout)
 	case "force-maintenance":
@@ -61,6 +69,179 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("preview-auth-check", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 5*time.Second, "per-node HTTP timeout")
+	concurrency := fs.Int("concurrency", 16, "maximum concurrent auth-check probes")
+	nodeID := fs.String("node-id", "", "optional worker node id to probe")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	_ = fs.Parse(args)
+
+	keyring, err := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+	if err != nil {
+		exitErr("preview RPC keyring: %v", err)
+	}
+	nodes, err := store.ListPreviewRPCProbeNodes(ctx)
+	if err != nil {
+		exitErr("list preview RPC probe nodes: %v", err)
+	}
+	probeNodes, err := selectPreviewAuthProbeNodes(nodes, *nodeID)
+	if err != nil {
+		exitErr("%v", err)
+	}
+	checked, err := probePreviewRPCAuthNodes(probeNodes, keyring, *timeout, *concurrency, &http.Client{})
+	if err != nil {
+		exitErr("%v", err)
+	}
+	writeOutput(map[string]any{
+		"ok":            true,
+		"checked_count": len(checked),
+		"checked_nodes": checked,
+	}, *jsonOut)
+}
+
+type previewAuthProbeNode struct {
+	ID      string
+	BaseURL string
+}
+
+func selectPreviewAuthProbeNodes(nodes []models.Node, nodeID string) ([]previewAuthProbeNode, error) {
+	probeNodes := make([]previewAuthProbeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if nodeID != "" && node.ID != nodeID {
+			continue
+		}
+		var metadata previewsvc.WorkerNodeMetadata
+		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
+			return nil, fmt.Errorf("decode preview metadata for node %s: %w", node.ID, err)
+		}
+		baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
+		if baseURL == "" {
+			return nil, fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+		}
+		probeNodes = append(probeNodes, previewAuthProbeNode{
+			ID:      node.ID,
+			BaseURL: baseURL,
+		})
+	}
+	if nodeID != "" && len(probeNodes) == 0 {
+		return nil, fmt.Errorf("node %s is not available for preview RPC auth-check", nodeID)
+	}
+	return probeNodes, nil
+}
+
+func probePreviewRPCAuthNodes(nodes []previewAuthProbeNode, keyring auth.PreviewTokenKeyring, timeout time.Duration, concurrency int, client *http.Client) ([]string, error) {
+	if len(nodes) == 0 {
+		return []string{}, nil
+	}
+	if timeout <= 0 {
+		return nil, fmt.Errorf("preview RPC auth-check timeout must be positive")
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > len(nodes) {
+		concurrency = len(nodes)
+	}
+	if client == nil {
+		client = &http.Client{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	checked := make([]bool, len(nodes))
+	jobs := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				if err := probePreviewRPCAuthNode(ctx, client, keyring, nodes[idx], timeout); err != nil {
+					select {
+					case errCh <- err:
+						cancel()
+					default:
+					}
+					continue
+				}
+				checked[idx] = true
+			}
+		}()
+	}
+
+sendJobs:
+	for idx := range nodes {
+		select {
+		case <-ctx.Done():
+			break sendJobs
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return nil, err
+	default:
+	}
+
+	checkedIDs := make([]string, 0, len(nodes))
+	for idx, ok := range checked {
+		if ok {
+			checkedIDs = append(checkedIDs, nodes[idx].ID)
+		}
+	}
+	return checkedIDs, nil
+}
+
+func probePreviewRPCAuthNode(ctx context.Context, client *http.Client, keyring auth.PreviewTokenKeyring, node previewAuthProbeNode, timeout time.Duration) error {
+	baseURL := strings.TrimRight(node.BaseURL, "/")
+	if baseURL == "" {
+		return fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+	}
+	token, err := keyring.Generate(auth.PreviewTokenClaims{
+		OrgID:        uuid.Nil,
+		TargetNodeID: node.ID,
+		Action:       "auth_check",
+		ExpiresAt:    time.Now().UTC().Add(30 * time.Second),
+	})
+	if err != nil {
+		return fmt.Errorf("sign preview RPC auth-check token for node %s: %w", node.ID, err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/internal/preview/auth-check", nil)
+	if err != nil {
+		return fmt.Errorf("build preview RPC auth-check request for node %s: %w", node.ID, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("preview RPC auth-check failed for node %s (%s): %w", node.ID, baseURL, err)
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("read preview RPC auth-check response for node %s (%s): %w", node.ID, baseURL, readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close preview RPC auth-check response for node %s (%s): %w", node.ID, baseURL, closeErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("preview RPC auth-check rejected by node %s (%s): status=%d body=%s", node.ID, baseURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func runExpireBudget(ctx context.Context, nodes *db.NodeStore, executors *db.SessionExecutorStore, args []string) {
@@ -117,8 +298,14 @@ func runPreflight(ctx context.Context, store *db.NodeStore, args []string) {
 	candidatePort := fs.String("candidate-port", "", "candidate worker host port")
 	buildSHA := fs.String("build-sha", "", "candidate build sha")
 	expectedSchemaVersion := fs.Int("expected-schema-version", 0, "minimum schema migration version required by the candidate")
+	workerProcessFingerprint := fs.String("worker-process-fingerprint", "", "candidate worker-process config fingerprint")
+	expectedWorkerProcessFingerprint := fs.String("expected-worker-process-fingerprint", "", "currently active worker-process config fingerprint")
 	supportFingerprint := fs.String("support-services-fingerprint", "", "candidate support-service config fingerprint")
 	expectedSupportFingerprint := fs.String("expected-support-services-fingerprint", "", "currently active support-service config fingerprint")
+	hostRuntimeFingerprint := fs.String("host-runtime-fingerprint", "", "candidate host-runtime config fingerprint")
+	expectedHostRuntimeFingerprint := fs.String("expected-host-runtime-fingerprint", "", "currently active host-runtime config fingerprint")
+	dockerDaemonFingerprint := fs.String("docker-daemon-fingerprint", "", "candidate docker-daemon config fingerprint")
+	expectedDockerDaemonFingerprint := fs.String("expected-docker-daemon-fingerprint", "", "currently active docker-daemon config fingerprint")
 	freeMemoryMB := fs.Int("free-memory-mb", -1, "observed free memory on the host")
 	minFreeMemoryMB := fs.Int("min-free-memory-mb", 0, "minimum free memory required for temporary worker overlap")
 	idleCPUMillis := fs.Int("idle-cpu-millis", -1, "observed idle CPU budget on the host in millicores")
@@ -161,6 +348,12 @@ func runPreflight(ctx context.Context, store *db.NodeStore, args []string) {
 	if *mode == "routine" && *expectedSupportFingerprint != "" && *supportFingerprint != "" && *expectedSupportFingerprint != *supportFingerprint {
 		exitErr("support-service config fingerprint changed during routine deploy; run maintenance mode (current=%s candidate=%s)", *expectedSupportFingerprint, *supportFingerprint)
 	}
+	if *mode == "routine" && *expectedHostRuntimeFingerprint != "" && *hostRuntimeFingerprint != "" && *expectedHostRuntimeFingerprint != *hostRuntimeFingerprint {
+		exitErr("worker host-runtime config fingerprint changed during routine deploy; run maintenance mode (current=%s candidate=%s)", *expectedHostRuntimeFingerprint, *hostRuntimeFingerprint)
+	}
+	if *mode == "routine" && *expectedDockerDaemonFingerprint != "" && *dockerDaemonFingerprint != "" && *expectedDockerDaemonFingerprint != *dockerDaemonFingerprint {
+		exitErr("worker docker-daemon config fingerprint changed during routine deploy; run maintenance mode (current=%s candidate=%s)", *expectedDockerDaemonFingerprint, *dockerDaemonFingerprint)
+	}
 	if *mode == "routine" && *minFreeMemoryMB > 0 && (*freeMemoryMB < 0 || *freeMemoryMB < *minFreeMemoryMB) {
 		exitErr("insufficient free memory for worker overlap: free_memory_mb=%d min_free_memory_mb=%d", *freeMemoryMB, *minFreeMemoryMB)
 	}
@@ -169,19 +362,26 @@ func runPreflight(ctx context.Context, store *db.NodeStore, args []string) {
 	}
 
 	out := map[string]any{
-		"ok":                           true,
-		"mode":                         *mode,
-		"host":                         *host,
-		"node_id":                      resolvedNodeID,
-		"candidate_port":               *candidatePort,
-		"build_sha":                    *buildSHA,
-		"current_node":                 status,
-		"free_memory_mb":               *freeMemoryMB,
-		"min_free_memory_mb":           *minFreeMemoryMB,
-		"idle_cpu_millis":              *idleCPUMillis,
-		"min_idle_cpu_millis":          *minIdleCPUMillis,
-		"support_services_fingerprint": *supportFingerprint,
-		"expected_schema_version":      *expectedSchemaVersion,
+		"ok":                                    true,
+		"mode":                                  *mode,
+		"host":                                  *host,
+		"node_id":                               resolvedNodeID,
+		"candidate_port":                        *candidatePort,
+		"build_sha":                             *buildSHA,
+		"current_node":                          status,
+		"free_memory_mb":                        *freeMemoryMB,
+		"min_free_memory_mb":                    *minFreeMemoryMB,
+		"idle_cpu_millis":                       *idleCPUMillis,
+		"min_idle_cpu_millis":                   *minIdleCPUMillis,
+		"worker_process_fingerprint":            *workerProcessFingerprint,
+		"expected_worker_process_fingerprint":   *expectedWorkerProcessFingerprint,
+		"support_services_fingerprint":          *supportFingerprint,
+		"expected_support_services_fingerprint": *expectedSupportFingerprint,
+		"host_runtime_fingerprint":              *hostRuntimeFingerprint,
+		"expected_host_runtime_fingerprint":     *expectedHostRuntimeFingerprint,
+		"docker_daemon_fingerprint":             *dockerDaemonFingerprint,
+		"expected_docker_daemon_fingerprint":    *expectedDockerDaemonFingerprint,
+		"expected_schema_version":               *expectedSchemaVersion,
 	}
 	if *includeImpact {
 		impact, err := store.WorkerDeployImpact(ctx, resolvedNodeID)
@@ -475,7 +675,7 @@ func writeOutput(v any, jsonOut bool) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
+	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
 }
 
 func exitErr(format string, args ...any) {

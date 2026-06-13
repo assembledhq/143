@@ -37,6 +37,14 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AuthHandler.Register":         "public, pre-auth",
 		"AuthHandler.EmailLogin":       "public, pre-auth",
 		"TeamHandler.AcceptInvitation": "public, token-based (no auth middleware)",
+		"AuthHandler.CLIStart":         "public, pre-auth (CLI browser-login start; chains into GitHub OAuth)",
+		"AuthHandler.CLIExchange":      "public, pre-auth (one-time code + verifier exchange; org comes from the code row)",
+
+		// CLI distribution — public installer/binary routes, no auth.
+		"CLIDistributionHandler.InstallScript":  "public installer script",
+		"CLIDistributionHandler.DownloadBinary": "public binary download",
+		"CLIDistributionHandler.Checksums":      "public checksum file",
+		"CLIDistributionHandler.Version":        "public version endpoint",
 
 		// Webhook routes — signature-verified, not session-authenticated.
 		"WebhookHandler.HandleGitHub":          "external webhook, signature auth",
@@ -44,29 +52,46 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"IngestionWebhookHandler.HandleLinear": "external webhook, signature auth",
 
 		// Internal API routes — use claims.OrgID from internal JWT, not middleware.
-		"InternalIssueHandler.Create":       "internal API, uses claims.OrgID",
-		"InternalPullRequestHandler.Create": "internal API, uses claims.OrgID",
-		"InternalProjectHandler.Propose":    "internal API, uses claims.OrgID",
+		"InternalIssueHandler.Create":            "internal API, uses claims.OrgID",
+		"InternalEvalHandler.AddCandidate":       "internal sandbox API, uses claims.OrgID and requires eval_bootstrap session origin",
+		"InternalPullRequestHandler.Create":      "internal API, uses claims.OrgID",
+		"InternalProjectHandler.Propose":         "internal API, uses claims.OrgID",
+		"InternalSessionTabsHandler.List":        "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.Get":         "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.Create":      "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.SendMessage": "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalSessionTabsHandler.Messages":    "internal sandbox API, uses claims.OrgID and claims.SessionID",
+		"InternalPreviewHandler.AuthCheck":       "internal worker deploy compatibility probe; validates signed target-node token and reads no org-scoped data",
 
 		// Authenticated but legitimately no org-scoped data access.
-		"AuthHandler.Me":                     "returns user from context only",
-		"AuthHandler.Logout":                 "deletes session by cookie token only",
-		"AuthHandler.SetActiveOrg":           "user-scoped preference write; validates membership directly instead of using request org context",
-		"AuthHandler.ClaimInvitation":        "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
-		"AuthHandler.ListPendingInvitations": "user-scoped query spanning all orgs the user is invited to",
-		"AuthHandler.AcceptInvitationByID":   "invitee-scoped accept; org context comes from the invitation row itself, not the request",
-		"AuthHandler.DeclineInvitationByID":  "invitee-scoped decline; org context comes from the invitation row itself, not the request",
-		"OrganizationsHandler.Create":        "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
-		"SettingsHandler.GetLLMDefaults":     "returns static server config",
-		"SettingsHandler.GetLLMModels":       "returns static server config",
-		"ProjectGenerateHandler.Generate":    "calls LLM only, no org-scoped data",
-		"GitHubStatusHandler.StartConnect":   "OAuth redirect only, no store calls",
+		"AuthHandler.Me":                       "returns user from context only",
+		"AuthHandler.Logout":                   "deletes session by cookie token only",
+		"AuthHandler.SetActiveOrg":             "user-scoped preference write; validates membership directly instead of using request org context",
+		"AuthHandler.ClaimInvitation":          "grants membership in a different org than the active one; target org comes from the invitation token, not the request context",
+		"AuthHandler.ListPendingInvitations":   "user-scoped query spanning all orgs the user is invited to",
+		"AuthHandler.ListCLITokens":            "user-scoped: a user's CLI device tokens span orgs, like auth_sessions",
+		"AuthHandler.RevokeCLIToken":           "user-scoped self-service revocation; ownership enforced by user_id in the store query",
+		"AuthHandler.AcceptInvitationByID":     "invitee-scoped accept; org context comes from the invitation row itself, not the request",
+		"AuthHandler.DeclineInvitationByID":    "invitee-scoped decline; org context comes from the invitation row itself, not the request",
+		"OrgDomainsHandler.ListJoinable":       "user-scoped cross-org discovery; must work for zero-membership users outside OrgContext",
+		"AuthHandler.SendEmailVerification":    "user-scoped identity action; sends to the session user's own address, no org data touched",
+		"AuthHandler.ConfirmEmailVerification": "public token-claim route; user and (optional) auto-join org come from the token, not request context",
+		"OrgDomainsHandler.Join":               "grants membership in a different org than the active one; target org comes from the URL and is re-validated against the session's verified email domain",
+		"OrganizationsHandler.Create":          "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
+		"SettingsHandler.GetLLMDefaults":       "returns static server config",
+		"SettingsHandler.GetLLMModels":         "returns static server config",
+		"ProjectGenerateHandler.Generate":      "calls LLM only, no org-scoped data",
+		"GitHubStatusHandler.StartConnect":     "OAuth redirect only, no store calls",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.
-		"IntegrationHandler.StartLinearOAuth": "OAuth redirect only",
-		"IntegrationHandler.StartSentryOAuth": "OAuth redirect only",
-		"IntegrationHandler.StartGitHubOAuth": "OAuth redirect only",
-		"IntegrationHandler.StartSlackOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartLinearOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartSentryOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartGitHubOAuth":  "OAuth redirect only",
+		"IntegrationHandler.StartSlackOAuth":   "OAuth redirect only",
+		"IntegrationHandler.ReinstallSlackBot": "delegates to Slack OAuth redirect only",
+		"SlackbotHandler.Events":               "public Slack callback resolves org from verified Slack team/app installation",
+		"SlackbotHandler.Commands":             "public Slack callback resolves org from verified Slack team/app installation",
+		"SlackbotHandler.Interactions":         "public Slack callback resolves org from verified Slack team/app installation",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
 		"PMHandler.Bootstrap":                      "delegates to enqueueAndRespond which uses OrgIDFromContext",
@@ -107,6 +132,15 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"LinearAgentSettingsHandler.ListSessions":  "delegates to requireOrgID which uses OrgIDFromContext",
 		"LinearAgentSettingsHandler.GetSession":    "delegates to requireOrgID which uses OrgIDFromContext",
 		"LinearAgentSettingsHandler.DeleteMapping": "delegates to requireOrgID which uses OrgIDFromContext",
+
+		// Session creation thin wrappers — both delegate to createManual which calls OrgIDFromContext.
+		"SessionHandler.CreateManual":   "delegates to createManual which uses OrgIDFromContext",
+		"SessionHandler.CreateExternal": "delegates to createManual which uses OrgIDFromContext",
+
+		// Automation creation thin wrappers — both delegate to Create or CreateExternal
+		// which calls OrgIDFromContext.
+		"AutomationHandler.CreatePublic":   "delegates to Create or CreateExternal which use OrgIDFromContext",
+		"AutomationHandler.CreateExternal": "delegates to Create which uses OrgIDFromContext",
 	}
 
 	fset := token.NewFileSet()

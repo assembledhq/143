@@ -27,7 +27,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
 	require.Equal(t,
-		[]string{ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
+		[]string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -393,6 +393,27 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "rejects preview capacity above maximum",
 			settings: OrgSettings{
 				PreviewMaxPreviewsPerUser: 999,
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview CPU cap above platform maximum",
+			settings: OrgSettings{
+				SandboxResources: SandboxResourceSettings{PreviewMaxCPUMillis: MaxPreviewMaxCPUMillis + 1},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview memory cap above platform maximum",
+			settings: OrgSettings{
+				SandboxResources: SandboxResourceSettings{PreviewMaxMemoryMiB: MaxPreviewMaxMemoryMiB + 1},
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects preview disk cap above platform maximum",
+			settings: OrgSettings{
+				SandboxResources: SandboxResourceSettings{PreviewMaxEphemeralDiskMiB: MaxPreviewMaxEphemeralDiskMiB + 1},
 			},
 			wantErr: true,
 		},

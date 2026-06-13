@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -79,6 +80,7 @@ type SessionHandler struct {
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
 	threadInboxStore   *db.ThreadInboxStore
+	attributionStore   *db.SessionAttributionStore
 	sandboxHolders     *db.SessionSandboxHolderStore
 	viewStore          *db.SessionViewStore
 	memberships        sessionMembershipStore
@@ -383,6 +385,10 @@ func (h *SessionHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
+func (h *SessionHandler) SetAttributionStore(store *db.SessionAttributionStore) {
+	h.attributionStore = store
+}
+
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
@@ -646,6 +652,20 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	if search := r.URL.Query().Get("search"); search != "" {
 		filters.Search = search
+	}
+	if raw := r.URL.Query().Get("created_after"); raw != "" {
+		parsed, ok := parseOptionalRFC3339(w, r, &raw)
+		if !ok {
+			return
+		}
+		filters.CreatedAfter = parsed
+	}
+	if raw := r.URL.Query().Get("created_before"); raw != "" {
+		parsed, ok := parseOptionalRFC3339(w, r, &raw)
+		if !ok {
+			return
+		}
+		filters.CreatedBefore = parsed
 	}
 
 	if repoIDStr := r.URL.Query().Get("repository_id"); repoIDStr != "" {
@@ -1393,8 +1413,44 @@ func (h *SessionHandler) writeLogsForOrg(w http.ResponseWriter, r *http.Request,
 		logs = []models.SessionLog{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{
-		Data: logs,
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLogResponse]{
+		Data: models.NewSessionLogResponses(logs),
+	})
+}
+
+// GetLogDetail returns the full message for one session log. Historical log
+// list and timeline endpoints return previews, so expanded UI rows call this
+// endpoint only when full detail is needed.
+func (h *SessionHandler) GetLogDetail(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	logID, err := strconv.ParseInt(chi.URLParam(r, "log_id"), 10, 64)
+	if err != nil || logID <= 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid log ID")
+		return
+	}
+
+	if _, err := h.runStore.GetByID(r.Context(), orgID, sessionID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	log, err := h.logStore.GetByID(r.Context(), orgID, sessionID, logID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "log not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to get log", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionLogDetailResponse]{
+		Data: models.NewSessionLogDetailResponse(log),
 	})
 }
 
@@ -1773,11 +1829,12 @@ func writeSessionLogSSEEvent(sw *sse.Writer, log models.SessionLog) error {
 }
 
 func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.SessionLog) error {
-	if err := sw.WriteDataID(streamID, log); err != nil {
+	payload := models.NewSessionLogResponse(log)
+	if err := sw.WriteDataID(streamID, payload); err != nil {
 		return err
 	}
 	if eventType, ok := humanInputSSEEventType(log); ok {
-		if err := sw.WriteEventID(eventType, streamID, log); err != nil {
+		if err := sw.WriteEventID(eventType, streamID, payload); err != nil {
 			return err
 		}
 	}
@@ -1932,9 +1989,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 
 	// Parse optional request body for per-PR overrides and authorship flow.
 	var req struct {
-		Draft       *bool  `json:"draft,omitempty"`
-		AuthorMode  string `json:"author_mode,omitempty"`
-		ResumeToken string `json:"resume_token,omitempty"`
+		Draft          *bool  `json:"draft,omitempty"`
+		AuthorMode     string `json:"author_mode,omitempty"`
+		ResumeToken    string `json:"resume_token,omitempty"`
+		MergeWhenReady bool   `json:"merge_when_ready,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -1946,6 +2004,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
+	}
+	if req.ResumeToken != "" && len(h.prAuthSigningKey) > 0 {
+		if claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now()); tokenErr == nil && claims.MergeWhenReady {
+			req.MergeWhenReady = true
+		}
 	}
 
 	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
@@ -1972,6 +2035,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		ActionDescription:    "create this pull request",
 		ResumeExpiredMessage: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
 		Draft:                req.Draft,
+		MergeWhenReady:       req.MergeWhenReady,
 	}) {
 		return
 	}
@@ -1985,6 +2049,15 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	if authorMode != prAuthorModeAuto {
 		payload["author_mode"] = string(authorMode)
+	}
+	if req.MergeWhenReady {
+		user := middleware.UserFromContext(r.Context())
+		if user == nil {
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			return
+		}
+		payload["merge_when_ready"] = true
+		payload["requested_by_user_id"] = user.ID.String()
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 	queued, err := h.enqueuePublishActionInTx(
@@ -2018,6 +2091,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	})
 	if req.Draft != nil {
 		prDetails["draft"] = *req.Draft
+	}
+	if req.MergeWhenReady {
+		prDetails["merge_when_ready"] = true
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 		marshalAuditDetails(h.logger, prDetails))
@@ -3057,7 +3133,9 @@ func (h *SessionHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
 		timeline = []models.SessionTimelineEntry{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineEntry]{Data: timeline})
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineResponseEntry]{
+		Data: models.NewSessionTimelineResponseEntries(timeline),
+	})
 }
 
 // EndSession handles POST /sessions/{id}/end — explicitly ends an idle session.
@@ -3272,10 +3350,20 @@ func isTerminalStatus(status models.SessionStatus) bool {
 
 // CreateManual creates a new manual session from a user-provided message.
 func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
+	h.createManual(w, r, models.SessionOriginManual, false)
+}
+
+// CreateExternal creates a session through the service-account API.
+func (h *SessionHandler) CreateExternal(w http.ResponseWriter, r *http.Request) {
+	h.createManual(w, r, models.SessionOriginExternalAPI, true)
+}
+
+func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, origin models.SessionOrigin, requireRepository bool) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	var body struct {
 		Message         string                         `json:"message"`
+		Attachments     []string                       `json:"attachments"`
 		Images          []string                       `json:"images"`
 		References      []models.SessionInputReference `json:"references"`
 		Commands        []models.SessionInputCommand   `json:"commands"`
@@ -3286,6 +3374,8 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 		TokenMode       string                         `json:"token_mode"`
 		RepositoryID    string                         `json:"repository_id"`
 		Branch          string                         `json:"branch"`
+		TargetBranch    string                         `json:"target_branch"`
+		Metadata        json.RawMessage                `json:"metadata"`
 		// LinearPrivate suppresses every Linear write; the agent still gets
 		// linked-issue context locally. Frozen at session create.
 		LinearPrivate bool `json:"linear_private,omitempty"`
@@ -3302,6 +3392,9 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body.Message = strings.TrimSpace(body.Message)
+	if len(body.Images) == 0 && len(body.Attachments) > 0 {
+		body.Images = body.Attachments
+	}
 	// Empty message is allowed when the user attached images or is starting
 	// from a linked Linear issue. Mobile screenshot/photo-first flows rely on
 	// this: the UI explicitly advertises image-only session starts, and the
@@ -3314,6 +3407,10 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	// inside the linker.
 	if body.Message == "" && len(body.Images) == 0 && !h.canBypassMissingMessageForLinear(r.Context(), orgID, body.References) {
 		writeError(w, r, http.StatusBadRequest, "MISSING_MESSAGE", "message, images, or a linked Linear issue are required")
+		return
+	}
+	if requireRepository && strings.TrimSpace(body.RepositoryID) == "" {
+		writeError(w, r, http.StatusBadRequest, "MISSING_REPOSITORY_ID", "repository_id is required")
 		return
 	}
 	for _, reference := range body.References {
@@ -3349,12 +3446,17 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		if token := middleware.APITokenFromContext(r.Context()); token != nil && !apiTokenAllowsRepository(token, parsed) {
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "API token is not allowed to access this repository")
+			return
+		}
 		repoID = &parsed
 	}
 
 	var targetBranch *string
-	if body.Branch != "" {
-		b := strings.TrimSpace(body.Branch)
+	branchName := firstNonEmptyString(body.TargetBranch, body.Branch)
+	if branchName != "" {
+		b := strings.TrimSpace(branchName)
 		if !isValidGitRef(b) {
 			writeError(w, r, http.StatusBadRequest, "INVALID_BRANCH", "branch contains invalid characters")
 			return
@@ -3463,7 +3565,7 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	session := &models.Session{
 		OrgID:                   orgID,
-		Origin:                  models.SessionOriginManual,
+		Origin:                  origin,
 		InteractionMode:         models.SessionInteractionModeInteractive,
 		ValidationPolicy:        models.SessionValidationPolicyOnSessionEnd,
 		AgentType:               agentType,
@@ -3483,6 +3585,17 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
 		return
+	}
+	if origin == models.SessionOriginExternalAPI && h.attributionStore != nil && len(body.Metadata) > 0 && string(body.Metadata) != "null" {
+		attribution := &models.SessionAttribution{
+			OrgID:          orgID,
+			SessionID:      session.ID,
+			Source:         models.SessionAttributionSourceExternalAPI,
+			SourceMetadata: body.Metadata,
+		}
+		if err := h.attributionStore.Create(r.Context(), attribution); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to create external api session attribution")
+		}
 	}
 
 	// Persist the initial user message as a turn-0 record so that attachments
@@ -3645,19 +3758,12 @@ func (h *SessionHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 
 	manualSessionIDStr := session.ID.String()
 	h.enrichSessionLinks(r.Context(), orgID, session)
-	emitUserAuditWithSession(
-		h.audit,
-		r,
-		models.AuditActionSessionCreated,
-		models.AuditResourceSession,
-		&manualSessionIDStr,
-		&session.ID,
-		nil,
+	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionCreated, models.AuditResourceSession, &manualSessionIDStr, &session.ID, nil,
 		sessionCreateAuditDetails(h.logger, session, nil, map[string]any{
-			"manual_session": true,
+			"manual_session": origin == models.SessionOriginManual,
+			"external_api":   origin == models.SessionOriginExternalAPI,
 			"image_count":    len(body.Images),
-		}),
-	)
+		}))
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
 }
 

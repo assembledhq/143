@@ -291,6 +291,8 @@ func (s *SessionReviewLoopStore) MarkPassClean(ctx context.Context, orgID, loopI
 		UPDATE session_review_loop_passes
 		SET status = 'clean',
 		    agent_decision = @agent_decision,
+		    review_output = COALESCE(review_output, @summary),
+		    review_completed_at = COALESCE(review_completed_at, now()),
 		    summary = @summary
 		WHERE id = @id AND org_id = @org_id`, orgID, passID, pgx.NamedArgs{
 		"agent_decision": decision,
@@ -310,6 +312,8 @@ func (s *SessionReviewLoopStore) MarkPassCleanAndEnqueueOpenPR(ctx context.Conte
 			UPDATE session_review_loop_passes
 			SET status = 'clean',
 			    agent_decision = @agent_decision,
+			    review_output = COALESCE(review_output, @summary),
+			    review_completed_at = COALESCE(review_completed_at, now()),
 			    summary = @summary
 			WHERE id = @id AND org_id = @org_id`, orgID, passID, pgx.NamedArgs{
 			"agent_decision": decision,

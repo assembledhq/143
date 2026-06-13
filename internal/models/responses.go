@@ -36,6 +36,8 @@ type ErrorDetail struct {
 // PaginationMeta contains cursor-based pagination info.
 type PaginationMeta struct {
 	NextCursor string `json:"next_cursor,omitempty"`
+	Counts     any    `json:"counts,omitempty"`
+	Pool       any    `json:"pool,omitempty"`
 }
 
 // ThreadMessageWindowMeta contains cursor and anchor metadata for bottom-first
@@ -43,8 +45,13 @@ type PaginationMeta struct {
 type ThreadMessageWindowMeta struct {
 	NextOlderCursor          string `json:"next_older_cursor,omitempty"`
 	HasOlder                 bool   `json:"has_older"`
+	NextNewerCursor          string `json:"next_newer_cursor,omitempty"`
+	HasNewer                 bool   `json:"has_newer"`
+	AnchorMessageID          int64  `json:"anchor_message_id,omitempty"`
+	AnchorFound              bool   `json:"anchor_found"`
 	LatestAssistantMessageID int64  `json:"latest_assistant_message_id,omitempty"`
 	LiveEdgeMessageID        int64  `json:"live_edge_message_id,omitempty"`
+	WindowPosition           string `json:"window_position"`
 	ThreadStatus             string `json:"thread_status"`
 }
 

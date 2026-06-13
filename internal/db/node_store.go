@@ -144,6 +144,29 @@ func (s *NodeStore) ListActive(ctx context.Context) ([]models.Node, error) {
 	return result, nil
 }
 
+// ListPreviewRPCProbeNodes returns active or draining worker nodes that should
+// be checked before deploying preview RPC callers.
+// lint:allow-no-orgid reason="preview RPC deploy compatibility is cluster-scoped"
+func (s *NodeStore) ListPreviewRPCProbeNodes(ctx context.Context) ([]models.Node, error) {
+	rows, err := s.db.Query(ctx,
+		fmt.Sprintf(`SELECT %s FROM nodes
+		 WHERE status IN ('active', 'draining')
+		   AND mode IN ('worker', 'all')
+		   AND metadata->>'preview_capable' = 'true'
+		   AND metadata->>'preview_rpc_auth_check' = 'true'
+		   AND COALESCE(metadata->>'preview_internal_base_url', '') <> ''
+		 ORDER BY id ASC`, nodeColumns),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list preview RPC probe nodes: %w", err)
+	}
+	result, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Node])
+	if err != nil {
+		return nil, fmt.Errorf("scan preview RPC probe nodes: %w", err)
+	}
+	return result, nil
+}
+
 // WorkerHeartbeatHealth returns aggregate worker heartbeat freshness for
 // control-plane alerts.
 // lint:allow-no-orgid reason="nodes is a cluster-scoped table with no org_id"
@@ -520,7 +543,7 @@ func (s *NodeStore) RetainActiveExecutorImages(ctx context.Context, params Retai
 		INSERT INTO worker_image_retention (
 			image, build_sha, node_id, executor_id, deploy_id, reason, expires_at
 		)
-		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, @expires_at
+		SELECT DISTINCT image, build_sha, host_node_id, id, @deploy_id, @reason, CAST(@expires_at AS timestamptz)
 		FROM session_executors
 		WHERE host_node_id = @node_id
 		  AND status IN ('starting', 'running', 'draining')
@@ -529,7 +552,7 @@ func (s *NodeStore) RetainActiveExecutorImages(ctx context.Context, params Retai
 			"node_id":    params.NodeID,
 			"deploy_id":  params.DeployID,
 			"reason":     params.Reason,
-			"expires_at": params.ExpiresAt.UTC(),
+			"expires_at": pgtype.Timestamptz{Time: params.ExpiresAt.UTC(), Valid: true},
 		})
 	if err != nil {
 		return 0, fmt.Errorf("retain active executor images: %w", err)

@@ -258,6 +258,45 @@ describe('api client', () => {
       expect(url.searchParams.get('limit')).toBe('25');
     });
 
+    it('fetches thread message windows around anchors and after cursors', async () => {
+      const capturedUrls: string[] = [];
+      const mockWindow = {
+        data: [],
+        meta: {
+          has_older: false,
+          has_newer: false,
+          thread_status: 'idle',
+          window_position: 'around',
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
+          capturedUrls.push(request.url);
+          return HttpResponse.json(mockWindow);
+        }),
+      );
+
+      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
+        position: 'around',
+        anchorMessageId: 456,
+        limit: 80,
+      });
+      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
+        after: '789',
+        limit: 40,
+      });
+
+      const aroundUrl = new URL(capturedUrls[0]!);
+      expect(aroundUrl.searchParams.get('position')).toBe('around');
+      expect(aroundUrl.searchParams.get('anchor_message_id')).toBe('456');
+      expect(aroundUrl.searchParams.get('limit')).toBe('80');
+
+      const afterUrl = new URL(capturedUrls[1]!);
+      expect(afterUrl.searchParams.get('after')).toBe('789');
+      expect(afterUrl.searchParams.get('limit')).toBe('40');
+    });
+
     it('fetches thread logs only for loaded message turns', async () => {
       let capturedUrl: string | undefined;
       const mockLogs = {
@@ -280,6 +319,37 @@ describe('api client', () => {
       expect(capturedUrl).toBeDefined();
       const url = new URL(capturedUrl!);
       expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
+    });
+
+    it('fetches session log detail by log id', async () => {
+      let capturedUrl: string | undefined;
+      const mockDetail = {
+        data: {
+          id: 42,
+          session_id: 'session-abc',
+          level: 'output',
+          message: 'full output',
+          metadata: { type: 'tool_result' },
+          turn_number: 7,
+          created_at: '2026-01-01T00:00:00Z',
+          message_bytes: 11,
+          message_chars: 11,
+          message_truncated: false,
+        },
+      };
+
+      server.use(
+        http.get('/api/v1/sessions/:id/logs/:logId', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json(mockDetail);
+        }),
+      );
+
+      const result = await api.sessions.getLogDetail('session-abc', 42);
+
+      expect(result).toEqual(mockDetail);
+      expect(capturedUrl).toBeDefined();
+      expect(new URL(capturedUrl!).pathname).toBe('/api/v1/sessions/session-abc/logs/42');
     });
 
     it('fetches recoverable thread inbox entries', async () => {
@@ -923,10 +993,10 @@ describe('api client', () => {
         }),
       );
 
-      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123' });
+      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123', mergeWhenReady: true });
       expect(result.status).toBe('queued');
       expect(capturedUrl).toContain('/api/v1/sessions/session-abc/pr');
-      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123' });
+      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123', merge_when_ready: true });
     });
 
     it('throws on conflict when PR already exists', async () => {
@@ -1168,10 +1238,11 @@ describe('api client', () => {
       try {
         await api.issues.list();
       } catch (err: unknown) {
-        const error = err as { name: string; code: string; message: string };
+        const error = err as { name: string; code: string; message: string; status: number };
         expect(error.name).toBe('ApiError');
         expect(error.code).toBe('BAD_REQUEST');
         expect(error.message).toBe('bad request');
+        expect(error.status).toBe(400);
       }
     });
 
@@ -1197,133 +1268,112 @@ describe('api client', () => {
     });
   });
 
-  describe('userCredentials', () => {
-    it('lists personal credentials', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/personal', () => {
-          return HttpResponse.json({
-            data: [{ provider: 'anthropic', configured: true, masked_key: 'sk-ant-...abc' }],
-            meta: {},
-          });
-        }),
-      );
-
-      const result = await api.userCredentials.listPersonal();
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].provider).toBe('anthropic');
-      expect(result.data[0].configured).toBe(true);
-    });
-
-    it('upserts personal credential', async () => {
-      let capturedBody: unknown;
-      let capturedUrl: string | undefined;
+  describe('codingCredentials', () => {
+    it('lists credentials for the requested scope', async () => {
+      let capturedScope: string | null = null;
 
       server.use(
-        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request, params }) => {
-          capturedBody = await request.json();
-          capturedUrl = params.provider as string;
-          return HttpResponse.json({ data: { provider: 'anthropic', configured: true } });
-        }),
-      );
-
-      await api.userCredentials.upsertPersonal('anthropic', { api_key: 'sk-ant-test' });
-      expect(capturedUrl).toBe('anthropic');
-      expect(capturedBody).toEqual({ config: { api_key: 'sk-ant-test' }, is_team_default: false });
-    });
-
-    it('upserts personal credential with team default flag', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({ data: { provider: 'openai', configured: true } });
-        }),
-      );
-
-      await api.userCredentials.upsertPersonal('openai', { api_key: 'sk-test' }, true);
-      expect(capturedBody).toEqual({ config: { api_key: 'sk-test' }, is_team_default: true });
-    });
-
-    it('deletes personal credential', async () => {
-      let deleteCalled = false;
-
-      server.use(
-        http.delete('/api/v1/settings/credentials/personal/:provider', ({ params }) => {
-          deleteCalled = true;
-          expect(params.provider).toBe('anthropic');
-          return new HttpResponse(null, { status: 204 });
-        }),
-      );
-
-      await api.userCredentials.deletePersonal('anthropic');
-      expect(deleteCalled).toBe(true);
-    });
-
-    it('lists team defaults', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/team', () => {
-          return HttpResponse.json({
-            data: [{ provider: 'anthropic', configured: true, is_team_default: true, set_by_user_name: 'Alice' }],
-            meta: {},
-          });
-        }),
-      );
-
-      const result = await api.userCredentials.listTeamDefaults();
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].is_team_default).toBe(true);
-    });
-
-    it('sets team default', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.put('/api/v1/settings/credentials/team/:provider', async ({ request, params }) => {
-          capturedBody = await request.json();
-          expect(params.provider).toBe('anthropic');
-          return HttpResponse.json({});
-        }),
-      );
-
-      await api.userCredentials.setTeamDefault('anthropic', 'user-1');
-      expect(capturedBody).toEqual({ user_id: 'user-1' });
-    });
-
-    it('removes team default', async () => {
-      let deleteCalled = false;
-
-      server.use(
-        http.delete('/api/v1/settings/credentials/team/:provider', ({ params }) => {
-          deleteCalled = true;
-          expect(params.provider).toBe('openai');
-          return new HttpResponse(null, { status: 204 });
-        }),
-      );
-
-      await api.userCredentials.removeTeamDefault('openai');
-      expect(deleteCalled).toBe(true);
-    });
-
-    it('lists resolved credentials', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/resolved', () => {
+        http.get('/api/v1/coding-credentials', ({ request }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
           return HttpResponse.json({
             data: [
-              { provider: 'anthropic', source: 'personal', masked_key: 'sk-ant-...abc' },
-              { provider: 'openai', source: 'team_default', masked_key: 'sk-...def' },
-              { provider: 'gemini', source: 'none' },
+              {
+                id: 'cc-1',
+                org_id: 'org-1',
+                user_id: 'user-1',
+                scope: 'personal',
+                priority: 1,
+                agent: 'claude_code',
+                auth_type: 'subscription',
+                provider: 'anthropic_subscription',
+                label: 'Personal Claude',
+                status: 'healthy',
+                is_default: true,
+                created_at: '2026-03-20T00:00:00Z',
+                updated_at: '2026-03-20T00:00:00Z',
+              },
             ],
             meta: {},
           });
         }),
       );
 
-      const result = await api.userCredentials.listResolved();
-      expect(result.data).toHaveLength(3);
-      expect(result.data[0].source).toBe('personal');
-      expect(result.data[1].source).toBe('team_default');
-      expect(result.data[2].source).toBe('none');
+      const result = await api.codingCredentials.list('resolved');
+      expect(capturedScope).toBe('resolved');
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].provider).toBe('anthropic_subscription');
+      expect(result.data[0].scope).toBe('personal');
+    });
+
+    it('creates a credential and returns the unwrapped row', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/coding-credentials', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            id: 'cc-2',
+            org_id: 'org-1',
+            scope: 'org',
+            priority: 1,
+            agent: 'codex',
+            auth_type: 'api_key',
+            provider: 'openai',
+            label: 'Codex API key',
+            status: 'healthy',
+            is_default: true,
+            created_at: '2026-03-20T00:00:00Z',
+            updated_at: '2026-03-20T00:00:00Z',
+          });
+        }),
+      );
+
+      const created = await api.codingCredentials.create({
+        scope: 'org',
+        agent: 'codex',
+        auth_type: 'api_key',
+        label: 'Codex API key',
+        api_key: 'sk-test',
+      });
+      expect(capturedBody).toEqual({
+        scope: 'org',
+        agent: 'codex',
+        auth_type: 'api_key',
+        label: 'Codex API key',
+        api_key: 'sk-test',
+      });
+      expect(created.id).toBe('cc-2');
+    });
+
+    it('deletes a credential within the requested scope', async () => {
+      let capturedScope: string | null = null;
+      let capturedId: string | undefined;
+
+      server.use(
+        http.delete('/api/v1/coding-credentials/:id', ({ request, params }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
+          capturedId = params.id as string;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await api.codingCredentials.delete('cc-1', 'org');
+      expect(capturedId).toBe('cc-1');
+      expect(capturedScope).toBe('org');
+    });
+
+    it('reorders a scope stack with ordered ids', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.patch('/api/v1/coding-credentials/reorder', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { reordered: true } });
+        }),
+      );
+
+      await api.codingCredentials.reorder('org', ['cc-2', 'cc-1']);
+      expect(capturedBody).toEqual({ scope: 'org', ordered_ids: ['cc-2', 'cc-1'] });
     });
   });
 
@@ -1411,7 +1461,7 @@ describe('api client', () => {
       expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456&return_to=%2Fintegrations');
     });
 
-    it('loginSentry redirects to Sentry OAuth', () => {
+    it('loginSentry redirects to backend Sentry OAuth start', () => {
       const loc = { href: '' };
       Object.defineProperty(window, 'location', {
         value: loc,
@@ -1420,7 +1470,19 @@ describe('api client', () => {
       });
 
       api.auth.loginSentry();
-      expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
+    });
+
+    it('integration loginSentry redirects to backend Sentry OAuth start', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.integrations.loginSentry();
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
     });
 
     it('loginLinear redirects to backend Linear OAuth start', () => {
@@ -1654,6 +1716,25 @@ describe('api client', () => {
         candidate_indices: [0, 2],
       });
       expect(result.data).toHaveLength(1);
+    });
+
+    it('reviews a bootstrap candidate', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.patch('/api/v1/evals/bootstrap/candidates/cand-1', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { candidate_id: 'cand-1', status: 'needs_revision' } });
+        }),
+      );
+      const result = await api.evals.reviewBootstrapCandidate('cand-1', {
+        status: 'needs_revision',
+        rejection_reason: 'Needs deterministic scoring.',
+      });
+      expect(capturedBody).toEqual({
+        status: 'needs_revision',
+        rejection_reason: 'Needs deterministic scoring.',
+      });
+      expect(result.data.status).toBe('needs_revision');
     });
   });
 

@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/auth"
@@ -20,6 +22,19 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// runtimeAuthEntry caches the active runtime identity used to validate proxy
+// token claims, so the per-request DB check in authorizePreviewAction only
+// fires once per TTL per preview.
+type runtimeAuthEntry struct {
+	validUntil   time.Time
+	runtimeID    uuid.UUID
+	runtimeEpoch int
+	workerNodeID string
+}
+
+// runtimeAuthCacheTTL bounds how long a cached runtime identity is trusted.
+const runtimeAuthCacheTTL = 5 * time.Second
+
 // InternalPreviewHandler handles authenticated app->worker preview RPC.
 type InternalPreviewHandler struct {
 	preview   *PreviewHandler
@@ -27,17 +42,37 @@ type InternalPreviewHandler struct {
 	sessions  *db.SessionStore
 	canceller SessionCanceller
 	nodeID    string
-	secret    string
+	keyring   auth.PreviewTokenKeyring
 	logger    zerolog.Logger
+
+	// runtimeAuthCache short-circuits the per-request active-runtime check.
+	runtimeAuthMu    sync.RWMutex
+	runtimeAuthCache map[uuid.UUID]*runtimeAuthEntry
+
+	// previewTransports pools upstream connections into preview containers,
+	// keyed by preview ID. Without pooling, every proxied request resolved
+	// the preview from the DB and dialed a fresh container connection.
+	transportMu       sync.Mutex
+	previewTransports map[uuid.UUID]*http.Transport
 }
 
 func NewInternalPreviewHandler(preview *PreviewHandler, manager *previewsvc.Manager, nodeID, secret string, logger zerolog.Logger) *InternalPreviewHandler {
+	keyring, err := auth.NewPreviewTokenKeyring([]string{secret})
+	if err != nil {
+		keyring = auth.PreviewTokenKeyring{}
+	}
+	return NewInternalPreviewHandlerWithKeyring(preview, manager, nodeID, keyring, logger)
+}
+
+func NewInternalPreviewHandlerWithKeyring(preview *PreviewHandler, manager *previewsvc.Manager, nodeID string, keyring auth.PreviewTokenKeyring, logger zerolog.Logger) *InternalPreviewHandler {
 	return &InternalPreviewHandler{
-		preview: preview,
-		manager: manager,
-		nodeID:  nodeID,
-		secret:  secret,
-		logger:  logger,
+		preview:           preview,
+		manager:           manager,
+		nodeID:            nodeID,
+		keyring:           keyring,
+		logger:            logger,
+		runtimeAuthCache:  make(map[uuid.UUID]*runtimeAuthEntry),
+		previewTransports: make(map[uuid.UUID]*http.Transport),
 	}
 }
 
@@ -49,23 +84,40 @@ func (h *InternalPreviewHandler) SetSessionCancelRuntime(sessions *db.SessionSto
 func (h *InternalPreviewHandler) authorize(w http.ResponseWriter, r *http.Request, action string) (*auth.PreviewTokenClaims, bool) {
 	tokenStr := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if tokenStr == "" {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing authorization token")
 		return nil, false
 	}
-	claims, err := auth.ValidatePreviewToken(h.secret, tokenStr)
+	claims, err := h.keyring.Validate(tokenStr)
 	if err != nil {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid preview token", err)
 		return nil, false
 	}
 	if claims.TargetNodeID != h.nodeID {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "WRONG_PREVIEW_WORKER", "preview token targets a different worker")
 		return nil, false
 	}
 	if claims.Action != action {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "PREVIEW_ACTION_MISMATCH", "preview token is not valid for this action")
 		return nil, false
 	}
 	return claims, true
+}
+
+func markPreviewWorkerError(w http.ResponseWriter) {
+	w.Header().Set(auth.PreviewWorkerErrorHeader, "1")
+}
+
+func (h *InternalPreviewHandler) AuthCheck(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authorize(w, r, "auth_check"); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{
+		Data: map[string]string{"node_id": h.nodeID},
+	})
 }
 
 func (h *InternalPreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request) (previewsvc.PreviewInspector, bool) {
@@ -137,6 +189,7 @@ func (h *InternalPreviewHandler) StopPreview(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
 		return
 	}
+	h.evictPreviewTransport(previewID)
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "stopped"}})
 }
 
@@ -171,6 +224,7 @@ func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.R
 		writePreviewHTTPError(w, r, previewErr)
 		return
 	}
+	h.evictPreviewTransport(previewID)
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
 }
 
@@ -420,24 +474,60 @@ func (h *InternalPreviewHandler) authorizePreviewAction(w http.ResponseWriter, r
 		return uuid.Nil, nil, false
 	}
 	if claims.PreviewID == nil || *claims.PreviewID != previewID {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "PREVIEW_MISMATCH", "preview token does not match the requested preview")
 		return uuid.Nil, nil, false
 	}
 	if action == "proxy" && (claims.RuntimeID == nil || claims.RuntimeEpoch <= 0) {
+		markPreviewWorkerError(w)
 		writeError(w, r, http.StatusForbidden, "PREVIEW_RUNTIME_MISMATCH", "preview token does not match an active runtime")
 		return uuid.Nil, nil, false
 	}
 	if action == "proxy" && h.preview != nil && h.preview.store != nil {
-		runtime, err := h.preview.store.GetActivePreviewRuntime(r.Context(), claims.OrgID, previewID)
-		if err != nil ||
-			runtime.ID != *claims.RuntimeID ||
-			runtime.RuntimeEpoch != claims.RuntimeEpoch ||
-			runtime.WorkerNodeID != claims.TargetNodeID {
+		if !h.runtimeClaimsValid(r.Context(), claims, previewID) {
+			markPreviewWorkerError(w)
 			writeError(w, r, http.StatusForbidden, "PREVIEW_RUNTIME_MISMATCH", "preview token does not match an active runtime")
 			return uuid.Nil, nil, false
 		}
 	}
 	return previewID, claims, true
+}
+
+// runtimeClaimsValid checks proxy token claims against the active runtime
+// through a short TTL cache. A cached match is trusted; a miss or mismatch
+// always re-resolves from the DB before rejecting, so a freshly recycled
+// preview (new runtime epoch) is never penalized by a stale cache entry.
+func (h *InternalPreviewHandler) runtimeClaimsValid(ctx context.Context, claims *auth.PreviewTokenClaims, previewID uuid.UUID) bool {
+	matches := func(entry *runtimeAuthEntry) bool {
+		return entry.runtimeID == *claims.RuntimeID &&
+			entry.runtimeEpoch == claims.RuntimeEpoch &&
+			entry.workerNodeID == claims.TargetNodeID
+	}
+	now := time.Now()
+	h.runtimeAuthMu.RLock()
+	entry, ok := h.runtimeAuthCache[previewID]
+	h.runtimeAuthMu.RUnlock()
+	if ok && now.Before(entry.validUntil) && matches(entry) {
+		return true
+	}
+	runtime, err := h.preview.store.GetActivePreviewRuntime(ctx, claims.OrgID, previewID)
+	if err != nil {
+		return false
+	}
+	entry = &runtimeAuthEntry{
+		validUntil:   now.Add(runtimeAuthCacheTTL),
+		runtimeID:    runtime.ID,
+		runtimeEpoch: runtime.RuntimeEpoch,
+		workerNodeID: runtime.WorkerNodeID,
+	}
+	h.runtimeAuthMu.Lock()
+	if len(h.runtimeAuthCache) > 4096 {
+		// Safety valve against unbounded growth across short-lived previews.
+		h.runtimeAuthCache = make(map[uuid.UUID]*runtimeAuthEntry)
+	}
+	h.runtimeAuthCache[previewID] = entry
+	h.runtimeAuthMu.Unlock()
+	return matches(entry)
 }
 
 func (h *InternalPreviewHandler) Proxy(w http.ResponseWriter, r *http.Request) {
@@ -449,43 +539,105 @@ func (h *InternalPreviewHandler) Proxy(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	if isWebSocketUpgrade(r) {
-		h.handleWebSocketProxy(w, r, orgID, previewID)
+		h.handleWebSocketProxy(w, r, orgID, previewID, claims)
 		return
 	}
-	h.handleHTTPProxy(w, r, orgID, previewID)
+	h.handleHTTPProxy(w, r, orgID, previewID, claims)
 }
 
-func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
+func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims) {
+	originalReq := r
+	backendPath := trimInternalPreviewProxyPath(r.URL.Path, previewID)
+	if backendPath == "" {
+		backendPath = "/"
+	}
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			req.URL.Host = "preview-target"
-			req.URL.Path = trimInternalPreviewProxyPath(req.URL.Path, previewID)
-			if req.URL.Path == "" {
-				req.URL.Path = "/"
-			}
+			req.URL.Path = backendPath
 			req.RequestURI = ""
 			req.Host = "preview-target"
 			req.Header.Del("Authorization")
 			stripPreviewAccessCookies(req)
 		},
-		Transport: &internalPreviewTransport{
-			manager:   h.manager,
-			orgID:     orgID,
-			previewID: previewID,
+		Transport: h.previewTransport(orgID, previewID),
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del(auth.PreviewWorkerErrorHeader)
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			h.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("internal preview proxy error")
+			addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), originalReq, orgID, previewID, claims, backendPath).
+				Msg("internal preview proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
 }
 
-func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
+// previewTransport returns the pooled upstream transport for a preview,
+// creating it on first use. Pooled connections are keyed per preview so
+// container streams are reused across requests instead of dialed fresh each
+// time. Connections to a torn-down container close on the container side and
+// fall out of the pool, so a recycle converges on the new container without
+// explicit invalidation; eviction hooks just tighten the window.
+func (h *InternalPreviewHandler) previewTransport(orgID, previewID uuid.UUID) http.RoundTripper {
+	h.transportMu.Lock()
+	defer h.transportMu.Unlock()
+	if transport, ok := h.previewTransports[previewID]; ok {
+		return transport
+	}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			conn, err := h.manager.DialPreview(ctx, orgID, previewID)
+			if err != nil {
+				return nil, fmt.Errorf("dial preview: %w", err)
+			}
+			return conn, nil
+		},
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 128,
+		IdleConnTimeout:     60 * time.Second,
+		// Preserve end-to-end content negotiation: the browser's own
+		// Accept-Encoding is forwarded by the gateway, and the previous
+		// raw-conn transport never decompressed bodies.
+		DisableCompression: true,
+	}
+	if len(h.previewTransports) > 1024 {
+		// Safety valve against unbounded growth across short-lived previews.
+		for id, old := range h.previewTransports {
+			old.CloseIdleConnections()
+			delete(h.previewTransports, id)
+		}
+	}
+	h.previewTransports[previewID] = transport
+	return transport
+}
+
+// evictPreviewTransport drops the pooled transport for a preview and closes
+// its idle connections. Called when the preview is stopped or recycled on
+// this worker.
+func (h *InternalPreviewHandler) evictPreviewTransport(previewID uuid.UUID) {
+	h.transportMu.Lock()
+	transport, ok := h.previewTransports[previewID]
+	if ok {
+		delete(h.previewTransports, previewID)
+	}
+	h.transportMu.Unlock()
+	if ok {
+		transport.CloseIdleConnections()
+	}
+}
+
+func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims) {
+	backendPath := trimInternalPreviewProxyPath(r.URL.Path, previewID)
+	if backendPath == "" {
+		backendPath = "/"
+	}
 	backendConn, err := h.manager.DialPreview(r.Context(), orgID, previewID)
 	if err != nil {
-		h.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("internal websocket dial failed")
+		addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), r, orgID, previewID, claims, backendPath).
+			Msg("internal websocket dial failed")
 		http.Error(w, "preview unavailable", http.StatusBadGateway)
 		return
 	}
@@ -505,7 +657,8 @@ func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *
 
 	backendReq := cloneWebSocketRequestForInternalProxy(r, previewID)
 	if err := backendReq.Write(backendConn); err != nil {
-		h.logger.Warn().Err(err).Msg("internal websocket: failed to forward upgrade request")
+		addInternalPreviewProxyLogFields(h.logger.Warn().Err(err), r, orgID, previewID, claims, backendPath).
+			Msg("internal websocket: failed to forward upgrade request")
 		return
 	}
 	if clientBuf.Reader.Buffered() > 0 {
@@ -529,42 +682,43 @@ func (h *InternalPreviewHandler) handleWebSocketProxy(w http.ResponseWriter, r *
 	<-done
 }
 
-type internalPreviewTransport struct {
-	manager   *previewsvc.Manager
-	orgID     uuid.UUID
-	previewID uuid.UUID
-}
+func addInternalPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, previewID uuid.UUID, claims *auth.PreviewTokenClaims, backendPath string) *zerolog.Event {
+	requestPath := ""
+	requestHost := ""
+	requestMethod := ""
+	queryPresent := false
+	secFetchDest := ""
+	if r != nil {
+		requestHost = r.Host
+		requestMethod = r.Method
+		secFetchDest = r.Header.Get("Sec-Fetch-Dest")
+		if r.URL != nil {
+			requestPath = r.URL.Path
+			queryPresent = r.URL.RawQuery != ""
+		}
+	}
 
-type connClosingBody struct {
-	io.ReadCloser
-	conn net.Conn
-}
+	event = event.
+		Str("org_id", orgID.String()).
+		Str("preview_id", previewID.String()).
+		Str("request_method", requestMethod).
+		Str("request_host", requestHost).
+		Str("request_path", requestPath).
+		Bool("query_present", queryPresent).
+		Str("sec_fetch_dest", secFetchDest).
+		Str("backend_path", backendPath)
 
-func (b *connClosingBody) Close() error {
-	bodyErr := b.ReadCloser.Close()
-	connErr := b.conn.Close()
-	if bodyErr != nil {
-		return bodyErr
+	if claims == nil {
+		return event
 	}
-	return connErr
-}
 
-func (t *internalPreviewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	conn, err := t.manager.DialPreview(req.Context(), t.orgID, t.previewID)
-	if err != nil {
-		return nil, fmt.Errorf("dial preview: %w", err)
+	event = event.
+		Str("target_node_id", claims.TargetNodeID).
+		Int("runtime_epoch", claims.RuntimeEpoch)
+	if claims.RuntimeID != nil {
+		event = event.Str("runtime_id", claims.RuntimeID.String())
 	}
-	if err := req.Write(conn); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("write request: %w", err)
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	resp.Body = &connClosingBody{ReadCloser: resp.Body, conn: conn}
-	return resp, nil
+	return event
 }
 
 func cloneWebSocketRequestForInternalProxy(req *http.Request, previewID uuid.UUID) *http.Request {

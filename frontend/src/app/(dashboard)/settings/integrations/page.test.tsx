@@ -11,6 +11,8 @@ const {
   linearAgentMappingsMock,
   updateLinearAgentMock,
   upsertLinearAgentMappingMock,
+  listSlackChannelsMock,
+  updateSlackChannelsMock,
   githubConnectMock,
   currentUserMock,
   ApiErrorMock,
@@ -31,6 +33,8 @@ const {
     linearAgentMappingsMock: vi.fn(),
     updateLinearAgentMock: vi.fn(),
     upsertLinearAgentMappingMock: vi.fn(),
+    listSlackChannelsMock: vi.fn(),
+    updateSlackChannelsMock: vi.fn(),
     githubConnectMock: vi.fn(),
     currentUserMock: {
       id: "user-1",
@@ -62,6 +66,8 @@ vi.mock("@/lib/api", () => ({
       listLinearAgentMappings: linearAgentMappingsMock,
       updateLinearAgentSettings: updateLinearAgentMock,
       upsertLinearAgentMapping: upsertLinearAgentMappingMock,
+      listSlackChannels: listSlackChannelsMock,
+      updateSlackChannels: updateSlackChannelsMock,
     },
     repositories: {
       list: repositoriesListMock,
@@ -128,6 +134,8 @@ describe("IntegrationsPage", () => {
     linearAgentMappingsMock.mockResolvedValue({ data: [], meta: {} });
     updateLinearAgentMock.mockResolvedValue(undefined);
     upsertLinearAgentMappingMock.mockResolvedValue({ data: {}, meta: {} });
+    listSlackChannelsMock.mockResolvedValue({ data: [] });
+    updateSlackChannelsMock.mockResolvedValue(undefined);
     claimGitHubRepositoriesMock.mockRejectedValue(
       new ApiErrorMock("GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories"),
     );
@@ -166,6 +174,8 @@ describe("IntegrationsPage", () => {
 
     expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
     expect(await screen.findByText("Repository access")).toBeInTheDocument();
+    expect(screen.getByText("Members of acme can now join this workspace automatically. Manage auto-join in Team settings.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Team settings" })).toHaveAttribute("href", "/settings/team");
     expect(await screen.findByText("acme/api")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Claim" })).toBeInTheDocument();
   });
@@ -403,6 +413,115 @@ describe("IntegrationsPage", () => {
     });
   });
 
+  it("filters monitored Slack channels in the Slack manage sidesheet", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    listSlackChannelsMock.mockResolvedValue({
+      data: [
+        { id: "chan-1", name: "engineering", selected: true },
+        { id: "chan-2", name: "customer-success", selected: false },
+        { id: "chan-3", name: "random", selected: false },
+      ],
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+    await within(sheet).findByText("#engineering");
+
+    await user.type(within(sheet).getByPlaceholderText("Search channels..."), "customer");
+
+    expect(within(sheet).getByText("#customer-success")).toBeInTheDocument();
+    expect(within(sheet).queryByText("#engineering")).not.toBeInTheDocument();
+    expect(within(sheet).queryByText("#random")).not.toBeInTheDocument();
+
+    await user.click(within(sheet).getByRole("option", { name: "Monitor #customer-success" }));
+
+    await waitFor(() => {
+      expect(updateSlackChannelsMock).toHaveBeenCalledWith(["chan-1", "chan-2"]);
+    });
+  });
+
+  it("deselects a monitored Slack channel in the Slack manage sidesheet", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    listSlackChannelsMock.mockResolvedValue({
+      data: [
+        { id: "chan-1", name: "engineering", selected: true },
+        { id: "chan-2", name: "customer-success", selected: false },
+      ],
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+    await within(sheet).findByText("#engineering");
+
+    await user.click(within(sheet).getByRole("option", { name: "Monitor #engineering" }));
+
+    await waitFor(() => {
+      expect(updateSlackChannelsMock).toHaveBeenCalledWith([]);
+    });
+  });
+
+  it("shows empty state when Slack channel search matches nothing", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    listSlackChannelsMock.mockResolvedValue({
+      data: [
+        { id: "chan-1", name: "engineering", selected: true },
+        { id: "chan-2", name: "customer-success", selected: false },
+      ],
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+    await within(sheet).findByText("#engineering");
+
+    await user.type(within(sheet).getByPlaceholderText("Search channels..."), "zzznomatch");
+
+    expect(within(sheet).queryByText("#engineering")).not.toBeInTheDocument();
+    expect(within(sheet).queryByText("#customer-success")).not.toBeInTheDocument();
+    expect(within(sheet).getByText("No channels found.")).toBeInTheDocument();
+  });
+
   it("shows Notion workspace and CircleCI project metadata on connected cards", async () => {
     integrationsListMock.mockResolvedValueOnce({
       data: [
@@ -452,5 +571,24 @@ describe("IntegrationsPage", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Use the API project slug from CircleCI. OAuth projects usually look like gh/org/repo; GitHub App projects can use a circleci/... slug.",
     );
+  });
+
+  it("helps users find Mezmo service keys while connecting", async () => {
+    integrationsListMock.mockResolvedValueOnce({ data: [], meta: {} });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Connect Mezmo" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Connect Mezmo" });
+    expect(dialog).toHaveTextContent("Open Mezmo, select the right organization, then go to Settings > Organization > API Keys. Create a service key there so agents can query production logs.");
+    expect(within(dialog).getByRole("link", { name: "Open Mezmo" })).toHaveAttribute(
+      "href",
+      "https://app.mezmo.com/",
+    );
+
+    expect(within(dialog).queryByLabelText("Dataset (optional)")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Where to find the Mezmo dataset" })).not.toBeInTheDocument();
   });
 });

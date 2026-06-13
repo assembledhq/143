@@ -106,6 +106,267 @@ remote_env_assignment() {
   remote_shell_quote "$value"
 }
 
+apply_static_egress_worker_host_map() {
+  if [ "$ROLE" != "worker" ] || [ -z "${STATIC_EGRESS_WORKER_HOSTS:-}" ]; then
+    return
+  fi
+
+  # STATIC_EGRESS_WORKER_HOSTS is a comma-separated list of worker tunnel
+  # identities. Entries are "<host>@<wg-address>@<private-key>".
+  # Example:
+  # STATIC_EGRESS_WORKER_HOSTS="87.99.158.39@10.143.0.2/32@abc=,54.1.2.3@10.143.0.3/32@def="
+  IFS=',' read -ra mappings <<< "$STATIC_EGRESS_WORKER_HOSTS"
+  for mapping in "${mappings[@]}"; do
+    map_host="${mapping%%@*}"
+    rest="${mapping#*@}"
+    if [ "$map_host" != "$HOST" ]; then
+      continue
+    fi
+    if [ "$rest" = "$mapping" ] || [[ "$rest" != *@* ]]; then
+      echo "ERROR: invalid STATIC_EGRESS_WORKER_HOSTS entry for $HOST; expected host@wg-address@private-key" >&2
+      exit 1
+    fi
+    map_wg_address="${rest%%@*}"
+    map_private_key="${rest#*@}"
+    if [ -z "$map_wg_address" ] || [ -z "$map_private_key" ]; then
+      echo "ERROR: invalid STATIC_EGRESS_WORKER_HOSTS entry for $HOST; wg-address and private-key are required" >&2
+      exit 1
+    fi
+    : "${STATIC_EGRESS_WORKER_WG_ADDRESS:=$map_wg_address}"
+    : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:=$map_private_key}"
+    return
+  done
+}
+
+# Canonical worker fingerprint input lists, shared by the staged fingerprint
+# gate and the blue/green rollover (including the detached rollover script).
+# Both sides MUST hash the same inputs: the gate repairs the persisted
+# baseline from these lists, and the rollover compares its own computation
+# against that baseline. If they diverge, every routine deploy fails with
+# "config changed" even when nothing changed — the gate writes one hash, the
+# rollover expects another, and DEPLOY_MODE=maintenance just re-arms the loop.
+WORKER_HOST_RUNTIME_FINGERPRINT_FILES='/opt/143/deploy/scripts/reconcile-worker-host.sh /opt/143/deploy/scripts/sandbox-firewall.sh /opt/143/deploy/scripts/sandbox-resolv-conf.sh /opt/143/deploy/scripts/install-static-egress-worker.sh'
+WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='/opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-log-rotation.sh'
+WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='/opt/143/Dockerfile.dnsmasq /opt/143/docker-compose.dns-probe.yml'
+WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='chrome gvisor-check sandbox-dns'
+
+run_worker_staged_fingerprint_gate() {
+  if [ "$ROLE" != "worker" ]; then
+    return 0
+  fi
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+    "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
+    'bash -s' <<'REMOTE'
+set -euo pipefail
+
+: "${WORKER_HOST_RUNTIME_FINGERPRINT_FILES:?deploy.sh must pass the shared host-runtime fingerprint file list}"
+: "${WORKER_DOCKER_DAEMON_FINGERPRINT_FILES:?deploy.sh must pass the shared docker-daemon fingerprint file list}"
+: "${WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES:?deploy.sh must pass the shared support-service fingerprint file list}"
+: "${WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES:?deploy.sh must pass the shared support-service compose service list}"
+
+fingerprint_candidate_files() {
+  local selected=()
+  local path
+  for path in "$@"; do
+    if [ -e "${path}.new" ]; then
+      selected+=("$path:${path}.new")
+    elif [ -e "$path" ]; then
+      selected+=("$path:$path")
+    fi
+  done
+  if [ "${#selected[@]}" -eq 0 ]; then
+    echo "none"
+    return 0
+  fi
+  {
+    local entry logical_path selected_path file_hash
+    for entry in "${selected[@]}"; do
+      logical_path="${entry%%:*}"
+      selected_path="${entry#*:}"
+      file_hash="$(sha256sum "$selected_path" | awk '{print $1}')"
+      printf '%s  %s\n' "$file_hash" "$logical_path"
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+fingerprint_active_files() {
+  local existing=()
+  local path
+  for path in "$@"; do
+    if [ -e "$path" ]; then
+      existing+=("$path")
+    fi
+  done
+  if [ "${#existing[@]}" -eq 0 ]; then
+    echo "none"
+    return 0
+  fi
+  {
+    local selected_path file_hash
+    for selected_path in "${existing[@]}"; do
+      file_hash="$(sha256sum "$selected_path" | awk '{print $1}')"
+      printf '%s  %s\n' "$file_hash" "$selected_path"
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+compose_service_fingerprint() {
+  local compose_file="$1"
+  shift
+  local read_file="$compose_file"
+  if [ -e "${compose_file}.new" ]; then
+    read_file="${compose_file}.new"
+  fi
+  if [ ! -e "$read_file" ]; then
+    printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
+    return 0
+  fi
+  {
+    local svc
+    for svc in "$@"; do
+      printf -- '--- %s:%s ---\n' "$compose_file" "$svc"
+      awk -v svc="$svc" '
+        /^  [A-Za-z0-9_.-]+:/ {
+          current=$1
+          sub(/:$/, "", current)
+          in_service=(current == svc)
+        }
+        in_service { print }
+      ' "$read_file"
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+compose_service_active_fingerprint() {
+  local compose_file="$1"
+  shift
+  if [ ! -e "$compose_file" ]; then
+    printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
+    return 0
+  fi
+  {
+    local svc
+    for svc in "$@"; do
+      printf -- '--- %s:%s ---\n' "$compose_file" "$svc"
+      awk -v svc="$svc" '
+        /^  [A-Za-z0-9_.-]+:/ {
+          current=$1
+          sub(/:$/, "", current)
+          in_service=(current == svc)
+        }
+        in_service { print }
+      ' "$compose_file"
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+worker_process_config_fingerprint() {
+  compose_service_fingerprint /opt/143/docker-compose.worker.yml worker
+}
+
+# The shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES lists are intentionally
+# expanded unquoted: they are space-separated lists of paths/services.
+worker_support_service_fingerprint() {
+  {
+    # shellcheck disable=SC2086
+    compose_service_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+    # shellcheck disable=SC2086
+    fingerprint_candidate_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
+  } | sha256sum | awk '{print $1}'
+}
+
+worker_active_support_service_fingerprint() {
+  {
+    # shellcheck disable=SC2086
+    compose_service_active_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+    # shellcheck disable=SC2086
+    fingerprint_active_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
+  } | sha256sum | awk '{print $1}'
+}
+
+worker_host_runtime_fingerprint() {
+  # shellcheck disable=SC2086
+  fingerprint_candidate_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
+}
+
+worker_active_host_runtime_fingerprint() {
+  # shellcheck disable=SC2086
+  fingerprint_active_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
+}
+
+worker_docker_daemon_fingerprint() {
+  # shellcheck disable=SC2086
+  fingerprint_candidate_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
+}
+
+worker_active_docker_daemon_fingerprint() {
+  # shellcheck disable=SC2086
+  fingerprint_active_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
+}
+
+repair_stale_worker_fingerprint() {
+  local label="$1" file="$2" expected="$3" candidate="$4" active="$5"
+  if [ "$expected" != "$candidate" ] && [ "$candidate" = "$active" ]; then
+    echo "WARNING: stored worker $label fingerprint is stale; repairing baseline because staged candidate matches active files." >&2
+    printf '%s\n' "$candidate" > "$file"
+    return 0
+  fi
+  return 1
+}
+
+mode="${DEPLOY_MODE:-routine}"
+worker_process_fingerprint="$(worker_process_config_fingerprint)"
+support_fingerprint="$(worker_support_service_fingerprint)"
+host_runtime_fingerprint="$(worker_host_runtime_fingerprint)"
+docker_daemon_fingerprint="$(worker_docker_daemon_fingerprint)"
+active_support_fingerprint="$(worker_active_support_service_fingerprint)"
+active_host_runtime_fingerprint="$(worker_active_host_runtime_fingerprint)"
+active_docker_daemon_fingerprint="$(worker_active_docker_daemon_fingerprint)"
+
+worker_process_expected="$worker_process_fingerprint"
+support_expected="$support_fingerprint"
+host_runtime_expected="$host_runtime_fingerprint"
+docker_daemon_expected="$docker_daemon_fingerprint"
+
+[ ! -f /opt/143/.worker-process.fingerprint ] || worker_process_expected="$(cat /opt/143/.worker-process.fingerprint)"
+[ ! -f /opt/143/.worker-support-services.v2.fingerprint ] || support_expected="$(cat /opt/143/.worker-support-services.v2.fingerprint)"
+[ ! -f /opt/143/.worker-host-runtime.fingerprint ] || host_runtime_expected="$(cat /opt/143/.worker-host-runtime.fingerprint)"
+[ ! -f /opt/143/.worker-docker-daemon.fingerprint ] || docker_daemon_expected="$(cat /opt/143/.worker-docker-daemon.fingerprint)"
+
+if [ "$mode" = "routine" ] && [ "$support_expected" != "$support_fingerprint" ]; then
+  if repair_stale_worker_fingerprint "support-service" /opt/143/.worker-support-services.v2.fingerprint "$support_expected" "$support_fingerprint" "$active_support_fingerprint"; then
+    support_expected="$support_fingerprint"
+  else
+    echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "current=$support_expected candidate=$support_fingerprint" >&2
+    exit 1
+  fi
+fi
+if [ "$mode" = "routine" ] && [ "$host_runtime_expected" != "$host_runtime_fingerprint" ]; then
+  if repair_stale_worker_fingerprint "host-runtime" /opt/143/.worker-host-runtime.fingerprint "$host_runtime_expected" "$host_runtime_fingerprint" "$active_host_runtime_fingerprint"; then
+    host_runtime_expected="$host_runtime_fingerprint"
+  else
+    echo "ERROR: worker host-runtime config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "current=$host_runtime_expected candidate=$host_runtime_fingerprint" >&2
+    exit 1
+  fi
+fi
+if [ "$mode" = "routine" ] && [ "$docker_daemon_expected" != "$docker_daemon_fingerprint" ]; then
+  if repair_stale_worker_fingerprint "docker-daemon" /opt/143/.worker-docker-daemon.fingerprint "$docker_daemon_expected" "$docker_daemon_fingerprint" "$active_docker_daemon_fingerprint"; then
+    docker_daemon_expected="$docker_daemon_fingerprint"
+  else
+    echo "ERROR: worker docker-daemon config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "current=$docker_daemon_expected candidate=$docker_daemon_fingerprint" >&2
+    exit 1
+  fi
+fi
+REMOTE
+}
+
 # --- Refresh secrets from .env.production.enc ---
 if [ -z "${SOPS_AGE_KEY:-}" ]; then
   AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
@@ -117,7 +378,18 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
   fi
 fi
 
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+# The encrypted bundle lives in the private secrets checkout, not this
+# (public) repo. Resolved worktree-safely; see resolve-secrets-dir.sh.
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
+# Having the age key but no bundle means the private secrets checkout is
+# missing — deploying anyway would silently reuse stale /opt/143/.env and
+# skip the bundle scp. Fail loudly instead of degrading.
+if [ -n "${SOPS_AGE_KEY:-}" ] && [ ! -f "$ENC_FILE" ]; then
+  echo "ERROR: SOPS_AGE_KEY is set but $ENC_FILE does not exist." >&2
+  echo "Clone the private secrets repo next to the main checkout (see docs/secrets/README.md) or set SECRETS_DIR." >&2
+  exit 1
+fi
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Refreshing secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
@@ -126,12 +398,13 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     [[ -z "$line" || "$line" == \#* ]] && continue
     key="${line%%=*}"
     value="${line#*=}"
-    if [ -z "${!key+x}" ]; then
+    if [ -z "${!key:-}" ]; then
       export "$key=$value"
     fi
   done <<< "$DECRYPTED"
 
   apply_worker_bucket_overrides "$ROLE" "$HOST"
+  apply_static_egress_worker_host_map
 
   if [ "$ROLE" = "logging" ]; then
     : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for logging role (set it or add to .env.production.enc)}"
@@ -160,16 +433,18 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${SANDBOX_GC_INTERVAL:=5m}"
     : "${SANDBOX_GC_GRACE:=30m}"
     : "${SANDBOX_GC_HARD_MAX:=24h}"
+    : "${STATIC_EGRESS_PROBE_IMAGE:=ghcr.io/assembledhq/143-sandbox:$TAG}"
     # Refresh the shared secrets in /opt/143/.env, then re-append the per-host
     # identity/runtime values from /opt/143/.env.local (NODE_ID,
     # WORKER_PRIVATE_IP, PREVIEW_INTERNAL_BASE_URL, DOCKER_GID) so docker
     # compose can still interpolate them when it parses the compose file.
     # .env.local is owned by provisioning and we abort if it's missing instead
     # of silently coming up with empty/unsafe defaults.
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nWORKER_PREVIEW_DRAIN_TIMEOUT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\n' \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nWORKER_PREVIEW_DRAIN_TIMEOUT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nSTATIC_EGRESS_PROBE_IMAGE=%s\n' \
       "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
       "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${WORKER_PREVIEW_DRAIN_TIMEOUT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
       "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
+      "${STATIC_EGRESS_PUBLIC_IP:-}" "$STATIC_EGRESS_PROBE_IMAGE" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" '
           set -euo pipefail
           cat > /opt/143/.env
@@ -191,6 +466,9 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
           fi
           cat /opt/143/.env.local >> /opt/143/.env
         '
+    printf 'STATIC_EGRESS_GATEWAY_PUBLIC_IP=%s\nSTATIC_EGRESS_GATEWAY_PUBLIC_KEY=%s\nSTATIC_EGRESS_WORKER_PRIVATE_KEY=%s\nSTATIC_EGRESS_WORKER_WG_ADDRESS=%s\n' \
+      "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:-}" "${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:-}" "${STATIC_EGRESS_WORKER_PRIVATE_KEY:-}" "${STATIC_EGRESS_WORKER_WG_ADDRESS:-}" \
+      | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/static-egress-worker.env && chmod 600 /opt/143/static-egress-worker.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
   else
@@ -203,7 +481,7 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DOMAIN:=143.dev}"
     : "${PREVIEW_ORIGIN_TEMPLATE:=https://{id}.preview.143.dev}"
     : "${NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:=$PREVIEW_ORIGIN_TEMPLATE}"
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nDOMAIN=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "$DOMAIN" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nDOMAIN=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "$DOMAIN" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" "${STATIC_EGRESS_PUBLIC_IP:-}" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
@@ -213,8 +491,19 @@ else
   echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
 fi
 
-# Sync compose file so the remote always runs the latest version
-scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+# Sync compose file so the remote always runs the latest version. Worker
+# compose can include support-service changes, so stage it until the routine
+# worker fingerprint gate allows promotion.
+if [ "$ROLE" = "worker" ]; then
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new
+else
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+fi
+if [ "$ROLE" = "db" ]; then
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy/postgres"
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/postgresql.conf" deploy@"$HOST":/opt/143/deploy/postgres/
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/pg_hba.conf" deploy@"$HOST":/opt/143/deploy/postgres/
+fi
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
@@ -224,7 +513,11 @@ fi
 # own stack and doesn't include it). Stage the file so docker compose can
 # resolve the include directive.
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
-  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+  if [ "$ROLE" = "worker" ]; then
+    scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/docker-compose.dns-probe.yml.new
+  else
+    scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+  fi
 fi
 if [ "$ROLE" = "logging" ]; then
   # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
@@ -289,9 +582,6 @@ if [ "$ROLE" = "worker" ]; then
       exit 1
     fi
   fi
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
-     || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new; exit 1; }"
 
   # Sync the sandbox-resolv.conf writer. This is the single source of truth
   # for /etc/143/sandbox-resolv.conf, which gets bind-mounted into every
@@ -301,21 +591,51 @@ if [ "$ROLE" = "worker" ]; then
   # same ETXTBSY-class reasons noted on sandbox-firewall.sh above.
   scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/sandbox-resolv-conf.sh" \
     deploy@"$HOST":/opt/143/deploy/scripts/sandbox-resolv-conf.sh.new
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
-     && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
-     || { rm -f /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new; exit 1; }"
+
+  # Sync the static egress worker installer before reconciliation. Existing
+  # workers created before this feature need the helper present locally so
+  # configured static egress can fail closed instead of silently skipping
+  # WireGuard/policy-route installation.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-static-egress-worker.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-static-egress-worker.sh.new
 
   # Sync the canonical worker host reconciler. It owns the sandbox network,
   # firewall, resolv.conf, sandbox-auth socket dir, and worker sysctl state.
   scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/reconcile-worker-host.sh" \
     deploy@"$HOST":/opt/143/deploy/scripts/reconcile-worker-host.sh.new
+
+  # Sync Dockerfile.dnsmasq alongside the worker compose file. The
+  # sandbox-dns service is built locally on each worker (see
+  # docker-compose.worker.yml) and the build context is /opt/143, so the
+  # Dockerfile must live next to the compose file before `docker compose
+  # up` runs. Atomic-rename via .new for the same ETXTBSY-class reasons
+  # noted on sandbox-firewall.sh above.
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" \
+    deploy@"$HOST":/opt/143/Dockerfile.dnsmasq.new
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-log-rotation.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-log-rotation.sh.new
+  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/scripts/install-docker-dns.sh" \
+    deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
+  run_worker_staged_fingerprint_gate
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh \
+    "mv /opt/143/$COMPOSE_FILE.new /opt/143/$COMPOSE_FILE \
+     && mv /opt/143/docker-compose.dns-probe.yml.new /opt/143/docker-compose.dns-probe.yml \
+     && mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
+     && mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
+     && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
+     && mv /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh \
+     && chmod +x /opt/143/deploy/scripts/install-static-egress-worker.sh \
+     && mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh \
      && chmod +x /opt/143/deploy/scripts/reconcile-worker-host.sh \
-     || { rm -f /opt/143/deploy/scripts/reconcile-worker-host.sh.new; exit 1; }"
+     && mv /opt/143/Dockerfile.dnsmasq.new /opt/143/Dockerfile.dnsmasq \
+     || { rm -f /opt/143/$COMPOSE_FILE.new /opt/143/docker-compose.dns-probe.yml.new /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 
   echo "Reconciling worker host invariants..."
+  if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
+    static_egress_probe_image="${STATIC_EGRESS_PROBE_IMAGE:-ghcr.io/assembledhq/143-sandbox:$TAG}"
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+      "docker pull \"$static_egress_probe_image\""
+  fi
   if ! run_worker_host_reconcile; then
     echo "reconcile-worker-host.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
     if repair_deploy_sudoers; then
@@ -329,18 +649,6 @@ if [ "$ROLE" = "worker" ]; then
       exit 1
     fi
   fi
-
-  # Sync Dockerfile.dnsmasq alongside the worker compose file. The
-  # sandbox-dns service is built locally on each worker (see
-  # docker-compose.worker.yml) and the build context is /opt/143, so the
-  # Dockerfile must live next to the compose file before `docker compose
-  # up` runs. Atomic-rename via .new for the same ETXTBSY-class reasons
-  # noted on sandbox-firewall.sh above.
-  scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.dnsmasq" \
-    deploy@"$HOST":/opt/143/Dockerfile.dnsmasq.new
-  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/Dockerfile.dnsmasq.new /opt/143/Dockerfile.dnsmasq \
-     || { rm -f /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 fi
 
 if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
@@ -385,6 +693,7 @@ else
     fi
   fi
   if [ "$LOG_ROTATION_READY" -eq 1 ]; then
+    run_worker_staged_fingerprint_gate
     if ! ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       "mv /opt/143/deploy/scripts/install-log-rotation.sh.new /opt/143/deploy/scripts/install-log-rotation.sh \
        && chmod +x /opt/143/deploy/scripts/install-log-rotation.sh \
@@ -419,6 +728,10 @@ else
 fi
 
 if { [ "$ROLE" = "app" ] || { [ "$ROLE" = "worker" ] && [ "${DEPLOY_MODE:-routine}" = "routine" ]; }; } && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  if [ "$ROLE" = "worker" ]; then
+    run_worker_staged_fingerprint_gate
+    ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new"
+  fi
   echo "Skipping docker daemon DNS check on $ROLE deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 and DEPLOY_MODE=maintenance for explicit maintenance."
 else
   # --- Docker daemon DNS resolvers (idempotent) ---
@@ -486,6 +799,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS "${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_START "${WORKER_BLUE_GREEN_PORT_START:-}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PORT_END "${WORKER_BLUE_GREEN_PORT_END:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS "${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}")" \
+  "$(remote_env_assignment WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS "${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}")" \
   "$(remote_env_assignment WORKER_BASE_NODE_ID "${WORKER_BASE_NODE_ID:-}")" \
   "$(remote_env_assignment WORKER_DRAIN_TIMEOUT "${WORKER_DRAIN_TIMEOUT:-}")" \
   "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
@@ -496,6 +811,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
   "$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")" \
   "$(remote_env_assignment DEPLOY_DOCKER_VOLUME_PRUNE "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}")" \
+  "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
@@ -786,6 +1105,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  preview_rpc_auth_preflight() {
+    local cid="$1"
+    echo "Running preview RPC auth compatibility check from candidate api container ${cid:0:12}..."
+    docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json
+  }
+
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
   #   1. scale up by 1 alongside the existing container(s)
   #   2. wait for the new container's health check
@@ -856,6 +1181,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ -n "$old_containers" ]; then
+      if [ "$service" = "api" ]; then
+        preview_rpc_auth_preflight "$new_container"
+      fi
       wait_caddy_upstream_discovery "$service" "$new_container"
       # Stop each old container with a long timeout so in-flight requests and
       # SSE streams have time to drain. Docker sends SIGTERM and only falls
@@ -956,6 +1284,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' /opt/143/.env
   }
 
+  load_worker_endpoint_check_env() {
+    DB_HOST="${DB_HOST:-$(read_worker_env_value DB_HOST)}"
+    DB_PASSWORD="${DB_PASSWORD:-$(read_worker_env_value DB_PASSWORD)}"
+    export DB_HOST DB_PASSWORD
+
+    if [ -z "${DB_HOST:-}" ] || [ -z "${DB_PASSWORD:-}" ]; then
+      echo "ERROR: DB_HOST and DB_PASSWORD are required to verify preview runtime endpoint reuse safety." >&2
+      echo "Run make deploy-worker-preflight to verify worker blue/green readiness before a routine deploy." >&2
+      return 1
+    fi
+  }
+
   sanitize_compose_project() {
     local raw="$1" sanitized
     sanitized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
@@ -1053,22 +1393,49 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   worker_host_capacity_preflight() {
     local min_mem="${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}"
     local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}"
-    local free_mem idle_cpu idle1 total1 idle2 total2 delta
+    local attempts="${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-3}"
+    local retry_delay="${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-2}"
+    local free_mem idle_cpu idle1 total1 idle2 total2 delta cpu_count
+    local attempt
 
-    free_mem="$(awk '/MemAvailable:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 0)"
-    read -r idle1 total1 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
-    sleep 1
-    read -r idle2 total2 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
-    idle1="${idle1:-0}"
-    total1="${total1:-0}"
-    idle2="${idle2:-0}"
-    total2="${total2:-0}"
-    delta=$((total2 - total1))
-    if [ "$delta" -le 0 ]; then
-      idle_cpu=0
-    else
-      idle_cpu=$((((idle2 - idle1) * 1000) / delta))
+    if ! [[ "$attempts" =~ ^[0-9]+$ ]] || [ "$attempts" -lt 1 ]; then
+      attempts=1
     fi
+    if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
+      retry_delay=2
+    fi
+    cpu_count="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+    if ! [[ "$cpu_count" =~ ^[0-9]+$ ]] || [ "$cpu_count" -lt 1 ]; then
+      cpu_count=1
+    fi
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+      free_mem="$(awk '/MemAvailable:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 0)"
+      read -r idle1 total1 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+      sleep 1
+      read -r idle2 total2 < <(awk '/^cpu / {idle=$5; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+      idle1="${idle1:-0}"
+      total1="${total1:-0}"
+      idle2="${idle2:-0}"
+      total2="${total2:-0}"
+      delta=$((total2 - total1))
+      if [ "$delta" -le 0 ]; then
+        idle_cpu=0
+      else
+        idle_cpu=$((((idle2 - idle1) * 1000 * cpu_count) / delta))
+      fi
+
+      if [ "$free_mem" -ge "$min_mem" ] && [ "$idle_cpu" -ge "$min_cpu" ]; then
+        WORKER_BLUE_GREEN_FREE_MEMORY_MB="$free_mem"
+        WORKER_BLUE_GREEN_IDLE_CPU_MILLIS="$idle_cpu"
+        return 0
+      fi
+
+      if [ "$attempt" -lt "$attempts" ]; then
+        echo "Worker capacity preflight attempt ${attempt}/${attempts} below threshold: free=${free_mem}MB min=${min_mem}MB idle=${idle_cpu}m min=${min_cpu}m; retrying..." >&2
+        sleep "$retry_delay"
+      fi
+    done
 
     if [ "$free_mem" -lt "$min_mem" ]; then
       echo "ERROR: insufficient free memory for worker blue/green overlap: free=${free_mem}MB min=${min_mem}MB" >&2
@@ -1078,21 +1445,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       echo "ERROR: insufficient idle CPU for worker blue/green overlap: idle=${idle_cpu}m min=${min_cpu}m" >&2
       return 1
     fi
-    WORKER_BLUE_GREEN_FREE_MEMORY_MB="$free_mem"
-    WORKER_BLUE_GREEN_IDLE_CPU_MILLIS="$idle_cpu"
   }
 
-  worker_support_service_fingerprint() {
-    local inputs=(
-      /opt/143/deploy/scripts/reconcile-worker-host.sh
-      /opt/143/deploy/scripts/install-docker-dns.sh
-      /opt/143/deploy/scripts/install-log-rotation.sh
-      /opt/143/docker-compose.worker.yml
-      /opt/143/docker-compose.dns-probe.yml
-    )
+  fingerprint_files() {
     local existing=()
     local path
-    for path in "${inputs[@]}"; do
+    for path in "$@"; do
       if [ -e "$path" ]; then
         existing+=("$path")
       fi
@@ -1104,21 +1462,101 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     sha256sum "${existing[@]}" | sha256sum | awk '{print $1}'
   }
 
-  ensure_routine_support_service_fingerprint_unchanged() {
-    local mode="${DEPLOY_MODE:-routine}"
-    local current_file="/opt/143/.worker-support-services.fingerprint"
-    local candidate current
-    candidate="$(worker_support_service_fingerprint)"
-    WORKER_SUPPORT_SERVICE_FINGERPRINT="$candidate"
-    if [ ! -f "$current_file" ]; then
-      printf '%s\n' "$candidate" > "$current_file"
+  compose_service_fingerprint() {
+    local compose_file="$1"
+    shift
+    if [ ! -e "$compose_file" ]; then
+      printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
       return 0
     fi
-    current="$(cat "$current_file")"
-    WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT="$current"
-    if [ "$mode" = "routine" ] && [ "$current" != "$candidate" ]; then
+    {
+      local svc
+      for svc in "$@"; do
+        printf -- '--- %s:%s ---\n' "$compose_file" "$svc"
+        awk -v svc="$svc" '
+          /^  [A-Za-z0-9_.-]+:/ {
+            current=$1
+            sub(/:$/, "", current)
+            in_service=(current == svc)
+          }
+          in_service { print }
+        ' "$compose_file"
+      done
+    } | sha256sum | awk '{print $1}'
+  }
+
+  worker_process_config_fingerprint() {
+    compose_service_fingerprint /opt/143/docker-compose.worker.yml worker
+  }
+
+  # These fingerprints must match the staged fingerprint gate's computation
+  # exactly, so both read the shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES
+  # lists (passed via SSH env here, baked into the detached rollover script).
+  # The lists are space-separated, hence the intentional unquoted expansion.
+  worker_support_service_fingerprint() {
+    {
+      # shellcheck disable=SC2086
+      compose_service_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+      # shellcheck disable=SC2086
+      fingerprint_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
+    } | sha256sum | awk '{print $1}'
+  }
+
+  worker_host_runtime_fingerprint() {
+    # shellcheck disable=SC2086
+    fingerprint_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
+  }
+
+  worker_docker_daemon_fingerprint() {
+    # shellcheck disable=SC2086
+    fingerprint_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
+  }
+
+  ensure_routine_worker_fingerprints_compatible() {
+    local mode="${DEPLOY_MODE:-routine}"
+    local worker_process_file="/opt/143/.worker-process.fingerprint"
+    # v2 keeps the semantic support-service hash separate from the legacy
+    # broad hash that included the entire worker compose file.
+    local support_file="/opt/143/.worker-support-services.v2.fingerprint"
+    local host_runtime_file="/opt/143/.worker-host-runtime.fingerprint"
+    local docker_daemon_file="/opt/143/.worker-docker-daemon.fingerprint"
+
+    WORKER_PROCESS_FINGERPRINT="$(worker_process_config_fingerprint)"
+    WORKER_SUPPORT_SERVICE_FINGERPRINT="$(worker_support_service_fingerprint)"
+    WORKER_HOST_RUNTIME_FINGERPRINT="$(worker_host_runtime_fingerprint)"
+    WORKER_DOCKER_DAEMON_FINGERPRINT="$(worker_docker_daemon_fingerprint)"
+
+    WORKER_PROCESS_EXPECTED_FINGERPRINT="$WORKER_PROCESS_FINGERPRINT"
+    WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT="$WORKER_SUPPORT_SERVICE_FINGERPRINT"
+    WORKER_HOST_RUNTIME_EXPECTED_FINGERPRINT="$WORKER_HOST_RUNTIME_FINGERPRINT"
+    WORKER_DOCKER_DAEMON_EXPECTED_FINGERPRINT="$WORKER_DOCKER_DAEMON_FINGERPRINT"
+
+    if [ -f "$worker_process_file" ]; then
+      WORKER_PROCESS_EXPECTED_FINGERPRINT="$(cat "$worker_process_file")"
+    fi
+    if [ -f "$support_file" ]; then
+      WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT="$(cat "$support_file")"
+    fi
+    if [ -f "$host_runtime_file" ]; then
+      WORKER_HOST_RUNTIME_EXPECTED_FINGERPRINT="$(cat "$host_runtime_file")"
+    fi
+    if [ -f "$docker_daemon_file" ]; then
+      WORKER_DOCKER_DAEMON_EXPECTED_FINGERPRINT="$(cat "$docker_daemon_file")"
+    fi
+
+    if [ "$mode" = "routine" ] && [ "$WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT" != "$WORKER_SUPPORT_SERVICE_FINGERPRINT" ]; then
       echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
-      echo "current=$current candidate=$candidate" >&2
+      echo "current=$WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT candidate=$WORKER_SUPPORT_SERVICE_FINGERPRINT" >&2
+      return 1
+    fi
+    if [ "$mode" = "routine" ] && [ "$WORKER_HOST_RUNTIME_EXPECTED_FINGERPRINT" != "$WORKER_HOST_RUNTIME_FINGERPRINT" ]; then
+      echo "ERROR: worker host-runtime config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+      echo "current=$WORKER_HOST_RUNTIME_EXPECTED_FINGERPRINT candidate=$WORKER_HOST_RUNTIME_FINGERPRINT" >&2
+      return 1
+    fi
+    if [ "$mode" = "routine" ] && [ "$WORKER_DOCKER_DAEMON_EXPECTED_FINGERPRINT" != "$WORKER_DOCKER_DAEMON_FINGERPRINT" ]; then
+      echo "ERROR: worker docker-daemon config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+      echo "current=$WORKER_DOCKER_DAEMON_EXPECTED_FINGERPRINT candidate=$WORKER_DOCKER_DAEMON_FINGERPRINT" >&2
       return 1
     fi
   }
@@ -1281,26 +1719,44 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   deploy_worker_blue_green() {
-    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id
+    local old_containers base_node_id worker_private_ip generation node_id host_port base_url project new_cid deploy_id preflight_node_id deploy_mode
 
     old_containers="$(list_running_worker_containers || true)"
     preflight_node_id="$(first_running_worker_node_id "$old_containers" || true)"
     base_node_id="${WORKER_BASE_NODE_ID:-$(read_worker_env_value NODE_ID)}"
     worker_private_ip="$(read_worker_env_value WORKER_PRIVATE_IP)"
+    deploy_mode="${DEPLOY_MODE:-routine}"
     if [ -z "$base_node_id" ] || [ -z "$worker_private_ip" ]; then
       echo "ERROR: NODE_ID and WORKER_PRIVATE_IP must be present in /opt/143/.env for worker blue/green deploy." >&2
       return 1
     fi
-    worker_host_capacity_preflight
-    ensure_routine_support_service_fingerprint_unchanged
+    ensure_routine_worker_fingerprints_compatible
+
+    if [ "$deploy_mode" = "maintenance" ]; then
+      if [ -n "$old_containers" ]; then
+        drain_worker_containers_blocking "$old_containers"
+      else
+        echo "No existing worker containers found; maintenance deploy will start a fresh generation."
+      fi
+    else
+      load_worker_endpoint_check_env
+      worker_host_capacity_preflight
+    fi
 
     generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
     node_id="${base_node_id}-g${generation}"
     deploy_id="worker-${generation}"
-    if ! host_port="$(find_free_worker_port "$worker_private_ip")"; then
-      echo "ERROR: no free worker generation port; routine blue/green deploy refuses blocking drain fallback." >&2
-      echo "Configure WORKER_BLUE_GREEN_PORT_START/END or run an explicit maintenance deploy." >&2
-      return 1
+    if [ "$deploy_mode" = "maintenance" ]; then
+      if ! host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"; then
+        echo "ERROR: no reusable worker host port after maintenance drain." >&2
+        return 1
+      fi
+    else
+      if ! host_port="$(find_free_worker_port "$worker_private_ip")"; then
+        echo "ERROR: no free worker generation port; routine blue/green deploy refuses blocking drain fallback." >&2
+        echo "Configure WORKER_BLUE_GREEN_PORT_START/END or run an explicit maintenance deploy." >&2
+        return 1
+      fi
     fi
     base_url="http://${worker_private_ip}:${host_port}"
     project="$(sanitize_compose_project "143-${node_id}")"
@@ -1313,8 +1769,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         --candidate-port "$host_port" \
         --build-sha "${IMAGE_TAG:-}" \
         --expected-schema-version "$(worker_expected_schema_version)" \
+        --worker-process-fingerprint "${WORKER_PROCESS_FINGERPRINT:-}" \
+        --expected-worker-process-fingerprint "${WORKER_PROCESS_EXPECTED_FINGERPRINT:-${WORKER_PROCESS_FINGERPRINT:-}}" \
         --support-services-fingerprint "${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}" \
         --expected-support-services-fingerprint "${WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT:-${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}}" \
+        --host-runtime-fingerprint "${WORKER_HOST_RUNTIME_FINGERPRINT:-}" \
+        --expected-host-runtime-fingerprint "${WORKER_HOST_RUNTIME_EXPECTED_FINGERPRINT:-${WORKER_HOST_RUNTIME_FINGERPRINT:-}}" \
+        --docker-daemon-fingerprint "${WORKER_DOCKER_DAEMON_FINGERPRINT:-}" \
+        --expected-docker-daemon-fingerprint "${WORKER_DOCKER_DAEMON_EXPECTED_FINGERPRINT:-${WORKER_DOCKER_DAEMON_FINGERPRINT:-}}" \
         --free-memory-mb "${WORKER_BLUE_GREEN_FREE_MEMORY_MB:-0}" \
         --min-free-memory-mb "${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}" \
         --idle-cpu-millis "${WORKER_BLUE_GREEN_IDLE_CPU_MILLIS:-0}" \
@@ -1334,11 +1796,20 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       docker rm "$new_cid" >/dev/null 2>&1 || true
       return 1
     fi
+    if ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
+      echo "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure..."
+      docker stop "$new_cid" >/dev/null 2>&1 || true
+      docker rm "$new_cid" >/dev/null 2>&1 || true
+      return 1
+    fi
     if [ -n "$preflight_node_id" ]; then
       protect_active_executor_images "$preflight_node_id" "$deploy_id"
     fi
     drain_old_worker_containers "$new_cid" "$old_containers" "$deploy_id"
-    printf '%s\n' "${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}" > /opt/143/.worker-support-services.fingerprint
+    printf '%s\n' "${WORKER_PROCESS_FINGERPRINT:-}" > /opt/143/.worker-process.fingerprint
+    printf '%s\n' "${WORKER_SUPPORT_SERVICE_FINGERPRINT:-}" > /opt/143/.worker-support-services.v2.fingerprint
+    printf '%s\n' "${WORKER_HOST_RUNTIME_FINGERPRINT:-}" > /opt/143/.worker-host-runtime.fingerprint
+    printf '%s\n' "${WORKER_DOCKER_DAEMON_FINGERPRINT:-}" > /opt/143/.worker-docker-daemon.fingerprint
     echo "Worker generation ${new_cid:0:12} is healthy; old workers are admission-draining until owned runtimes retire."
   }
 
@@ -1552,8 +2023,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
-    echo "Running coding-credentials Anthropic split post-step..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate-coding-credentials-anthropic-split --allow-dual-set < /dev/null
   fi
 
   # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.
@@ -1613,7 +2082,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight worker_support_service_fingerprint ensure_routine_support_service_fingerprint_unchanged worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'
@@ -1629,8 +2098,14 @@ DEPLOY_DOCKER_VOLUME_PRUNE='${DEPLOY_DOCKER_VOLUME_PRUNE:-0}'
 WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS='${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}'
 WORKER_BLUE_GREEN_PORT_START='${WORKER_BLUE_GREEN_PORT_START:-}'
 WORKER_BLUE_GREEN_PORT_END='${WORKER_BLUE_GREEN_PORT_END:-}'
+WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS='${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}'
+WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS='${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}'
 WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
 WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
+WORKER_HOST_RUNTIME_FINGERPRINT_FILES='$WORKER_HOST_RUNTIME_FINGERPRINT_FILES'
+WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES'
+WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES'
+WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES'
 
 # Always write a status file so the verify step has a deterministic signal.
 # If we exit before the success line writes "ok", the trap leaves "fail".
@@ -1663,7 +2138,7 @@ EOS
       # </dev/null + redirect: nothing tied back to the SSH stdio so SSH can
       #   close cleanly.
       setsid bash -c "
-        flock -x /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
+        flock -xo /tmp/143-deploy-worker.lock '$rollover_script' >>'$log_file' 2>&1
         rm -f '$rollover_script'
       " </dev/null >/dev/null 2>&1 &
       disown

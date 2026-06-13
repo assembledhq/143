@@ -9,6 +9,7 @@ import {
   Bot,
   Sparkles,
   Target,
+  Activity,
   FlaskConical,
   Users,
   ScrollText,
@@ -54,7 +55,9 @@ const settingsGroups: SettingsGroup[] = [
       { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
       { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
+      { label: "Runtime", icon: Activity, href: "/settings/runtime", adminOnly: true },
       { label: "Preview", icon: KeyRound, href: "/settings/previews", adminOnly: true },
+      { label: "API keys", icon: KeyRound, href: "/settings/api-keys", adminOnly: true },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
@@ -127,7 +130,7 @@ export function SidebarSettingsSection({
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-border/50" />
+      <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-sidebar-border/70" />
       <CollapsibleTrigger asChild>
         <Button
           type="button"
@@ -136,8 +139,8 @@ export function SidebarSettingsSection({
             "flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
             isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] text-xs",
             onSettingsPage
-              ? "bg-sidebar-accent text-sidebar-accent-foreground"
-              : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+              : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
           )}
         >
           <Settings className="h-4 w-4 shrink-0" />
@@ -168,7 +171,12 @@ export function SidebarSettingsSection({
               return (
                 <div key={groupIndex}>
                   {group.label && (
-                    <div className="px-7 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    <div
+                      className={cn(
+                        "pt-3 pb-1 font-medium uppercase tracking-wider text-muted-foreground",
+                        isMobile ? "px-8 text-xs" : "px-7 text-xs",
+                      )}
+                    >
                       {group.label}
                     </div>
                   )}
@@ -198,13 +206,14 @@ export function SidebarSettingsSection({
                             : undefined
                         }
                         className={cn(
-                          "relative flex items-center gap-2 rounded-lg py-1.5 pl-7 pr-2.5 text-xs font-medium transition-colors duration-150",
+                          "relative flex items-center gap-2 rounded-lg pr-2.5 font-medium transition-colors duration-150",
+                          isMobile ? "py-2.5 pl-8 text-sm" : "py-1.5 pl-7 text-xs",
                           active
-                            ? "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
-                            : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                            ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60 before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
+                            : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
                         )}
                       >
-                        <Icon className="h-3.5 w-3.5 shrink-0" />
+                        <Icon className={cn("shrink-0", isMobile ? "h-4 w-4" : "h-3.5 w-3.5")} />
                         {item.label}
                       </Link>
                     );

@@ -105,6 +105,51 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 message queued");
   });
 
+  it("disables the single-agent add button while a tab create is pending", () => {
+    const thread = makeThread({});
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        addTabPending
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add agent tab" })).toBeDisabled();
+  });
+
+  it("disables the multi-agent add button while a tab create is pending", () => {
+    const thread1 = makeThread({ id: "thread-1" });
+    const thread2 = makeThread({ id: "thread-2", label: "Codex 2" });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread1, thread2]}
+        activeThreadId={thread1.id}
+        viewedThreadIds={new Set([thread1.id, thread2.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        addTabPending
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add agent tab" })).toBeDisabled();
+  });
+
   it("shows durable inbox delivery state in the tab tooltip", async () => {
     const user = userEvent.setup();
     const thread = makeThread({
@@ -141,6 +186,33 @@ describe("AgentTabStrip", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Delivery pending");
     expect(screen.getByRole("tooltip")).toHaveTextContent("2 waiting");
     expect(screen.getByRole("tooltip")).toHaveTextContent("1 delivered");
+  });
+
+  it("shows agent-tool provenance in the tab tooltip", async () => {
+    const user = userEvent.setup();
+    const thread = makeThread({
+      created_by_source: "agent_tool",
+      created_by_thread_id: "source-thread-1",
+    });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    await user.hover(screen.getByText("Main tab"));
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Created by agent via 143-tools");
   });
 
   it("keeps the single-agent tooltip trigger scoped to the visible tab label", () => {

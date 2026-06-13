@@ -40,6 +40,12 @@ type codingCredentialStore interface {
 	Reorder(ctx context.Context, scope models.Scope, orderedIDs []uuid.UUID) error
 }
 
+// codingAuthOrgStore merges org-scoped agent defaults when a credential
+// create carries agent_defaults.
+type codingAuthOrgStore interface {
+	MergeCodingAgentDefaults(ctx context.Context, orgID uuid.UUID, agent models.AgentType, defaults map[string]string) error
+}
+
 // CodingCredentialHandler exposes the unified API.
 type CodingCredentialHandler struct {
 	store       codingCredentialStore
@@ -524,7 +530,7 @@ func isAllowedHandlerStatus(s models.CodingCredentialRowStatus) bool {
 
 func summaryFromDecryptedCoding(cred models.DecryptedCodingCredential) models.CodingCredentialSummary {
 	agent := codingAgentForProvider(cred.Provider)
-	authType := authTypeForProvider(cred.Provider, cred.Config)
+	authType := authTypeForProvider(cred.Provider)
 	scope := models.CodingCredentialScopeOrg
 	if cred.UserID != nil {
 		scope = models.CodingCredentialScopePersonal
@@ -554,7 +560,7 @@ func codingAgentForProvider(p models.ProviderName) models.AgentType {
 	switch p {
 	case models.ProviderAnthropic, models.ProviderAnthropicSubscription:
 		return models.AgentTypeClaudeCode
-	case models.ProviderOpenAI, models.ProviderOpenAIChatGPT, models.ProviderOpenAISubscription:
+	case models.ProviderOpenAI, models.ProviderOpenAISubscription:
 		return models.AgentTypeCodex
 	case models.ProviderGemini:
 		return models.AgentTypeGeminiCLI
@@ -569,17 +575,9 @@ func codingAgentForProvider(p models.ProviderName) models.AgentType {
 	}
 }
 
-func authTypeForProvider(p models.ProviderName, cfg models.ProviderConfig) models.CodingAuthType {
+func authTypeForProvider(p models.ProviderName) models.CodingAuthType {
 	switch p {
-	case models.ProviderAnthropicSubscription, models.ProviderOpenAISubscription, models.ProviderOpenAIChatGPT:
-		return models.CodingAuthTypeSubscription
-	}
-	// During the dual-write window a legacy mirrored row can land here with
-	// provider=anthropic and a non-nil Subscription embedded (the post-step
-	// migration is what later rewrites it to anthropic_subscription). Mirror
-	// the type-switch logic in usageNoteFor so the auth_type response field
-	// agrees with the usage note for those transitional rows.
-	if anth, ok := cfg.(models.AnthropicConfig); ok && anth.Subscription != nil {
+	case models.ProviderAnthropicSubscription, models.ProviderOpenAISubscription:
 		return models.CodingAuthTypeSubscription
 	}
 	return models.CodingAuthTypeAPIKey
@@ -607,12 +605,7 @@ func usageNoteFor(cred models.DecryptedCodingCredential) string {
 		return coalesce(cfg.AccountType, "Claude subscription")
 	case models.OpenAISubscriptionConfig:
 		return coalesce(cfg.AccountType, "ChatGPT subscription")
-	case models.OpenAIChatGPTConfig:
-		return coalesce(cfg.AccountType, "ChatGPT subscription")
 	case models.AnthropicConfig:
-		if cfg.Subscription != nil {
-			return coalesce(cfg.Subscription.AccountType, "Claude subscription")
-		}
 		return cfg.MaskedSummary().MaskedKey
 	case models.OpenAIConfig:
 		return cfg.MaskedSummary().MaskedKey

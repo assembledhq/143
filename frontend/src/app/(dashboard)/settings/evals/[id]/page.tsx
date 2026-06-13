@@ -39,7 +39,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
-import { ArrowLeft, Play, Trash2, Loader2, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Play, Trash2, Loader2, AlertTriangle, ExternalLink, FileText, MonitorPlay } from "lucide-react";
 import { usePageTitle } from "@/hooks/use-page-title";
 import type { EvalRun, ScoringCriterion } from "@/lib/types";
 import { evalComplexityConfig, evalRunStatusConfig, evalSourceConfig } from "@/lib/types";
@@ -150,11 +150,11 @@ export default function EvalTaskDetailPage() {
 
         {/* Snapshot broken warning */}
         {task.snapshot_broken && (
-          <div className="flex items-center gap-3 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 dark:border-orange-800 dark:bg-orange-950/30">
-            <AlertTriangle className="h-4 w-4 text-orange-600 dark:text-orange-400 shrink-0" />
+          <div className="flex items-center gap-3 rounded-lg border border-attention/30 bg-attention/10 px-4 py-3">
+            <AlertTriangle className="h-4 w-4 text-attention shrink-0" />
             <div>
-              <p className="text-xs font-medium text-orange-800 dark:text-orange-300">Snapshot broken</p>
-              <p className="text-xs text-orange-700 dark:text-orange-400">
+              <p className="text-xs font-medium text-attention">Snapshot broken</p>
+              <p className="text-xs text-attention">
                 The base commit ({task.base_commit_sha.slice(0, 8)}) is no longer reachable. This usually happens after a force-push. Runs for this task will fail.
               </p>
             </div>
@@ -239,7 +239,7 @@ export default function EvalTaskDetailPage() {
                     </div>
                     <p className="mt-0.5 text-xs text-muted-foreground">{criterion.notes}</p>
                   </div>
-                  <span className="text-xs text-muted-foreground shrink-0 ml-4">
+                  <span className="text-xs text-muted-foreground tabular-nums shrink-0 ml-4">
                     Weight: {criterion.weight}
                   </span>
                 </div>
@@ -264,11 +264,12 @@ export default function EvalTaskDetailPage() {
               <CardContent className="p-0">
                 <div className="flex items-center px-4 py-2 border-b border-border bg-muted/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                   <span className="w-24">Status</span>
-                  <span className="flex-1">Model</span>
+                  <span className="flex-1">Input</span>
+                  <span className="w-24 text-right">Session</span>
                   <span className="w-20 text-right">Score</span>
                   <span className="w-16 text-right">Pass</span>
+                  <span className="w-28 text-right">Artifacts</span>
                   <span className="w-24 text-right">Duration</span>
-                  <span className="w-28 text-right">Started</span>
                 </div>
                 {runs.map((run) => (
                   <EvalRunRow key={run.id} run={run} />
@@ -284,6 +285,10 @@ export default function EvalTaskDetailPage() {
 
 function EvalRunRow({ run }: { run: EvalRun }) {
   const statusStyle = evalRunStatusConfig[run.status];
+  const baseCommit = typeof run.input_manifest?.base_commit_sha === "string"
+    ? run.input_manifest.base_commit_sha
+    : undefined;
+  const criterionCount = Array.isArray(run.criterion_results) ? run.criterion_results.length : 0;
   return (
     <div className="flex items-center py-3 px-4 border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors">
       <span className="w-24">
@@ -291,24 +296,54 @@ function EvalRunRow({ run }: { run: EvalRun }) {
           {statusStyle.label}
         </span>
       </span>
-      <span className="flex-1 text-xs font-mono">{run.model}</span>
-      <span className="w-20 text-right text-xs">
+      <span className="flex-1 min-w-0">
+        <span className="block truncate text-xs font-mono">{run.model}</span>
+        <span className="block truncate text-xs text-muted-foreground">
+          {baseCommit ? `base ${baseCommit.slice(0, 8)}` : "base from task"}
+          {run.config_ref ? ` - config ${run.config_ref}` : ""}
+          {run.error_message ? ` - ${run.error_message}` : ""}
+        </span>
+      </span>
+      <span className="w-24 text-right">
+        {run.session_id ? (
+          <span className="inline-flex justify-end gap-1">
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" asChild>
+              <Link href={`/sessions/${run.session_id}`}>
+                <ExternalLink className="mr-1 h-3 w-3" />
+                Open
+              </Link>
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7" title="Open preview" asChild>
+              <Link href={`/sessions/${run.session_id}?preview=1`}>
+                <MonitorPlay className="h-3.5 w-3.5" />
+              </Link>
+            </Button>
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">-</span>
+        )}
+      </span>
+      <span className="w-20 text-right text-xs tabular-nums">
         {run.final_score != null ? `${(run.final_score * 100).toFixed(0)}%` : "-"}
       </span>
       <span className="w-16 text-right text-xs">
         {run.passed != null ? (
           run.passed ? (
-            <span className="text-emerald-600 dark:text-emerald-400">Pass</span>
+            <span className="text-success">Pass</span>
           ) : (
-            <span className="text-red-600 dark:text-red-400">Fail</span>
+            <span className="text-destructive">Fail</span>
           )
         ) : "-"}
       </span>
-      <span className="w-24 text-right text-xs text-muted-foreground">
-        {run.duration_seconds != null ? `${run.duration_seconds}s` : "-"}
-      </span>
       <span className="w-28 text-right text-xs text-muted-foreground">
-        {run.started_at ? new Date(run.started_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "-"}
+        <span className="inline-flex items-center justify-end gap-1">
+          <FileText className="h-3 w-3" />
+          {run.agent_diff ? "diff" : "no diff"}
+          {criterionCount > 0 ? ` - ${criterionCount} checks` : ""}
+        </span>
+      </span>
+      <span className="w-24 text-right text-xs text-muted-foreground tabular-nums">
+        {run.duration_seconds != null ? `${run.duration_seconds}s` : "-"}
       </span>
     </div>
   );

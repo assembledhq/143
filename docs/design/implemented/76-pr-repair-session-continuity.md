@@ -61,9 +61,9 @@ Future Overview commands should follow the same classification:
 
 ### Fix tests
 
-When a user clicks `Fix tests`:
+When a user clicks the primary `Fix tests` action:
 
-1. The original PR session receives a user message: `Please fix these tests.`
+1. The original PR session receives a user message asking the agent to fix the failing tests and push changes to the PR branch.
 2. The backend creates or reuses an active `pull_request_repair_runs` row for the current PR health version.
 3. The worker passes failing-test details through structured command context.
 4. The worker prepares a workspace using either snapshot continuation or PR-head reconstruction.
@@ -71,13 +71,17 @@ When a user clicks `Fix tests`:
 6. Assistant output streams into the original session transcript.
 7. The final diff, summary, token usage, and snapshot are persisted on the original session.
 
+The dropdown alternative is labeled `Fix without pushing changes`; it uses the same repair flow but asks the agent to stop before pushing.
+
 ### Resolve conflicts
 
-`Resolve conflicts` follows the same flow, with a different visible prompt and command context:
+The primary `Resolve conflicts` action follows the same flow, with a different visible prompt and command context:
 
-- visible prompt: `Please resolve the conflicts.`
+- visible prompt: ask the agent to resolve the conflicts and push changes to the PR branch
 - context: PR number, repository, base SHA, head SHA, merge state, conflict flags, and conflict-resolution guardrails
 - workspace requirement: checkout must match the current PR head before the agent starts
+
+The dropdown alternative is labeled `Resolve without pushing changes`; it uses the same repair flow but asks the agent to stop before pushing.
 
 Conflict repair should still suppress `Fix tests` and `Merge` for the same PR health version while active, matching the current in-progress behavior.
 
@@ -110,6 +114,8 @@ It should:
 
 Agent-backed Overview commands should use the existing continuation model with command metadata.
 
+The repair launch request may include the caller's active `thread_id`. When present, the backend validates that the thread belongs to the canonical PR session and uses that thread for the visible user command, active repair attribution, and worker continuation payload. Older clients that omit `thread_id` fall back to the first-created session thread for compatibility, but product UI should always send the current active thread so the clicked tab becomes the go-forward conversation lane.
+
 The continuation payload should carry enough information for the worker to select the correct workspace and build the correct prompt:
 
 ```json
@@ -122,7 +128,8 @@ The continuation payload should carry enough information for the worker to selec
     "repair_run_id": "repair-run-id",
     "command_type": "fix_tests",
     "health_version": 12,
-    "head_sha": "expected-head-sha"
+    "head_sha": "expected-head-sha",
+    "thread_id": "active-thread-id"
   }
 }
 ```
@@ -131,6 +138,7 @@ This keeps the abstraction small:
 
 - `continue_session` remains the session turn executor
 - command metadata tells it how to prepare the workspace and prompt
+- thread metadata tells it which session tab owns streamed logs, final result metadata, and sibling-tab attribution
 - repair-run state remains the durable PR-level in-progress marker
 
 A separate `repair_pull_request` job is not required unless the implementation becomes cleaner with a thin wrapper. If a wrapper is introduced, it should delegate to shared continuation helpers rather than duplicate session execution.

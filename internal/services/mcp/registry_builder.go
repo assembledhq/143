@@ -58,9 +58,19 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 			reg.RegisterPullRequestCreator(prCreator)
 			fmt.Fprintln(logger, "143-tools: registered PR creator")
 
+			tabManager := integration.NewInternalSessionTabManager(token, apiURL)
+			reg.RegisterSessionTabManager(tabManager)
+			fmt.Fprintln(logger, "143-tools: registered session tab manager")
+
 			proposer := integration.NewInternalProjectProposer(token, apiURL)
 			reg.RegisterProjectProposer(proposer)
 			fmt.Fprintln(logger, "143-tools: registered project proposer")
+
+			if os.Getenv("EVAL_BOOTSTRAP_TOOLS_ENABLED") == "true" {
+				reporter := integration.NewInternalEvalCandidateReporter(token, apiURL, os.Getenv("EVAL_BOOTSTRAP_RUN_ID"))
+				reg.RegisterEvalCandidateReporter(reporter)
+				fmt.Fprintln(logger, "143-tools: registered eval candidate reporter")
+			}
 		}
 	}
 

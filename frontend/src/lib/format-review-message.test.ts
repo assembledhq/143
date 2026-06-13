@@ -59,7 +59,7 @@ describe("formatReviewMessage", () => {
   it("formats a single comment with file, line, and body", () => {
     const result = formatReviewMessage([makeComment()], diffFiles, "");
     expect(result).toContain("1. **src/app.ts:10** (new side)");
-    expect(result).toContain('Comment: "Fix this bug"');
+    expect(result).toContain('Requested change: "Fix this bug"');
   });
 
   it("includes diff hunk context when available", () => {
@@ -67,6 +67,13 @@ describe("formatReviewMessage", () => {
     expect(result).toContain("```");
     expect(result).toContain("+ const b = 2;");
     expect(result).toContain("  const a = 1;");
+  });
+
+  it("marks the exact reviewed line inside diff context", () => {
+    const result = formatReviewMessage([makeComment()], diffFiles, "");
+    expect(result).toContain("Target line: `src/app.ts:10` (new side)");
+    expect(result).toContain(">>> new 10 + const b = 2;");
+    expect(result).toContain("    new 9   const a = 1;");
   });
 
   it("formats multiple comments with numbered list", () => {
@@ -98,7 +105,7 @@ describe("formatReviewMessage", () => {
   it("handles multi-line comment bodies with indentation", () => {
     const comment = makeComment({ body: "Line one\nLine two\nLine three" });
     const result = formatReviewMessage([comment], diffFiles, "");
-    expect(result).toContain('Comment: "Line one\n   Line two\n   Line three"');
+    expect(result).toContain('Requested change: "Line one\n   Line two\n   Line three"');
   });
 
   it("skips diff hunk when file not found in diffFiles", () => {

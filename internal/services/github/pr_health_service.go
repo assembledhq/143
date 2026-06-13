@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -27,6 +28,8 @@ const (
 	prHealthReconcileJobType = "reconcile_pull_request_state"
 	prHealthEnrichJobType    = "enrich_pull_request_health"
 	prMergeWhenReadyJobType  = "merge_pull_request_when_ready"
+	requiredChecksCacheTTL   = 24 * time.Hour
+	noRequiredChecksCacheTTL = 6 * time.Hour
 )
 
 var (
@@ -63,6 +66,11 @@ type gitHubBranchResponse struct {
 			Contexts []string `json:"contexts"`
 		} `json:"required_status_checks"`
 	} `json:"protection"`
+}
+
+type requiredStatusChecksCacheEntry struct {
+	Required  bool      `json:"required"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 type gitHubCheckRun struct {
@@ -254,6 +262,7 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 		activeRepairs = append(activeRepairs, models.PullRequestActiveRepair{
 			ActionType:    run.ActionType,
 			SessionID:     run.SessionID,
+			ThreadID:      run.ThreadID,
 			SessionStatus: session.Status,
 			HealthVersion: run.HealthVersion,
 		})
@@ -268,7 +277,7 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
-	resp.CanFixTests = resp.FailingTestCount > 0
+	resp.CanFixTests = resp.FailingTestCount > 0 || checkSummariesHaveFailedCheck(resp.Checks)
 	// CanMerge is the green-light counterpart to the repair flags: GitHub has
 	// confirmed the branch is mergeable and the check state is authoritative.
 	// Once GitHub health has been loaded, zero checks means "no CI rules
@@ -289,6 +298,22 @@ func checksAllowMerge(checksConfirmed bool, checks []models.PullRequestCheckSumm
 		}
 	}
 	return true
+}
+
+func healthSummaryHasRepairableFailedChecks(summary models.PullRequestHealthSummary) bool {
+	if summary.FailingTestCount > 0 {
+		return true
+	}
+	return checkSummariesHaveFailedCheck(summary.Checks)
+}
+
+func checkSummariesHaveFailedCheck(checks []models.PullRequestCheckSummary) bool {
+	for _, check := range checks {
+		if classifyStoredCheckStatus(check) == models.PullRequestCheckStatusFailed {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -334,7 +359,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 
 	requiredChecksConfigured := false
 	if len(checkRuns) == 0 {
-		requiredChecksConfigured, err = s.branchRequiresStatusChecks(ctx, token, owner, repoName, details.Base.Ref)
+		requiredChecksConfigured, err = s.branchRequiresStatusChecksCached(ctx, orgID.String(), token, owner, repoName, details.Base.Ref)
 		if err != nil {
 			return err
 		}
@@ -482,9 +507,6 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	payloadChecks := make([]failingCheckPayload, 0)
 	for _, check := range checkRuns {
 		category := classifyCheckRunCategory(check.Name)
-		if category != models.PullRequestCheckCategoryTest {
-			continue
-		}
 		if normalizeCheckRunStatus(check) != models.PullRequestCheckStatusFailed {
 			continue
 		}
@@ -518,7 +540,14 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	return s.pullRequests.UpdateHealthEnrichment(ctx, orgID, pullRequestID, version, conflictPayload, failingTestsPayload, models.PullRequestHealthEnrichmentStatusReady)
 }
 
-func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, action models.PullRequestRepairActionType) (*models.PullRequestRepairResponse, error) {
+type StartPullRequestRepairOptions struct {
+	Action      models.PullRequestRepairActionType
+	ThreadID    *uuid.UUID
+	PushChanges *bool
+}
+
+func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, opts StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+	action := opts.Action
 	if err := action.Validate(); err != nil {
 		return nil, err
 	}
@@ -546,7 +575,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 			return nil, fmt.Errorf("pull request does not currently require conflict resolution")
 		}
 	case models.PullRequestRepairActionTypeFixTests:
-		if summary.FailingTestCount == 0 {
+		if !healthSummaryHasRepairableFailedChecks(summary) {
 			return nil, fmt.Errorf("pull request does not currently have failing tests")
 		}
 		if snapshot.EnrichmentStatus != models.PullRequestHealthEnrichmentStatusReady {
@@ -564,15 +593,11 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	if err == nil {
 		session, sessionErr := s.sessions.GetByID(ctx, orgID, existing.SessionID)
 		if sessionErr == nil && !isSessionTerminalStatus(session.Status) {
-			return &models.PullRequestRepairResponse{
-				SessionID:        existing.SessionID,
-				Mode:             "existing",
-				ReusedInFlight:   true,
-				HeadSHA:          current.HeadSHA,
-				BaseSHA:          current.BaseSHA,
-				HealthVersion:    current.Version,
-				RepairActionType: action,
-			}, nil
+			// The existing repair run carries no push_changes preference, so we
+			// cannot verify that the in-flight session's prompt matches the
+			// caller's intent.  Return an error for all cases; the caller can
+			// navigate to the active repair via active_repairs on the health response.
+			return nil, ErrRepairAlreadyInProgress
 		}
 		_ = s.pullRequests.DeactivateRepairRun(ctx, orgID, existing.ID)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -602,7 +627,14 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	if workspaceMode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason != "" {
 		return nil, fmt.Errorf("canonical pull request session is not ready for repair: %s", reason)
 	}
-	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode)
+	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action, repairShouldPushChanges(opts)), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID)
+}
+
+func repairShouldPushChanges(opts StartPullRequestRepairOptions) bool {
+	if opts.PushChanges == nil {
+		return true
+	}
+	return *opts.PushChanges
 }
 
 func (s *PRService) buildRepairRevisionContext(pr models.PullRequest, current models.PullRequestHealthCurrent, summary models.PullRequestHealthSummary, snapshot models.PullRequestHealthSnapshot, action models.PullRequestRepairActionType) ([]byte, error) {
@@ -676,7 +708,7 @@ func (s *PRService) repairWorkspaceMode(session models.Session) (models.PullRequ
 	}
 }
 
-func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode) (*models.PullRequestRepairResponse, error) {
+func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode, requestedThreadID *uuid.UUID) (*models.PullRequestRepairResponse, error) {
 	if s.sessionMessages == nil {
 		return nil, fmt.Errorf("session message store not configured")
 	}
@@ -708,22 +740,13 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := txSessions.UpdateRevisionContext(ctx, pr.OrgID, claimed.ID, revisionContext); err != nil {
 		return nil, err
 	}
-	// The session's primary thread is the "Main" tab seeded at session
-	// creation. Without attributing the repair message to that thread, the
-	// session-detail UI's per-thread timeline query (ListByThread) skips it
-	// and the user sees the click do nothing in the conversation view —
-	// SessionStore.ClaimIdle/ClaimForResume don't hydrate PrimaryThreadID
-	// from the row, so we look it up here. ListBySession orders by
-	// created_at ASC, matching the convention that the first-created thread
-	// is "Main".
 	threads, err := txThreads.ListBySession(ctx, pr.OrgID, claimed.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list session threads for repair message: %w", err)
 	}
-	var threadID *uuid.UUID
-	if len(threads) > 0 {
-		id := threads[0].ID
-		threadID = &id
+	threadID, err := selectRepairThreadID(threads, requestedThreadID)
+	if err != nil {
+		return nil, err
 	}
 	msg := &models.SessionMessage{
 		SessionID:  claimed.ID,
@@ -741,6 +764,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		OrgID:         pr.OrgID,
 		PullRequestID: pr.ID,
 		SessionID:     claimed.ID,
+		ThreadID:      threadID,
 		ActionType:    action,
 		HealthVersion: healthVersion,
 		WorkspaceMode: workspaceMode,
@@ -748,18 +772,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	}
 	if err := txPRs.CreateRepairRun(ctx, repairRun); err != nil {
 		if isUniqueActiveRepairRunViolation(err) {
-			existing, lookupErr := s.pullRequests.GetActiveRepairRun(ctx, pr.OrgID, pr.ID, action, healthVersion)
-			if lookupErr == nil {
-				return &models.PullRequestRepairResponse{
-					SessionID:        existing.SessionID,
-					Mode:             "existing",
-					ReusedInFlight:   true,
-					HeadSHA:          headSHA,
-					BaseSHA:          baseSHA,
-					HealthVersion:    healthVersion,
-					RepairActionType: action,
-				}, nil
-			}
+			return nil, ErrRepairAlreadyInProgress
 		}
 		return nil, err
 	}
@@ -774,6 +787,9 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"head_sha":            headSHA,
 		"workspace_mode":      string(workspaceMode),
 		"pull_request_number": pr.GitHubPRNumber,
+	}
+	if threadID != nil {
+		payload["thread_id"] = threadID.String()
 	}
 	if _, err := s.jobs.EnqueueInTxWithOpts(ctx, tx, pr.OrgID, db.EnqueueOpts{
 		Queue:        "agent",
@@ -790,6 +806,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	}
 	return &models.PullRequestRepairResponse{
 		SessionID:        claimed.ID,
+		ThreadID:         threadID,
 		Mode:             repairResponseMode(workspaceMode),
 		ReusedInFlight:   false,
 		HeadSHA:          headSHA,
@@ -797,6 +814,30 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		HealthVersion:    healthVersion,
 		RepairActionType: action,
 	}, nil
+}
+
+// ErrRepairThreadNotFound is returned when the requested thread_id is not found in the canonical PR session.
+var ErrRepairThreadNotFound = errors.New("requested repair thread does not belong to the canonical pull request session")
+
+// ErrRepairAlreadyInProgress is returned when a repair session is already running and the caller requested a
+// different push behavior than the default, meaning the new preference cannot be honored.
+var ErrRepairAlreadyInProgress = errors.New("a repair session is already in progress")
+
+func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*uuid.UUID, error) {
+	if requestedThreadID != nil {
+		for _, thread := range threads {
+			if thread.ID == *requestedThreadID {
+				id := thread.ID
+				return &id, nil
+			}
+		}
+		return nil, ErrRepairThreadNotFound
+	}
+	if len(threads) == 0 {
+		return nil, nil
+	}
+	id := threads[0].ID
+	return &id, nil
 }
 
 func repairResponseMode(workspaceMode models.PullRequestRepairWorkspaceMode) string {
@@ -883,6 +924,57 @@ func (s *PRService) branchRequiresStatusChecks(ctx context.Context, token, owner
 		return false, nil
 	}
 	return len(resp.Protection.RequiredStatusChecks.Contexts) > 0, nil
+}
+
+func (s *PRService) branchRequiresStatusChecksCached(ctx context.Context, orgKey, token, owner, repo, branch string) (bool, error) {
+	key := requiredStatusChecksCacheKey(orgKey, owner+"/"+repo, branch)
+	if s.redisClient != nil {
+		cached, err := s.redisClient.GetBytes(ctx, key)
+		switch {
+		case err == nil:
+			var entry requiredStatusChecksCacheEntry
+			unmarshalErr := json.Unmarshal(cached, &entry)
+			if unmarshalErr == nil {
+				return entry.Required, nil
+			}
+			s.logger.Warn().Err(unmarshalErr).Str("key", key).Msg("failed to decode required status checks cache entry")
+		case errors.Is(err, redis.Nil):
+		default:
+			s.logger.Debug().Err(err).Str("key", key).Msg("required status checks cache unavailable; falling back to GitHub")
+		}
+	}
+
+	required, err := s.branchRequiresStatusChecks(ctx, token, owner, repo, branch)
+	if err != nil {
+		return false, err
+	}
+	s.cacheRequiredStatusChecks(ctx, key, required)
+	return required, nil
+}
+
+func (s *PRService) cacheRequiredStatusChecks(ctx context.Context, key string, required bool) {
+	if s.redisClient == nil {
+		return
+	}
+	payload, err := json.Marshal(requiredStatusChecksCacheEntry{
+		Required:  required,
+		CheckedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		s.logger.Warn().Err(err).Str("key", key).Msg("failed to encode required status checks cache entry")
+		return
+	}
+	ttl := noRequiredChecksCacheTTL
+	if required {
+		ttl = requiredChecksCacheTTL
+	}
+	if err := s.redisClient.SetBytes(ctx, key, payload, ttl); err != nil {
+		s.logger.Debug().Err(err).Str("key", key).Msg("failed to cache required status checks result")
+	}
+}
+
+func requiredStatusChecksCacheKey(orgKey, repoFullName, branch string) string {
+	return fmt.Sprintf("github:required-checks:%s:%s:%s", orgKey, repoFullName, branch)
 }
 
 // dedupeCheckRunsByName collapses check runs that share a display name down to
@@ -1013,12 +1105,18 @@ func (s *PRService) publishPullRequestUpdated(ctx context.Context, pr models.Pul
 		Msg("pull request health updated")
 }
 
-func repairPromptForAction(action models.PullRequestRepairActionType) string {
+func repairPromptForAction(action models.PullRequestRepairActionType, pushChanges bool) string {
 	switch action {
 	case models.PullRequestRepairActionTypeResolveConflicts:
-		return "Please resolve the conflicts."
+		if pushChanges {
+			return "Please resolve the conflicts and push changes to the pull request branch."
+		}
+		return "Please resolve the conflicts without pushing changes."
 	case models.PullRequestRepairActionTypeFixTests:
-		return "Please fix these tests."
+		if pushChanges {
+			return "Please fix these tests and push changes to the pull request branch."
+		}
+		return "Please fix these tests without pushing changes."
 	default:
 		return "Please repair this pull request."
 	}

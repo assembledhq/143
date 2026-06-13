@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
@@ -18,10 +19,39 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
+
+type repairJobPayloadArg struct {
+	wantThreadID      uuid.UUID
+	wantPullRequestID uuid.UUID
+	wantAction        models.PullRequestRepairActionType
+	wantHealthVersion int64
+}
+
+func (a repairJobPayloadArg) Match(value interface{}) bool {
+	var payloadBytes []byte
+	switch v := value.(type) {
+	case []byte:
+		payloadBytes = v
+	case string:
+		payloadBytes = []byte(v)
+	default:
+		return false
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return false
+	}
+	return payload["thread_id"] == a.wantThreadID.String() &&
+		payload["pull_request_id"] == a.wantPullRequestID.String() &&
+		payload["command_type"] == string(a.wantAction) &&
+		payload["health_version"] == float64(a.wantHealthVersion)
+}
 
 func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActions(t *testing.T) {
 	t.Parallel()
@@ -148,6 +178,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 	orgID := uuid.New()
 	pullRequestID := uuid.New()
 	sessionID := uuid.New()
+	threadID := uuid.New()
 	terminalSessionID := uuid.New()
 	now := time.Now().UTC()
 	summary := models.PullRequestHealthSummary{
@@ -209,8 +240,8 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 			"health_version":  int64(7),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns).
-			AddRow(uuid.New(), orgID, pullRequestID, sessionID, models.PullRequestRepairActionTypeFixTests, int64(7), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
-			AddRow(uuid.New(), orgID, pullRequestID, terminalSessionID, models.PullRequestRepairActionTypeResolveConflicts, int64(7), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
+			AddRow(uuid.New(), orgID, pullRequestID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(7), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
+			AddRow(uuid.New(), orgID, pullRequestID, terminalSessionID, (*uuid.UUID)(nil), models.PullRequestRepairActionTypeResolveConflicts, int64(7), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id = .+ AND id = ANY\\(@ids\\) AND deleted_at IS NULL").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID,
@@ -243,6 +274,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 	require.Len(t, resp.ActiveRepairs, 1, "buildPullRequestHealthResponse should only include active repairs whose linked sessions are still non-terminal")
 	require.Equal(t, models.PullRequestRepairActionTypeFixTests, resp.ActiveRepairs[0].ActionType, "buildPullRequestHealthResponse should surface the running repair action")
 	require.Equal(t, sessionID, resp.ActiveRepairs[0].SessionID, "buildPullRequestHealthResponse should surface the running repair session")
+	require.Equal(t, &threadID, resp.ActiveRepairs[0].ThreadID, "buildPullRequestHealthResponse should surface the running repair thread")
 	require.Equal(t, models.SessionStatusRunning, resp.ActiveRepairs[0].SessionStatus, "buildPullRequestHealthResponse should surface the linked session status")
 	require.False(t, resp.CanMerge, "buildPullRequestHealthResponse should suppress merge while a repair is active for the current health version")
 	require.NoError(t, mock.ExpectationsWereMet(), "all active repair health queries should be executed")
@@ -1264,7 +1296,7 @@ func TestPRServiceEnrichPullRequestHealth(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all enrichment expectations should be met")
 }
 
-func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
+func TestPRServiceStartPullRequestRepairBlocksWhenInFlight(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1310,7 +1342,7 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 			"health_version":  int64(5),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns).AddRow(
-			repairRunID, orgID, pullRequestID, sessionID, models.PullRequestRepairActionTypeResolveConflicts, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
+			repairRunID, orgID, pullRequestID, sessionID, (*uuid.UUID)(nil), models.PullRequestRepairActionTypeResolveConflicts, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
 		))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1324,12 +1356,10 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 		logger:       zerolog.New(io.Discard),
 	}
 
-	resp, err := service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), models.PullRequestRepairActionTypeResolveConflicts)
-	require.NoError(t, err, "StartPullRequestRepair should reuse an active in-flight repair run")
-	require.Equal(t, sessionID, resp.SessionID, "StartPullRequestRepair should return the active repair session")
-	require.True(t, resp.ReusedInFlight, "StartPullRequestRepair should mark reused in-flight runs")
-	require.Equal(t, "existing", resp.Mode, "StartPullRequestRepair should report that it reused an existing session")
-	require.NoError(t, mock.ExpectationsWereMet(), "all repair-run reuse expectations should be met")
+	resp, err := service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionTypeResolveConflicts})
+	require.Nil(t, resp, "StartPullRequestRepair should not return a session when an in-flight repair is detected")
+	require.ErrorIs(t, err, ErrRepairAlreadyInProgress, "StartPullRequestRepair should return ErrRepairAlreadyInProgress when a repair session is already running")
+	require.NoError(t, mock.ExpectationsWereMet(), "all repair-run in-flight detection expectations should be met")
 }
 
 func TestPRHealthServiceHelpers(t *testing.T) {
@@ -1344,6 +1374,16 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.True(t, resp.CanResolveConflicts, "derivePullRequestRepairActions should enable conflict repair for conflicted PRs")
 	require.True(t, resp.CanFixTests, "derivePullRequestRepairActions should enable test repair for failing checks")
 
+	resp = &models.PullRequestHealthResponse{
+		MergeState:       models.PullRequestMergeStateClean,
+		FailingTestCount: 0,
+		Checks: []models.PullRequestCheckSummary{
+			{Name: "backend", Category: models.PullRequestCheckCategoryUnknown, Status: models.PullRequestCheckStatusFailed},
+		},
+	}
+	derivePullRequestRepairActions(resp)
+	require.True(t, resp.CanFixTests, "derivePullRequestRepairActions should enable repair for failed checks without a legacy failing-test count")
+
 	first := "first"
 	second := "second"
 	require.Equal(t, "value", firstNonEmpty("", "value", "other"), "firstNonEmpty should return the first non-empty string")
@@ -1351,15 +1391,22 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.Equal(t, &first, firstNonNilString(nil, &first, &second), "firstNonNilString should return the first non-empty pointer")
 	require.Equal(t, "text", truncateText("text", 0), "truncateText should leave values unchanged for non-positive limits")
 	require.Equal(t, "hello world", stripWhitespace("  hello   world \n"), "stripWhitespace should collapse repeated whitespace")
-	require.Equal(t, "Please resolve the conflicts.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts), "repairPromptForAction should specialize conflict repair prompts")
-	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other"), "repairPromptForAction should provide a default prompt")
+	require.Equal(t, "Please resolve the conflicts and push changes to the pull request branch.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts, true), "repairPromptForAction should specialize conflict repair prompts that push changes")
+	require.Equal(t, "Please resolve the conflicts without pushing changes.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts, false), "repairPromptForAction should specialize conflict repair prompts that do not push changes")
+	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other", true), "repairPromptForAction should provide a default prompt")
+	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other", false), "repairPromptForAction default prompt should ignore the push flag")
+	require.True(t, repairShouldPushChanges(StartPullRequestRepairOptions{}), "repairShouldPushChanges should default omitted options to pushing changes")
+	pushTrue, pushFalse := true, false
+	require.True(t, repairShouldPushChanges(StartPullRequestRepairOptions{PushChanges: &pushTrue}), "repairShouldPushChanges should honor an explicit push=true")
+	require.False(t, repairShouldPushChanges(StartPullRequestRepairOptions{PushChanges: &pushFalse}), "repairShouldPushChanges should honor an explicit push=false")
 	require.Equal(t, models.PullRequestMergeStateBlocked, normalizeRepairMergeState(models.PullRequestMergeStateUnknown, boolPtr(false), "blocked"), "normalizeRepairMergeState should preserve non-conflict blocked states")
 	require.Equal(t, models.PullRequestMergeStateBehind, normalizeRepairMergeState(models.PullRequestMergeStateBehind, nil, ""), "normalizeRepairMergeState should fall back to the existing state when GitHub mergeability is unknown")
 	require.True(t, isSessionTerminalStatus(models.SessionStatusCompleted), "isSessionTerminalStatus should recognize completed sessions")
 	require.False(t, isSessionTerminalStatus(models.SessionStatusRunning), "isSessionTerminalStatus should reject active sessions")
 	require.True(t, isUniqueActiveRepairRunViolation(&pgconn.PgError{Code: pgerrcode.UniqueViolation, ConstraintName: "idx_pull_request_repair_runs_active"}), "isUniqueActiveRepairRunViolation should recognize the active repair-run uniqueness constraint")
 	require.False(t, isUniqueActiveRepairRunViolation(errors.New("boom")), "isUniqueActiveRepairRunViolation should reject unrelated errors")
-	require.Equal(t, "Please fix these tests.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests), "repairPromptForAction should specialize test repair prompts")
+	require.Equal(t, "Please fix these tests and push changes to the pull request branch.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests, true), "repairPromptForAction should specialize test repair prompts that push changes")
+	require.Equal(t, "Please fix these tests without pushing changes.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests, false), "repairPromptForAction should specialize test repair prompts that do not push changes")
 	require.Equal(t, "", firstNonEmpty("", "  "), "firstNonEmpty should return an empty string when every value is blank")
 	require.Nil(t, firstNonNilString(strPtr("   ")), "firstNonNilString should skip blank pointed strings")
 	require.Equal(t, "12345…", truncateText("123456", 5), "truncateText should append an ellipsis when trimming long strings")
@@ -1415,6 +1462,7 @@ func TestPRServiceResumeRepairSession(t *testing.T) {
 						"org_id":               pr.OrgID,
 						"pull_request_id":      pr.ID,
 						"session_id":           parentSession.ID,
+						"thread_id":            &threadID,
 						"action_type":          models.PullRequestRepairActionTypeResolveConflicts,
 						"health_version":       int64(9),
 						"workspace_mode":       models.PullRequestRepairWorkspaceModePRHeadReconstruction,
@@ -1424,20 +1472,26 @@ func TestPRServiceResumeRepairSession(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 				mock.ExpectQuery("INSERT INTO jobs").
 					WithArgs(pgx.NamedArgs{
-						"org_id":     pr.OrgID,
-						"queue":      "agent",
-						"job_type":   "continue_session",
-						"payload":    pgxmock.AnyArg(),
+						"org_id":   pr.OrgID,
+						"queue":    "agent",
+						"job_type": "continue_session",
+						"payload": repairJobPayloadArg{
+							wantThreadID:      threadID,
+							wantPullRequestID: pr.ID,
+							wantAction:        models.PullRequestRepairActionTypeResolveConflicts,
+							wantHealthVersion: 9,
+						},
 						"priority":   5,
 						"dedupe_key": pgxmock.AnyArg(),
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectCommit()
 
-				resp, err := service.resumeRepairSession(context.Background(), pr, parentSession, []byte(`{"repair":true}`), "Please resolve the conflicts.", userID, models.PullRequestRepairActionTypeResolveConflicts, 9, "head", "base", models.PullRequestRepairWorkspaceModePRHeadReconstruction)
+				resp, err := service.resumeRepairSession(context.Background(), pr, parentSession, []byte(`{"repair":true}`), "Please resolve the conflicts.", userID, models.PullRequestRepairActionTypeResolveConflicts, 9, "head", "base", models.PullRequestRepairWorkspaceModePRHeadReconstruction, &threadID)
 				require.NoError(t, err, "resumeRepairSession should continue an existing session")
 				require.Equal(t, "reconstructed", resp.Mode, "resumeRepairSession should report reconstructed mode when no snapshot continuation is used")
 				require.False(t, resp.ReusedInFlight, "resumeRepairSession should create a fresh active repair run for the resumed session")
+				require.Equal(t, &threadID, resp.ThreadID, "resumeRepairSession should return the selected repair thread")
 			},
 		},
 	}
@@ -1633,6 +1687,131 @@ func TestPRServiceBranchRequiresStatusChecks(t *testing.T) {
 			require.Equal(t, tt.expected, required, "branchRequiresStatusChecks should classify required status checks correctly")
 		})
 	}
+}
+
+func TestPRServiceBranchRequiresStatusChecksCached(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		cachedValue   string
+		branchBody    string
+		expected      bool
+		expectGitHub  bool
+		expectCached  bool
+		expectedTTLAt time.Duration
+	}{
+		{
+			name:         "uses cached required checks result",
+			cachedValue:  `{"required":true,"checked_at":"2026-06-06T00:00:00Z"}`,
+			expected:     true,
+			expectCached: true,
+		},
+		{
+			name:          "caches branch protection miss with shorter permissive ttl",
+			branchBody:    `{"protected":false}`,
+			expected:      false,
+			expectGitHub:  true,
+			expectCached:  true,
+			expectedTTLAt: 6 * time.Hour,
+		},
+		{
+			name:          "caches branch protection required checks with longer ttl",
+			branchBody:    `{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`,
+			expected:      true,
+			expectGitHub:  true,
+			expectCached:  true,
+			expectedTTLAt: 24 * time.Hour,
+		},
+		{
+			name:          "falls back to GitHub on corrupted cache entry",
+			cachedValue:   `not-valid-json`,
+			branchBody:    `{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`,
+			expected:      true,
+			expectGitHub:  true,
+			expectCached:  true,
+			expectedTTLAt: 24 * time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			redisClient, mr := newPRHealthRedisClient(t)
+			key := requiredStatusChecksCacheKey("org-1", "assembledhq/143", "main")
+			if tt.cachedValue != "" {
+				mr.Set(key, tt.cachedValue)
+			}
+
+			githubCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				githubCalls++
+				require.Equal(t, "/repos/assembledhq/143/branches/main", r.URL.Path, "cache miss should query GitHub branch protection")
+				_, _ = w.Write([]byte(tt.branchBody))
+			}))
+			defer server.Close()
+
+			service := &PRService{
+				redisClient: redisClient,
+				logger:      zerolog.New(io.Discard),
+				baseURL:     server.URL,
+				httpClient:  server.Client(),
+			}
+
+			required, err := service.branchRequiresStatusChecksCached(context.Background(), "org-1", "token", "assembledhq", "143", "main")
+			require.NoError(t, err, "cached branch protection lookup should succeed")
+			require.Equal(t, tt.expected, required, "cached branch protection lookup should return expected required-checks result")
+			if tt.expectGitHub {
+				require.Equal(t, 1, githubCalls, "cache miss should query GitHub exactly once")
+			} else {
+				require.Equal(t, 0, githubCalls, "cache hit should not query GitHub")
+			}
+			if tt.expectCached {
+				raw, err := mr.Get(key)
+				require.NoError(t, err, "branch protection result should be cached in Redis")
+				require.Contains(t, raw, `"required":`, "cached payload should include the required flag")
+			}
+			if tt.expectedTTLAt > 0 {
+				ttl := mr.TTL(key)
+				require.True(t, ttl > tt.expectedTTLAt-time.Minute && ttl <= tt.expectedTTLAt, "cached result should use the expected TTL")
+			}
+		})
+	}
+}
+
+func TestPRServiceBranchRequiresStatusChecksCachedFallsBackWhenRedisUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/assembledhq/143/branches/main", r.URL.Path, "Redis outage should fall back to GitHub branch protection")
+		_, _ = w.Write([]byte(`{"protected":true,"protection":{"required_status_checks":{"contexts":["ci-build"]}}}`))
+	}))
+	defer server.Close()
+
+	service := &PRService{
+		redisClient: &cache.Client{},
+		logger:      zerolog.New(io.Discard),
+		baseURL:     server.URL,
+		httpClient:  server.Client(),
+	}
+
+	required, err := service.branchRequiresStatusChecksCached(context.Background(), "org-1", "token", "assembledhq", "143", "main")
+	require.NoError(t, err, "Redis outage should not prevent a live GitHub lookup")
+	require.True(t, required, "live GitHub lookup should still report required checks")
+}
+
+func newPRHealthRedisClient(t *testing.T) (*cache.Client, *miniredis.Miniredis) {
+	t.Helper()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize for PR health cache tests")
+	t.Cleanup(func() {
+		require.NoError(t, client.Close(), "Redis client should close cleanly")
+	})
+	return client, mr
 }
 
 func TestPRServiceBuildRepairRevisionContextIncludesFailingChecks(t *testing.T) {
@@ -1893,7 +2072,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			logger:       zerolog.New(io.Discard),
 		}
 
-		_, err = service.StartPullRequestRepair(context.Background(), uuid.New(), uuid.New(), uuid.New(), models.PullRequestRepairActionType("bad"))
+		_, err = service.StartPullRequestRepair(context.Background(), uuid.New(), uuid.New(), uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionType("bad")})
 		require.Error(t, err, "StartPullRequestRepair should reject invalid repair actions")
 
 		orgID := uuid.New()
@@ -1917,7 +2096,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 				pullRequestID, orgID, int64(5), "head", "base", []byte(`{"merge_state":"clean"}`), nil, nil, 0, models.PullRequestHealthEnrichmentStatusReady, nil, now,
 			))
 
-		_, err = service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), models.PullRequestRepairActionTypeResolveConflicts)
+		_, err = service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionTypeResolveConflicts})
 		require.Error(t, err, "StartPullRequestRepair should fail when the health summary cannot be decoded")
 		require.Contains(t, err.Error(), "decode pull request health summary for repair", "StartPullRequestRepair should wrap health summary decode errors")
 	})
@@ -2036,11 +2215,108 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 						pullRequestID, orgID, int64(5), "head", "base", summaryJSON, nil, nil, 0, models.PullRequestHealthEnrichmentStatusReady, nil, now,
 					))
 
-				_, err = service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), tt.action)
+				_, err = service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: tt.action})
 				require.Error(t, err, "StartPullRequestRepair should reject ineligible repair actions")
 				require.Contains(t, err.Error(), tt.wantErr, "StartPullRequestRepair should describe why the repair action is ineligible")
 			})
 		}
+	})
+
+	t.Run("start fix tests accepts failed check summaries without legacy test count", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		service := &PRService{
+			pullRequests: db.NewPullRequestStore(mock),
+			sessions:     db.NewSessionStore(mock),
+			logger:       zerolog.New(io.Discard),
+		}
+
+		orgID := uuid.New()
+		pullRequestID := uuid.New()
+		now := time.Now().UTC()
+		summary := models.PullRequestHealthSummary{
+			MergeState:       models.PullRequestMergeStateClean,
+			FailingTestCount: 0,
+			Checks: []models.PullRequestCheckSummary{
+				{Name: "backend", Category: models.PullRequestCheckCategoryUnknown, Status: models.PullRequestCheckStatusFailed},
+			},
+		}
+		summaryJSON, err := json.Marshal(summary)
+		require.NoError(t, err, "should marshal health summary")
+
+		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+				pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+				models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
+			WillReturnRows(pgxmock.NewRows(prHealthSnapshotTestColumns).AddRow(
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, nil, nil, 0, models.PullRequestHealthEnrichmentStatusReady, nil, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
+			WithArgs(pgx.NamedArgs{
+				"org_id":          orgID,
+				"pull_request_id": pullRequestID,
+				"action_type":     models.PullRequestRepairActionTypeFixTests,
+				"health_version":  int64(5),
+			}).
+			WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns))
+
+		_, err = service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionTypeFixTests})
+		require.Error(t, err, "StartPullRequestRepair should still require a canonical session after accepting the failed check state")
+		require.Contains(t, err.Error(), "pull request is not linked to a canonical session", "StartPullRequestRepair should pass failed-check validation before requiring session context")
+		require.NoError(t, mock.ExpectationsWereMet(), "all failed-check repair expectations should be met")
+	})
+}
+
+func TestSelectRepairThreadID(t *testing.T) {
+	t.Parallel()
+
+	threadA := uuid.New()
+	threadB := uuid.New()
+	threads := []models.SessionThread{
+		{ID: threadA},
+		{ID: threadB},
+	}
+
+	t.Run("returns requested thread when found", func(t *testing.T) {
+		t.Parallel()
+		got, err := selectRepairThreadID(threads, &threadA)
+		require.NoError(t, err)
+		require.Equal(t, &threadA, got)
+	})
+
+	t.Run("returns error when requested thread not in session", func(t *testing.T) {
+		t.Parallel()
+		unknown := uuid.New()
+		_, err := selectRepairThreadID(threads, &unknown)
+		require.ErrorIs(t, err, ErrRepairThreadNotFound)
+	})
+
+	t.Run("falls back to first thread when no thread requested", func(t *testing.T) {
+		t.Parallel()
+		got, err := selectRepairThreadID(threads, nil)
+		require.NoError(t, err)
+		require.Equal(t, &threadA, got)
+	})
+
+	t.Run("returns nil when no thread requested and session has no threads", func(t *testing.T) {
+		t.Parallel()
+		got, err := selectRepairThreadID(nil, nil)
+		require.NoError(t, err)
+		require.Nil(t, got)
 	})
 }
 
@@ -2049,7 +2325,7 @@ func TestPRServiceDirectErrorBranches(t *testing.T) {
 
 	service := &PRService{logger: zerolog.New(io.Discard)}
 
-	_, err := service.resumeRepairSession(context.Background(), models.PullRequest{}, models.Session{}, nil, "", uuid.New(), models.PullRequestRepairActionTypeFixTests, 1, "head", "base", models.PullRequestRepairWorkspaceModeSnapshotContinuation)
+	_, err := service.resumeRepairSession(context.Background(), models.PullRequest{}, models.Session{}, nil, "", uuid.New(), models.PullRequestRepairActionTypeFixTests, 1, "head", "base", models.PullRequestRepairWorkspaceModeSnapshotContinuation, nil)
 	require.Error(t, err, "resumeRepairSession should require a session message store")
 	require.Contains(t, err.Error(), "session message store not configured", "resumeRepairSession should explain the missing dependency")
 
@@ -2093,7 +2369,7 @@ var prHealthSnapshotTestColumns = []string{
 }
 
 var prRepairRunTestColumns = []string{
-	"id", "org_id", "pull_request_id", "session_id", "action_type", "health_version", "workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at",
+	"id", "org_id", "pull_request_id", "session_id", "thread_id", "action_type", "health_version", "workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at",
 }
 
 var prHealthSessionThreadColumns = []string{

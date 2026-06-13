@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -20,7 +21,9 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api"
+	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
@@ -38,6 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -63,6 +67,10 @@ const (
 	httpDrainPropagationDelay = 7 * time.Second
 	httpShutdownTimeout       = 100 * time.Second
 )
+
+func previewDependencyCacheEnabled(cfg config.Config) bool {
+	return strings.TrimSpace(cfg.PreviewDependencyCacheBucket) != ""
+}
 
 func main() {
 	if isSessionExecutorInvocation(os.Args) {
@@ -109,7 +117,10 @@ func main() {
 		cfg.NodeID = hostname
 	}
 
-	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
+		MaxConns:        cfg.DatabaseMaxConns,
+		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
@@ -193,35 +204,9 @@ func main() {
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
-	// Wire the unified coding-credentials mirror into both legacy stores so
-	// every existing write path (OAuth services, /settings/coding-auths,
-	// /settings/credentials/personal, /settings/credentials/team) lands in
-	// `coding_credentials` as well as the legacy table. Reads come from the
-	// unified store via AgentEnv.CodingCredentials. The mirror is removed in
-	// the unified-credentials cleanup PR.
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	// Pipe mirror failures into the application logger so a drift between
-	// the legacy and unified tables is visible in production telemetry.
-	mirrorLog := func(format string, args ...any) {
-		logger.Warn().Msgf(format, args...)
-	}
-	credentialStore.SetMirrorLogger(mirrorLog)
-	userCredentialStore.SetMirrorLogger(mirrorLog)
-	codingCredentialStore.SetMirrorLogger(mirrorLog)
-	// Expose the mirror's drift / failure counters through OTel so the
-	// dual-write rollout has a dashboard signal when the unified table is
-	// drifting from the legacy stores. Cleaned up alongside the mirror itself.
-	if _, err := metrics.NewMirrorMetrics(func() (uint64, uint64) {
-		return codingCredentialStore.MirrorDriftCount(), codingCredentialStore.MirrorFailureCount()
-	}); err != nil {
-		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
-	}
-	// Both OAuth services depend on a scope-aware credential surface. The
-	// adapter routes org-scope traffic to the legacy OrgCredentialStore
-	// (mirrored to coding_credentials) and personal-scope traffic to the
-	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
-	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	// Both OAuth services depend on a scope-aware credential surface backed
+	// by the unified store — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(codingCredentialStore)
 	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
@@ -238,6 +223,7 @@ func main() {
 	// gracefully degrades when Docker is not available).
 	fileReader := sandbox.FileReader(sandbox.NoOpFileReader{})
 	var pvProvider preview.PreviewCapableProvider
+	var dependencyCache preview.DependencyCache
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
 	var sandboxCapacity *agent.SandboxCapacityGate
@@ -256,7 +242,59 @@ func main() {
 				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
-			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger)
+			if previewDependencyCacheEnabled(*cfg) {
+				dependencyS3Region := cfg.PreviewDependencyCacheS3Region
+				if dependencyS3Region == "" {
+					dependencyS3Region = cfg.SnapshotS3Region
+				}
+				dependencyS3Endpoint := cfg.PreviewDependencyCacheS3Endpoint
+				if dependencyS3Endpoint == "" {
+					dependencyS3Endpoint = cfg.SnapshotS3Endpoint
+				}
+				dependencyS3UsePathStyle := cfg.PreviewDependencyCacheS3UsePathStyle || cfg.SnapshotS3UsePathStyle
+				dependencyBlobStore, _, cacheStoreErr := storage.BuildSnapshotStore(ctx, storage.SnapshotStoreConfig{
+					S3Bucket:       cfg.PreviewDependencyCacheBucket,
+					S3Prefix:       cfg.PreviewDependencyCachePrefix,
+					S3Region:       dependencyS3Region,
+					S3Endpoint:     dependencyS3Endpoint,
+					S3UsePathStyle: dependencyS3UsePathStyle,
+				})
+				if cacheStoreErr != nil {
+					logger.Warn().Err(cacheStoreErr).Msg("failed to initialize preview dependency cache blob store — dependency caching disabled")
+				} else {
+					cache, cacheErr := preview.NewDependencyCache(preview.DependencyCacheConfig{
+						Store:         db.NewPreviewStore(pool),
+						Executor:      sandboxExec,
+						BlobStore:     dependencyBlobStore,
+						Logger:        logger,
+						WorkerNodeID:  cfg.NodeID,
+						Prefix:        cfg.PreviewDependencyCachePrefix,
+						LocalDir:      config.ResolvePreviewDependencyCacheLocalDir(cfg.PreviewDependencyCacheLocalDir),
+						LocalMaxBytes: cfg.PreviewDependencyCacheLocalMaxBytes,
+					})
+					if cacheErr != nil {
+						logger.Warn().Err(cacheErr).Msg("failed to initialize preview dependency cache — dependency caching disabled")
+					} else {
+						dependencyCache = cache
+						cleaner := preview.NewDependencyCacheCleaner(preview.DependencyCacheCleanerConfig{
+							Store:             db.NewPreviewStore(pool),
+							BlobStore:         dependencyBlobStore,
+							Logger:            logger,
+							Retention:         time.Duration(cfg.PreviewDependencyCacheRetentionDays) * 24 * time.Hour,
+							Interval:          cfg.PreviewDependencyCacheCleanupInterval,
+							KeepNewestPerRepo: cfg.PreviewDependencyCacheKeepNewestPerRepo,
+						})
+						go cleaner.Run(ctx)
+					}
+				}
+			}
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(
+				apiDockerCli,
+				sandboxExec,
+				logger,
+				previewproviders.WithDependencyCache(dependencyCache),
+				previewproviders.WithPackageManagerCacheEnabled(cfg.PreviewPackageManagerCacheEnabled),
+			)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
@@ -340,7 +378,7 @@ func main() {
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
-		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL)
+		return buildBaseMetadata(previewCapable && previewRoutingReady.Load(), cfg.PreviewInternalBaseURL, cfg.NodeRegion)
 	})
 	if err := nodeManager.Register(ctx, hostname); err != nil {
 		logger.Fatal().Err(err).Msg("failed to register cluster node")
@@ -358,6 +396,7 @@ func main() {
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	var jobStore *db.JobStore
+	var evalBootstrapStore *db.EvalBootstrapStore
 	var workerPreviewStore *db.PreviewStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
@@ -380,6 +419,7 @@ func main() {
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
 		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
+		evalBootstrapStore = db.NewEvalBootstrapStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -414,9 +454,11 @@ func main() {
 
 		stores := &worker.Stores{
 			Issues:              issueStore,
+			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
+			Memberships:         db.NewOrganizationMembershipStore(pool),
 			Webhooks:            db.NewWebhookDeliveryStore(pool),
 			PriorityScores:      priorityScoreStore,
 			ComplexityEstimates: complexityEstimateStore,
@@ -429,8 +471,10 @@ func main() {
 			EvalTasks:           db.NewEvalTaskStore(pool),
 			EvalRuns:            db.NewEvalRunStore(pool),
 			EvalBatches:         db.NewEvalBatchStore(pool),
-			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+			EvalBootstraps:      evalBootstrapStore,
+			EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 			Repositories:        repoStore,
+			GitHubInstallations: db.NewGitHubInstallationStore(pool),
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
 			HumanInputRequests:  sessionHumanInputStore,
@@ -440,6 +484,15 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+			Previews:            previewStore,
+			PullRequests:        pullRequestStore,
+			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+			SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
+			SessionAttributions: db.NewSessionAttributionStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -452,23 +505,45 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
+				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				if previewManager != nil && pvProvider != nil {
+					var prewarmDependencyCache preview.PreviewPathCache
+					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
+						prewarmDependencyCache = pathCache
+					}
+					services.PreviewController = previewManager
 					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
 						Manager:         previewManager,
 						Previews:        previewStore,
 						Sessions:        sessionStore,
 						Repositories:    repoStore,
+						Orgs:            orgStore,
 						FileReader:      fileReader,
 						SandboxProvider: apiSandboxProvider,
 						SandboxCapacity: sandboxCapacity,
+						StaticEgress:    agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 						Snapshots:       snapshotStore,
 						GitHub:          services.GitHub,
 						NodeID:          cfg.NodeID,
+						DependencyCache: prewarmDependencyCache,
+						PrewarmEnabled:  cfg.PreviewCachePrewarmEnabled,
+						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
+						autoPreviewNodeStore := db.NewNodeStore(pool)
+						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+							MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+							PreferredRegion:      cfg.NodeRegion,
+						})
+						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
+						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
+						services.AutoPreviewStarter = branchPreviewHandler
+					}
+					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
+					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
 				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
@@ -574,8 +649,10 @@ func main() {
 			nodeManager,
 			previewCapable,
 			cfg.PreviewInternalBaseURL,
+			cfg.NodeRegion,
 			previewRoutingReady.Load,
 			sandboxCapacity,
+			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
@@ -590,6 +667,7 @@ func main() {
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
+		go worker.RunPreviewHealthSampler(ctx, db.NewPreviewStore(pool), logger, time.Minute)
 		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
@@ -607,8 +685,16 @@ func main() {
 		if previewManager != nil {
 			previewStore := db.NewPreviewStore(pool)
 			nodeStore := db.NewNodeStore(pool)
-			selector := preview.NewWorkerSelector(nodeStore, previewStore)
-			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+			selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+				PreferredRegion:      cfg.NodeRegion,
+			})
+			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+			if keyringErr != nil {
+				logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+				previewRPCKeyring = auth.PreviewTokenKeyring{}
+			}
+			client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
 			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
@@ -642,6 +728,12 @@ func main() {
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
 		scheduler.SetSessionStore(sessionStore)
+		scheduler.SetDomainRecheck(
+			db.NewOrganizationDomainStore(pool),
+			domains.NewVerifier(),
+			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
+		)
+		scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -736,7 +828,7 @@ func main() {
 		drainCancel()
 		if !workerDrainTimedOut && workerPreviewStore != nil && cfg.NodeID != "" {
 			if drained := waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second); !drained {
-				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorker(context.Background(), cfg.NodeID, "worker preview drain timeout"); err != nil {
+				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), cfg.NodeID, "worker preview drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout); err != nil {
 					logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes lost after drain timeout")
 				}
 			}
@@ -812,8 +904,10 @@ func startProcessWorkers(
 	nodeManager *cluster.NodeManager,
 	previewCapable bool,
 	previewInternalBaseURL string,
+	nodeRegion string,
 	previewRoutingReady func() bool,
 	sandboxCapacity *agent.SandboxCapacityGate,
+	staticEgress agent.StaticEgressRuntimeConfig,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -830,7 +924,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, previewRoutingReady, sandboxCapacity))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity, staticEgress))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -854,12 +948,16 @@ func resolveWorkerMaxActiveSandboxes(workerProcessCount, configured int) int {
 // any provider installed later (e.g. by startProcessWorkers) must continue to
 // emit these fields or the next heartbeat will wipe preview_capable from the
 // node row and break preview routing.
-func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[string]any {
+func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeRegion string) map[string]any {
 	metadata := map[string]any{
 		"build_sha": version.BuildSHA,
 	}
+	if nodeRegion != "" {
+		metadata["region"] = nodeRegion
+	}
 	if previewCapable {
 		metadata["preview_capable"] = true
+		metadata["preview_rpc_auth_check"] = true
 	}
 	if previewInternalBaseURL != "" {
 		metadata["preview_internal_base_url"] = previewInternalBaseURL
@@ -867,13 +965,25 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string) map[s
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate) func() map[string]any {
+func buildStaticEgressMetadata(runtime agent.StaticEgressRuntimeConfig) map[string]any {
+	metadata := map[string]any{}
+	if runtime.Enabled && runtime.Capable && runtime.PublicIP != "" {
+		metadata["static_egress_capable"] = true
+		metadata["static_egress_public_ip"] = runtime.PublicIP
+	}
+	return metadata
+}
+
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
 			advertisePreview = advertisePreview && previewRoutingReady()
 		}
-		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL)
+		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL, nodeRegion)
+		for k, v := range buildStaticEgressMetadata(staticEgress) {
+			metadata[k] = v
+		}
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
 		if sandboxCapacity != nil {
@@ -1014,10 +1124,7 @@ func configureSessionExecutorDispatch(
 		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
 			Image:       cfg.SessionExecutorImage,
 			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds: []string{
-				"/var/run/docker.sock:/var/run/docker.sock",
-				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
-			},
+			Binds:       sessionExecutorBinds(),
 			GroupAdd:    sessionExecutorGroupAddFromEnv(),
 			Env:         os.Environ(),
 			StopTimeout: cfg.SessionExecutorStopTimeout,
@@ -1026,6 +1133,14 @@ func configureSessionExecutorDispatch(
 		Image:                 cfg.SessionExecutorImage,
 		BuildSHA:              version.BuildSHA,
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
+	}
+}
+
+func sessionExecutorBinds() []string {
+	return []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
 	}
 }
 
@@ -1068,6 +1183,7 @@ func buildServices(
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	automationRunStore *db.AutomationRunStore,
+	evalBootstrapStore *db.EvalBootstrapStore,
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
@@ -1172,7 +1288,6 @@ func buildServices(
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
 		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
 		CodingCredentials: codingCredentialStore,
 		Orgs:              orgStore,
 		OrgSettingsCache:  orgSettingsCache,
@@ -1257,7 +1372,6 @@ func buildServices(
 		CodexAuth:          codexAuthSvc,
 		ClaudeCodeAuth:     claudeCodeAuthSvc,
 		Credentials:        credentialStore,
-		UserCredentials:    userCredentialStore,
 		CodingCredentials:  codingCredentialStore,
 		Snapshots:          snapshotStore,
 		Uploads:            uploadStore,
@@ -1265,6 +1379,7 @@ func buildServices(
 		MentionIndexes:     mentionIndexCache,
 		UsageTracker:       usageTracker,
 		SandboxCapacity:    sandboxCapacity,
+		StaticEgress:       agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		ThreadRuntimes:     threadRuntimeStore,
 		ThreadInbox:        threadInboxStore,
 		SandboxHolders:     sessionSandboxHolderStore,
@@ -1274,6 +1389,7 @@ func buildServices(
 		IdentityResolver:   identityResolver,
 		SandboxAuth:        sandboxAuthServer,
 		Users:              userStore,
+		EvalBootstraps:     evalBootstrapStore,
 		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
 		InternalAPISecret:  cfg.SessionSecret,
 		NodeID:             cfg.NodeID,
@@ -1387,6 +1503,10 @@ func buildServices(
 	if mErr != nil {
 		logger.Warn().Err(mErr).Msg("failed to register linear_agent metrics in worker; milestone emits will not record")
 	}
+	workerSlackbotMetrics, slackMetricsErr := metrics.NewSlackbotMetrics()
+	if slackMetricsErr != nil {
+		logger.Warn().Err(slackMetricsErr).Msg("failed to register slackbot metrics in worker; Slackbot emits will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
 		Logger:             logger,
@@ -1458,8 +1578,12 @@ func buildServices(
 		SlackSummarizer: slackSummarizer,
 		LLM:             llmClient,
 		GitHub:          ghSvc,
+		GitHubOrgRoster: ghSvc,
+		Snapshots:       snapshotStore,
 		TitleService:    titleService,
 		Linear:          linearService,
+		SlackbotMetrics: workerSlackbotMetrics,
+		FrontendURL:     cfg.FrontendURL,
 		ReviewLoops:     reviewLoopSvc,
 		RuntimeSampler:  runtimeSampler,
 		SandboxGC:       sandboxGC,

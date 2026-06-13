@@ -643,7 +643,7 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 	}
 
 	query := r.URL.Query()
-	if query.Has("position") || query.Has("before") || query.Has("limit") {
+	if query.Has("position") || query.Has("before") || query.Has("after") || query.Has("anchor_message_id") || query.Has("limit") {
 		opts := db.SessionMessageWindowOptions{Limit: db.DefaultSessionMessageWindowLimit}
 		if before := strings.TrimSpace(query.Get("before")); before != "" {
 			beforeID, err := parsePositiveInt64(before)
@@ -652,6 +652,16 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 				return
 			}
 			opts.BeforeID = beforeID
+			opts.Position = db.SessionMessageWindowPositionOlder
+		}
+		if after := strings.TrimSpace(query.Get("after")); after != "" {
+			afterID, err := parsePositiveInt64(after)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid after cursor")
+				return
+			}
+			opts.AfterID = afterID
+			opts.Position = db.SessionMessageWindowPositionNewer
 		}
 		if limitRaw := strings.TrimSpace(query.Get("limit")); limitRaw != "" {
 			limit, err := parsePositiveInt(limitRaw)
@@ -662,9 +672,42 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 			opts.Limit = limit
 		}
 		position := strings.TrimSpace(query.Get("position"))
-		if position != "" && position != "latest" {
-			writeError(w, r, http.StatusBadRequest, "INVALID_POSITION", "position must be latest")
+		if position != "" {
+			switch position {
+			case string(db.SessionMessageWindowPositionLatest):
+				opts.Position = db.SessionMessageWindowPositionLatest
+			case string(db.SessionMessageWindowPositionAround):
+				opts.Position = db.SessionMessageWindowPositionAround
+			default:
+				writeError(w, r, http.StatusBadRequest, "INVALID_POSITION", "position must be latest or around")
+				return
+			}
+		}
+		if anchorRaw := strings.TrimSpace(query.Get("anchor_message_id")); anchorRaw != "" {
+			anchorID, err := parsePositiveInt64(anchorRaw)
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid anchor message id")
+				return
+			}
+			opts.AnchorMessageID = anchorID
+		}
+		if opts.BeforeID > 0 && opts.AfterID > 0 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "before and after cursors cannot be combined")
 			return
+		}
+		if opts.Position == db.SessionMessageWindowPositionLatest && (opts.BeforeID > 0 || opts.AfterID > 0) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "before and after cursors cannot be combined with position=latest")
+			return
+		}
+		if opts.Position == db.SessionMessageWindowPositionAround {
+			if opts.AnchorMessageID <= 0 {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "anchor_message_id is required for around position")
+				return
+			}
+			if opts.BeforeID > 0 || opts.AfterID > 0 {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "around position cannot be combined with before or after")
+				return
+			}
 		}
 
 		result, err := h.svc.GetMessageWindow(r.Context(), orgID, sessionID, threadID, opts)
@@ -681,8 +724,13 @@ func (h *SessionThreadHandler) GetThreadMessages(w http.ResponseWriter, r *http.
 			Meta: models.ThreadMessageWindowMeta{
 				NextOlderCursor:          result.Window.NextOlderCursor,
 				HasOlder:                 result.Window.HasOlder,
+				NextNewerCursor:          result.Window.NextNewerCursor,
+				HasNewer:                 result.Window.HasNewer,
+				AnchorMessageID:          result.Window.AnchorMessageID,
+				AnchorFound:              result.Window.AnchorFound,
 				LatestAssistantMessageID: result.Window.LatestAssistantMessageID,
 				LiveEdgeMessageID:        result.Window.LiveEdgeMessageID,
+				WindowPosition:           string(result.Window.Position),
 				ThreadStatus:             string(result.ThreadStatus),
 			},
 		})
@@ -750,7 +798,10 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	opts := db.SessionLogFilterOptions{TurnNumbers: parseTurnNumbers(r.URL.Query().Get("turn_numbers"))}
+	opts := db.SessionLogFilterOptions{
+		TurnNumbers: parseTurnNumbers(r.URL.Query().Get("turn_numbers")),
+		LatestTurns: parseLatestTurns(r.URL.Query().Get("latest_turns")),
+	}
 	logs, err := h.svc.GetLogs(r.Context(), orgID, sessionID, threadID, opts)
 	if err != nil {
 		if errors.Is(err, thread.ErrThreadNotFound) {
@@ -764,7 +815,27 @@ func (h *SessionThreadHandler) GetThreadLogs(w http.ResponseWriter, r *http.Requ
 		logs = []models.SessionLog{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{Data: logs})
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLogResponse]{
+		Data: models.NewSessionLogResponses(logs),
+	})
+}
+
+// maxLatestTurns bounds the latest_turns parameter so a client cannot turn
+// the bounded bootstrap query back into an unbounded full-thread scan.
+const maxLatestTurns = 200
+
+func parseLatestTurns(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	if value > maxLatestTurns {
+		return maxLatestTurns
+	}
+	return value
 }
 
 func parseTurnNumbers(raw string) []int {

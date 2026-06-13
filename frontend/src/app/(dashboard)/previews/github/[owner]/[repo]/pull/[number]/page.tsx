@@ -13,6 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
+import { pollMs } from "@/lib/poll-intervals";
 
 export default function PullRequestPreviewPage({
   params,
@@ -39,7 +40,7 @@ export function PullRequestPreviewContent({
     queryFn: () => api.previews.getPullRequest(owner, repo, number),
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      return status === "starting" ? 3000 : false;
+      return status === "starting" ? pollMs(3000) : false;
     },
   });
   const startLatest = useMutation({
@@ -81,11 +82,11 @@ export function PullRequestPreviewContent({
             ) : preview ? (
               <>
                 {preview.new_commits_available ? (
-                  <div className="flex items-start gap-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                  <div className="flex items-start gap-3 rounded-md border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                     <div className="min-w-0">
                       <p className="font-medium">New commits available</p>
-                      <p className="break-all text-amber-800 dark:text-amber-300">
+                      <p className="break-all text-warning/80">
                         Latest head: {preview.latest_commit_sha?.slice(0, 12) ?? "unknown"}
                       </p>
                     </div>

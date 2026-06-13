@@ -10,6 +10,7 @@ import {
   Bot,
   Sparkles,
   Target,
+  KeyRound,
   FlaskConical,
   ScrollText,
   MonitorPlay,
@@ -40,6 +41,7 @@ export const staticActions: PaletteAction[] = [
   { id: "nav-automations", label: "Automations", icon: RefreshCw, href: "/automations", group: "navigation" },
   { id: "nav-projects", label: "Projects", icon: FolderKanban, href: "/projects", preserveRepo: true, group: "navigation" },
   { id: "nav-autopilot", label: "Autopilot", icon: Zap, href: "/autopilot", group: "navigation" },
+  { id: "nav-previews", label: "Previews", icon: MonitorPlay, href: "/previews", preserveRepo: true, group: "navigation" },
 
   // Settings & admin
   { id: "settings-account", label: "Account", icon: CircleUser, href: "/settings/account", group: "settings" },
@@ -48,6 +50,7 @@ export const staticActions: PaletteAction[] = [
   { id: "settings-agents", label: "Coding agents", icon: Bot, href: "/settings/agent", hiddenRoles: ["viewer"], group: "settings" },
   { id: "settings-llm", label: "LLM", icon: Sparkles, href: "/settings/llm", requiredRole: "admin", group: "settings" },
   { id: "settings-autopilot", label: "Autopilot", icon: Target, href: "/settings/autopilot", requiredRole: "admin", group: "settings" },
+  { id: "settings-api-keys", label: "API keys", icon: KeyRound, href: "/settings/api-keys", requiredRole: "admin", group: "settings" },
   { id: "settings-evals", label: "Evals", icon: FlaskConical, href: "/settings/evals", hiddenRoles: ["viewer", "builder"], group: "settings" },
   { id: "settings-team", label: "Team", icon: Users, href: "/settings/team", hiddenRoles: ["viewer", "builder"], group: "settings" },
   { id: "settings-audit-log", label: "Audit log", icon: ScrollText, href: "/settings/audit-log", requiredRole: "admin", group: "settings" },

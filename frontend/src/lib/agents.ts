@@ -11,9 +11,9 @@ import {
   AVAILABLE_OPENCODE_MODELS,
   AVAILABLE_PI_MODELS,
 } from "@/lib/model-constants";
-import type { CodexAuthStatus, CodingAuth, ResolvedCredential, UserCredentialSummary } from "@/lib/types";
+import type { CodexAuthStatus, CodingCredentialSummary, ResolvedCredential } from "@/lib/types";
 
-type CodingAuthAvailability = Pick<CodingAuth, "agent" | "status">;
+type CodingAuthAvailability = Pick<CodingCredentialSummary, "agent" | "status">;
 
 export interface AgentEnvVar {
   name: string;
@@ -63,7 +63,7 @@ export const AGENTS: readonly AgentMeta[] = [
     label: "Claude Code",
     short: "CC",
     color: "#cc785c",
-    description: "Anthropic Claude (Opus, Sonnet, Haiku)",
+    description: "Anthropic Claude (Fable, Opus, Sonnet, Haiku)",
     providerKey: "anthropic",
     models: AVAILABLE_CLAUDE_CODE_MODELS,
     envVars: [
@@ -192,18 +192,21 @@ export function isAgentConnected(
   );
 }
 
-function codingAuthStatusAllowsSelection(status: CodingAuth["status"]): boolean {
+function codingAuthStatusAllowsSelection(status: CodingCredentialSummary["status"]): boolean {
   return status === "healthy" || status === "rate_limited";
 }
 
+// isAgentAvailable extends isAgentConnected with unified coding-credential
+// rows (typically codingCredentials.list("resolved") or list("org")) — any
+// usable row for the agent makes it selectable.
 export function isAgentAvailable(
   agentType: string,
   resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus?: CodexAuthStatus | null,
-  codingAuths: readonly CodingAuthAvailability[] = [],
+  codingCredentials: readonly CodingAuthAvailability[] = [],
 ): boolean {
   if (isAgentConnected(agentType, resolvedCredentials, codexAuthStatus)) return true;
-  return codingAuths.some(
+  return codingCredentials.some(
     (row) => row.agent === agentType && codingAuthStatusAllowsSelection(row.status),
   );
 }
@@ -235,7 +238,7 @@ export interface AvailableAgentModelGroupsOptions {
 export function availableAgentModelGroups(
   resolvedCredentials: readonly ResolvedCredential[],
   codexAuthStatus: CodexAuthStatus | null | undefined,
-  codingAuths: readonly CodingAuthAvailability[],
+  codingCredentials: readonly CodingAuthAvailability[],
   defaultAgentType: string,
   options: AvailableAgentModelGroupsOptions = {},
 ): AgentModelGroup[] {
@@ -248,7 +251,7 @@ export function availableAgentModelGroups(
   };
   const filtered = AGENTS.filter(
     (agent) =>
-      isAgentAvailable(agent.key, resolvedCredentials, codexAuthStatus, codingAuths) ||
+      isAgentAvailable(agent.key, resolvedCredentials, codexAuthStatus, codingCredentials) ||
       orgConfiguredAgent(agent) ||
       agent.key === defaultAgentType,
   );
@@ -265,32 +268,27 @@ export function availableAgentModelGroups(
 }
 
 // PM jobs run server-side without a user id, so they cannot use the current
-// admin's personal credentials. Keep org/team-default resolved credentials,
-// then add explicit team defaults because the resolved endpoint reports only
-// the first source for a provider and a personal credential can shadow a
-// PM-usable team default.
+// admin's personal credentials. Keep only the org-scoped rows from the
+// unified resolved stack (codingCredentials.list("resolved")), collapsing
+// them into one provider-keyed ResolvedCredential per provider. Subscription
+// rows ("openai_subscription" / "anthropic_subscription") are mapped to their
+// agent's provider key so isAgentConnected's providerKey matching sees them.
 export function pmUsableResolvedCredentials(
-  resolvedCredentials: readonly ResolvedCredential[],
-  teamDefaults: readonly UserCredentialSummary[],
+  resolvedCredentials: readonly CodingCredentialSummary[],
 ): ResolvedCredential[] {
   const byProvider = new Map<string, ResolvedCredential>();
 
-  for (const credential of resolvedCredentials) {
-    if (credential.source !== "org" && credential.source !== "team_default") {
+  for (const row of resolvedCredentials) {
+    if (row.scope !== "org") {
       continue;
     }
-    byProvider.set(credential.provider, credential);
-  }
-
-  for (const credential of teamDefaults) {
-    if (!credential.configured || !credential.is_team_default) {
+    const provider = AGENTS_BY_KEY[row.agent]?.providerKey ?? row.provider;
+    // The resolved stack is ordered by priority — keep the first (highest
+    // priority) row per provider.
+    if (byProvider.has(provider)) {
       continue;
     }
-    byProvider.set(credential.provider, {
-      provider: credential.provider,
-      source: "team_default",
-      masked_key: credential.masked_key,
-    });
+    byProvider.set(provider, { provider, source: "org" });
   }
 
   return Array.from(byProvider.values());

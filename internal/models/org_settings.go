@@ -230,28 +230,33 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	AutonomyLevel              AutonomyLevel      `json:"autonomy_level"`
-	Aggressiveness             int                `json:"execution_aggressiveness"`
-	MaxConcurrentRuns          int                `json:"max_concurrent_runs"`
-	AgentAutonomy              string             `json:"agent_autonomy"`
-	PriorityWeights            PriorityWeights    `json:"priority_weights"`
-	MinPriorityThreshold       float64            `json:"min_priority_threshold"`
-	ProductDirection           string             `json:"product_direction"`
-	ProductContext             *ProductContext    `json:"product_context,omitempty"`
-	PMScheduleHours            int                `json:"pm_schedule_hours"`
-	PMModel                    string             `json:"pm_model"`
-	LLMModel                   string             `json:"llm_model"`
-	LLMReasoningEffort         ReasoningEffort    `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig                AgentEnvConfig     `json:"agent_config,omitempty"`
-	DefaultAgentType           AgentType          `json:"default_agent_type,omitempty"`
-	AuditRetentionDays         int                `json:"audit_retention_days,omitempty"`
-	ContextRefreshIntervalDays int                `json:"context_refresh_interval_days,omitempty"`
-	OrgSize                    OrgSize            `json:"org_size,omitempty"`
-	ContextLimits              ContextLimits      `json:"context_limits,omitempty"`
-	PRAuthorship               PRAuthorship       `json:"pr_authorship,omitempty"`
-	PRDraftDefault             bool               `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose       bool               `json:"auto_archive_on_pr_close,omitempty"`
-	BuilderPermissions         BuilderPermissions `json:"builder_permissions,omitempty"`
+	AutonomyLevel              AutonomyLevel          `json:"autonomy_level"`
+	Aggressiveness             int                    `json:"execution_aggressiveness"`
+	MaxConcurrentRuns          int                    `json:"max_concurrent_runs"`
+	AgentAutonomy              string                 `json:"agent_autonomy"`
+	PriorityWeights            PriorityWeights        `json:"priority_weights"`
+	MinPriorityThreshold       float64                `json:"min_priority_threshold"`
+	ProductDirection           string                 `json:"product_direction"`
+	ProductContext             *ProductContext        `json:"product_context,omitempty"`
+	PMScheduleHours            int                    `json:"pm_schedule_hours"`
+	PMModel                    string                 `json:"pm_model"`
+	LLMModel                   string                 `json:"llm_model"`
+	LLMReasoningEffort         ReasoningEffort        `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig                AgentEnvConfig         `json:"agent_config,omitempty"`
+	DefaultAgentType           AgentType              `json:"default_agent_type,omitempty"`
+	AuditRetentionDays         int                    `json:"audit_retention_days,omitempty"`
+	ContextRefreshIntervalDays int                    `json:"context_refresh_interval_days,omitempty"`
+	OrgSize                    OrgSize                `json:"org_size,omitempty"`
+	ContextLimits              ContextLimits          `json:"context_limits,omitempty"`
+	PRAuthorship               PRAuthorship           `json:"pr_authorship,omitempty"`
+	PRDraftDefault             bool                   `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose       bool                   `json:"auto_archive_on_pr_close,omitempty"`
+	BuilderPermissions         BuilderPermissions     `json:"builder_permissions,omitempty"`
+	SandboxNetwork             SandboxNetworkSettings `json:"sandbox_network,omitempty"`
+	// CodingAgentTabToolsEnabled controls whether sandbox agents may use
+	// 143-tools to view/create/message tabs in their current session. Pointer
+	// typed so absent settings default on without losing explicit false.
+	CodingAgentTabToolsEnabled *bool `json:"coding_agent_tab_tools_enabled,omitempty"`
 
 	// MaxSessionDurationSeconds is the per-session wall-clock timeout applied
 	// as the soft runtime budget for run_agent and continue_session jobs.
@@ -263,7 +268,14 @@ type OrgSettings struct {
 	// DefaultPreviewMaxPreviewsPerUser.
 	PreviewMaxPreviewsPerUser int `json:"preview_max_previews_per_user,omitempty"`
 
+	// PreviewAutoPoolMaxActive caps concurrently running auto-created previews
+	// org-wide. Warm and hibernated previews do not count.
+	PreviewAutoPoolMaxActive int `json:"preview_auto_pool_max_active,omitempty"`
+
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
+
+	SandboxLifecycle SandboxLifecycleSettings `json:"sandbox_lifecycle,omitempty"`
+	SandboxResources SandboxResourceSettings  `json:"sandbox_resources,omitempty"`
 
 	// LinearAutomation controls how 143 reflects session events back into
 	// Linear. The two write levels are intentionally separate so teams can
@@ -276,6 +288,71 @@ type OrgSettings struct {
 	// LinearAutomation, which is purely outbound. The feature is opt-in;
 	// nothing happens to a Linear-connected org until an admin enables it.
 	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
+}
+
+// SandboxNetworkSettings controls per-org sandbox egress behavior.
+type SandboxNetworkSettings struct {
+	StaticEgressEnabled bool `json:"static_egress_enabled,omitempty"`
+}
+
+// SandboxLifecycleSettings controls cleanup and retention defaults for runtime artifacts.
+type SandboxLifecycleSettings struct {
+	CompletedSessionRetentionMinutes int   `json:"completed_session_retention_minutes,omitempty"`
+	IdlePreviewTTLMinutes            int   `json:"idle_preview_ttl_minutes,omitempty"`
+	PreviewHoldsSandbox              *bool `json:"preview_holds_sandbox,omitempty"`
+}
+
+// EffectivePreviewHoldsSandbox applies the default preview hold policy.
+func (s SandboxLifecycleSettings) EffectivePreviewHoldsSandbox() bool {
+	if s.PreviewHoldsSandbox == nil {
+		return true
+	}
+	return *s.PreviewHoldsSandbox
+}
+
+// SandboxResourceTier is a named resource-size tier for sandbox runtime defaults.
+type SandboxResourceTier string
+
+const (
+	SandboxResourceTierSmall    SandboxResourceTier = "small"
+	SandboxResourceTierStandard SandboxResourceTier = "standard"
+	SandboxResourceTierLarge    SandboxResourceTier = "large"
+)
+
+// Validate returns an error when the tier is not one of the supported values.
+func (t SandboxResourceTier) Validate() error {
+	switch t {
+	case "", SandboxResourceTierSmall, SandboxResourceTierStandard, SandboxResourceTierLarge:
+		return nil
+	default:
+		return fmt.Errorf("invalid sandbox resource tier: %q", t)
+	}
+}
+
+// SandboxResourceSettings controls org-level sandbox resource defaults and bounds.
+type SandboxResourceSettings struct {
+	AgentDefaultTier           SandboxResourceTier `json:"agent_default_tier,omitempty"`
+	PreviewDefaultTier         SandboxResourceTier `json:"preview_default_tier,omitempty"`
+	AllowRepoResourceRequests  *bool               `json:"allow_repo_resource_requests,omitempty"`
+	PreviewMaxTier             SandboxResourceTier `json:"preview_max_tier,omitempty"`
+	PreviewMaxCPUMillis        int                 `json:"preview_max_cpu_millis,omitempty"`
+	PreviewMaxMemoryMiB        int                 `json:"preview_max_memory_mib,omitempty"`
+	PreviewMaxEphemeralDiskMiB int                 `json:"preview_max_ephemeral_disk_mib,omitempty"`
+}
+
+// EffectiveAllowRepoResourceRequests applies the default resource policy.
+func (s SandboxResourceSettings) EffectiveAllowRepoResourceRequests() bool {
+	if s.AllowRepoResourceRequests == nil {
+		return true
+	}
+	return *s.AllowRepoResourceRequests
+}
+
+func (s OrgSettings) EffectiveCodingAgentTabToolsEnabled() bool {
+	if s.CodingAgentTabToolsEnabled == nil {
+		return true
+	}
+	return *s.CodingAgentTabToolsEnabled
 }
 
 // BuilderPermissions controls the narrower builder role's access to
@@ -562,6 +639,26 @@ const (
 	DefaultPreviewMaxPreviewsPerUser = 4
 	MinPreviewMaxPreviewsPerUser     = 1
 	MaxPreviewMaxPreviewsPerUser     = 20
+	DefaultPreviewAutoPoolMaxActive  = 4
+	MinPreviewAutoPoolMaxActive      = 1
+	MaxPreviewAutoPoolMaxActive      = 20
+
+	DefaultPreviewMaxCPUMillis        = 2000
+	MinPreviewMaxCPUMillis            = 250
+	MaxPreviewMaxCPUMillis            = 2000
+	DefaultPreviewMaxMemoryMiB        = 8 * 1024
+	MinPreviewMaxMemoryMiB            = 512
+	MaxPreviewMaxMemoryMiB            = 8 * 1024
+	DefaultPreviewMaxEphemeralDiskMiB = 10 * 1024
+	MinPreviewMaxEphemeralDiskMiB     = 1024
+	MaxPreviewMaxEphemeralDiskMiB     = 10 * 1024
+
+	DefaultCompletedSessionRetentionMinutes = 60
+	MinCompletedSessionRetentionMinutes     = 0
+	MaxCompletedSessionRetentionMinutes     = 24 * 60
+	DefaultIdlePreviewTTLMinutes            = 4 * 60
+	MinIdlePreviewTTLMinutes                = 15
+	MaxIdlePreviewTTLMinutes                = 24 * 60
 )
 
 // ContextLimits returns the default context limits for this org size.
@@ -746,6 +843,57 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.PreviewMaxPreviewsPerUser = MinPreviewMaxPreviewsPerUser
 	} else if s.PreviewMaxPreviewsPerUser > MaxPreviewMaxPreviewsPerUser {
 		s.PreviewMaxPreviewsPerUser = MaxPreviewMaxPreviewsPerUser
+	}
+	if s.PreviewAutoPoolMaxActive == 0 {
+		s.PreviewAutoPoolMaxActive = DefaultPreviewAutoPoolMaxActive
+	} else if s.PreviewAutoPoolMaxActive < MinPreviewAutoPoolMaxActive {
+		s.PreviewAutoPoolMaxActive = MinPreviewAutoPoolMaxActive
+	} else if s.PreviewAutoPoolMaxActive > MaxPreviewAutoPoolMaxActive {
+		s.PreviewAutoPoolMaxActive = MaxPreviewAutoPoolMaxActive
+	}
+	if s.SandboxLifecycle.CompletedSessionRetentionMinutes == 0 {
+		s.SandboxLifecycle.CompletedSessionRetentionMinutes = DefaultCompletedSessionRetentionMinutes
+	} else if s.SandboxLifecycle.CompletedSessionRetentionMinutes < MinCompletedSessionRetentionMinutes {
+		s.SandboxLifecycle.CompletedSessionRetentionMinutes = MinCompletedSessionRetentionMinutes
+	} else if s.SandboxLifecycle.CompletedSessionRetentionMinutes > MaxCompletedSessionRetentionMinutes {
+		s.SandboxLifecycle.CompletedSessionRetentionMinutes = MaxCompletedSessionRetentionMinutes
+	}
+	if s.SandboxLifecycle.IdlePreviewTTLMinutes == 0 {
+		s.SandboxLifecycle.IdlePreviewTTLMinutes = DefaultIdlePreviewTTLMinutes
+	} else if s.SandboxLifecycle.IdlePreviewTTLMinutes < MinIdlePreviewTTLMinutes {
+		s.SandboxLifecycle.IdlePreviewTTLMinutes = MinIdlePreviewTTLMinutes
+	} else if s.SandboxLifecycle.IdlePreviewTTLMinutes > MaxIdlePreviewTTLMinutes {
+		s.SandboxLifecycle.IdlePreviewTTLMinutes = MaxIdlePreviewTTLMinutes
+	}
+	if s.SandboxResources.AgentDefaultTier == "" {
+		s.SandboxResources.AgentDefaultTier = SandboxResourceTierStandard
+	}
+	if s.SandboxResources.PreviewDefaultTier == "" {
+		s.SandboxResources.PreviewDefaultTier = SandboxResourceTierStandard
+	}
+	if s.SandboxResources.PreviewMaxTier == "" {
+		s.SandboxResources.PreviewMaxTier = SandboxResourceTierLarge
+	}
+	if s.SandboxResources.PreviewMaxCPUMillis == 0 {
+		s.SandboxResources.PreviewMaxCPUMillis = DefaultPreviewMaxCPUMillis
+	} else if s.SandboxResources.PreviewMaxCPUMillis < MinPreviewMaxCPUMillis {
+		s.SandboxResources.PreviewMaxCPUMillis = MinPreviewMaxCPUMillis
+	} else if s.SandboxResources.PreviewMaxCPUMillis > MaxPreviewMaxCPUMillis {
+		s.SandboxResources.PreviewMaxCPUMillis = MaxPreviewMaxCPUMillis
+	}
+	if s.SandboxResources.PreviewMaxMemoryMiB == 0 {
+		s.SandboxResources.PreviewMaxMemoryMiB = DefaultPreviewMaxMemoryMiB
+	} else if s.SandboxResources.PreviewMaxMemoryMiB < MinPreviewMaxMemoryMiB {
+		s.SandboxResources.PreviewMaxMemoryMiB = MinPreviewMaxMemoryMiB
+	} else if s.SandboxResources.PreviewMaxMemoryMiB > MaxPreviewMaxMemoryMiB {
+		s.SandboxResources.PreviewMaxMemoryMiB = MaxPreviewMaxMemoryMiB
+	}
+	if s.SandboxResources.PreviewMaxEphemeralDiskMiB == 0 {
+		s.SandboxResources.PreviewMaxEphemeralDiskMiB = DefaultPreviewMaxEphemeralDiskMiB
+	} else if s.SandboxResources.PreviewMaxEphemeralDiskMiB < MinPreviewMaxEphemeralDiskMiB {
+		s.SandboxResources.PreviewMaxEphemeralDiskMiB = MinPreviewMaxEphemeralDiskMiB
+	} else if s.SandboxResources.PreviewMaxEphemeralDiskMiB > MaxPreviewMaxEphemeralDiskMiB {
+		s.SandboxResources.PreviewMaxEphemeralDiskMiB = MaxPreviewMaxEphemeralDiskMiB
 	}
 
 	if s.RuntimeBudgets.NoProgressTimeoutSeconds <= 0 {

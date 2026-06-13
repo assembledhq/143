@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   flexRender,
   getCoreRowModel,
@@ -35,30 +35,14 @@ import { StatusDot } from "@/components/status-dot";
 import { AnimatedEllipsis } from "@/components/animated-ellipsis";
 import { AgentBadge } from "@/components/agent-badge";
 import { usePeopleFilter } from "@/hooks/use-people-filter";
-import { prMergedAccent } from "@/lib/pr-status-styles";
-import type { Session, SessionListItem, SessionStatus, User } from "@/lib/types";
+import { provisionalSessionDetailFromListItem } from "@/lib/session-detail-cache";
+import { preloadSessionDetailContent } from "./[id]/session-detail-page-client";
+import { deriveSessionDisplayStatus, type SessionDisplayStatus } from "@/lib/session-display-status";
+import type { Session, SessionDetail, SessionListItem, SingleResponse, User } from "@/lib/types";
 import {
-  workingSet,
   filterToStatusParam as baseFilterToStatusParam,
 } from "@/lib/session-status-groups";
 import { getCountForTab, renderCount } from "@/lib/session-counts";
-
-// ---------------------------------------------------------------------------
-// Status config
-// ---------------------------------------------------------------------------
-
-const statusConfig: Record<SessionStatus, { dot: string; text: string; bg: string; label: string }> = {
-  pending: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Pending" },
-  running: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Running" },
-  idle: { dot: "bg-primary", text: "text-primary", bg: "bg-primary/10", label: "Idle" },
-  awaiting_input: { dot: "bg-amber-500", text: "text-amber-700 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-950/30", label: "Awaiting input" },
-  needs_human_guidance: { dot: "bg-orange-500", text: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 dark:bg-orange-950/30", label: "Needs guidance" },
-  completed: { dot: "bg-emerald-500", text: "text-emerald-700 dark:text-emerald-400", bg: "bg-emerald-50 dark:bg-emerald-950/30", label: "Completed" },
-  pr_created: { dot: prMergedAccent.dot, text: prMergedAccent.text, bg: prMergedAccent.bg, label: "PR created" },
-  failed: { dot: "bg-destructive", text: "text-destructive", bg: "bg-destructive/10", label: "Failed" },
-  cancelled: { dot: "bg-muted-foreground/50", text: "text-muted-foreground", bg: "bg-muted", label: "Cancelled" },
-  skipped: { dot: "bg-muted-foreground/30", text: "text-muted-foreground", bg: "bg-muted", label: "Skipped" },
-};
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -75,13 +59,11 @@ function filterToStatusParam(filter: string | null): string | undefined {
 // Inline cell components
 // ---------------------------------------------------------------------------
 
-function SessionStatusDot({ status }: { status: SessionStatus }) {
-  const working = workingSet.has(status);
-  const cfg = statusConfig[status];
-  if (working) {
+function SessionStatusDot({ displayStatus }: { displayStatus: SessionDisplayStatus }) {
+  if (displayStatus.animated) {
     return <StatusDot animate color="bg-primary" pingColor="bg-primary/60" />;
   }
-  return <StatusDot color={cfg.dot} />;
+  return <StatusDot color={displayStatus.dotClass} />;
 }
 
 function SortableHeader({ label, column }: { label: string; column: { toggleSorting: (desc?: boolean) => void; getIsSorted: () => false | "asc" | "desc" } }) {
@@ -108,15 +90,13 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
       header: ({ column }) => <SortableHeader label="Status" column={column} />,
       size: 140,
       cell: ({ row }) => {
-        const status = row.original.status;
-        const cfg = statusConfig[status];
-        const working = workingSet.has(status);
+        const displayStatus = deriveSessionDisplayStatus(row.original);
         return (
           <div className="flex items-center gap-2">
-            <SessionStatusDot status={status} />
-            <span className={`text-xs font-medium ${cfg.text}`}>
-              <span>{cfg.label}</span>
-              {working && <AnimatedEllipsis />}
+            <SessionStatusDot displayStatus={displayStatus} />
+            <span className={`text-xs font-medium ${displayStatus.textClass}`}>
+              <span>{displayStatus.label}</span>
+              {displayStatus.animated && <AnimatedEllipsis />}
             </span>
           </div>
         );
@@ -189,6 +169,21 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 
 export function SessionsPageContent() {
   const router = useRouter();
+  const queryClient = useQueryClient();
+
+  // Seeding the detail cache with the list item lets the session detail view
+  // render its header/skeleton instantly instead of waiting on the API fetch.
+  const seedSessionDetailCache = useCallback((session: Session) => {
+    queryClient.setQueryData<SingleResponse<SessionDetail>>(
+      queryKeys.sessions.detail(session.id),
+      (current) => current ?? provisionalSessionDetailFromListItem(session),
+    );
+  }, [queryClient]);
+
+  const navigateToSession = useCallback((session: Session) => {
+    seedSessionDetailCache(session);
+    router.push(`/sessions/${session.id}`);
+  }, [router, seedSessionDetailCache]);
   const {
     mode,
     selectedUserIDs,
@@ -227,6 +222,11 @@ export function SessionsPageContent() {
   const [loadMoreCursor, setLoadMoreCursor] = useState<string | undefined>(undefined);
   const isPaginated = extraPages.length > 0;
 
+  // Pause list polling while the pointer is over the table. A poll response can
+  // reorder rows mid-click, which either swallows the click or swaps a
+  // different session under the cursor right before navigation.
+  const [isTableHovered, setIsTableHovered] = useState(false);
+
   // Reset pagination when the effective query scope changes. Adjusting state
   // during render (rather than in an effect) avoids cascading renders.
   const scopeKey = `${repo ?? ""}|${serializedPeopleParam ?? "mine"}|${currentFilter}`;
@@ -250,7 +250,7 @@ export function SessionsPageContent() {
   const { data: listData, isLoading, error } = useQuery({
     queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam],
     queryFn: () => api.sessions.list(listParams),
-    refetchInterval: isPaginated || showDecisions ? false : 10000,
+    refetchInterval: isPaginated || showDecisions || isTableHovered ? false : 10000,
     enabled: !showDecisions && isResolved,
   });
 
@@ -416,7 +416,11 @@ export function SessionsPageContent() {
 
       {/* ── Data table ─────────────────────────────────────────────── */}
       {!isPendingScope && !showDecisions && !error && counts?.all !== 0 && (
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div
+          className="rounded-lg border border-border bg-card overflow-hidden"
+          onPointerEnter={() => setIsTableHovered(true)}
+          onPointerLeave={() => setIsTableHovered(false)}
+        >
           {filteredSessions.length === 0 ? (
             <div className="py-12 text-center text-xs text-muted-foreground">
               No sessions match this filter.
@@ -430,6 +434,7 @@ export function SessionsPageContent() {
                       {headerGroup.headers.map((header) => (
                         <TableHead
                           key={header.id}
+                          className="uppercase"
                           style={{ width: header.column.getSize() !== 150 ? header.column.getSize() : undefined }}
                         >
                           {header.isPlaceholder
@@ -445,7 +450,16 @@ export function SessionsPageContent() {
                     <TableRow
                       key={row.id}
                       className="cursor-pointer"
-                      onClick={() => router.push(`/sessions/${row.original.id}`)}
+                      // Prefetch the route and warm the detail view's dynamic
+                      // chunk on hover, and seed the detail cache on mousedown,
+                      // so the click navigates instantly to a seeded skeleton
+                      // instead of silently waiting on a server fetch.
+                      onMouseEnter={() => {
+                        router.prefetch(`/sessions/${row.original.id}`);
+                        preloadSessionDetailContent();
+                      }}
+                      onMouseDown={() => seedSessionDetailCache(row.original)}
+                      onClick={() => navigateToSession(row.original)}
                     >
                       {row.getVisibleCells().map((cell) => (
                         <TableCell key={cell.id}>

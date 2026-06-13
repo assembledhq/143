@@ -77,3 +77,17 @@ func TestMemoryMetrics_RecordInjectionAndReinforcement(t *testing.T) {
 	m.RecordInjection(ctx, 5)
 	m.RecordReinforcement(ctx, 3)
 }
+
+func TestSlackbotMetrics_RecordObservabilityCounters(t *testing.T) {
+	t.Parallel()
+
+	m, err := NewSlackbotMetrics()
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	require.NotNil(t, m.RateLimitsTotal)
+	require.NotNil(t, m.MessageUpdateLatency)
+
+	ctx := context.Background()
+	m.RecordRateLimit(ctx, "events_api")
+	m.RecordMessageUpdateLatency(ctx, "chat.update", "sent", 12.5)
+}

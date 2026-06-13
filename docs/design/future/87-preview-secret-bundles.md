@@ -118,8 +118,8 @@ Use the simplest repo-facing shape:
 }
 ```
 
-Only `bundle` and `services` are required. `env` and `files` are optional non-secret hints that let 143 show a useful setup checklist before the bundle exists.
-When `files` is present, `services` must include every preview service because generated files are written into the shared workspace. If an env var should go only to a backend service, use a separate env-only bundle.
+Only `bundle` and `services` are required. `env` and `files` are optional non-secret hints that let 143 show a useful setup checklist before the bundle exists. A managed bundle may deliver multiple environment variables and one generated file.
+When `files` is present, `services` must include every preview service because the generated file is written into the shared workspace. If an env var should go only to a backend service, use a separate env-only bundle.
 
 Recommended field names:
 
@@ -129,7 +129,7 @@ Recommended field names:
 | `bundle` | Use one named bundle handle. | Short, stable, and easy to understand in code review. |
 | `services` | Use instead of `inject_into`. | It describes the outcome without implementation language. |
 | `env` | Optional list of secret env var names the repo expects. | Lets 143 prefill setup and explain missing values without putting values in Git. |
-| `files` | Optional list of generated secret config files the repo expects. | Makes file-based apps discoverable without committing the file contents. |
+| `files` | Optional generated secret config file the repo expects. | Makes file-based apps discoverable without committing the file contents; V1 admin bundles support one file output. |
 | `mode` | Avoid in new config. | A required enum like `managed_bundle` adds ceremony without helping the repo author. |
 | `credentials` | Keep as a backward-compatible alias. | Existing preview config already uses it, but it reads more like login credentials than app config secrets. |
 | `credential_set` | Deprecate in favor of `bundle`. | `bundle` covers env vars, files, and external sources. |

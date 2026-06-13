@@ -14,23 +14,19 @@ import (
 type ProviderName string
 
 const (
-	ProviderAnthropic     ProviderName = "anthropic"
-	ProviderOpenAI        ProviderName = "openai"
-	ProviderGemini        ProviderName = "gemini"
-	ProviderAmp           ProviderName = "amp"
-	ProviderPi            ProviderName = "pi"
-	ProviderOpenCode      ProviderName = "opencode"
-	ProviderOpenAIChatGPT ProviderName = "openai_chatgpt"
+	ProviderAnthropic ProviderName = "anthropic"
+	ProviderOpenAI    ProviderName = "openai"
+	ProviderGemini    ProviderName = "gemini"
+	ProviderAmp       ProviderName = "amp"
+	ProviderPi        ProviderName = "pi"
+	ProviderOpenCode  ProviderName = "opencode"
 	// ProviderOpenAISubscription is the canonical name for Codex subscription
-	// credentials on the unified coding_credentials table. ProviderOpenAIChatGPT
-	// is the legacy spelling used by the org_credentials table; it is kept until
-	// the cleanup PR drops it.
+	// credentials on the unified coding_credentials table.
 	ProviderOpenAISubscription ProviderName = "openai_subscription"
 	// ProviderAnthropicSubscription is the canonical name for Claude Code
 	// subscription credentials on the unified coding_credentials table.
-	// Subscription tokens used to live inside AnthropicConfig.Subscription
-	// alongside ProviderAnthropic API keys; the unified table splits them into
-	// their own provider with a dedicated config struct.
+	// Subscription tokens are a distinct provider from ProviderAnthropic
+	// API keys, each with a dedicated config struct.
 	ProviderAnthropicSubscription ProviderName = "anthropic_subscription"
 	ProviderOpenRouter            ProviderName = "openrouter"
 	ProviderGitHubApp             ProviderName = "github_app"
@@ -48,7 +44,7 @@ const (
 // AllProviders is the canonical list of credential providers.
 var AllProviders = []ProviderName{
 	ProviderAnthropic, ProviderAnthropicSubscription,
-	ProviderOpenAI, ProviderOpenAIChatGPT, ProviderOpenAISubscription,
+	ProviderOpenAI, ProviderOpenAISubscription,
 	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenCode, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
 	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
@@ -102,17 +98,13 @@ type ProviderConfig interface {
 type AnthropicConfig struct {
 	APIKey  string `json:"api_key,omitempty"` // #nosec G117 -- JSON config field
 	BaseURL string `json:"base_url,omitempty"`
-
-	// Subscription carries a Claude Code CLI OAuth token (Pro/Max/Team/Enterprise).
-	// Mutually exclusive with APIKey — a single row holds one or the other.
-	Subscription *AnthropicSubscription `json:"subscription,omitempty"`
 }
 
 // AnthropicSubscription holds OAuth tokens issued by the Claude Code CLI
-// authorization-code + PKCE flow. Stored inside AnthropicConfig so
-// subscription rows and API-key rows share the same provider
-// (ProviderAnthropic); the presence of a non-nil Subscription is what marks
-// a row as a subscription credential.
+// authorization-code + PKCE flow. This is the runtime token shape returned by
+// claudecodeauth.GetValidToken and injected into sandboxes; the persisted row
+// shape is AnthropicSubscriptionConfig (provider anthropic_subscription),
+// which carries the identical field set.
 //
 // Field provenance:
 //   - AccessToken/RefreshToken/ExpiresAt come from the /v1/oauth/token endpoint.
@@ -278,6 +270,8 @@ type SlackConfig struct {
 	AccessToken string   `json:"access_token"` // #nosec G117 -- JSON config field
 	TeamID      string   `json:"team_id"`
 	TeamName    string   `json:"team_name"`
+	BotUserID   string   `json:"bot_user_id,omitempty"`
+	BotID       string   `json:"bot_id,omitempty"`
 	Scope       string   `json:"scope"`
 	ChannelIDs  []string `json:"channel_ids"`
 }
@@ -295,29 +289,16 @@ type CircleCIConfig struct {
 	ProjectSlug string `json:"project_slug"`
 }
 
-type OpenAIChatGPTConfig struct {
-	AccessToken  string    `json:"access_token"`       // #nosec G117 -- JSON config field
-	RefreshToken string    `json:"refresh_token"`      // #nosec G117 -- JSON config field
-	IDToken      string    `json:"id_token,omitempty"` // OIDC id_token from OAuth exchange
-	ExpiresAt    time.Time `json:"expires_at"`
-	AccountType  string    `json:"account_type"` // "plus", "pro", "team", "enterprise"
-
-	// Pending device auth fields — only populated during the device code flow.
-	// Stored encrypted so the pending state survives server restarts.
-	DeviceAuthID    string `json:"device_auth_id,omitempty"`
-	UserCode        string `json:"user_code,omitempty"`
-	VerificationURI string `json:"verification_uri,omitempty"`
-	PollInterval    int    `json:"poll_interval,omitempty"`
-}
-
-// IsExpired returns true if the access token has expired.
-func (c OpenAIChatGPTConfig) IsExpired() bool {
-	return time.Now().After(c.ExpiresAt)
-}
-
-// NeedsRefresh returns true if the access token will expire within the given window.
-func (c OpenAIChatGPTConfig) NeedsRefresh(window time.Duration) bool {
-	return time.Now().Add(window).After(c.ExpiresAt)
+// MezmoConfig stores a Mezmo service key plus optional base URL (for
+// self-hosted/enterprise endpoints, defaults to https://api.mezmo.com). Dataset
+// is retained only to parse older saved credentials; new connections reject it
+// because Mezmo's documented v2 export API does not support dataset scoping.
+// This is the persisted credential shape; the runtime provider config lives in
+// internal/services/integration.MezmoConfig, mirroring the CircleCI split.
+type MezmoConfig struct {
+	APIKey  string `json:"api_key"` // #nosec G117 -- JSON config field
+	BaseURL string `json:"base_url,omitempty"`
+	Dataset string `json:"dataset,omitempty"`
 }
 
 // IsExpired returns true if the access token has expired.
@@ -356,37 +337,15 @@ func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAut
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
 func (c CircleCIConfig) Provider() ProviderName      { return ProviderCircleCI }
+func (c MezmoConfig) Provider() ProviderName         { return ProviderMezmo }
 func (c SlackConfig) Provider() ProviderName         { return ProviderSlack }
 func (c NotionConfig) Provider() ProviderName        { return ProviderNotion }
-func (c OpenAIChatGPTConfig) Provider() ProviderName { return ProviderOpenAIChatGPT }
 
 // --- Validate() implementations ---
 
 func (c AnthropicConfig) Validate() error {
-	hasKey := c.APIKey != ""
-	hasSub := c.Subscription != nil
-	if hasKey == hasSub {
-		// Either both set or neither set — both are invalid. A single
-		// AnthropicConfig row holds exactly one credential method.
-		if hasKey {
-			return errors.New("api_key and subscription are mutually exclusive")
-		}
-		return errors.New("api_key or subscription is required")
-	}
-	if hasSub {
-		// A subscription row is valid in one of two shapes:
-		//   1. Active: AccessToken + RefreshToken populated.
-		//   2. Pending PKCE auth: State + CodeVerifier populated, tokens empty.
-		// Anything else is malformed.
-		hasTokens := c.Subscription.AccessToken != "" && c.Subscription.RefreshToken != ""
-		hasPending := c.Subscription.State != "" && c.Subscription.CodeVerifier != ""
-		if hasTokens {
-			return nil
-		}
-		if hasPending {
-			return nil
-		}
-		return errors.New("subscription requires either (access_token + refresh_token) or (state + code_verifier) for a pending auth")
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
 	}
 	return nil
 }
@@ -582,12 +541,9 @@ func (c CircleCIConfig) Validate() error {
 	return nil
 }
 
-func (c OpenAIChatGPTConfig) Validate() error {
-	if c.AccessToken == "" {
-		return errors.New("access_token is required")
-	}
-	if c.RefreshToken == "" {
-		return errors.New("refresh_token is required")
+func (c MezmoConfig) Validate() error {
+	if c.APIKey == "" {
+		return errors.New("api_key is required")
 	}
 	return nil
 }
@@ -595,21 +551,11 @@ func (c OpenAIChatGPTConfig) Validate() error {
 // --- MaskedSummary() implementations ---
 
 func (c AnthropicConfig) MaskedSummary() CredentialSummary {
-	summary := CredentialSummary{
+	return CredentialSummary{
 		Provider:   ProviderAnthropic,
 		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
 	}
-	if c.Subscription != nil {
-		// Skip the masked-key field entirely for subscriptions: MaskKey keeps
-		// the last four characters, which on a JWT is part of the HMAC
-		// signature — the exact high-entropy tail we must not leak. The UI
-		// distinguishes subscriptions via AccountType and the separate
-		// subscription list endpoint, so no masked fingerprint is needed.
-		summary.AccountType = c.Subscription.AccountType
-	} else {
-		summary.MaskedKey = MaskKey(c.APIKey)
-	}
-	return summary
 }
 
 func (c OpenAIConfig) MaskedSummary() CredentialSummary {
@@ -723,12 +669,11 @@ func (c CircleCIConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
-func (c OpenAIChatGPTConfig) MaskedSummary() CredentialSummary {
+func (c MezmoConfig) MaskedSummary() CredentialSummary {
 	return CredentialSummary{
-		Provider:    ProviderOpenAIChatGPT,
-		Configured:  true,
-		MaskedKey:   MaskKey(c.AccessToken),
-		AccountType: c.AccountType,
+		Provider:   ProviderMezmo,
+		Configured: true,
+		MaskedKey:  MaskKey(c.APIKey),
 	}
 }
 
@@ -817,12 +762,6 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 			return nil, fmt.Errorf("invalid linear config: %w", err)
 		}
 		return cfg, nil
-	case ProviderOpenAIChatGPT:
-		var cfg OpenAIChatGPTConfig
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("invalid openai_chatgpt config: %w", err)
-		}
-		return cfg, nil
 	case ProviderOpenAISubscription:
 		var cfg OpenAISubscriptionConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -851,6 +790,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg CircleCIConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parse circleci config: %w", err)
+		}
+		return cfg, nil
+	case ProviderMezmo:
+		var cfg MezmoConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse mezmo config: %w", err)
 		}
 		return cfg, nil
 	default:
@@ -917,7 +862,6 @@ type UserCredential struct {
 	OrgID          uuid.UUID        `db:"org_id"`
 	Provider       ProviderName     `db:"provider"`
 	Config         []byte           `db:"config"`
-	IsTeamDefault  bool             `db:"is_team_default"`
 	Status         CredentialStatus `db:"status"`
 	LastVerifiedAt *time.Time       `db:"last_verified_at"`
 	CreatedAt      time.Time        `db:"created_at"`
@@ -931,7 +875,6 @@ type DecryptedUserCredential struct {
 	OrgID          uuid.UUID        `json:"org_id"`
 	Provider       ProviderName     `json:"provider"`
 	Config         ProviderConfig   `json:"-"`
-	IsTeamDefault  bool             `json:"is_team_default"`
 	Status         CredentialStatus `json:"status"`
 	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
 	UpdatedAt      time.Time        `json:"updated_at"`
@@ -952,18 +895,6 @@ type CredentialSummary struct {
 	AppName     string `json:"app_name,omitempty"`
 	AppID       int64  `json:"app_id,omitempty"`
 	AccountType string `json:"account_type,omitempty"` // OpenAI ChatGPT account tier
-}
-
-// UserCredentialSummary is the API-safe representation of a user credential.
-type UserCredentialSummary struct {
-	Provider       ProviderName     `json:"provider"`
-	Configured     bool             `json:"configured"`
-	IsTeamDefault  bool             `json:"is_team_default"`
-	MaskedKey      string           `json:"masked_key,omitempty"`
-	SetByUserID    *uuid.UUID       `json:"set_by_user_id,omitempty"`
-	SetByUserName  string           `json:"set_by_user_name,omitempty"`
-	Status         CredentialStatus `json:"status,omitempty"`
-	LastVerifiedAt *time.Time       `json:"last_verified_at,omitempty"`
 }
 
 // ResolvedCredential describes which credential source would be used for a provider.

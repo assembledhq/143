@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -985,8 +986,8 @@ func TestAuthHandler_Me(t *testing.T) {
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 					WithArgs(settingsUserID).
 					WillReturnRows(pgxmock.NewRows([]string{
-						"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
-					}).AddRow(settingsUserID, uuid.New(), "me@example.com", "Me", "member", nil, nil, nil, nil, time.Now(), settings))
+						"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
+					}).AddRow(settingsUserID, uuid.New(), "me@example.com", "Me", "member", nil, nil, nil, nil, nil, time.Now(), settings))
 				handler := NewAuthHandler(&config.Config{}, nil, userStore, nil, nil, nil)
 				return handler
 			}(),
@@ -1056,14 +1057,19 @@ func TestAuthHandler_UpdateSettings(t *testing.T) {
 	now := time.Now()
 	settings := []byte(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`)
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 	mock.ExpectExec("UPDATE users SET settings = @settings").
 		WithArgs(pgxmock.AnyArg(), userID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
-		}).AddRow(userID, orgID, "me@example.com", "Me", "admin", nil, nil, nil, nil, now, settings))
+			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
+		}).AddRow(userID, orgID, "me@example.com", "Me", "admin", nil, nil, nil, nil, nil, now, settings))
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/auth/me/settings", bytes.NewBufferString(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`))
 	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{
@@ -1155,9 +1161,25 @@ func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
 			expectedBody: "INVALID_BODY",
 		},
 		{
+			name:         "returns invalid body for non-object patch",
+			handler:      newAuthHandlerWithUserStore(t, nil),
+			body:         `[{"diff_viewer_full_screen":true}]`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_BODY",
+		},
+		{
 			name:         "returns invalid settings for unsupported effort",
 			handler:      newAuthHandlerWithUserStore(t, nil),
 			body:         `{"coding_agent_reasoning_defaults":{"codex":"max"}}`,
+			setupCtx:     withAuthUser,
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_USER_SETTINGS",
+		},
+		{
+			name:         "returns invalid settings for unknown patch field",
+			handler:      newAuthHandlerWithUserStore(t, nil),
+			body:         `{"not_a_setting":null}`,
 			setupCtx:     withAuthUser,
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_USER_SETTINGS",
@@ -1169,9 +1191,14 @@ func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
 				require.NoError(t, err, "should create pgxmock pool without error")
 				t.Cleanup(func() { mock.Close() })
 				userID := authCoverageUserID
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 				mock.ExpectExec("UPDATE users SET settings = @settings").
 					WithArgs(pgxmock.AnyArg(), userID).
 					WillReturnError(errors.New("write failed"))
+				mock.ExpectRollback()
 				return NewAuthHandler(&config.Config{}, nil, db.NewUserStore(mock), nil, nil, nil)
 			}(),
 			body:         `{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`,
@@ -1186,9 +1213,14 @@ func TestAuthHandler_UpdateSettings_ErrorPaths(t *testing.T) {
 				require.NoError(t, err, "should create pgxmock pool without error")
 				t.Cleanup(func() { mock.Close() })
 				userID := authCoverageUserID
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 				mock.ExpectExec("UPDATE users SET settings = @settings").
 					WithArgs(pgxmock.AnyArg(), userID).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectCommit()
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 					WithArgs(userID).
 					WillReturnError(errors.New("reload failed"))
@@ -1956,6 +1988,10 @@ func TestAuthHandler_Register_WithInvitation_Success(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO users").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(newUserID, time.Now()))
+	// Claiming the emailed token proves address receipt → verification stamp.
+	mock.ExpectExec("UPDATE users SET email_verified_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// Membership upsert inside the signup tx.
 	mock.ExpectQuery("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3585,18 +3621,476 @@ func TestFetchGitHubNoreplyEmail(t *testing.T) {
 	})
 }
 
-func TestAuthHandler_FetchGitHubNoreplyEmail_DelegatesToInjectedURL(t *testing.T) {
+func TestAuthHandler_FetchGitHubEmails_DelegatesToInjectedURL(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/user/emails", r.URL.Path, "AuthHandler should probe the API base + /user/emails")
-		_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+		_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true},{"email":"alice@assembledhq.com","primary":true,"verified":true}]`))
 	}))
 	defer server.Close()
 
 	handler := NewAuthHandler(&config.Config{}, nil, nil, nil, nil, nil)
 	handler.SetGitHubURLsForTest(server.URL, "", server.Client())
 
-	got := handler.fetchGitHubNoreplyEmail(context.Background(), "ghu_token", 42, "alicehub")
-	require.Equal(t, "42+alicehub@users.noreply.github.com", got, "AuthHandler.fetchGitHubNoreplyEmail should delegate to the injected GitHub API base + httptest server")
+	emails := handler.fetchGitHubEmails(context.Background(), "ghu_token")
+	got := selectGitHubNoreplyEmail(emails, 42, "alicehub")
+	require.Equal(t, "42+alicehub@users.noreply.github.com", got, "noreply selection should use the injected GitHub API base + httptest server")
+	require.True(t, gitHubEmailVerified(emails, "alice@assembledhq.com"), "verified flag should be readable from the same fetch")
+	require.True(t, gitHubEmailVerified(emails, "ALICE@assembledhq.com"), "verification match is case-insensitive")
+	require.False(t, gitHubEmailVerified(emails, "other@assembledhq.com"), "addresses absent from /user/emails are not verified")
+}
+
+// TestAuthHandler_Callback_DomainAutoJoin pins the domain-capture signup
+// path: a brand-new GitHub user whose GitHub-verified email is on a domain
+// some org has DNS-verified with auto-join enabled must be created directly
+// as a member of that org — no fresh single-user org.
+func TestAuthHandler_Callback_DomainAutoJoin(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userID := uuid.New()
+	orgID := uuid.New()
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+
+	// Brand-new user: no GitHub-id match, no email match.
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\) = LOWER\(@email\)`).
+		WithArgs("alice@assembledhq.com").
+		WillReturnRows(pgxmock.NewRows(userColumns))
+
+	// Domain lookup finds the verified auto-join org. Queried twice: once
+	// by selectGitHubAutoJoinEmail (choosing which address to capture
+	// with) and once inside tryDomainAutoJoin (resolving the target org).
+	for range 2 {
+		mock.ExpectQuery("SELECT d.org_id, o.name AS org_name, d.domain").
+			WithArgs("assembledhq.com").
+			WillReturnRows(pgxmock.NewRows([]string{"org_id", "org_name", "domain"}).
+				AddRow(orgID, "Assembled", "assembledhq.com"))
+	}
+
+	// createAutoJoinUser transaction: user upsert, membership grant at
+	// member, email-verification stamp, session — all-or-nothing.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+	mock.ExpectQuery("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec("UPDATE users SET email_verified_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE users SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUserLastOrgLookup(mock, userID, &orgID)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+	mock.ExpectCommit()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"alice@assembledhq.com","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"alice@assembledhq.com","primary":true,"verified":true},{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		db.NewOrganizationMembershipStore(mock),
+	)
+	handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "auto-join signup should complete and redirect")
+	location, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err, "redirect location should parse as a URL")
+	require.Equal(t, "http://frontend.test", location.Scheme+"://"+location.Host, "should redirect to the configured frontend")
+	require.Equal(t, orgID.String(), location.Query().Get("joined_org"), "domain auto-join redirects should carry the joined org provenance")
+	require.Equal(t, "domain", location.Query().Get("joined_via"), "domain auto-join redirects should name the join source")
+	require.NoError(t, mock.ExpectationsWereMet(), "the auto-join transaction must run exactly as specified — no fresh-org INSERT INTO organizations")
+}
+
+// TestAuthHandler_Callback_DomainAutoJoinSkipsUnverifiedEmail pins the
+// security boundary: a GitHub profile email NOT attested in /user/emails
+// must not trigger domain capture, even when the domain matches a verified
+// auto-join org. The signup falls back to the classic fresh-org path.
+func TestAuthHandler_Callback_DomainAutoJoinSkipsUnverifiedEmail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userID := uuid.New()
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\) = LOWER\(@email\)`).
+		WithArgs("alice@assembledhq.com").
+		WillReturnRows(pgxmock.NewRows(userColumns))
+
+	// NO domain lookup expectation: tryDomainAutoJoin must short-circuit on
+	// the unverified email before ever querying organization_domains.
+	// Classic signup transaction instead: fresh org + admin membership.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectUserLastOrgLookup(mock, userID, nil)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+	mock.ExpectCommit()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"alice@assembledhq.com","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			// The profile email is conspicuously absent / unverified.
+			_, _ = w.Write([]byte(`[{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		db.NewOrganizationMembershipStore(mock),
+	)
+	handler.SetOrgDomainStore(db.NewOrganizationDomainStore(mock))
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "fallback signup should complete and redirect")
+	require.NoError(t, mock.ExpectationsWereMet(), "unverified email must take the fresh-org path, never the auto-join path")
+}
+
+// fakeGitHubOrgVerifier is a test double for the IsActiveOrgMember live check.
+type fakeGitHubOrgVerifier struct {
+	active bool
+	err    error
+}
+
+func (f *fakeGitHubOrgVerifier) IsActiveOrgMember(_ context.Context, _ int64, _, _ string) (bool, error) {
+	return f.active, f.err
+}
+
+// TestAuthHandler_Callback_GitHubOrgAutoJoin_NewUser verifies that a brand-new
+// GitHub OAuth user is placed into the captured workspace when the roster lookup
+// finds a match and the live membership check confirms active membership.
+func TestAuthHandler_Callback_GitHubOrgAutoJoin_NewUser(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userID := uuid.New()
+	orgID := uuid.New()
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+	accountType := "Organization"
+
+	// No existing GitHub-id or email match — new user.
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\) = LOWER\(@email\)`).
+		WithArgs("alice@assembledhq.com").
+		WillReturnRows(pgxmock.NewRows(userColumns))
+
+	// Roster lookup returns one matching capture.
+	mock.ExpectQuery("FROM github_org_members").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"org_id", "org_name", "installation_id", "account_login", "account_type", "enabled_at",
+		}).AddRow(orgID, "Assembled", int64(12345), "assembledhq", &accountType, now))
+
+	// Auto-join signup transaction: user create, membership grant, org pin, session.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+	mock.ExpectQuery("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectExec("UPDATE users SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	expectUserLastOrgLookup(mock, userID, &orgID)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+	mock.ExpectCommit()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"alice@assembledhq.com","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"alice@assembledhq.com","primary":true,"verified":true},{"email":"42+alicehub@users.noreply.github.com","verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		db.NewOrganizationMembershipStore(mock),
+	)
+	handler.SetGitHubOrgAutoJoinDeps(db.NewGitHubInstallationStore(mock), &fakeGitHubOrgVerifier{active: true})
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "github org auto-join signup should redirect")
+	location, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err, "redirect location should parse as a URL")
+	require.Equal(t, orgID.String(), location.Query().Get("joined_org"), "github org auto-join signup should carry joined_org in redirect")
+	require.Equal(t, "github_org", location.Query().Get("joined_via"), "github org auto-join signup should identify the join source")
+	require.Equal(t, "assembledhq", location.Query().Get("github_org"), "github org auto-join signup should include the org login")
+	require.NoError(t, mock.ExpectationsWereMet(), "all db expectations must be met — no fresh org should be created")
+}
+
+// TestAuthHandler_Callback_GitHubOrgAutoJoin_LiveCheckFails verifies that a
+// failed live membership check falls through to the standard fresh-org signup
+// without granting access to the captured workspace.
+func TestAuthHandler_Callback_GitHubOrgAutoJoin_LiveCheckFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userID := uuid.New()
+	orgID := uuid.New()
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+	accountType := "Organization"
+
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows(userColumns))
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE LOWER\(email\) = LOWER\(@email\)`).
+		WithArgs("alice@assembledhq.com").
+		WillReturnRows(pgxmock.NewRows(userColumns))
+
+	// Roster finds a candidate but the live check returns false (not a member).
+	mock.ExpectQuery("FROM github_org_members").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"org_id", "org_name", "installation_id", "account_login", "account_type", "enabled_at",
+		}).AddRow(orgID, "Assembled", int64(12345), "assembledhq", &accountType, now))
+
+	// No domain lookup either — falls through to fresh org creation.
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* RETURNING id, created_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+	mock.ExpectExec("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	expectUserLastOrgLookup(mock, userID, nil)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+	mock.ExpectCommit()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"alice@assembledhq.com","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"alice@assembledhq.com","primary":true,"verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		db.NewOrganizationMembershipStore(mock),
+	)
+	// Live check says not a member → fallback to fresh org.
+	handler.SetGitHubOrgAutoJoinDeps(db.NewGitHubInstallationStore(mock), &fakeGitHubOrgVerifier{active: false})
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "failed live check should fall back to fresh org signup")
+	location, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err, "redirect should be parseable")
+	require.Empty(t, location.Query().Get("joined_org"), "failed live check must not set joined_org on the redirect")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed live check must take the fresh-org path, never the auto-join path")
+}
+
+// TestAuthHandler_Callback_GitHubOrgAutoJoin_ExistingUserGainsMembership
+// verifies that an already-authenticated user who logs in again is granted
+// membership in a newly-captured org they belong to.
+func TestAuthHandler_Callback_GitHubOrgAutoJoin_ExistingUserGainsMembership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	now := time.Now()
+	userID := uuid.New()
+	orgID := uuid.New()
+	ghID := int64(42)
+	ghLogin := "alicehub"
+	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
+	accountType := "Organization"
+
+	// Existing user found by GitHub ID.
+	mock.ExpectQuery("SELECT .* FROM users WHERE github_id").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows(userColumns).
+			AddRow(userID, uuid.New(), "alice@assembledhq.com", "Alice Hub", "member", &ghID, &ghLogin, nil, nil, nil, nil, now))
+
+	// UpsertFromGitHub refreshes the user's name/login/avatar on every login.
+	mock.ExpectQuery("INSERT INTO users .* ON CONFLICT .* DO UPDATE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(userID, now))
+
+	// markGitHubEmailVerified stamps the email as verified.
+	mock.ExpectExec("UPDATE users SET email_verified_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Roster finds the capture for this user's GitHub ID.
+	mock.ExpectQuery("FROM github_org_members").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"org_id", "org_name", "installation_id", "account_login", "account_type", "enabled_at",
+		}).AddRow(orgID, "Assembled", int64(12345), "assembledhq", &accountType, now))
+
+	// Not yet a member of the captured org.
+	mock.ExpectQuery("SELECT .* FROM organization_memberships WHERE user_id").
+		WithArgs(userID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at", "updated_at"}))
+
+	// Grant member role.
+	mock.ExpectQuery("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+
+	// Pin last_org_id to the new org.
+	mock.ExpectExec("UPDATE users SET last_org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Session creation (non-tx path for existing user login).
+	// storeGitHubToken is skipped because userCredentials is not wired.
+	expectUserLastOrgLookup(mock, userID, &orgID)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), now))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/oauth/access_token":
+			_, _ = w.Write([]byte(`{"access_token":"ghu_token","token_type":"bearer","scope":"repo,user:email"}`))
+		case "/user":
+			_, _ = w.Write([]byte(`{"id":42,"login":"alicehub","name":"Alice Hub","email":"alice@assembledhq.com","avatar_url":"https://example.com/avatar.png"}`))
+		case "/user/emails":
+			_, _ = w.Write([]byte(`[{"email":"alice@assembledhq.com","primary":true,"verified":true}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	handler := NewAuthHandler(
+		&config.Config{FrontendURL: "http://frontend.test"},
+		mock,
+		db.NewUserStore(mock),
+		db.NewAuthSessionStore(mock),
+		nil,
+		db.NewOrganizationMembershipStore(mock),
+	)
+	// No userCredentials wired — storeGitHubToken is a no-op, simplifying mock setup.
+	handler.SetGitHubOrgAutoJoinDeps(db.NewGitHubInstallationStore(mock), &fakeGitHubOrgVerifier{active: true})
+	handler.SetGitHubURLsForTest(server.URL, server.URL, server.Client())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/github/callback?state=valid-state&code=test-code", nil)
+	req.AddCookie(&http.Cookie{Name: "github_oauth_state", Value: "valid-state"})
+	w := httptest.NewRecorder()
+
+	handler.Callback(w, req)
+	require.Equal(t, http.StatusTemporaryRedirect, w.Code, "existing user github org auto-join should redirect")
+	location, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err, "redirect location should parse")
+	require.Equal(t, orgID.String(), location.Query().Get("joined_org"), "existing user auto-join should carry joined_org in redirect")
+	require.Equal(t, "github_org", location.Query().Get("joined_via"), "existing user auto-join should identify the join source")
+	require.NoError(t, mock.ExpectationsWereMet(), "all membership grant expectations must be met")
 }

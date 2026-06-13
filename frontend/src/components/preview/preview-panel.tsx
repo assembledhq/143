@@ -48,12 +48,14 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
+import { pollMs } from "@/lib/poll-intervals";
 import {
   PREVIEW_ERROR_CODES,
   type PreviewStatus,
   type PreviewInfrastructure,
   type PreviewService,
   type PreviewFreshnessState,
+  type PreviewRestartReason,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
 import { DesignModeOverlay } from "./design-mode-overlay";
@@ -118,9 +120,9 @@ function getStartupPhaseRailLayout(
 function statusColor(status: PreviewStatus): string {
   switch (status) {
     case "ready":
-      return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/20";
+      return "bg-success/15 text-success border-success/20";
     case "partially_ready":
-      return "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20";
+      return "bg-warning/15 text-warning border-warning/20";
     case "failed":
     case "unhealthy":
       return "bg-destructive/15 text-destructive border-destructive/20";
@@ -145,6 +147,7 @@ function buildStartupChecklist(
   status: PreviewStatus | undefined,
   services: PreviewService[],
   infrastructure: PreviewInfrastructure[],
+  unavailableReason?: string,
 ): StartupChecklistStep[] {
   // When the parent preview reaches a terminal state, force any child rows
   // that were still pending to render as terminal too. The backend cascades
@@ -195,7 +198,9 @@ function buildStartupChecklist(
         : status === "failed"
           ? "Preview startup failed before the app became reachable."
           : status === "unavailable"
-            ? "The worker runtime that owned this preview is unavailable."
+            ? unavailableReason === "endpoint_unreachable"
+              ? "Worker connection lost before the preview could be opened."
+              : "The worker runtime that owned this preview is unavailable."
             : "Waiting for the preview URL to become reachable.";
 
   const steps: StartupChecklistStep[] = [];
@@ -273,7 +278,7 @@ function buildStartupChecklist(
 function startupStepIcon(state: StartupChecklistStepState) {
   switch (state) {
     case "complete":
-      return <CheckCircle2 className="size-3.5 text-emerald-500" />;
+      return <CheckCircle2 className="size-3.5 text-success" />;
     case "active":
       return <Loader2 className="size-3.5 animate-spin text-primary" />;
     case "failed":
@@ -301,6 +306,22 @@ function getStartupSubtitle(
   }
 
   return "Starting services";
+}
+
+function unavailablePreviewRecoveryCopy(unavailableReason?: string) {
+  if (unavailableReason === "endpoint_unreachable") {
+    return {
+      title: "Preview connection lost",
+      description:
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+    };
+  }
+
+  return {
+    title: "No preview running",
+    description:
+      "Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.",
+  };
 }
 
 function formatPreviewShutdownTime(expiresAt: string): string {
@@ -410,6 +431,12 @@ function freshnessLabel(
   if (mutationPending || freshness === "updating") {
     return "Updating preview...";
   }
+  if (freshness === "live_updated") {
+    return "Updated live";
+  }
+  if (freshness === "restart_required") {
+    return "Restart required";
+  }
   if (freshness === "out_of_date") {
     return "New changes available";
   }
@@ -417,6 +444,30 @@ function freshnessLabel(
     return "Preview freshness could not be verified.";
   }
   return undefined;
+}
+
+function restartReasonHelpText(
+  reasons: PreviewRestartReason[] | undefined,
+): string {
+  const reason = reasons?.[0];
+  if (reason?.detail) {
+    return reason.detail;
+  }
+
+  switch (reason?.kind) {
+    case "dependency_changed":
+      return "Dependencies changed. Restart to install and apply them.";
+    case "preview_config_changed":
+      return "Preview configuration changed. Restart to apply the new startup settings.";
+    case "build_config_changed":
+      return "Build configuration changed. Restart to rebuild with the new settings.";
+    case "environment_config_changed":
+      return "Environment configuration changed. Restart to reload the preview environment.";
+    case "database_schema_changed":
+      return "Database schema changed. Restart to apply the schema update.";
+    default:
+      return "Restart the preview to apply changes that cannot update live.";
+  }
 }
 
 export function PreviewPanel({
@@ -486,7 +537,7 @@ export function PreviewPanel({
       ) {
         return false;
       }
-      return 3000;
+      return pollMs(3000);
     },
     retry: (failureCount, error) => {
       // Don't retry NO_ACTIVE_PREVIEW — it's a normal state, not a transient failure.
@@ -509,7 +560,11 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const unavailableReason = instance?.unavailable_reason;
+  const isEndpointUnreachable =
+    status === "unavailable" && unavailableReason === "endpoint_unreachable";
   const freshnessState = previewStatus?.freshness?.state;
+  const restartReasons = previewStatus?.freshness?.restart_reasons;
   const lastPreviewStoppedAt =
     status === "stopped" || status === "expired" || status === "unavailable"
       ? instance?.stopped_at || instance?.updated_at
@@ -539,7 +594,7 @@ export function PreviewPanel({
         ? api.sessions.preview.logs(sessionId, { tail: true })
         : api.sessions.preview.logs(sessionId),
     enabled: Boolean(instance) && shouldLoadPreviewLogs,
-    refetchInterval: previewLogsTail ? 2000 : false,
+    refetchInterval: previewLogsTail ? pollMs(2000) : false,
     retry: 1,
   });
   const startupErrorLogs = useMemo(() => {
@@ -839,34 +894,51 @@ export function PreviewPanel({
     lifetimeMutation.isPending;
   const showStartupCanvas = isPreparing;
   const isPreviewOutOfDate = freshnessState === "out_of_date";
+  const isPreviewLiveUpdated = freshnessState === "live_updated";
+  const isPreviewRestartRequired = freshnessState === "restart_required";
   const isPreviewFreshnessUnknown = freshnessState === "unknown";
   const freshnessText = freshnessLabel(freshnessState, startMutation.isPending);
   const freshnessCalloutText =
-    isManageable && !isPreviewFreshnessUnknown ? freshnessText : undefined;
+    isManageable &&
+    !isPreviewFreshnessUnknown &&
+    !isPreviewLiveUpdated
+      ? freshnessText
+      : undefined;
   const previewRecoveryAction =
-    isPreviewOutOfDate && isReady
+    isPreviewRestartRequired && isReady
+      ? "restart"
+      : isPreviewOutOfDate && isReady
       ? "refresh"
       : status === "failed" || status === "unhealthy"
         ? "retry"
         : undefined;
+  const shouldShowRestartPreview = previewRecoveryAction === "restart";
   const shouldShowRefreshPreview = previewRecoveryAction === "refresh";
   const shouldShowRetryPreview = previewRecoveryAction === "retry";
-  const freshnessOutOfDateHelpText =
-    previewRecoveryAction === "refresh"
-      ? "Restart the preview to see the latest session changes."
-      : previewRecoveryAction === "retry"
-        ? "Retry the preview to use the latest session changes."
-        : undefined;
+  const freshnessHelpText =
+    previewRecoveryAction === "restart"
+      ? restartReasonHelpText(restartReasons)
+      : previewRecoveryAction === "refresh"
+        ? "Restart the preview to see the latest session changes."
+        : previewRecoveryAction === "retry"
+          ? "Retry the preview to use the latest session changes."
+          : undefined;
   const startupFreshnessText =
     showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
+  const startupEstimate = previewStatus?.startup_estimate;
+  const startupEstimateLabel =
+    startupEstimate && startupEstimate.sample_count >= 5
+      ? startupEstimate.label
+      : undefined;
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
-        ? buildStartupChecklist(status, services, infrastructure)
+        ? buildStartupChecklist(status, services, infrastructure, unavailableReason)
         : [],
-    [showStartupProgress, status, services, infrastructure],
+    [showStartupProgress, status, services, infrastructure, unavailableReason],
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
+  const idleRecoveryCopy = unavailablePreviewRecoveryCopy(unavailableReason);
   const showTopControls =
     status !== "starting" &&
     status !== "stopped" &&
@@ -928,7 +1000,8 @@ export function PreviewPanel({
                     <ConsoleBadge sessionId={sessionId} />
                   </ErrorBoundary>
                 )}
-                {isPreviewFreshnessUnknown && freshnessText && (
+                {(isPreviewFreshnessUnknown || isPreviewLiveUpdated) &&
+                  freshnessText && (
                   <span>{freshnessText}</span>
                 )}
               </div>
@@ -1008,13 +1081,13 @@ export function PreviewPanel({
               data-testid="preview-freshness-callout"
               className={cn(
                 "flex flex-col gap-3 rounded-md border px-2.5 py-2 text-xs sm:flex-row sm:items-center sm:justify-between",
-                isPreviewOutOfDate
-                  ? "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200"
+                isPreviewOutOfDate || isPreviewRestartRequired
+                  ? "border-warning/25 bg-warning/10 text-warning"
                   : "border-border bg-muted/40 text-muted-foreground",
               )}
             >
               <div className="flex min-w-0 items-start gap-2">
-                {isPreviewOutOfDate ? (
+                {isPreviewOutOfDate || isPreviewRestartRequired ? (
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
                 ) : (
                   <RefreshCw
@@ -1026,13 +1099,30 @@ export function PreviewPanel({
                 )}
                 <div className="min-w-0">
                   <div className="font-medium">{freshnessCalloutText}</div>
-                  {freshnessOutOfDateHelpText && (
+                  {freshnessHelpText && (
                     <div className="text-muted-foreground">
-                      {freshnessOutOfDateHelpText}
+                      {freshnessHelpText}
                     </div>
                   )}
                 </div>
               </div>
+              {shouldShowRestartPreview && (
+                <div className="flex shrink-0 justify-start sm:justify-end">
+                  <Button
+                    size="sm"
+                    variant="default"
+                    className="w-full sm:w-auto"
+                    onClick={() => restartMutation.mutate()}
+                    disabled={isMutating}
+                    loading={restartMutation.isPending}
+                  >
+                    {!restartMutation.isPending && (
+                      <RotateCw className="size-3.5" />
+                    )}
+                    Restart preview
+                  </Button>
+                </div>
+              )}
               {shouldShowRefreshPreview && (
                 <div className="flex shrink-0 justify-start sm:justify-end">
                   <Button
@@ -1127,6 +1217,11 @@ export function PreviewPanel({
                     {startupFreshnessText}
                   </p>
                 )}
+                {startupEstimateLabel && (
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {startupEstimateLabel}
+                  </p>
+                )}
               </div>
               <div
                 ref={startupPhaseRailRef}
@@ -1152,7 +1247,7 @@ export function PreviewPanel({
                         step.state === "active" &&
                           "border-primary/30 text-foreground shadow-sm",
                         step.state === "complete" &&
-                          "text-emerald-600 dark:text-emerald-400",
+                          "text-success",
                         step.state === "failed" &&
                           "border-destructive/30 text-destructive",
                       )}
@@ -1202,7 +1297,7 @@ export function PreviewPanel({
                   onClick={() => copyLogs("preview", visiblePreviewRuntimeLogs)}
                 >
                   {copiedLogTarget === "preview" ? (
-                    <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                    <Check className="size-3.5 text-success" aria-hidden="true" />
                   ) : (
                     <Copy className="size-3.5" aria-hidden="true" />
                   )}
@@ -1226,7 +1321,7 @@ export function PreviewPanel({
       )}
 
       {/* Failure diagnostics */}
-      {status === "failed" && instance && (
+      {(status === "failed" || (isEndpointUnreachable && hasStartupRows)) && instance && (
         <Card
           role="alert"
           className={cn(
@@ -1242,10 +1337,14 @@ export function PreviewPanel({
                 </div>
                 <div className="min-w-0">
                   <div className="text-sm font-medium leading-5 text-foreground">
-                    Preview failed to start
+                    {isEndpointUnreachable
+                      ? "Preview connection lost"
+                      : "Preview failed to start"}
                   </div>
                   <div className="text-xs leading-5 text-muted-foreground">
-                    The app never became reachable during startup.
+                    {isEndpointUnreachable
+                      ? "The worker that was serving this preview stopped responding."
+                      : "The app never became reachable during startup."}
                   </div>
                 </div>
               </div>
@@ -1301,7 +1400,7 @@ export function PreviewPanel({
                       onClick={() => copyLogs("error", visibleStartupErrorLogs)}
                     >
                       {copiedLogTarget === "error" ? (
-                        <Check className="size-3.5 text-emerald-500" aria-hidden="true" />
+                        <Check className="size-3.5 text-success" aria-hidden="true" />
                       ) : (
                         <Copy className="size-3.5" aria-hidden="true" />
                       )}
@@ -1404,10 +1503,9 @@ export function PreviewPanel({
               <Monitor className="size-5 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">No preview running</p>
+              <p className="text-sm font-medium">{idleRecoveryCopy.title}</p>
               <p className="text-xs text-muted-foreground">
-                Start a preview to see live changes from the agent. Note that it
-                can take a few minutes for the environment to finish booting.
+                {idleRecoveryCopy.description}
               </p>
               {instance?.created_at && lastPreviewStoppedAt && (
                 <div className="flex flex-wrap items-center justify-center gap-2">

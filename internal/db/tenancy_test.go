@@ -88,6 +88,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"users", "where github_id"},                                    // pre-auth lookup by GitHub ID
 		{"users", "where lower(email)"},                                 // pre-auth lookup by email (case-insensitive)
 		{"users", "where google_id"},                                    // pre-auth lookup by Google ID
+		{"users", "set email_verified_at"},                              // MarkEmailVerified: user-scoped identity write by globally unique user id + provider-asserted email
 		// GetByIDGlobal: the auth middleware loads user identity *before* the
 		// active-org is resolved (multi-org users; org comes from the session
 		// hint or X-Active-Org-ID header against organization_memberships, not
@@ -103,9 +104,14 @@ func TestMultiTenancyAudit(t *testing.T) {
 		// "users WHERE id = @id" without org_id must add its own exemption
 		// (with its own justification) rather than silently piggybacking.
 		{"users", "where id = @id`"},
+		// MergeSettings: user-scoped settings merge locks the user row by
+		// primary key inside the patch transaction. Same backtick anchoring
+		// rationale as the exemption above.
+		{"users", "where id = @id for update`"},
 
 		{"organization_memberships", "count(*) from organization_memberships where user_id"}, // CountForUser: user-scoped aggregate; the membership set IS the authoritative org list
 		{"coding_credentials", "where status = 'pending_auth'"},                              // JanitorDeletePendingAuthOlderThan: cross-org system cleanup of expired OAuth handshakes
+		{"coding_credentials", "rt.status = 'pending_auth'"},                                 // JanitorDeletePendingAuthOlderThan (versioned runtime state): same cross-org system cleanup
 		{"coding_credentials", "where provider = 'anthropic'"},                               // EnsureAnthropicSplitSentinel: cross-org migration gate before serving traffic
 		{"coding_credentials", "coding_credentials_migrations"},                              // global migration-sentinel table; name prefix overlaps coding_credentials
 	}

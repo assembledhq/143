@@ -11,6 +11,7 @@ const {
   revokeInvitationMock,
   githubInviteStatusMock,
   searchGitHubUsersMock,
+  auditLogsListMock,
   currentUserMock,
 } = vi.hoisted(() => ({
   listMembersMock: vi.fn().mockResolvedValue({
@@ -57,6 +58,7 @@ const {
   revokeInvitationMock: vi.fn().mockResolvedValue(undefined),
   githubInviteStatusMock: vi.fn().mockResolvedValue({ data: { connected: false } }),
   searchGitHubUsersMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
+  auditLogsListMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
   currentUserMock: {
     id: 'user-1',
     email: 'admin@example.com',
@@ -80,6 +82,9 @@ vi.mock('@/lib/api', () => ({
     auth: {
       me: vi.fn().mockResolvedValue({ data: { id: 'user-1', email: 'admin@example.com', name: 'Admin User', role: 'admin' } }),
     },
+    auditLogs: {
+      list: auditLogsListMock,
+    },
   },
 }));
 
@@ -100,6 +105,8 @@ describe('TeamSettingsPage', () => {
     revokeInvitationMock.mockClear();
     githubInviteStatusMock.mockClear();
     searchGitHubUsersMock.mockClear();
+    auditLogsListMock.mockReset();
+    auditLogsListMock.mockResolvedValue({ data: [], meta: {} });
     currentUserMock.id = 'user-1';
     currentUserMock.email = 'admin@example.com';
     currentUserMock.name = 'Admin User';
@@ -116,6 +123,27 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByText('Member User')).toBeInTheDocument();
     expect(screen.getByText('admin@example.com')).toBeInTheDocument();
     expect(screen.getByText('member@example.com')).toBeInTheDocument();
+  });
+
+  it('renders team activity as a low-priority footer', async () => {
+    auditLogsListMock.mockResolvedValue({
+      data: [{
+        id: 'audit-team-1',
+        org_id: 'org-1',
+        actor_type: 'user',
+        actor_id: 'user-1',
+        user_id: 'user-1',
+        action: 'team.member.role_changed',
+        resource_type: 'team_member',
+        created_at: new Date(Date.now() - 3 * 60000).toISOString(),
+      }],
+      meta: {},
+    });
+
+    renderWithProviders(<TeamSettingsPage />);
+
+    expect(await screen.findByText(/Last activity:/)).toBeInTheDocument();
+    expect(screen.getByText(/Updated .* ago by Admin User/)).toBeInTheDocument();
   });
 
   it('renders the members in list format with column headers', async () => {
@@ -361,6 +389,45 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(removeMemberMock).toHaveBeenCalledWith('user-2');
     });
+  });
+
+  it('warns when removing a member who can rejoin through a captured GitHub org', async () => {
+    listMembersMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'user-1',
+          org_id: 'org-1',
+          email: 'admin@example.com',
+          name: 'Admin User',
+          role: 'admin',
+          avatar_url: 'https://example.com/avatar.png',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+        {
+          id: 'user-2',
+          org_id: 'org-1',
+          email: 'member@example.com',
+          name: 'Member User',
+          role: 'member',
+          avatar_url: null,
+          captured_github_org_login: 'acme',
+          created_at: '2026-01-02T00:00:00Z',
+        },
+      ],
+      meta: {},
+    });
+
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Member User')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Remove' }));
+
+    expect(await screen.findByText(/They're a member of acme on GitHub/)).toBeInTheDocument();
+    expect(screen.getByText(/will rejoin on their next sign-in/)).toBeInTheDocument();
   });
 
   it('cancels member removal when Cancel is clicked in confirmation dialog', async () => {

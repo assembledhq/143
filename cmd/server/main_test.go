@@ -35,6 +35,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 		previewInternalBaseURL string
 		wantPreviewCapable     bool
 		wantInternalBaseURL    string
+		wantAuthCheck          bool
 	}{
 		{
 			name:                   "preview-capable worker advertises both fields",
@@ -42,6 +43,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 			previewInternalBaseURL: "http://worker-1:8080",
 			wantPreviewCapable:     true,
 			wantInternalBaseURL:    "http://worker-1:8080",
+			wantAuthCheck:          true,
 		},
 		{
 			name:                   "non-preview-capable node omits preview_capable",
@@ -63,7 +65,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL)
+			metadata := buildBaseMetadata(tt.previewCapable, tt.previewInternalBaseURL, "")
 
 			if _, ok := metadata["build_sha"]; !ok {
 				t.Errorf("expected build_sha to always be present")
@@ -86,6 +88,15 @@ func TestBuildBaseMetadata(t *testing.T) {
 			} else if hasURL {
 				t.Errorf("expected preview_internal_base_url to be omitted, got %v", gotURL)
 			}
+
+			gotAuthCheck, hasAuthCheck := metadata["preview_rpc_auth_check"]
+			if tt.wantAuthCheck {
+				if !hasAuthCheck || gotAuthCheck != true {
+					t.Errorf("expected preview_rpc_auth_check=true, got %v (present=%v)", gotAuthCheck, hasAuthCheck)
+				}
+			} else if hasAuthCheck {
+				t.Errorf("expected preview_rpc_auth_check to be omitted, got %v", gotAuthCheck)
+			}
 		})
 	}
 }
@@ -97,7 +108,7 @@ func TestBuildBaseMetadata(t *testing.T) {
 func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, nil)
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -106,6 +117,9 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 	}
 	if got, ok := metadata["preview_internal_base_url"]; !ok || got != "http://worker-1:8080" {
 		t.Errorf("preview_internal_base_url must persist across worker startup, got %v (present=%v)", got, ok)
+	}
+	if got, ok := metadata["preview_rpc_auth_check"]; !ok || got != true {
+		t.Errorf("preview_rpc_auth_check must persist across worker startup, got %v (present=%v)", got, ok)
 	}
 	if _, ok := metadata["active_job_count"]; !ok {
 		t.Errorf("expected active_job_count to be present in worker metadata")
@@ -118,12 +132,15 @@ func TestBuildWorkerMetadataProvider_PreservesPreviewFields(t *testing.T) {
 func TestBuildWorkerMetadataProvider_NonPreviewCapable(t *testing.T) {
 	t.Parallel()
 
-	provider := buildWorkerMetadataProvider(nil, false, "", func() bool { return true }, nil)
+	provider := buildWorkerMetadataProvider(nil, false, "", "", func() bool { return true }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
 	if _, ok := metadata["preview_capable"]; ok {
 		t.Errorf("preview_capable should be omitted when worker is not preview-capable")
+	}
+	if _, ok := metadata["preview_rpc_auth_check"]; ok {
+		t.Errorf("preview_rpc_auth_check should be omitted when worker is not preview-capable")
 	}
 	if _, ok := metadata["preview_internal_base_url"]; ok {
 		t.Errorf("preview_internal_base_url should be omitted when not configured")
@@ -134,15 +151,58 @@ func TestBuildWorkerMetadataProvider_DelaysPreviewCapabilityUntilReady(t *testin
 	t.Parallel()
 
 	ready := false
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return ready }, nil)
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return ready }, nil, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 	require.NotContains(t, metadata, "preview_capable", "preview_capable should be hidden until the HTTP listener is bound")
+	require.NotContains(t, metadata, "preview_rpc_auth_check", "preview auth-check capability should be hidden until the HTTP listener is bound")
 	require.Equal(t, "http://worker-1:8080", metadata["preview_internal_base_url"], "preview internal URL should remain available in metadata")
 
 	ready = true
 	metadata = provider()
 	require.Equal(t, true, metadata["preview_capable"], "preview_capable should be advertised once routing is ready")
+	require.Equal(t, true, metadata["preview_rpc_auth_check"], "preview auth-check capability should be advertised once routing is ready")
+}
+
+func TestBuildStaticEgressMetadataRequiresVerifiedCapability(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		runtime agent.StaticEgressRuntimeConfig
+		want    map[string]any
+	}{
+		{
+			name: "configured but not verified",
+			runtime: agent.StaticEgressRuntimeConfig{
+				Enabled:  true,
+				Capable:  false,
+				PublicIP: "203.0.113.10",
+			},
+			want: map[string]any{},
+		},
+		{
+			name: "verified static egress",
+			runtime: agent.StaticEgressRuntimeConfig{
+				Enabled:  true,
+				Capable:  true,
+				PublicIP: "203.0.113.10",
+			},
+			want: map[string]any{
+				"static_egress_capable":   true,
+				"static_egress_public_ip": "203.0.113.10",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := buildStaticEgressMetadata(tt.runtime)
+			require.Equal(t, tt.want, got, "worker metadata should only advertise verified static egress capability")
+		})
+	}
 }
 
 func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
@@ -168,6 +228,78 @@ func TestResolveWorkerMaxActiveSandboxes(t *testing.T) {
 			require.Equal(t, tt.expected, got, "resolved live sandbox capacity should follow the configured precedence")
 		})
 	}
+}
+
+func TestPreviewDependencyCacheEnabledWithConfiguredBucket(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{
+			name: "bucket enables cache by default",
+			cfg: config.Config{
+				PreviewDependencyCacheBucket: "preview-dependency-cache",
+			},
+			want: true,
+		},
+		{
+			name: "empty bucket keeps cache disabled",
+			cfg:  config.Config{},
+			want: false,
+		},
+		{
+			name: "blank bucket keeps cache disabled",
+			cfg: config.Config{
+				PreviewDependencyCacheBucket: "   ",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := previewDependencyCacheEnabled(tt.cfg)
+
+			require.Equal(t, tt.want, got, "dependency cache should be enabled exactly when an L2 bucket is configured")
+		})
+	}
+}
+
+func TestPreviewDependencyCacheUsesNormalizedLocalDir(t *testing.T) {
+	t.Parallel()
+
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "main.go", nil, parser.ParseComments)
+	require.NoError(t, err, "test should parse cmd/server/main.go")
+
+	found := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		kv, ok := node.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "LocalDir" {
+			return true
+		}
+		call, ok := kv.Value.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "ResolvePreviewDependencyCacheLocalDir" {
+			return true
+		}
+		found = true
+		return false
+	})
+
+	require.True(t, found, "dependency cache construction should normalize PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR so opt-out sentinels disable L1")
 }
 
 func TestValidateSessionExecutorStartupConfig(t *testing.T) {
@@ -257,6 +389,18 @@ func TestSessionExecutorGroupAdd(t *testing.T) {
 	}
 }
 
+func TestSessionExecutorBindsIncludeStaticEgressCapabilityMount(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
+	}
+
+	require.Equal(t, expected, sessionExecutorBinds(), "session executors should mount every host resource needed for sandbox creation")
+}
+
 func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -266,7 +410,7 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 		NodeID:    "worker-1",
 		Logger:    zerolog.Nop(),
 	})
-	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", func() bool { return true }, gate)
+	provider := buildWorkerMetadataProvider(nil, true, "http://worker-1:8080", "", func() bool { return true }, gate, agent.StaticEgressRuntimeConfig{})
 
 	metadata := provider()
 
@@ -368,6 +512,59 @@ func TestMainPassesConfiguredNodeIDToWorkers(t *testing.T) {
 	require.True(t, ok, "worker node ID argument should be rooted at cfg")
 	require.Equal(t, "cfg", root.Name, "workers should use the configured node ID root")
 	require.Equal(t, "NodeID", nodeArg.Sel.Name, "workers should use cfg.NodeID rather than the Docker hostname")
+}
+
+func TestMainWiresStaticEgressIntoDurablePreviewRunner(t *testing.T) {
+	t.Parallel()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	require.NoError(t, err, "main.go should parse for durable preview runner wiring regression test")
+
+	var cfgLiteral *ast.CompositeLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range assign.Lhs {
+			selector, ok := lhs.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "PreviewStarter" || i >= len(assign.Rhs) {
+				continue
+			}
+			call, ok := assign.Rhs[i].(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				continue
+			}
+			fun, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || fun.Sel.Name != "NewStartRunner" {
+				continue
+			}
+			lit, ok := call.Args[0].(*ast.CompositeLit)
+			if !ok {
+				continue
+			}
+			cfgLiteral = lit
+			return false
+		}
+		return true
+	})
+
+	require.NotNil(t, cfgLiteral, "startup should construct a durable preview StartRunnerConfig")
+	fields := map[string]bool{}
+	for _, elt := range cfgLiteral.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		fields[key.Name] = true
+	}
+	require.True(t, fields["Orgs"], "durable preview runner should load org network settings")
+	require.True(t, fields["StaticEgress"], "durable preview runner should fail closed and hydrate on the static egress bridge when org settings require it")
 }
 
 func TestMainAdvertisesPreviewAfterHTTPListen(t *testing.T) {

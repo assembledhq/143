@@ -16,10 +16,14 @@ import (
 
 // InternalTokenClaims are the claims embedded in an internal API token.
 type InternalTokenClaims struct {
-	OrgID     uuid.UUID  `json:"org_id"`
-	RepoID    uuid.UUID  `json:"repo_id"`
-	SessionID *uuid.UUID `json:"session_id,omitempty"`
-	ExpiresAt time.Time  `json:"exp"`
+	OrgID              uuid.UUID  `json:"org_id"`
+	RepoID             uuid.UUID  `json:"repo_id"`
+	SessionID          *uuid.UUID `json:"session_id,omitempty"`
+	ThreadID           *uuid.UUID `json:"thread_id,omitempty"`
+	AllowedToolScopes  []string   `json:"allowed_tool_scopes,omitempty"`
+	SessionOrigin      string     `json:"session_origin,omitempty"`
+	EvalBootstrapRunID *uuid.UUID `json:"eval_bootstrap_run_id,omitempty"`
+	ExpiresAt          time.Time  `json:"exp"`
 }
 
 // GenerateInternalToken creates a short-lived HMAC-signed token scoped to an org and repo.
@@ -49,11 +53,27 @@ func GenerateInternalToken(secret string, orgID uuid.UUID, repoID uuid.UUID, ttl
 // Use this instead of GenerateInternalToken when the token will be used for session-specific operations
 // such as PR creation, so the handler can enforce that the caller is acting on the correct session.
 func GenerateSessionToken(secret string, orgID uuid.UUID, repoID uuid.UUID, sessionID uuid.UUID, ttl time.Duration) (string, error) {
+	return GenerateSessionThreadToken(secret, orgID, repoID, sessionID, nil, ttl)
+}
+
+// GenerateSessionThreadToken creates a short-lived HMAC token scoped to an
+// org, repo, session, and optionally the source thread currently running.
+func GenerateSessionThreadToken(secret string, orgID uuid.UUID, repoID uuid.UUID, sessionID uuid.UUID, threadID *uuid.UUID, ttl time.Duration) (string, error) {
+	return GenerateSessionThreadTokenWithClaims(secret, orgID, repoID, sessionID, threadID, nil, "", nil, ttl)
+}
+
+// GenerateSessionThreadTokenWithClaims creates a session/thread token with
+// optional tool-scope claims used by sandbox-only internal APIs.
+func GenerateSessionThreadTokenWithClaims(secret string, orgID uuid.UUID, repoID uuid.UUID, sessionID uuid.UUID, threadID *uuid.UUID, allowedToolScopes []string, sessionOrigin string, evalBootstrapRunID *uuid.UUID, ttl time.Duration) (string, error) {
 	claims := InternalTokenClaims{
-		OrgID:     orgID,
-		RepoID:    repoID,
-		SessionID: &sessionID,
-		ExpiresAt: time.Now().Add(ttl),
+		OrgID:              orgID,
+		RepoID:             repoID,
+		SessionID:          &sessionID,
+		ThreadID:           threadID,
+		AllowedToolScopes:  allowedToolScopes,
+		SessionOrigin:      sessionOrigin,
+		EvalBootstrapRunID: evalBootstrapRunID,
+		ExpiresAt:          time.Now().Add(ttl),
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {

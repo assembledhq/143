@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 
+	"github.com/google/uuid"
+
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -22,7 +24,8 @@ type PreviewCapableProvider interface {
 	//   4. Start application services in dependency order
 	//   5. Wait for all readiness probes to pass
 	//
-	// extraEnv is merged into every service's environment after the user's
+	// StartPreviewOptions carries launch metadata and platform env. ExtraEnv
+	// is merged into every service's environment after the user's
 	// declared env and any infrastructure-injected credentials, so it can
 	// carry platform-level values (e.g. PREVIEW_ORIGIN) that must always be
 	// available and should win over user overrides.
@@ -33,7 +36,7 @@ type PreviewCapableProvider interface {
 	// nil; provider implementations must tolerate it.
 	//
 	// The returned PreviewHandle contains connection details for DialPreview.
-	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, extraEnv map[string]string, observer ServiceObserver) (*PreviewHandle, error)
+	StartPreview(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error)
 
 	// StopPreview gracefully stops all preview processes and tears down
 	// infrastructure containers. Safe to call multiple times.
@@ -48,6 +51,18 @@ type PreviewCapableProvider interface {
 	// PreviewStatus returns the current status of all services and
 	// infrastructure in a preview.
 	PreviewStatus(ctx context.Context, handle string) (*PreviewStatusSnapshot, error)
+}
+
+type PreviewCachePrewarmProvider interface {
+	PrewarmPreviewInstallCaches(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) error
+}
+
+type StartPreviewOptions struct {
+	OrgID        uuid.UUID
+	RepositoryID uuid.UUID
+	SessionID    uuid.UUID
+	ConfigDigest string
+	ExtraEnv     map[string]string
 }
 
 // PreviewHandle is returned by StartPreview and contains the information
@@ -128,6 +143,15 @@ type ServiceObserver interface {
 	// holds up to the last few hundred lines of stdout/stderr captured from
 	// the service process; it is best-effort and may be empty.
 	OnServiceFailed(name, errMsg string, tail []string)
+}
+
+type CacheObserver interface {
+	OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
+	OnDependencyCacheSave(status string, cacheKey string, sizeBytes int64, err error)
+	OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
+	OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error)
+	OnBuildCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
+	OnBuildCacheSave(status string, cacheKey string, sizeBytes int64, err error)
 }
 
 // InfraSnapshot is the current state of a platform infrastructure container.

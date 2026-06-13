@@ -1,6 +1,13 @@
 package models
 
-import "testing"
+import (
+	"os"
+	"regexp"
+	"sort"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestPreviewStatus_Validate(t *testing.T) {
 	t.Parallel()
@@ -80,6 +87,130 @@ func TestPreviewStatus_IsTerminal(t *testing.T) {
 	}
 }
 
+func TestPreviewAutoMode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    PreviewAutoMode
+		wantErr bool
+	}{
+		{name: "off is valid", mode: PreviewAutoModeOff},
+		{name: "warm is valid", mode: PreviewAutoModeWarm},
+		{name: "on is valid", mode: PreviewAutoModeOn},
+		{name: "empty is invalid", mode: "", wantErr: true},
+		{name: "bogus is invalid", mode: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.mode.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewAutoMode should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewAutoMode should accept known policy modes")
+		})
+	}
+}
+
+func TestPreviewStoppedReason_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		reason  PreviewStoppedReason
+		wantErr bool
+	}{
+		{name: "none is valid", reason: PreviewStoppedReasonNone},
+		{name: "user is valid", reason: PreviewStoppedReasonUser},
+		{name: "expired is valid", reason: PreviewStoppedReasonExpired},
+		{name: "warm policy is valid", reason: PreviewStoppedReasonWarmPolicy},
+		{name: "pr closed is valid", reason: PreviewStoppedReasonPRClosed},
+		{name: "drain is valid", reason: PreviewStoppedReasonDrain},
+		{name: "error is valid", reason: PreviewStoppedReasonError},
+		{name: "bogus is invalid", reason: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.reason.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewStoppedReason should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewStoppedReason should accept migration check values")
+		})
+	}
+}
+
+func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000180_preview_policies.up.sql")
+	require.NoError(t, err, "migration file should be readable")
+
+	tests := []struct {
+		name       string
+		constraint string
+		expected   []string
+	}{
+		{
+			name:       "auto mode",
+			constraint: "repository_preview_policies_auto_mode_check",
+			expected: []string{
+				string(PreviewAutoModeOff),
+				string(PreviewAutoModeWarm),
+				string(PreviewAutoModeOn),
+			},
+		},
+		{
+			name:       "stopped reason",
+			constraint: "preview_instances_stopped_reason_check",
+			expected: []string{
+				string(PreviewStoppedReasonNone),
+				string(PreviewStoppedReasonUser),
+				string(PreviewStoppedReasonExpired),
+				string(PreviewStoppedReasonWarmPolicy),
+				string(PreviewStoppedReasonPRClosed),
+				string(PreviewStoppedReasonDrain),
+				string(PreviewStoppedReasonError),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			values := migrationCheckValues(t, string(body), tt.constraint)
+			sort.Strings(values)
+			sort.Strings(tt.expected)
+			require.Equal(t, tt.expected, values, "migration CHECK values should match Go enum constants")
+		})
+	}
+}
+
+func migrationCheckValues(t *testing.T, sql, constraint string) []string {
+	t.Helper()
+
+	re := regexp.MustCompile(regexp.QuoteMeta(constraint) + `(?s).*?CHECK\s*\([^)]*IN\s*\(([^)]*)\)`)
+	match := re.FindStringSubmatch(sql)
+	require.Len(t, match, 2, "migration should define the expected CHECK constraint")
+
+	valueRe := regexp.MustCompile(`'([^']*)'`)
+	matches := valueRe.FindAllStringSubmatch(match[1], -1)
+	values := make([]string, 0, len(matches))
+	for _, m := range matches {
+		values = append(values, m[1])
+	}
+	return values
+}
+
 func TestPreviewFreshnessState_Validate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -88,6 +219,8 @@ func TestPreviewFreshnessState_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "current is valid", state: PreviewFreshnessCurrent},
+		{name: "live updated is valid", state: PreviewFreshnessLiveUpdated},
+		{name: "restart required is valid", state: PreviewFreshnessRestartRequired},
 		{name: "out of date is valid", state: PreviewFreshnessOutOfDate},
 		{name: "updating is valid", state: PreviewFreshnessUpdating},
 		{name: "unknown is valid", state: PreviewFreshnessUnknown},
@@ -98,6 +231,57 @@ func TestPreviewFreshnessState_Validate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			err := tt.state.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPreviewRuntimeRevisionSource_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		source  PreviewRuntimeRevisionSource
+		wantErr bool
+	}{
+		{name: "none is valid", source: PreviewRuntimeRevisionSourceNone},
+		{name: "launch is valid", source: PreviewRuntimeRevisionSourceLaunch},
+		{name: "recycle is valid", source: PreviewRuntimeRevisionSourceRecycle},
+		{name: "hmr is valid", source: PreviewRuntimeRevisionSourceHMR},
+		{name: "file event is valid", source: PreviewRuntimeRevisionSourceFileEvent},
+		{name: "bogus is invalid", source: "bogus", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.source.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPreviewRestartReasonKind_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		kind    PreviewRestartReasonKind
+		wantErr bool
+	}{
+		{name: "dependency changed is valid", kind: PreviewRestartReasonDependencyChanged},
+		{name: "preview config changed is valid", kind: PreviewRestartReasonPreviewConfigChanged},
+		{name: "build config changed is valid", kind: PreviewRestartReasonBuildConfigChanged},
+		{name: "environment config changed is valid", kind: PreviewRestartReasonEnvironmentConfigChanged},
+		{name: "database schema changed is valid", kind: PreviewRestartReasonDatabaseSchemaChanged},
+		{name: "bogus is invalid", kind: "bogus", wantErr: true},
+		{name: "empty is invalid", kind: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.kind.Validate()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}

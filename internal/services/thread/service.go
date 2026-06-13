@@ -134,10 +134,19 @@ type MessageStore interface {
 	ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error)
 }
 
+type messageStoreWithSource interface {
+	CreateWithSource(ctx context.Context, msg *models.SessionMessage) error
+}
+
+type threadStoreWithProvenance interface {
+	CreateWithProvenance(ctx context.Context, thread *models.SessionThread, maxThreads int) error
+}
+
 // LogStore defines the log DB operations needed by the thread service.
 type LogStore interface {
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
 	ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 // JobStore defines the job DB operations needed by the thread service.
@@ -166,13 +175,23 @@ type ThreadRuntimeOwnerStore interface {
 
 // CreateThreadInput holds the input for creating a new thread.
 type CreateThreadInput struct {
-	SessionID    uuid.UUID
-	OrgID        uuid.UUID
-	AgentType    string
-	Model        string
-	Label        string
-	Instructions string
-	FileScope    []string
+	SessionID         uuid.UUID
+	OrgID             uuid.UUID
+	AgentType         string
+	Model             string
+	Label             string
+	Instructions      string
+	FileScope         []string
+	CreatedBySource   models.ThreadCreatedBySource
+	CreatedByThreadID *uuid.UUID
+}
+
+type ListThreadsOptions struct {
+	IncludeArchived bool
+}
+
+type threadStoreWithListOptions interface {
+	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
 }
 
 // UpdateThreadInput patches an editable (idle, current_turn=0) thread. Model
@@ -207,6 +226,7 @@ type SendMessageInput struct {
 	Images                  []string
 	References              models.SessionInputReferences
 	Commands                models.SessionInputCommands
+	MessageSource           models.SessionMessageSource
 	PlanMode                bool
 	ResolveReviewCommentIDs []uuid.UUID
 	// ContinuationDedupeKeyOverride is for system-generated follow-up turns
@@ -383,24 +403,45 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 	}
 
 	thread := &models.SessionThread{
-		SessionID:     input.SessionID,
-		OrgID:         input.OrgID,
-		AgentType:     agentType,
-		ModelOverride: modelOverride,
-		Label:         input.Label,
-		Instructions:  instructions,
-		FileScope:     input.FileScope,
-		Status:        models.ThreadStatusIdle,
+		SessionID:         input.SessionID,
+		OrgID:             input.OrgID,
+		AgentType:         agentType,
+		ModelOverride:     modelOverride,
+		Label:             input.Label,
+		Instructions:      instructions,
+		FileScope:         input.FileScope,
+		Status:            models.ThreadStatusIdle,
+		CreatedBySource:   input.CreatedBySource,
+		CreatedByThreadID: input.CreatedByThreadID,
 	}
 
-	if err := s.threadStore.Create(ctx, thread, models.MaxThreadsPerSession); err != nil {
-		if errors.Is(err, db.ErrThreadLimitReached) {
+	createErr := s.createThread(ctx, thread, models.MaxThreadsPerSession)
+	if createErr != nil {
+		if errors.Is(createErr, db.ErrThreadLimitReached) {
 			return nil, db.ErrThreadLimitReached
 		}
-		return nil, fmt.Errorf("create thread: %w", err)
+		return nil, fmt.Errorf("create thread: %w", createErr)
 	}
 
 	return thread, nil
+}
+
+func (s *Service) createThread(ctx context.Context, thread *models.SessionThread, maxThreads int) error {
+	if thread.CreatedBySource != "" || thread.CreatedByThreadID != nil {
+		if store, ok := s.threadStore.(threadStoreWithProvenance); ok {
+			return store.CreateWithProvenance(ctx, thread, maxThreads)
+		}
+	}
+	return s.threadStore.Create(ctx, thread, maxThreads)
+}
+
+func (s *Service) createMessage(ctx context.Context, store MessageStore, msg *models.SessionMessage) error {
+	if msg.Source != "" {
+		if withSource, ok := store.(messageStoreWithSource); ok {
+			return withSource.CreateWithSource(ctx, msg)
+		}
+	}
+	return store.Create(ctx, msg)
 }
 
 func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*models.SessionThread, error) {
@@ -501,12 +542,26 @@ func visibleThreadInSession(thread models.SessionThread, sessionID uuid.UUID) (m
 
 // ListThreads returns all threads for a session.
 func (s *Service) ListThreads(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
+	return s.ListThreadsWithOptions(ctx, orgID, sessionID, ListThreadsOptions{})
+}
+
+func (s *Service) ListThreadsWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, opts ListThreadsOptions) ([]models.SessionThread, error) {
 	// Verify session exists and belongs to org.
 	if _, err := s.sessionStore.GetByID(ctx, orgID, sessionID); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 	}
 
-	threads, err := s.threadStore.ListBySession(ctx, orgID, sessionID)
+	var threads []models.SessionThread
+	var err error
+	if opts.IncludeArchived {
+		withOptions, ok := s.threadStore.(threadStoreWithListOptions)
+		if !ok {
+			return nil, fmt.Errorf("list threads with archived: store does not support include_archived")
+		}
+		threads, err = withOptions.ListBySessionWithOptions(ctx, orgID, sessionID, true)
+	} else {
+		threads, err = s.threadStore.ListBySession(ctx, orgID, sessionID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list threads: %w", err)
 	}
@@ -679,6 +734,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		Content:    content,
 		References: input.References,
 		Commands:   input.Commands,
+		Source:     input.MessageSource,
 	}
 	if len(input.Images) > 0 {
 		msg.Attachments = input.Images
@@ -702,7 +758,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		resolvedComments, answeredQuestion, answeredHumanInput, inboxEntry, err = s.createMessageInTx(ctx, msg, input, claimedSession, answerPendingQuestion, answerPendingHumanInput, s.inboxStore != nil)
 		inboxAppendedInTx = err == nil && s.inboxStore != nil
 	} else {
-		err = s.messageStore.Create(ctx, msg)
+		err = s.createMessage(ctx, s.messageStore, msg)
 	}
 	if err != nil {
 		if !queueOnly {
@@ -838,6 +894,7 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 		Content:    content,
 		References: input.References,
 		Commands:   input.Commands,
+		Source:     input.MessageSource,
 	}
 	if len(input.Images) > 0 {
 		msg.Attachments = input.Images
@@ -890,7 +947,7 @@ func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMe
 	// queued message and creates the actual resume job.
 	answerPendingQuestion := threadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
 	if !answerPendingQuestion {
-		return nil, nil, s.messageStore.Create(ctx, msg)
+		return nil, nil, s.createMessage(ctx, s.messageStore, msg)
 	}
 	_, answeredQuestion, _, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false, false)
 	return answeredQuestion, nil, err
@@ -915,7 +972,7 @@ func (s *Service) createQueuedMessageAndInboxInTx(ctx context.Context, msg *mode
 	}()
 
 	txMessageStore := db.NewSessionMessageStore(tx)
-	if err := txMessageStore.Create(ctx, msg); err != nil {
+	if err := s.createMessage(ctx, txMessageStore, msg); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -1281,7 +1338,7 @@ func (s *Service) createMessageInTx(
 	}()
 
 	txMessageStore := db.NewSessionMessageStore(tx)
-	if err := txMessageStore.Create(ctx, msg); err != nil {
+	if err := s.createMessage(ctx, txMessageStore, msg); err != nil {
 		return nil, nil, nil, nil, err
 	}
 
@@ -1468,9 +1525,12 @@ func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.U
 	}
 
 	var logs []models.SessionLog
-	if len(opts.TurnNumbers) > 0 {
+	switch {
+	case len(opts.TurnNumbers) > 0:
 		logs, err = s.logStore.ListByThreadTurns(ctx, orgID, threadID, opts.TurnNumbers)
-	} else {
+	case opts.LatestTurns > 0:
+		logs, err = s.logStore.ListByThreadLatestTurns(ctx, orgID, threadID, opts.LatestTurns)
+	default:
 		logs, err = s.logStore.ListByThread(ctx, orgID, threadID)
 	}
 	if err != nil {

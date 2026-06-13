@@ -460,15 +460,18 @@ const HandlerCleanupBuffer = 2 * time.Minute
 
 // SandboxConfig holds the resource limits and settings for creating a sandbox.
 type SandboxConfig struct {
-	Image         string            // base image with agent CLI tools pre-installed
-	CPULimit      float64           // CPU cores (default: 2)
-	MemoryLimitMB int               // memory in MB (default: 3072)
-	Timeout       time.Duration     // max execution time (default: DefaultSandboxTimeout)
-	NetworkPolicy string            // "restricted" — allow only LLM API endpoints
-	WorkDir       string            // path to the repo checkout inside the sandbox (e.g. /home/sandbox/<repo>)
-	HomeDir       string            // sandbox user's home dir (e.g. /home/sandbox); HOME env var points here
-	Env           map[string]string // environment variables injected into the container (e.g. API keys)
-	DiskLimitGB   int               // max container rootfs size in GB (default: 10); requires overlay2+xfs backing store
+	Image          string            // base image with agent CLI tools pre-installed
+	CPULimit       float64           // CPU cores (default: 2)
+	MemoryLimitMB  int               // memory in MB (default: 3072)
+	Timeout        time.Duration     // max execution time (default: DefaultSandboxTimeout)
+	NetworkPolicy  string            // "restricted" — allow only LLM API endpoints
+	NetworkName    string            // optional Docker network override for this sandbox
+	ResolvConfPath string            // optional host resolv.conf override for this sandbox
+	EgressMode     string            // "direct" or "static"; persisted in sandbox metadata
+	WorkDir        string            // path to the repo checkout inside the sandbox (e.g. /home/sandbox/<repo>)
+	HomeDir        string            // sandbox user's home dir (e.g. /home/sandbox); HOME env var points here
+	Env            map[string]string // environment variables injected into the container (e.g. API keys)
+	DiskLimitGB    int               // max container rootfs size in GB (default: 10); requires overlay2+xfs backing store
 
 	// SessionID and OrgID are tracing identifiers propagated into provider log
 	// lines so that every sandbox-lifecycle event (create, exec, clone, stop,
@@ -584,6 +587,15 @@ const SandboxMetadataBaseCommitSHA = "base_commit_sha"
 // inflate the diff with target-branch changes. Falls back to the immutable
 // base_commit_sha when missing or when the merge-base resolution fails.
 const SandboxMetadataTargetBranch = "target_branch"
+
+// SandboxMetadataEgressMode records whether a sandbox used direct worker
+// egress or the opt-in static egress gateway path.
+const SandboxMetadataEgressMode = "egress_mode"
+
+const (
+	SandboxEgressModeDirect = "direct"
+	SandboxEgressModeStatic = "static"
+)
 
 // SandboxMetadataClaudeCodePermissionMode is the sandbox.Metadata key used by
 // Claude Code auth setup to record the CLI permission mode for sandboxed runs.

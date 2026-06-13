@@ -36,7 +36,7 @@ import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { getClipboardFiles } from "@/lib/clipboard-files";
 import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
-import { MarkdownContent } from "@/components/markdown";
+import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -111,7 +111,6 @@ import {
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
 import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
-import type { DiffFile } from "@/lib/diff-parser";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
@@ -120,22 +119,27 @@ import {
 } from "@/lib/session-pr-snapshot";
 import {
   readStoredSessionActiveThread,
+  readStoredSessionAnchorPosition,
   readStoredSessionScrollPosition,
   resolveInitialSessionThreadId,
   resolveInitialSessionAnchor,
+  type SessionAnchorPosition,
   type SessionScrollViewerScope,
+  writeStoredSessionAnchorPosition,
   writeStoredSessionActiveThread,
   writeStoredSessionScrollPosition,
 } from "@/lib/session-open-position";
+import { readCachedViewerScope } from "@/lib/viewer-scope-cache";
 import {
   readStoredViewedThreadIds,
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
+import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
 import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
-import { DiffStatsBadge, FileTree, CommentsSummary, PassSelector, type DiffPassEntry, type PassRange } from "@/components/code-review";
+import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
@@ -155,11 +159,14 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { deriveCreatePRActionState, derivePushChangesActionState } from "@/lib/session-pr-action-state";
+import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
+import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
+import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
+import { SessionDetailLoadingSkeleton, SessionTimelineSkeleton } from "./session-detail-loading-skeleton";
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
@@ -172,6 +179,14 @@ const ReviewDiffView = dynamic(
   {
     ssr: false,
     loading: () => <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />,
+  },
+);
+
+const ChangesTab = dynamic(
+  () => import("./session-changes-tab").then((m) => ({ default: m.ChangesTab })),
+  {
+    ssr: false,
+    loading: () => <div className="h-full w-full bg-muted/20 animate-pulse" />,
   },
 );
 
@@ -211,7 +226,7 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
-const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = 3000;
+const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = pollMs(3000);
 
 const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
   AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
@@ -241,10 +256,10 @@ const statusConfig: Record<DisplayStatusKey, { color: string; label: string }> =
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-primary/10 text-primary", label: "Running" },
   idle: { color: "bg-primary/10 text-primary", label: "Idle" },
-  awaiting_input: { color: "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400", label: "Awaiting input" },
-  needs_human_guidance: { color: "bg-orange-50 text-orange-700 dark:bg-orange-950/30 dark:text-orange-400", label: "Needs guidance" },
-  completed: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "Completed" },
-  pr_created: { color: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", label: "PR created" },
+  awaiting_input: { color: "bg-warning/10 text-warning", label: "Awaiting input" },
+  needs_human_guidance: { color: "bg-attention/10 text-attention", label: "Needs guidance" },
+  completed: { color: "bg-success/10 text-success", label: "Completed" },
+  pr_created: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR created" },
   pr_merged: { color: `${prMergedAccent.bg} ${prMergedAccent.text}`, label: "PR merged" },
   pr_closed: { color: "bg-muted text-muted-foreground", label: "PR closed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
@@ -399,6 +414,33 @@ function reconcileThreadsForOmittedStatusUpdate(
   });
 }
 
+export function mergeSessionDetailStatusUpdate(
+  existing: SingleResponse<SessionDetail> | undefined,
+  updated: SessionDetail,
+): SingleResponse<SessionDetail> {
+  if (!existing) {
+    return {
+      data: {
+        ...updated,
+        threads: updated.threads ?? [],
+      },
+    };
+  }
+  const existingThreads = existing.data.threads ?? [];
+  const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
+  const threads = hasThreadPayload
+    ? updated.threads
+    : reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
+  return {
+    ...existing,
+    data: {
+      ...existing.data,
+      ...updated,
+      threads,
+    },
+  };
+}
+
 export function applyThreadInboxEventToThreads(
   threads: SessionThread[],
   event: ThreadInboxEvent,
@@ -497,6 +539,7 @@ type PRAuthorMode = "auto" | "user" | "app";
 type PRAuthInterceptDetails = {
   connect_url?: string;
   resume_token?: string;
+  merge_when_ready?: boolean;
   can_fallback_to_app?: boolean;
 };
 
@@ -505,7 +548,7 @@ type PRAuthInterceptDetails = {
 // interception or be synthesized from the current GitHub status before the
 // backend has rejected the action.
 type PRAuthPromptState =
-  | ({ purpose: "create_pr" } & PRAuthInterceptDetails)
+  | ({ purpose: "create_pr"; mergeWhenReady?: boolean } & PRAuthInterceptDetails)
   | ({ purpose: "create_branch" } & PRAuthInterceptDetails)
   | ({ purpose: "push_changes" } & PRAuthInterceptDetails)
   | { purpose: "merge_pr" };
@@ -521,6 +564,29 @@ type PendingThreadPreview = Pick<
 >;
 
 const terminalSessionStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
+
+function threadMatchesPendingPreview(thread: SessionThread, pending: PendingThreadPreview): boolean {
+  return thread.id === pending.id || (
+    thread.session_id === pending.session_id &&
+    thread.agent_type === pending.agent_type &&
+    thread.label === pending.label &&
+    (thread.model_override ?? null) === (pending.model_override ?? null) &&
+    new Date(thread.created_at) >= new Date(pending.created_at)
+  );
+}
+
+export function buildChromeThreads(
+  threads: SessionThread[],
+  pendingThreadPreview: PendingThreadPreview | null,
+): SessionThread[] {
+  if (!pendingThreadPreview) {
+    return threads;
+  }
+  if (threads.some((thread) => threadMatchesPendingPreview(thread, pendingThreadPreview))) {
+    return threads;
+  }
+  return [...threads, pendingThreadPreview];
+}
 
 function mergePendingMessages(
   baseMessages: SessionMessage[],
@@ -570,7 +636,7 @@ function isRuntimeRecoveryActive(session: Session): boolean {
 
 function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | "border-b" | "border" }) {
   return (
-    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300`}>
+    <div className={`flex items-center gap-2 px-4 py-2.5 text-xs ${border} bg-info/10 border-info/30 text-info`}>
       <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
       <span>
         <span className="font-medium">Restoring runtime from checkpoint</span>
@@ -623,24 +689,24 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     <div className="space-y-4">
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
-        <Card className="border-l-2 border-l-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/10">
+        <Card className="border-l-2 border-l-success bg-success/5">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs flex items-center gap-2">
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <CheckCircle2 className="h-3.5 w-3.5 text-success" />
               Result
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <MarkdownContent content={session.result_summary} className="text-xs" />
+            <LazyMarkdownContent content={session.result_summary} className="text-xs" />
           </CardContent>
         </Card>
       )}
 
       {isDeployRecovery && (
-        <Card className="border-l-2 border-l-amber-500 bg-amber-50/30 dark:bg-amber-950/10">
+        <Card className="border-l-2 border-l-warning bg-warning/5">
           <CardHeader className="pb-2">
             <CardTitle className="text-xs flex items-center gap-2">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+              <AlertTriangle className="h-3.5 w-3.5 text-warning" />
               Resumed after deploy
             </CardTitle>
           </CardHeader>
@@ -730,7 +796,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
               </Button>
             )}
             {isCodexAuthFailure && isCodexAuthenticated && (
-              <p className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+              <p className="text-xs text-success flex items-center gap-1.5">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 {checkpointRetryUnavailable
                   ? "ChatGPT connected — open the retry menu and choose Start over from beginning."
@@ -776,8 +842,8 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
           <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${status.color}`}>
             {isActive && (
               <span className="relative mr-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-info/60 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-info" />
               </span>
             )}
             {status.label}
@@ -862,115 +928,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     </div>
   );
 }
-
-const ChangesTab = memo(function ChangesTab({
-  filteredFiles,
-  activeFileIndex,
-  onFileSelect,
-  onOpenReview,
-  comments,
-  onCommentClick,
-  passes,
-  passRange,
-  onPassRangeChange,
-  emptyStatusText,
-  isMobile,
-  diffLoadErrorText,
-  diffTruncationText,
-  onRetryDiffLoad,
-}: {
-  filteredFiles: DiffFile[];
-  activeFileIndex: number;
-  onFileSelect: (index: number) => void;
-  onOpenReview: (fileIndex?: number) => void;
-  comments: SessionReviewComment[];
-  onCommentClick: (filePath: string) => void;
-  passes: DiffPassEntry[];
-  passRange: PassRange | null;
-  onPassRangeChange: (range: PassRange | null) => void;
-  emptyStatusText: string;
-  isMobile: boolean;
-  diffLoadErrorText?: string;
-  diffTruncationText?: string;
-  onRetryDiffLoad?: () => void;
-}) {
-  const hasDiff = filteredFiles.length > 0;
-  const hasDiffLoadError = !!diffLoadErrorText;
-
-  const handleFileClick = useCallback(
-    (index: number) => {
-      onFileSelect(index);
-      onOpenReview(index);
-    },
-    [onFileSelect, onOpenReview]
-  );
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Pass selector */}
-      {passes.length >= 2 && (
-        <div className="px-4 py-3 border-b border-border">
-          <PassSelector
-            passes={passes}
-            selectedRange={passRange}
-            onRangeChange={onPassRangeChange}
-          />
-        </div>
-      )}
-
-      {/* Comments summary */}
-      {comments.length > 0 && (
-        <CommentsSummary
-          comments={comments}
-          onCommentClick={onCommentClick}
-        />
-      )}
-
-      {/* Main content: file tree or empty state */}
-      {hasDiff ? (
-        <div className="flex flex-col flex-1 min-h-0">
-          {diffTruncationText ? (
-            <div className="mx-4 mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-100">
-              <p className="font-medium">Large diff truncated</p>
-              <p className="mt-1 text-amber-900/80 dark:text-amber-100/80">{diffTruncationText}</p>
-            </div>
-          ) : null}
-          <div className="flex-1 overflow-hidden">
-            <FileTree
-              files={filteredFiles}
-              activeFileIndex={activeFileIndex}
-              onFileSelect={handleFileClick}
-              variant={isMobile ? "sheet" : "sidebar"}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center py-12">
-          <div className="text-center space-y-2 max-w-[280px]">
-            {hasDiffLoadError ? (
-              <AlertTriangle className="h-8 w-8 text-destructive/70 mx-auto" />
-            ) : (
-              <FileCode2 className="h-8 w-8 text-muted-foreground/40 mx-auto" />
-            )}
-            <p className="text-xs font-medium text-muted-foreground">
-              {hasDiffLoadError ? "Couldn't load changes" : "No changes yet"}
-            </p>
-            <p className="text-xs text-muted-foreground/60">
-              {diffLoadErrorText ?? emptyStatusText}
-            </p>
-            {hasDiffLoadError && onRetryDiffLoad ? (
-              <Button type="button" variant="outline" size="sm" className="mt-2" onClick={onRetryDiffLoad}>
-                Retry
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-});
-
-ChangesTab.displayName = "ChangesTab";
 
 // ---------------------------------------------------------------------------
 // Shared session composer (used in both chat and review mode)
@@ -1178,8 +1135,25 @@ function SessionComposer({
     queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
     enabled: showMentionPicker,
     staleTime: 30 * 1000,
+    // Keep the previous query's results rendered while the next keystroke's
+    // request is in flight so the picker doesn't blank out between queries.
+    placeholderData: (previous) => previous,
   });
   const fileMentions = useMemo(() => fileMentionsQuery.data?.data ?? [], [fileMentionsQuery.data]);
+
+  const mentionWarmQueryClient = useQueryClient();
+  useEffect(() => {
+    // Warm the backend's mention index as soon as the composer mounts: the
+    // empty-q request returns [] immediately but kicks off the workspace
+    // walk server-side, so the index is (usually) hot by the time the user
+    // opens the @-picker with a real query.
+    if (!repositoryId) return;
+    void mentionWarmQueryClient.prefetchQuery({
+      queryKey: queryKeys.sessions.composerFiles(sessionId, ""),
+      queryFn: () => api.sessions.composerFiles(sessionId, ""),
+      staleTime: 30 * 1000,
+    });
+  }, [mentionWarmQueryClient, sessionId, repositoryId]);
 
   const slashCommandsQuery = useSessionComposerSlashCommands({
     agentType,
@@ -1652,7 +1626,7 @@ function SessionComposer({
                     variant="secondary"
                     className={cn(
                       "gap-1 rounded-full border-border/60 bg-muted/60 pl-2 pr-1",
-                      isInvalid && "border-amber-500/60 bg-amber-100/40 text-amber-900 dark:bg-amber-900/30 dark:text-amber-100",
+                      isInvalid && "border-warning/60 bg-warning/10 text-warning",
                     )}
                     data-invalid={isInvalid || undefined}
                     title={isInvalid ? `${command.token} is a ${command.agent_type} command. Switch agent or remove it.` : undefined}
@@ -1674,7 +1648,7 @@ function SessionComposer({
             </div>
           )}
           {hasInvalidCommands && (
-            <p className="px-3 pb-2 text-xs text-amber-600 dark:text-amber-300" role="alert">
+            <p className="px-3 pb-2 text-xs text-warning" role="alert">
               {invalidCommandTokens.join(", ")} {invalidCommandTokens.length === 1 ? "is" : "are"} not valid for this agent. Remove the chip{invalidCommandTokens.length === 1 ? "" : "s"} to continue.
             </p>
           )}
@@ -1954,29 +1928,25 @@ function SessionComposer({
 // ---------------------------------------------------------------------------
 
 const MAX_SSE_RECONNECT_ATTEMPTS = 3;
-const BASE_SSE_RECONNECT_DELAY_MS = 1000;
+const BASE_SSE_RECONNECT_DELAY_MS = pollMs(1000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
 const THREAD_MESSAGE_WINDOW_LIMIT = 60;
-// Sliding window for the SSE log overlay buffer. The persisted logs are
-// fetched separately via the timeline query; streamedLogs only holds the
-// not-yet-persisted overlay that bridges the gap between an SSE push and the
-// next DB fetch. A few thousand entries is enough headroom for any active
-// session, and capping it bounds both memory and the per-event filter cost.
+// First-paint logs window fetched in parallel with the message window, before
+// the loaded messages have resolved which exact turns are visible. Sized to
+// cover at least the turns a full message window can span (every turn carries
+// one or more messages, so 60 messages never span more than 60 turns).
+const THREAD_LOG_BOOTSTRAP_TURNS = THREAD_MESSAGE_WINDOW_LIMIT;
+const THREAD_LOG_BOOTSTRAP_TURNS_KEY = `latest:${THREAD_LOG_BOOTSTRAP_TURNS}`;
+// Sliding window for live SSE logs that may not be visible in persisted log
+// queries yet. The buffer lives in React Query so remounting the chat panel
+// cannot drop the transcript during the SSE-to-DB handoff.
 const STREAMED_LOGS_MAX = 2000;
+const LIVE_LOG_MESSAGE_MAX_BYTES = 32 * 1024;
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
-}
-
-function normalizeTranscriptContent(content: string): string {
-  return content
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => line.replace(/[ \t\r]+$/g, ""))
-    .join("\n")
-    .replace(/\n+$/g, "");
 }
 
 export function flattenThreadMessageWindows(
@@ -1998,6 +1968,85 @@ export function filterThreadLogsForLoadedMessages(
   return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
 
+export function mergeSessionLogListResponse(
+  existing: ListResponse<SessionLog> | undefined,
+  incoming: SessionLog[],
+  maxItems?: number,
+): ListResponse<SessionLog> {
+  const byID = new Map<number, SessionLog>();
+  for (const log of existing?.data ?? []) {
+    byID.set(log.id, log);
+  }
+  for (const log of incoming) {
+    byID.set(log.id, log);
+  }
+  let data = Array.from(byID.values()).sort((a, b) => a.id - b.id);
+  if (maxItems !== undefined && maxItems > 0 && data.length > maxItems) {
+    data = data.slice(data.length - maxItems);
+  }
+  return {
+    data,
+    meta: existing?.meta ?? {},
+  };
+}
+
+function truncateUTF8Bytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(value);
+  if (bytes.byteLength <= maxBytes) return value;
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let end = maxBytes; end > 0; end -= 1) {
+    try {
+      return decoder.decode(bytes.slice(0, end));
+    } catch {
+      continue;
+    }
+  }
+  return "";
+}
+
+export function capLiveSessionLogMessage(log: SessionLog): SessionLog {
+  const originalBytes = new TextEncoder().encode(log.message).byteLength;
+  if (originalBytes <= LIVE_LOG_MESSAGE_MAX_BYTES) {
+    return {
+      ...log,
+      message_bytes: log.message_bytes ?? originalBytes,
+      message_chars: log.message_chars ?? Array.from(log.message).length,
+      message_truncated: log.message_truncated ?? false,
+    };
+  }
+
+  return {
+    ...log,
+    message: truncateUTF8Bytes(log.message, LIVE_LOG_MESSAGE_MAX_BYTES),
+    message_bytes: log.message_bytes ?? originalBytes,
+    message_chars: log.message_chars ?? Array.from(log.message).length,
+    message_truncated: true,
+  };
+}
+
+export function liveLogsForTimeline(includeLiveLogs: boolean, logs: SessionLog[]): SessionLog[] {
+  return includeLiveLogs ? logs : [];
+}
+
+export function mergeVisibleThreadLogs(
+  persisted: ListResponse<SessionLog> | undefined,
+  liveLogs: SessionLog[],
+  messages: SessionMessage[],
+  extraTurnNumbers: number[] = [],
+): SessionLog[] {
+  const persistedLogs = filterThreadLogsForLoadedMessages(
+    persisted?.data ?? [],
+    messages,
+    extraTurnNumbers,
+  );
+  return mergeSessionLogListResponse(
+    { data: persistedLogs, meta: persisted?.meta ?? {} },
+    liveLogs,
+  ).data;
+}
+
 function loadedTurnNumbers(messages: SessionMessage[]): number[] {
   return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
 }
@@ -2010,50 +2059,20 @@ export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: Se
   return Array.from(turns).sort((a, b) => a - b);
 }
 
-function threadMessageWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
-  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window"];
+function threadMessageWindowQueryKey(sessionId: string, threadId: string, anchorMessageId?: number | null): readonly unknown[] {
+  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window", anchorMessageId ?? "latest"];
 }
 
-function SessionTimelineSkeleton() {
-  const rows: { align: "left" | "right"; widths: string[] }[] = [
-    { align: "right", widths: ["w-3/5", "w-2/5"] },
-    { align: "left", widths: ["w-4/5", "w-3/4", "w-1/2"] },
-    { align: "left", widths: ["w-2/3", "w-1/3"] },
-    { align: "left", widths: ["w-3/4", "w-3/5"] },
-  ];
+function threadLogsWindowQueryKey(sessionId: string, threadId: string, visibleTurnsKey: string): readonly unknown[] {
+  return [...queryKeys.sessions.threadLogs(sessionId, threadId), visibleTurnsKey];
+}
 
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label="Loading session activity"
-      data-testid="session-timeline-skeleton"
-      className="space-y-3 py-1"
-    >
-      {rows.map((row, i) => (
-        <div
-          key={i}
-          className={`flex ${row.align === "right" ? "justify-end" : "justify-start"}`}
-        >
-          <div
-            className={`max-w-[92%] min-w-[40%] rounded-lg px-3 py-2.5 space-y-2 animate-pulse ${
-              row.align === "right" ? "bg-primary/10" : "bg-muted"
-            }`}
-          >
-            {row.widths.map((w, j) => (
-              <div
-                key={j}
-                className={`h-3 rounded ${w} ${
-                  row.align === "right" ? "bg-primary/20" : "bg-muted-foreground/15"
-                }`}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-      <span className="sr-only">Loading session activity…</span>
-    </div>
-  );
+function sessionLiveLogsQueryKey(sessionId: string): readonly unknown[] {
+  return ["session", sessionId, "logs", "live"];
+}
+
+function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly unknown[] {
+  return [...queryKeys.sessions.threadLogs(sessionId, threadId), "live"];
 }
 
 type ChatPanelProps = {
@@ -2090,14 +2109,15 @@ function ChatPanel({
   onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
-  const [streamedLogs, setStreamedLogs] = useState<SessionLog[]>([]);
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
+  const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<ThreadMessageWindowResponse[]>([]);
+  const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
   const initialAnchorAppliedRef = useRef(false);
+  const initialAnchorCancelledRef = useRef(false);
   const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const seenLogIds = useRef<Set<number>>(new Set());
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
@@ -2108,55 +2128,121 @@ function ChatPanel({
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
+  const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
+    if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;
+    return readStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
+  }, [activeThreadId, sessionId, viewerScope]);
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
     queryFn: () => api.sessions.getTimeline(sessionId),
     enabled: !activeThreadId,
-    refetchInterval: isActive && !activeThreadId ? 3000 : false,
+    refetchInterval: isActive && !activeThreadId ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessagesQuery = useInfiniteQuery({
-    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "messages", "window"],
+    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null) : ["session", sessionId, "thread", "none", "messages", "window"],
     queryFn: ({ pageParam }) =>
       api.sessions.getThreadMessageWindow(
         sessionId,
         activeThreadId!,
         pageParam
           ? { before: pageParam as string, limit: THREAD_MESSAGE_WINDOW_LIMIT }
-          : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+          : initialThreadAnchorPosition
+            ? { position: "around", anchorMessageId: initialThreadAnchorPosition.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
-    enabled: !!activeThreadId,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+    enabled: !!activeThreadId && !!viewerScope,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
   const threadMessages = useMemo(() => {
-    return flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
-  }, [threadMessagesQuery.data?.pages]);
+    const messages = flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
+    const seen = new Set(messages.map((message) => message.id));
+    for (const page of newerThreadMessagePages) {
+      for (const message of page.data ?? []) {
+        if (seen.has(message.id)) continue;
+        messages.push(message);
+        seen.add(message.id);
+      }
+    }
+    return messages;
+  }, [newerThreadMessagePages, threadMessagesQuery.data?.pages]);
+  const newestThreadWindow = newerThreadMessagePages.at(-1) ?? threadMessagesQuery.data?.pages[0];
+  const hasNewerThreadMessages = !!activeThreadId && !!newestThreadWindow?.meta.has_newer;
+  const nextNewerThreadCursor = newestThreadWindow?.meta.next_newer_cursor;
   const visibleThreadLogTurns = useMemo(
     () => getVisibleThreadLogTurns(threadMessages, activeThread),
     [activeThread, threadMessages],
   );
   const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
+  // Until the message window resolves which turns are visible, fetch the
+  // thread's latest turns of logs instead of waiting — this runs in parallel
+  // with the messages fetch instead of serializing one round trip behind the
+  // other. Over-fetched turns are harmless: mergeVisibleThreadLogs filters
+  // persisted logs down to the turns of the loaded messages.
+  const threadLogsBootstrapMode = !threadMessagesQuery.isFetched;
+  const activeThreadLogsQueryKey = useMemo(
+    () => activeThreadId
+      ? threadLogsWindowQueryKey(
+          sessionId,
+          activeThreadId,
+          threadLogsBootstrapMode ? THREAD_LOG_BOOTSTRAP_TURNS_KEY : visibleThreadLogTurnsKey,
+        )
+      : ["session", sessionId, "thread", "none", "logs"] as const,
+    [activeThreadId, sessionId, threadLogsBootstrapMode, visibleThreadLogTurnsKey],
+  );
+  const liveLogsQueryKey = useMemo(
+    () => activeThreadId
+      ? threadLiveLogsQueryKey(sessionId, activeThreadId)
+      : sessionLiveLogsQueryKey(sessionId),
+    [activeThreadId, sessionId],
+  );
 
   const threadLogsQuery = useQuery({
-    queryKey: activeThreadId ? [...queryKeys.sessions.threadLogs(sessionId, activeThreadId), visibleThreadLogTurnsKey] : ["session", sessionId, "thread", "none", "logs"],
+    queryKey: activeThreadLogsQueryKey,
     queryFn: () => api.sessions.getThreadLogs(
       sessionId,
       activeThreadId!,
-      visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
+      threadLogsBootstrapMode
+        ? { latestTurns: THREAD_LOG_BOOTSTRAP_TURNS }
+        : visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
-    enabled: !!activeThreadId && threadMessagesQuery.isFetched,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? 3000 : false,
+    enabled: !!activeThreadId,
+    // Carry the previous window across key changes within the same thread
+    // (bootstrap → precise turns, or the visible turn set growing) so tool
+    // entries don't blink out while the next window loads. Windows from a
+    // different thread must not carry over: their logs can share turn numbers
+    // with the new thread's messages and would survive the visible-turns
+    // filter.
+    placeholderData: (previousData, previousQuery) => {
+      if (!previousQuery || !activeThreadId) return undefined;
+      const threadScopedPrefix = queryKeys.sessions.threadLogs(sessionId, activeThreadId);
+      const previousPrefix = previousQuery.queryKey.slice(0, threadScopedPrefix.length);
+      return JSON.stringify(previousPrefix) === JSON.stringify(threadScopedPrefix) ? previousData : undefined;
+    },
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
+  const liveLogsQuery = useQuery({
+    queryKey: liveLogsQueryKey,
+    queryFn: () => ({ data: [], meta: {} }) satisfies ListResponse<SessionLog>,
+    enabled: false,
+    initialData: { data: [], meta: {} } satisfies ListResponse<SessionLog>,
+  });
+  const clearCurrentLiveLogs = useCallback(() => {
+    queryClient.setQueryData<ListResponse<SessionLog>>(
+      liveLogsQueryKey,
+      { data: [], meta: {} } satisfies ListResponse<SessionLog>,
+    );
+  }, [liveLogsQueryKey, queryClient]);
 
   const humanInputStatusFilter = activeThreadId ? undefined : "pending";
   const humanInputQuery = useQuery({
     queryKey: queryKeys.sessions.humanInputRequests(sessionId, humanInputStatusFilter ?? null, activeThreadId ?? null),
     queryFn: () => api.sessions.getHumanInputRequests(sessionId, { status: humanInputStatusFilter, threadId: activeThreadId ?? null }),
-    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? 3000 : false,
+    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
   const pendingHumanInputs = useMemo(() => {
     const requests = humanInputQuery.data?.data ?? [];
@@ -2232,24 +2318,38 @@ function ChatPanel({
     const optimisticForCurrentView = optimisticMessages.filter((message) =>
       activeThreadId ? message.thread_id === activeThreadId : !message.thread_id
     );
+    const includeLiveLogs = optimisticForCurrentView.length > 0 ||
+      (activeThread ? workingStatusesSet.has(activeThread.status) : workingStatusesSet.has(session.status));
+    const visibleLiveLogs = liveLogsForTimeline(
+      includeLiveLogs,
+      liveLogsQuery.data?.data ?? [],
+    );
     if (activeThreadId) {
-      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
-        .filter((request) => request.thread_id === activeThreadId)
-        .map((request) => ({ kind: "human_input" as const, data: request }));
-      const loadedThreadLogs = filterThreadLogsForLoadedMessages(
-        threadLogsQuery.data?.data ?? [],
+      const loadedThreadLogs = mergeVisibleThreadLogs(
+        threadLogsQuery.data,
+        visibleLiveLogs,
         threadMessages,
         visibleThreadLogTurns,
       );
-      return sortTimelineEntries([...buildTimeline(
-        mergePendingMessages(threadMessages, optimisticForCurrentView),
-        loadedThreadLogs,
-      ), ...threadHumanInputEntries]);
+      const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
+        .filter((request) => request.thread_id === activeThreadId)
+        .map((request) => ({ kind: "human_input" as const, data: request }));
+      return sortTimelineEntries([
+        ...buildTimeline(
+          mergePendingMessages(threadMessages, optimisticForCurrentView),
+          loadedThreadLogs,
+        ),
+        ...threadHumanInputEntries,
+      ]);
     }
     const flattenedTimeline = flattenTimelineResponse(timelineQuery.data?.data ?? []);
+    const sessionLogs = mergeSessionLogListResponse(
+      { data: flattenedTimeline.logs, meta: {} },
+      visibleLiveLogs,
+    ).data;
     const entries = sortTimelineEntries([...buildTimeline(
       mergePendingMessages(flattenedTimeline.messages, optimisticForCurrentView),
-      flattenedTimeline.logs,
+      sessionLogs,
     ), ...flattenedTimeline.humanInputs.map((request) => ({ kind: "human_input" as const, data: request }))]);
     const issueDescription = issueQuery.data?.data?.description;
     if (!issueDescription) return entries;
@@ -2265,75 +2365,27 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, humanInputQuery.data?.data, visibleThreadLogTurns]);
+  }, [activeThread, activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, session.status, humanInputQuery.data?.data, visibleThreadLogTurns]);
 
-  // Walk baseTimelineEntries once when it changes to derive the dedup keys
-  // used to filter streamedLogs. Splitting this out of the timelineEntries
-  // memo means each new SSE log event no longer triggers an O(N) walk over
-  // the entire base timeline — only the O(M) filter over streamed logs.
-  const baseTimelineDedupKeys = useMemo(() => {
-    const fetchedLogIds = new Set<number>();
-    const assistantTranscriptByTurn = new Map<number, Set<string>>();
-    const planModeSeedMessages: SessionMessage[] = [];
+  const baseTimelineHumanInputIds = useMemo(() => {
     const humanInputIds = new Set<string>();
 
     for (const entry of baseTimelineEntries) {
-      switch (entry.kind) {
-        case "message":
-          if (entry.data.role === "user" && entry.data.content.startsWith("[PLAN_MODE]\n")) {
-            planModeSeedMessages.push(entry.data);
-          }
-          if (entry.data.role === "assistant") {
-            const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
-            contents.add(normalizeTranscriptContent(entry.data.content));
-            assistantTranscriptByTurn.set(entry.data.turn_number, contents);
-          }
-          break;
-        case "plan_message": {
-          const contents = assistantTranscriptByTurn.get(entry.data.turn_number) ?? new Set<string>();
-          contents.add(normalizeTranscriptContent(entry.data.content));
-          assistantTranscriptByTurn.set(entry.data.turn_number, contents);
-          break;
-        }
-        case "assistant_output":
-        case "error":
-        case "log":
-        case "plan_output":
-          fetchedLogIds.add(entry.data.id);
-          break;
-        case "tool_group":
-          fetchedLogIds.add(entry.toolUse.id);
-          if (entry.toolResult) {
-            fetchedLogIds.add(entry.toolResult.id);
-          }
-          break;
-        case "human_input":
-          humanInputIds.add(entry.data.id);
-          break;
+      if (entry.kind === "human_input") {
+        humanInputIds.add(entry.data.id);
       }
     }
 
-    return { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages, humanInputIds };
+    return humanInputIds;
   }, [baseTimelineEntries]);
 
   const timelineEntries = useMemo(() => {
-    const { fetchedLogIds, assistantTranscriptByTurn, planModeSeedMessages, humanInputIds } = baseTimelineDedupKeys;
     const humanInputEntries: TimelineEntry[] = pendingHumanInputs
-      .filter((request) => !humanInputIds.has(request.id))
+      .filter((request) => !baseTimelineHumanInputIds.has(request.id))
       .map((request) => ({ kind: "human_input", data: request }));
 
-    const overlayLogs = streamedLogs.filter((log) => {
-      if (fetchedLogIds.has(log.id)) return false;
-      if (log.level !== "output") return true;
-      if (log.metadata?.type === "tool_result") return true;
-      if (log.metadata?.type === "assistant_final" && log.metadata?.duplicate_of_transcript === true) return false;
-      return !assistantTranscriptByTurn.get(log.turn_number)?.has(normalizeTranscriptContent(log.message));
-    });
-
-    if (overlayLogs.length === 0) return sortTimelineEntries([...baseTimelineEntries, ...humanInputEntries]);
-    const overlayEntries = buildTimeline(planModeSeedMessages, overlayLogs).filter((entry) => entry.kind !== "message");
-    return sortTimelineEntries([...baseTimelineEntries, ...overlayEntries, ...humanInputEntries]);
-  }, [baseTimelineEntries, baseTimelineDedupKeys, pendingHumanInputs, streamedLogs]);
+    return sortTimelineEntries([...baseTimelineEntries, ...humanInputEntries]);
+  }, [baseTimelineEntries, baseTimelineHumanInputIds, pendingHumanInputs]);
   const hasLoadedTimelineInputs = activeThreadId
     ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
@@ -2362,15 +2414,54 @@ function ChatPanel({
     writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
   }, [activeThreadId, sessionId, viewerScope]);
 
+  const findFirstVisibleMessageAnchor = useCallback((el: HTMLDivElement) => {
+    const containerTop = el.getBoundingClientRect().top;
+    const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-session-message-id]"));
+    for (const node of nodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom < containerTop) continue;
+      const rawID = node.dataset.sessionMessageId;
+      const id = rawID ? Number(rawID) : NaN;
+      if (!Number.isInteger(id) || id <= 0) continue;
+      return {
+        anchor: { kind: "message" as const, id },
+        offsetPx: Math.max(0, containerTop - rect.top),
+        scrollTopFallback: el.scrollTop,
+      };
+    }
+    return null;
+  }, []);
+
+  const persistCurrentScrollPosition = useCallback((el: HTMLDivElement) => {
+    if (typeof window === "undefined" || !viewerScope) return;
+    const anchorPosition = activeThreadId ? findFirstVisibleMessageAnchor(el) : null;
+    if (anchorPosition) {
+      writeStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, anchorPosition, activeThreadId);
+      return;
+    }
+    writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, el.scrollTop, activeThreadId);
+  }, [activeThreadId, findFirstVisibleMessageAnchor, sessionId, viewerScope]);
+
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
       clearTimeout(saveScrollTimerRef.current);
     }
     saveScrollTimerRef.current = setTimeout(() => {
-      persistScrollPosition(scrollTop);
+      const el = scrollRef.current;
+      if (el) {
+        persistCurrentScrollPosition(el);
+      } else {
+        persistScrollPosition(scrollTop);
+      }
       saveScrollTimerRef.current = null;
     }, SCROLL_POSITION_SAVE_DEBOUNCE_MS);
-  }, [persistScrollPosition]);
+  }, [persistCurrentScrollPosition, persistScrollPosition]);
+
+  const cancelPendingInitialAnchorRestore = useCallback(() => {
+    if (initialAnchorAppliedRef.current) return;
+    initialAnchorCancelledRef.current = true;
+    initialAnchorAppliedRef.current = true;
+  }, []);
 
   const syncScrollState = useCallback((el: HTMLDivElement) => {
     isNearBottomRef.current = isNearBottom(el);
@@ -2385,9 +2476,37 @@ function ChatPanel({
   }, []);
 
   const scrollToLiveEdge = useCallback(() => {
+    cancelPendingInitialAnchorRestore();
+    if (activeThreadId && hasNewerThreadMessages) {
+      setIsFetchingNewerThreadMessages(true);
+      void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+        position: "latest",
+        limit: THREAD_MESSAGE_WINDOW_LIMIT,
+      }).then((window) => {
+        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
+          threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null),
+          { pages: [window], pageParams: [undefined] },
+        );
+        setNewerThreadMessagePages([]);
+        requestAnimationFrame(scrollToLiveEdgePosition);
+      }).catch((error) => {
+        toast.error(error instanceof ApiError ? error.message : "Failed to load latest messages");
+      }).finally(() => {
+        setIsFetchingNewerThreadMessages(false);
+      });
+      return;
+    }
     scrollToLiveEdgePosition();
+    const el = scrollRef.current;
+    if (el) {
+      if (saveScrollTimerRef.current) {
+        clearTimeout(saveScrollTimerRef.current);
+        saveScrollTimerRef.current = null;
+      }
+      persistScrollPosition(el.scrollTop);
+    }
     setShowJumpToLatest(false);
-  }, [scrollToLiveEdgePosition]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, initialThreadAnchorPosition?.anchor.id, persistScrollPosition, queryClient, scrollToLiveEdgePosition, sessionId]);
 
   const focusTranscript = useCallback(() => {
     scrollRef.current?.focus({ preventScroll: true });
@@ -2435,6 +2554,21 @@ function ChatPanel({
     void threadMessagesQuery.fetchNextPage();
   }, [threadMessagesQuery]);
 
+  const loadNewerThreadMessages = useCallback(() => {
+    if (!activeThreadId || !nextNewerThreadCursor || isFetchingNewerThreadMessages) return;
+    setIsFetchingNewerThreadMessages(true);
+    void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+      after: nextNewerThreadCursor,
+      limit: THREAD_MESSAGE_WINDOW_LIMIT,
+    }).then((window) => {
+      setNewerThreadMessagePages((pages) => [...pages, window]);
+    }).catch((error) => {
+      toast.error(error instanceof ApiError ? error.message : "Failed to load newer messages");
+    }).finally(() => {
+      setIsFetchingNewerThreadMessages(false);
+    });
+  }, [activeThreadId, isFetchingNewerThreadMessages, nextNewerThreadCursor, sessionId]);
+
   useLayoutEffect(() => {
     const snapshot = olderMessagesPrependSnapshotRef.current;
     const el = scrollRef.current;
@@ -2449,6 +2583,7 @@ function ChatPanel({
     (_entry: TimelineEntry, index: number) =>
       ({
         "data-session-entry-index": index,
+        ...(_entry.kind === "message" ? { "data-session-message-id": _entry.data.id } : {}),
       }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>,
     [],
   );
@@ -2478,45 +2613,38 @@ function ChatPanel({
 
   // SSE streaming for real-time logs when the session is active.
   const mergeLogs = useCallback((newLogs: SessionLog[]) => {
-    setStreamedLogs((prev) => {
-      const toAdd: SessionLog[] = [];
-      for (const log of newLogs) {
-        if (!seenLogIds.current.has(log.id)) {
-          seenLogIds.current.add(log.id);
-          toAdd.push(log);
-        }
-      }
-      if (toAdd.length === 0) return prev;
-      const next = [...prev, ...toAdd];
-      // Drop oldest entries once we exceed the cap so a long-running session
-      // can't grow the overlay buffer without bound. Older logs already exist
-      // in the persisted timeline once the next refetch lands.
-      if (next.length > STREAMED_LOGS_MAX) {
-        return next.slice(next.length - STREAMED_LOGS_MAX);
-      }
-      return next;
-    });
-  }, []);
+    if (newLogs.length === 0) return;
+    const cappedLogs = newLogs.map(capLiveSessionLogMessage);
 
-  const mergeSessionStatusUpdate = useCallback((updated: Session) => {
+    const logsByThread = new Map<string, SessionLog[]>();
+    for (const log of cappedLogs) {
+      if (!log.thread_id) continue;
+      const threadLogs = logsByThread.get(log.thread_id) ?? [];
+      threadLogs.push(log);
+      logsByThread.set(log.thread_id, threadLogs);
+    }
+    for (const [threadID, threadLogs] of logsByThread) {
+      queryClient.setQueryData<ListResponse<SessionLog>>(
+        threadLiveLogsQueryKey(sessionId, threadID),
+        (existing) => mergeSessionLogListResponse(existing, threadLogs, STREAMED_LOGS_MAX),
+      );
+    }
+
+    if (activeThreadId) {
+      return;
+    }
+
+    queryClient.setQueryData<ListResponse<SessionLog>>(
+      sessionLiveLogsQueryKey(sessionId),
+      (existing) => mergeSessionLogListResponse(existing, cappedLogs, STREAMED_LOGS_MAX),
+    );
+  }, [activeThreadId, queryClient, sessionId]);
+
+  const mergeSessionStatusUpdate = useCallback((updated: SessionDetail) => {
     queryClient.setQueryData<SingleResponse<SessionDetail>>(["session", sessionId], (existing) => {
-      if (!existing) {
-        return { data: { ...updated, threads: [] } };
-      }
-      const existingThreads = existing.data.threads ?? [];
-      const hasThreadPayload = Array.isArray(updated.threads) && updated.threads.length > 0;
-      const threads = hasThreadPayload
-        ? updated.threads!
-        : reconcileThreadsForOmittedStatusUpdate(existingThreads, updated);
-      return {
-        ...existing,
-        data: {
-          ...existing.data,
-          ...updated,
-          threads,
-        },
-      };
+      return mergeSessionDetailStatusUpdate(existing, updated);
     });
+    applySessionDetailToSessionListCaches(queryClient, updated);
   }, [queryClient, sessionId]);
 
   const mergeThreadInboxUpdate = useCallback((event: ThreadInboxEvent) => {
@@ -2617,6 +2745,7 @@ function ChatPanel({
         // failure reverts to idle), fetch the latest messages so any error
         // message posted by the backend is displayed immediately.
         if (updated.status !== "running") {
+          clearCurrentLiveLogs();
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
           invalidateSessionHumanInputRequests(queryClient, sessionId);
           if (activeThreadId) {
@@ -2634,6 +2763,7 @@ function ChatPanel({
       addSSEListener(eventSource, SSE_EVENT.DONE, (updated) => {
         mergeSessionStatusUpdate(updated);
         eventSource?.close();
+        clearCurrentLiveLogs();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         if (activeThreadId) {
@@ -2669,18 +2799,25 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId, clearCurrentLiveLogs]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (hasLoadedTimelineInputs) {
+      cancelPendingInitialAnchorRestore();
+    }
     syncScrollState(el);
+    if (activeThreadId && isNearBottom(el) && hasNewerThreadMessages && !isFetchingNewerThreadMessages) {
+      loadNewerThreadMessages();
+    }
     schedulePersistScrollPosition(el.scrollTop);
-  }, [schedulePersistScrollPosition, syncScrollState]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasLoadedTimelineInputs, hasNewerThreadMessages, isFetchingNewerThreadMessages, loadNewerThreadMessages, schedulePersistScrollPosition, syncScrollState]);
 
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
+    initialAnchorCancelledRef.current = false;
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -2696,13 +2833,37 @@ function ChatPanel({
   }, [persistScrollPosition]);
 
   useEffect(() => {
-    if (!hasLoadedTimelineInputs || initialAnchorAppliedRef.current || !viewerScope) return;
+    if (
+      !hasLoadedTimelineInputs ||
+      initialAnchorAppliedRef.current ||
+      initialAnchorCancelledRef.current ||
+      !viewerScope
+    ) return;
 
     const el = scrollRef.current;
     if (!el) return;
 
+    const firstThreadWindow = threadMessagesQuery.data?.pages[0];
+    if (
+      activeThreadId &&
+      initialThreadAnchorPosition &&
+      firstThreadWindow?.meta.anchor_found
+    ) {
+      const target = el.querySelector<HTMLElement>(`[data-session-message-id="${initialThreadAnchorPosition.anchor.id}"]`);
+      if (target) {
+        el.scrollTop = target.offsetTop + initialThreadAnchorPosition.offsetPx;
+        syncScrollState(el);
+        initialAnchorAppliedRef.current = true;
+        return;
+      }
+    }
+
+    const ignoreStoredScrollTop =
+      activeThreadId &&
+      !!initialThreadAnchorPosition &&
+      firstThreadWindow?.meta.anchor_found === false;
     const storedScrollTop =
-      typeof window === "undefined"
+      ignoreStoredScrollTop || typeof window === "undefined"
         ? null
         : readStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
     const anchor = resolveInitialSessionAnchor({
@@ -2740,7 +2901,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2826,6 +2987,24 @@ function ChatPanel({
               onDismissHumanInputAutoOpen={handleDismissHumanInputAutoOpen}
               getEntryContainerProps={getEntryContainerProps}
             />
+            {activeThreadId && hasNewerThreadMessages ? (
+              <div className="flex justify-center pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={loadNewerThreadMessages}
+                  disabled={isFetchingNewerThreadMessages}
+                >
+                  {isFetchingNewerThreadMessages ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ArrowDown className="h-4 w-4" />
+                  )}
+                  Load newer
+                </Button>
+              </div>
+            ) : null}
           </>
         )}
         {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
@@ -2955,6 +3134,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
   const [detailWidth, setDetailWidth] = useState(DEFAULT_DETAIL);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
+  // null means "follow the saved user-settings preference"; a boolean means
+  // the user toggled full screen in this session (and we persist it).
+  const [diffFullScreenOverride, setDiffFullScreenOverride] = useState<boolean | null>(null);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
@@ -3088,9 +3270,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.sessions.detail(id),
     queryFn: () => api.sessions.get(id),
+    // Sidebar navigation may seed this key with list-row data so the detail
+    // shell can open immediately. Always treat that cache entry as stale so
+    // the authoritative detail payload replaces it on mount.
+    staleTime: 0,
     refetchInterval: (q) => {
       const s = q.state.data?.data;
       if (!s) return false;
+      if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
@@ -3111,7 +3298,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
       if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
-        return 2000;
+        return pollMs(2000);
       }
       return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
     },
@@ -3127,12 +3314,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     () => (user ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id } : null),
     [user],
   );
-  const session = data?.data;
-  usePageTitle(session ? sessionTitle(session) : null, "Session");
+  const rawSession = data?.data;
+  const isProvisionalSession = isProvisionalSessionDetail(rawSession);
+  const session = isProvisionalSession ? undefined : rawSession;
+  // Tab title from whatever payload is available — the provisional row's
+  // title matches what the user just clicked, so don't wait for the
+  // authoritative detail to label the tab.
+  usePageTitle(rawSession ? sessionTitle(rawSession) : null, "Session");
   const members = membersData?.data ?? [];
   const shouldLoadDiff = (
-    centerMode === "review" ||
-    detailTab === "changes"
+    !isProvisionalSession &&
+    (centerMode === "review" ||
+      detailTab === "changes")
   );
   const diffRevisionKey = useMemo(() => {
     if (!session) return null;
@@ -3205,12 +3398,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [diffRevisionKey, isDiffFetchedAfterMount, refetchDiff, sessionDiffPayload, shouldLoadDiff]);
   const threads = useMemo(() => session?.threads ?? [], [session?.threads]);
   const [pendingThreadPreview, setPendingThreadPreview] = useState<PendingThreadPreview | null>(null);
-  const chromeThreads = useMemo(() => {
-    if (!pendingThreadPreview || threads.some((thread) => thread.id === pendingThreadPreview.id)) {
-      return threads;
-    }
-    return [...threads, pendingThreadPreview];
-  }, [pendingThreadPreview, threads]);
+  const chromeThreads = useMemo(
+    () => buildChromeThreads(threads, pendingThreadPreview),
+    [pendingThreadPreview, threads],
+  );
   const nonInteractiveThreadIds = useMemo(
     () => new Set(pendingThreadPreview?.id === "__pending-thread__" ? [pendingThreadPreview.id] : []),
     [pendingThreadPreview],
@@ -3230,6 +3421,65 @@ export function SessionDetailContent({ id }: { id: string }) {
   const currentTitle = session ? sessionTitle(session) : "";
 
   const queryClient = useQueryClient();
+
+  // Warm the stored active thread's first message window in parallel with the
+  // session detail fetch. Without this, the messages request can't start
+  // until the detail payload arrives, the thread-selection effect runs, and
+  // ChatPanel mounts — a full extra round trip on every page open even
+  // though the server answers in single-digit milliseconds. The stored
+  // thread id (and, pre-auth, the cached viewer scope) is a hint: if it
+  // turns out stale, the normal resolution flow corrects the selection and
+  // this prefetch is just unused cache. ChatPanel's useInfiniteQuery shares
+  // the exact query key, so React Query dedupes against the in-flight fetch.
+  const didPrefetchThreadMessagesRef = useRef(false);
+  useEffect(() => {
+    if (didPrefetchThreadMessagesRef.current || typeof window === "undefined") return;
+    didPrefetchThreadMessagesRef.current = true;
+    const scope: SessionScrollViewerScope | null = user
+      ? { userId: user.id, orgId: getActiveOrgId() ?? user.org_id }
+      : readCachedViewerScope(window.localStorage);
+    if (!scope) return;
+    const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, scope);
+    if (!storedThreadId) return;
+    const anchor = readStoredSessionAnchorPosition(window.localStorage, id, scope, storedThreadId);
+    void queryClient.prefetchInfiniteQuery({
+      queryKey: threadMessageWindowQueryKey(id, storedThreadId, anchor?.anchor.id ?? null),
+      queryFn: () =>
+        api.sessions.getThreadMessageWindow(
+          id,
+          storedThreadId,
+          anchor
+            ? { position: "around", anchorMessageId: anchor.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
+            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+        ),
+      initialPageParam: undefined as string | undefined,
+    });
+  }, [id, queryClient, user]);
+
+  // Full-screen diff viewer. The preference lives on the user settings
+  // document so it sticks across sessions; mobile review already fills the
+  // viewport, so the mode is desktop-only.
+  const isDiffFullScreen =
+    !isMobileReviewViewport &&
+    (diffFullScreenOverride ?? user?.settings?.diff_viewer_full_screen ?? false);
+  const { mutate: persistDiffFullScreen } = useMutation({
+    // PATCH /auth/me/settings is a merge patch, so the flag travels alone and
+    // can't clobber settings edited concurrently elsewhere.
+    mutationFn: (fullScreen: boolean) =>
+      api.auth.updateSettings({ diff_viewer_full_screen: fullScreen }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+    },
+    onError: () => {
+      toast.error("Couldn't save full screen preference");
+    },
+  });
+  const toggleDiffFullScreen = useCallback(() => {
+    const next = !isDiffFullScreen;
+    setDiffFullScreenOverride(next);
+    persistDiffFullScreen(next);
+  }, [isDiffFullScreen, persistDiffFullScreen]);
+
   const activeThreadDelivery = activeThread?.inbox_delivery;
   const activeThreadHasRecoverableInbox =
     !!activeThreadDelivery &&
@@ -3254,10 +3504,11 @@ export function SessionDetailContent({ id }: { id: string }) {
     // (b) backend state changes (new failure, reaper marking unknown
     // delivery). Poll slowly to catch (b), and pause completely when the
     // tab is hidden — refetchIntervalInBackground=false (the default) stops
-    // the interval; refetchOnWindowFocus=true (the default) picks up any
-    // changes when the user returns.
+    // the interval; refetchOnWindowFocus=true picks up any changes when the
+    // user returns.
     refetchInterval: recoverableInboxThreadId ? 30_000 : false,
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   const recoverableInboxEntries = useMemo(
     () => recoverableInboxQuery.data?.data ?? [],
@@ -3533,6 +3784,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: prData } = useQuery({
     queryKey: ["session", id, "pr"],
     queryFn: () => api.sessions.getPR(id),
+    enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
@@ -3551,7 +3803,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchInterval: (query) => {
       const mergeState = query.state.data?.data?.merge_state;
       const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? 5_000 : false;
+      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? pollMs(5_000) : false;
     },
   });
   const prHealth = prHealthData?.data;
@@ -3594,6 +3846,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
         } : undefined);
       } else if (current === "failed") {
+        queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
         toast.error(PR_ERROR_TOAST_MESSAGE, { duration: PR_ERROR_TOAST_DURATION_MS });
       }
     }
@@ -3660,15 +3913,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     prevBranchStateRef.current = current;
   }, [localBranchState, session?.branch_creation_state, session?.branch_creation_error, session?.branch_url]);
   const startRepairMutation = useMutation({
-    mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
+    mutationFn: async ({ action, pushChanges }: { action: "fix_tests" | "resolve_conflicts"; pushChanges: boolean }) => {
       if (!pullRequestId) {
         throw new Error("Pull request not found");
       }
+      const body = activeThread?.id ? { thread_id: activeThread.id, push_changes: pushChanges } : { push_changes: pushChanges };
       return action === "fix_tests"
-        ? api.pullRequests.fixTests(pullRequestId)
-        : api.pullRequests.resolveConflicts(pullRequestId);
+        ? api.pullRequests.fixTests(pullRequestId, body)
+        : api.pullRequests.resolveConflicts(pullRequestId, body);
     },
-    onMutate: (action) => {
+    onMutate: ({ action }) => {
       setRepairActionError(null);
       setPendingPRAction(action);
     },
@@ -3681,6 +3935,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (response.data.session_id !== id) {
         router.push(`/sessions/${response.data.session_id}`);
         return;
+      }
+      if (response.data.thread_id && response.data.thread_id !== activeThreadId) {
+        setActiveThreadId(response.data.thread_id);
       }
       try {
         await queryClient.refetchQueries({ queryKey: repairHealthQueryKey, type: "active" });
@@ -3699,8 +3956,15 @@ export function SessionDetailContent({ id }: { id: string }) {
         toast.info(label);
       }
     },
-    onError: (err) => {
+    onError: (err, { action }) => {
       setPendingPRAction(null);
+      if (err instanceof ApiError && err.code === "REPAIR_ALREADY_IN_PROGRESS") {
+        const label = action === "fix_tests"
+          ? "Fix tests session is already in progress"
+          : "Resolve conflicts session is already in progress";
+        toast.info(label);
+        return;
+      }
       setRepairActionError(err instanceof ApiError ? err.message : "Failed to open repair session");
     },
   });
@@ -3844,14 +4108,14 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [session?.id, session?.status, session?.title]);
   // Record that the user has viewed this session (for unread tracking).
   useEffect(() => {
-    if (id) {
+    if (session?.id) {
       api.sessions.recordView(id).then(() => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
       }).catch((err) => {
         console.error("failed to record session view", err);
       });
     }
-  }, [id, queryClient]);
+  }, [id, queryClient, session?.id]);
 
   const hasPR = !!prData?.data;
   const hasSnapshot = !!session?.snapshot_key;
@@ -3918,7 +4182,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [githubPRParam, setGithubPRParam, setResumePRParam, setResumeActionParam]);
 
   const createPRMutation = useMutation({
-    mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string }) =>
+    mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean }) =>
       api.sessions.createPR(id, options),
     onMutate: () => {
       setLocalPRActionError(null);
@@ -3939,7 +4203,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         isPRAuthInterceptDetails(err.details)) {
         setLocalPRState("idle");
         setLocalPRActionError(null);
-        setPRAuthPrompt({ ...err.details, purpose: "create_pr" });
+        setPRAuthPrompt({ ...err.details, purpose: "create_pr", mergeWhenReady: options?.mergeWhenReady || err.details.merge_when_ready === true });
         clearPRResumeParams();
         return;
       }
@@ -4698,7 +4962,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: queryKeys.sessions.threadFileEvents(id),
     queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
     enabled: threads.length > 0,
-    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? 5000 : false,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? pollMs(5000) : false,
     staleTime: 2_000,
   });
   useEffect(() => {
@@ -4988,6 +5252,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     createBranchMutation.mutate(undefined);
   }, [canCreatePR, createBranchMutation, ghBlocked, localBranchState]);
 
+  const createPRWithAutoMerge = useCallback(() => {
+    if (localPRState !== "idle" || createPRMutation.isPending || !canCreatePR) {
+      return;
+    }
+    if (ghBlocked) {
+      setPRAuthPrompt({ purpose: "create_pr", mergeWhenReady: true });
+      return;
+    }
+    createPRMutation.mutate({ mergeWhenReady: true });
+  }, [canCreatePR, createPRMutation, ghBlocked, localPRState]);
+
   const pushChangesFromKeyboard = useCallback(() => {
     if (localPushState !== "idle" || pushChangesMutation.isPending) {
       return;
@@ -5047,26 +5322,38 @@ export function SessionDetailContent({ id }: { id: string }) {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
       canPush: canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: canManagePR && !!prHealth?.can_fix_tests && pendingPRAction === null,
+      canFixTests: canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
       canResolveConflicts: canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
       canMerge: canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
-      onFixTests: () => startRepairMutation.mutate("fix_tests"),
-      onResolveConflicts: () => startRepairMutation.mutate("resolve_conflicts"),
+      onFixTests: () => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true }),
+      onResolveConflicts: () => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true }),
       onMerge: handleMergeAction,
     },
   });
 
-  if (isLoading) {
+  if (isLoading || (isProvisionalSession && !error)) {
+    // Metadata-first paint: the provisional row seeded by the sidebar (or a
+    // partially settled payload) already carries the title, status, and
+    // agent. Show those immediately and confine the shimmer to the parts we
+    // genuinely don't have yet, so opening a session never hides data the
+    // client already holds.
+    const provisionalStatus = rawSession ? getDisplayStatus(rawSession.status) : null;
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-center space-y-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40 mx-auto" />
-          <p className="text-xs text-muted-foreground">Loading session...</p>
-        </div>
-      </div>
+      <SessionDetailLoadingSkeleton
+        metadata={
+          rawSession && provisionalStatus
+            ? {
+                title: sessionTitle(rawSession),
+                statusLabel: provisionalStatus.label,
+                statusColor: provisionalStatus.color,
+                agentType: rawSession.agent_type,
+              }
+            : null
+        }
+      />
     );
   }
 
@@ -5340,6 +5627,19 @@ export function SessionDetailContent({ id }: { id: string }) {
                           )}
                           {branchActionLabel}
                         </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-xs"
+                          onClick={createPRWithAutoMerge}
+                          disabled={prActionDisabled || createPRMutation.isPending}
+                          title={prActionTitle}
+                        >
+                          {prActionSpinning ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <GitPullRequest className="h-3.5 w-3.5" />
+                          )}
+                          Create PR and enable auto-merge
+                        </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
@@ -5437,16 +5737,25 @@ export function SessionDetailContent({ id }: { id: string }) {
               <PRHealthBanner
                 health={prHealth}
                 currentSessionId={id}
+                currentThreadId={activeThread?.id ?? null}
                 pendingAction={pendingPRAction}
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
                 mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate("fix_tests")}
-                onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
+                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
                 onMerge={handleMergeAction}
                 onQueueMergeWhenReady={handleQueueMergeWhenReady}
                 onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId) => router.push(`/sessions/${sessionId}`)}
+                onOpenRepairSession={(sessionId, threadId) => {
+                  if (sessionId === id && threadId) {
+                    setActiveThreadId(threadId);
+                    return;
+                  }
+                  router.push(`/sessions/${sessionId}`);
+                }}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
@@ -5695,9 +6004,16 @@ export function SessionDetailContent({ id }: { id: string }) {
               )}
             </div>
           ) : null}
-          {/* Review diff view — mounted only when active */}
+          {/* Review diff view — mounted only when active. Full screen lifts
+              the same mounted subtree into a viewport overlay (z-40 stays
+              below dialogs/sheets at z-50) so diff state survives toggling. */}
           {centerMode === "review" && (
-            <div className="h-full animate-in fade-in duration-150 flex flex-col">
+            <div
+              className={cn(
+                "animate-in fade-in duration-150 flex flex-col",
+                isDiffFullScreen ? "fixed inset-0 z-40 bg-background" : "h-full"
+              )}
+            >
               <div className="flex-1 min-h-0">
                 {isDiffDisplayLoading ? (
                   <div className="h-full w-full bg-muted/20 animate-pulse rounded-lg" />
@@ -5734,6 +6050,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                     onDeleteComment={deleteComment}
                     diffSearchQuery={diffSearchQuery}
                     onDiffSearchChange={setDiffSearchQuery}
+                    isFullScreen={isDiffFullScreen}
+                    onToggleFullScreen={toggleDiffFullScreen}
                   />
                 )}
               </div>
@@ -5744,7 +6062,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         {session.agent_type !== "pm_agent" && !isDedicatedMobileReview && (
           <>
             {composerIsSnapshotExpired && (
-              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-warning/10 border-warning/30 text-warning">
                 <Clock className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
@@ -5755,7 +6073,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <RuntimeRecoveryNotice />
             )}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired && (
-              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+              <div className="flex items-center gap-2 px-4 py-2.5 text-xs border-t bg-info/10 border-info/30 text-info">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
@@ -5989,7 +6307,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </SheetDescription>
             </SheetHeader>
             {composerIsSnapshotExpired ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/40 text-amber-800 dark:text-amber-300">
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-warning/10 border-warning/30 text-warning">
                 <Clock className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   This session&apos;s environment has expired. Sessions can be continued for up to 30 days after their last activity. To make further changes, please start a new session.
@@ -6000,7 +6318,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               <RuntimeRecoveryNotice border="border-b" />
             ) : null}
             {composerLacksHeadlessResume && composerCanSendMessage && !composerIsSnapshotExpired ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-sky-50 dark:bg-sky-950/20 border-sky-200 dark:border-sky-800/40 text-sky-800 dark:text-sky-300">
+              <div className="flex items-center gap-2 px-4 py-3 text-xs border-b bg-info/10 border-info/30 text-info">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                 <span>
                   {AGENTS_BY_KEY[session.agent_type]?.label ?? session.agent_type} doesn&apos;t support headless conversation resume. Follow-up messages run against the restored filesystem, but earlier chat context is not replayed — include anything you need the agent to remember.
@@ -6217,7 +6535,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 onClick={(event) => {
                   event.preventDefault();
                   setPRAuthPrompt(null);
-                  createPRMutation.mutate({ authorMode: "app" });
+                  createPRMutation.mutate({ authorMode: "app", mergeWhenReady: prAuthPrompt.mergeWhenReady });
                 }}
               >
                 Create as 143

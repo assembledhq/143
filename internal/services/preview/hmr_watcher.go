@@ -136,9 +136,10 @@ func (pw *previewWatcher) stopTimer() {
 
 // HMRWatcherConfig holds initialization options for HMRWatcher.
 type HMRWatcherConfig struct {
-	Inspector PreviewInspector
-	Store     *db.PreviewStore
-	Logger    zerolog.Logger
+	Inspector      PreviewInspector
+	Store          *db.PreviewStore
+	RuntimeStamper PreviewRuntimeRevisionStamper
+	Logger         zerolog.Logger
 	// BlobDir is the directory where screenshot PNGs are stored on disk.
 	// Subdirectories are created per preview ID.
 	BlobDir string
@@ -150,10 +151,11 @@ type HMRWatcherConfig struct {
 // One HMRWatcher instance is shared across all active previews on a worker
 // node. Each preview gets its own goroutine context and debounce timer.
 type HMRWatcher struct {
-	inspector PreviewInspector
-	store     *db.PreviewStore
-	logger    zerolog.Logger
-	blobDir   string
+	inspector      PreviewInspector
+	store          *db.PreviewStore
+	runtimeStamper PreviewRuntimeRevisionStamper
+	logger         zerolog.Logger
+	blobDir        string
 
 	mu       sync.RWMutex
 	watchers map[uuid.UUID]*previewWatcher // keyed by preview ID
@@ -177,11 +179,12 @@ func NewHMRWatcher(cfg HMRWatcherConfig) (*HMRWatcher, error) {
 	}
 
 	return &HMRWatcher{
-		inspector: cfg.Inspector,
-		store:     cfg.Store,
-		logger:    cfg.Logger.With().Str("component", "hmr_watcher").Logger(),
-		blobDir:   cfg.BlobDir,
-		watchers:  make(map[uuid.UUID]*previewWatcher),
+		inspector:      cfg.Inspector,
+		store:          cfg.Store,
+		runtimeStamper: cfg.RuntimeStamper,
+		logger:         cfg.Logger.With().Str("component", "hmr_watcher").Logger(),
+		blobDir:        cfg.BlobDir,
+		watchers:       make(map[uuid.UUID]*previewWatcher),
 	}, nil
 }
 
@@ -326,6 +329,12 @@ func (hw *HMRWatcher) captureAgentChange(pw *previewWatcher) {
 	hw.mu.RUnlock()
 	if !active {
 		return
+	}
+
+	if hw.runtimeStamper != nil {
+		if err := hw.runtimeStamper.StampPreviewRuntimeRevision(ctx, pw.orgID, pw.previewID, models.PreviewRuntimeRevisionSourceHMR); err != nil {
+			hw.logger.Warn().Err(err).Str("preview_id", pw.previewID.String()).Msg("failed to stamp HMR runtime workspace revision")
+		}
 	}
 
 	hw.captureAndStore(ctx, pw, models.PreviewSnapshotTriggerAgentChange)

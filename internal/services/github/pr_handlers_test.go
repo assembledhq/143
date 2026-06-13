@@ -86,6 +86,233 @@ func TestNewPRService(t *testing.T) {
 	require.NotNil(t, svc.httpClient, "NewPRService should initialize an HTTP client")
 }
 
+func TestHandleAutoPreviewEvent_StartsForPolicyEnabledPullRequest(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	starter := &recordingAutoPreviewStarter{}
+
+	svc := &PRService{
+		repos:              db.NewRepositoryStore(repoMock),
+		previews:           db.NewPreviewStore(previewMock),
+		autoPreviewStarter: starter,
+		logger:             zerolog.Nop(),
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), userID, now, now))
+
+	event := autoPreviewPullRequestEvent(orgID)
+	err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+	require.NoError(t, err, "auto preview webhook policy handling should not fail")
+	require.True(t, starter.called, "auto preview starter should be invoked for enabled policy")
+	require.Equal(t, models.PreviewAutoModeWarm, starter.mode, "auto preview starter should receive the configured mode")
+	require.Equal(t, "feature", starter.headRef, "auto preview starter should receive the PR head branch")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "preview expectations should be met")
+}
+
+func TestHandleAutoPreviewEvent_StartsForReopenedAndSynchronizePullRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		action string
+	}{
+		{name: "reopened", action: "reopened"},
+		{name: "synchronize", action: "synchronize"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repoMock := newMockPool(t)
+			previewMock := newMockPool(t)
+			orgID := uuid.New()
+			repoID := uuid.New()
+			userID := uuid.New()
+			now := time.Now()
+			starter := &recordingAutoPreviewStarter{}
+
+			svc := &PRService{
+				repos:              db.NewRepositoryStore(repoMock),
+				previews:           db.NewPreviewStore(previewMock),
+				autoPreviewStarter: starter,
+				logger:             zerolog.Nop(),
+			}
+
+			repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+					AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+			previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), userID, now, now))
+
+			event := autoPreviewPullRequestEvent(orgID)
+			event.Action = tt.action
+			err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+			require.NoError(t, err, "eligible auto preview webhook action should not fail")
+			require.True(t, starter.called, "auto preview starter should be invoked for eligible PR action")
+			require.Equal(t, models.PreviewAutoModeOn, starter.mode, "auto preview starter should receive the configured mode")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+			require.NoError(t, previewMock.ExpectationsWereMet(), "preview expectations should be met")
+		})
+	}
+}
+
+func TestHandleAutoPreviewEvent_SkipsDraftAndForkPullRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*PullRequestEvent)
+	}{
+		{name: "draft", mutate: func(e *PullRequestEvent) { e.PR.Draft = true }},
+		{name: "fork", mutate: func(e *PullRequestEvent) { e.PR.Head.Repo.Fork = true }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			starter := &recordingAutoPreviewStarter{}
+			svc := &PRService{
+				repos:              db.NewRepositoryStore(newMockPool(t)),
+				previews:           db.NewPreviewStore(newMockPool(t)),
+				autoPreviewStarter: starter,
+				logger:             zerolog.Nop(),
+			}
+			orgID := uuid.New()
+			event := autoPreviewPullRequestEvent(orgID)
+			tt.mutate(&event)
+
+			err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+			require.NoError(t, err, "unsafe auto preview webhook should be skipped without error")
+			require.False(t, starter.called, "auto preview starter should not be invoked for skipped PRs")
+		})
+	}
+}
+
+func TestHandleAutoPreviewEvent_SkipsDisabledPolicyAndNonDefaultBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		mutate     func(*PullRequestEvent)
+		setupMocks func(t *testing.T, orgID uuid.UUID, repoMock, previewMock pgxmock.PgxPoolIface)
+	}{
+		{
+			name:   "disabled policy",
+			mutate: func(*PullRequestEvent) {},
+			setupMocks: func(t *testing.T, orgID uuid.UUID, repoMock, previewMock pgxmock.PgxPoolIface) {
+				t.Helper()
+				repoID := uuid.New()
+				now := time.Now()
+				repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+						AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+				previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+						AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOff), uuid.New(), now, now))
+			},
+		},
+		{
+			name: "non-default base branch",
+			mutate: func(e *PullRequestEvent) {
+				e.PR.Base.Ref = "release"
+			},
+			setupMocks: func(*testing.T, uuid.UUID, pgxmock.PgxPoolIface, pgxmock.PgxPoolIface) {},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			repoMock := newMockPool(t)
+			previewMock := newMockPool(t)
+			starter := &recordingAutoPreviewStarter{}
+			svc := &PRService{
+				repos:              db.NewRepositoryStore(repoMock),
+				previews:           db.NewPreviewStore(previewMock),
+				autoPreviewStarter: starter,
+				logger:             zerolog.Nop(),
+			}
+			orgID := uuid.New()
+			event := autoPreviewPullRequestEvent(orgID)
+			tt.mutate(&event)
+			tt.setupMocks(t, orgID, repoMock, previewMock)
+
+			err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+			require.NoError(t, err, "skipped auto preview webhook should not fail")
+			require.False(t, starter.called, "auto preview starter should not be invoked for skipped PRs")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+			require.NoError(t, previewMock.ExpectationsWereMet(), "preview expectations should be met")
+		})
+	}
+}
+
+type recordingAutoPreviewStarter struct {
+	called  bool
+	mode    models.PreviewAutoMode
+	headRef string
+}
+
+func (s *recordingAutoPreviewStarter) StartAutoPullRequestPreview(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.Repository, _ int, headRef, _ string, _ string, mode models.PreviewAutoMode) error {
+	s.called = true
+	s.mode = mode
+	s.headRef = headRef
+	return nil
+}
+
+func autoPreviewPullRequestEvent(orgID uuid.UUID) PullRequestEvent {
+	event := PullRequestEvent{
+		Action:     "opened",
+		Number:     42,
+		OwnerOrgID: &orgID,
+	}
+	event.Repository.ID = 123
+	event.Repository.FullName = "acme/app"
+	event.Repository.DefaultBranch = "main"
+	event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
+	event.PR.Head.SHA = "0123456789012345678901234567890123456789"
+	event.PR.Head.Ref = "feature"
+	event.PR.Head.Repo.FullName = "acme/app"
+	event.PR.Base.Ref = "main"
+	return event
+}
+
+func githubRepositoryPreviewPolicyTestCols() []string {
+	return []string{"id", "org_id", "repository_id", "auto_mode", "updated_by_user_id", "created_at", "updated_at"}
+}
+
+func githubRepositoryTestCols() []string {
+	return []string{
+		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description",
+		"clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	}
+}
+
 func TestSetBaseURL(t *testing.T) {
 	t.Parallel()
 
@@ -2473,4 +2700,150 @@ func TestTeardownPRPreview_SwallowsErrors(t *testing.T) {
 	require.Equal(t, 1, stopper.calls, "StopPreview should still be invoked even though it returns an error")
 	require.NoError(t, repoMock.ExpectationsWereMet())
 	require.NoError(t, previewMock.ExpectationsWereMet())
+}
+
+// TestHandlePullRequestEvent_OpenedWith143GeneratedPRTriggersAutoPreview confirms that
+// auto-preview policy is applied even when the PR was created by 143 (i.e., when
+// getWebhookPullRequest succeeds). Previously, the code returned nil without calling
+// handleAutoPreviewEvent for 143-generated PRs.
+func TestHandlePullRequestEvent_OpenedWith143GeneratedPRTriggersAutoPreview(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	starter := &recordingAutoPreviewStarter{}
+
+	svc := &PRService{
+		pullRequests:       db.NewPullRequestStore(prMock),
+		jobs:               db.NewJobStore(jobMock),
+		repos:              db.NewRepositoryStore(repoMock),
+		previews:           db.NewPreviewStore(previewMock),
+		autoPreviewStarter: starter,
+		logger:             zerolog.Nop(),
+	}
+
+	// 1. GetByOrgRepoAndNumber returns the 143-generated PR.
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, &sessionID, orgID, "acme/app", now)...),
+		)
+
+	// 2. enqueuePullRequestStateSync inserts a job.
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	// 3. handleAutoPreviewEvent: repo lookup.
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+
+	// 4. handleAutoPreviewEvent: policy lookup returns warm mode.
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), userID, now, now))
+
+	event := autoPreviewPullRequestEvent(orgID)
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+
+	require.NoError(t, err, "HandlePullRequestEvent for 143-generated PR should not fail")
+	require.True(t, starter.called, "auto preview starter should be invoked even for 143-generated PRs")
+	require.Equal(t, models.PreviewAutoModeWarm, starter.mode, "auto preview should receive the configured mode")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "all repo expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "all preview expectations should be met")
+}
+
+// TestHandlePullRequestEvent_ClosedWith143GeneratedPRTeardownAutoPreview confirms
+// that closing a 143-generated PR invokes teardownAutoPreview (via handleAutoPreviewEvent)
+// in addition to the regular applyClosedPRTransition path.
+func TestHandlePullRequestEvent_ClosedWith143GeneratedPRTeardownAutoPreview(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	prPreviewStateID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+
+	// previewStopper is nil so teardownPRPreview is a no-op (guard check fails).
+	svc := &PRService{
+		pullRequests:       db.NewPullRequestStore(prMock),
+		jobs:               db.NewJobStore(jobMock),
+		repos:              db.NewRepositoryStore(repoMock),
+		previews:           db.NewPreviewStore(previewMock),
+		autoPreviewStarter: &recordingAutoPreviewStarter{},
+		logger:             zerolog.Nop(),
+	}
+
+	// 1. GetByOrgRepoAndNumber returns the 143-generated PR (nil session).
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, &sessionID, orgID, "acme/app", now)...),
+		)
+
+	// 2. applyClosedPRTransition: UpdateStatus to closed.
+	prMock.ExpectExec("UPDATE pull_requests SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// 3. enqueuePullRequestStateSync inserts a job.
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	// 4. teardownAutoPreview: repo lookup.
+	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+
+	// 5. teardownAutoPreview: GetPRPreviewState returns a state (nil LastPreviewInstanceID so no stop).
+	previewMock.ExpectQuery("SELECT .+ FROM pr_preview_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "pr_number", "github_comment_id",
+			"last_preview_instance_id", "last_screenshot_blob_path",
+			"last_visual_diff_blob_path", "base_snapshot_key", "status",
+			"created_at", "updated_at",
+		}).AddRow(prPreviewStateID, orgID, repoID, 42, nil, nil, "", "", "", "running", now, now))
+
+	// 6. teardownAutoPreview: UpdatePRPreviewStatus to closed.
+	previewMock.ExpectExec("UPDATE pr_preview_state SET status").
+		WithArgs(models.PRPreviewStatusClosed, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := PullRequestEvent{Action: "closed", Number: 42, OwnerOrgID: &orgID}
+	event.PR.Merged = false
+	event.PR.Head.SHA = "abc123commit"
+	event.Repository.FullName = "acme/app"
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+	require.NoError(t, err, "HandlePullRequestEvent for closed 143-generated PR should not fail")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repo lookup for teardownAutoPreview must be called")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "GetPRPreviewState and UpdatePRPreviewStatus must be called")
 }

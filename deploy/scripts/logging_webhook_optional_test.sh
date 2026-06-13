@@ -57,6 +57,12 @@ run_case() {
   mkdir -p "$home_dir/.config/sops/age"
   printf 'AGE-SECRET-KEY-test\n' >"$home_dir/.config/sops/age/keys.txt"
 
+  # deploy.sh resolves the encrypted bundle from SECRETS_DIR (the private
+  # secrets checkout); stage a stub so the sops-stub decrypt path runs.
+  local secrets_dir="$TMP_DIR/secrets"
+  mkdir -p "$secrets_dir"
+  printf 'sops-stub\n' >"$secrets_dir/.env.production.enc"
+
   local capture_file="$TMP_DIR/$(basename "$script_path").capture"
   : >"$capture_file"
   local stdin_dir="$TMP_DIR/$(basename "$script_path").stdin"
@@ -68,6 +74,7 @@ run_case() {
 
   (
     export HOME="$home_dir"
+    export SECRETS_DIR="$secrets_dir"
     export PATH="$STUB_DIR:$PATH"
     export SOPS_STUB_OUTPUT=$'GRAFANA_ADMIN_PASSWORD=admin-secret\nVICTORIALOGS_HOST=10.0.0.9'
     export SSH_CAPTURE_FILE="$capture_file"

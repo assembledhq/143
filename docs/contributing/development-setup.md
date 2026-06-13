@@ -77,13 +77,13 @@ The frontend proxies `/api/*` to the Go server automatically.
 
 ### Secrets Management
 
-143 uses [SOPS](https://github.com/getsops/sops) + [age](https://github.com/FiloSottile/age) to encrypt secrets into `.env.enc` (safe to commit). Production secrets are stored in `.env.production.enc`.
+143 uses [SOPS](https://github.com/getsops/sops) + [age](https://github.com/FiloSottile/age) to encrypt secrets into `.env*.enc` bundles. The bundles and `.sops.yaml` live in a **private** sibling repo (`SECRETS_DIR`, default `../143-infra`) — never in this public repo. See the [secrets management guide](../secrets/README.md) for the layout and bootstrap steps.
 
 | Command | Description |
 |---------|-------------|
 | `make secrets-setup` | One-time: generate age keypair |
-| `make secrets-encrypt` | Encrypt `.env` → `.env.enc` |
-| `make secrets-decrypt` | Decrypt `.env.enc` → `.env` |
+| `make secrets-encrypt` | Encrypt `.env` → `$SECRETS_DIR/.env.enc` |
+| `make secrets-decrypt` | Decrypt `$SECRETS_DIR/.env.enc` → `.env` |
 | `make secrets-encrypt ENV=production` | Encrypt production secrets |
 | `make secrets-decrypt ENV=production` | Decrypt production secrets |
 | `make secrets-edit` | Edit encrypted `.env.enc` in-place |

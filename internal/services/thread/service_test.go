@@ -173,8 +173,9 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
-	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadFn            func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn       func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadLatestTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
@@ -187,6 +188,13 @@ func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UU
 func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
 	if m.listByThreadTurnsFn != nil {
 		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+	if m.listByThreadLatestTurnsFn != nil {
+		return m.listByThreadLatestTurnsFn(ctx, orgID, threadID, latestTurns)
 	}
 	return nil, nil
 }
@@ -2139,6 +2147,44 @@ func TestService_SendMessage_AppliesInboxBackpressureWithoutClientMessageID(t *t
 	require.Empty(t, deps.inboxStore.appendCalls, "SendMessage should reject before appending more inbox entries")
 }
 
+func TestService_SendMessage_ReturnsExistingMessageForClientMessageID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	existingMessageID := int64(99)
+	svc, deps := newTestService(t)
+	svc.SetThreadInboxStore(deps.inboxStore)
+
+	deps.inboxStore.getByClientMessageIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error) {
+		require.Equal(t, orgID, gotOrgID, "idempotency lookup should be org scoped")
+		require.Equal(t, threadID, gotThreadID, "idempotency lookup should be thread scoped")
+		require.Equal(t, "agent-tool-repeat", clientMessageID, "idempotency lookup should use the client message id")
+		return models.ThreadInboxEntry{MessageID: existingMessageID}, nil
+	}
+	deps.messageStore.getByIDFn = func(_ context.Context, gotOrgID uuid.UUID, id int64) (models.SessionMessage, error) {
+		require.Equal(t, orgID, gotOrgID, "existing message lookup should be org scoped")
+		require.Equal(t, existingMessageID, id, "existing message lookup should use the inbox message id")
+		return models.SessionMessage{ID: id, OrgID: gotOrgID, SessionID: sessionID, ThreadID: &threadID, Content: "already accepted"}, nil
+	}
+	deps.threadStore.claimIdleFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{}, fmt.Errorf("claim should not be called for idempotent sends")
+	}
+
+	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+		SessionID:       sessionID,
+		OrgID:           orgID,
+		ThreadID:        threadID,
+		ClientMessageID: "agent-tool-repeat",
+		Message:         "run tests again",
+	})
+	require.NoError(t, err, "SendMessage should return the existing message without mutating state")
+	require.NotNil(t, result, "SendMessage should return a result for idempotent sends")
+	require.Equal(t, existingMessageID, result.Message.ID, "SendMessage should return the previously accepted message")
+	require.Empty(t, deps.inboxStore.appendCalls, "SendMessage should not append a second inbox entry")
+}
+
 func TestService_SendMessage_RunningThreadEnqueuesLiveInboxDelivery(t *testing.T) {
 	t.Parallel()
 
@@ -3085,6 +3131,7 @@ func TestService_GetMessageWindow(t *testing.T) {
 					require.Equal(t, orgID, gotOrgID, "message window should be scoped by org")
 					require.Equal(t, threadID, gotThreadID, "message window should use requested thread")
 					require.Equal(t, int64(44), opts.BeforeID, "message window should pass cursor options")
+					require.Equal(t, db.SessionMessageWindowPositionOlder, opts.Position, "message window should pass requested position")
 					return db.SessionMessageWindow{
 						Messages:                 []models.SessionMessage{{ID: 43}},
 						NextOlderCursor:          "43",
@@ -3132,7 +3179,7 @@ func TestService_GetMessageWindow(t *testing.T) {
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
 
-			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{BeforeID: 44, Limit: 10})
+			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{Position: db.SessionMessageWindowPositionOlder, BeforeID: 44, Limit: 10})
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
 				return
@@ -3179,6 +3226,38 @@ func TestService_GetLogs(t *testing.T) {
 					require.Equal(t, threadID, gotThreadID, "filtered log lookup should preserve thread scope")
 					require.Equal(t, []int{5, 6}, turns, "filtered log lookup should pass requested turns")
 					return []models.SessionLog{{ID: 6}}, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
+			name: "success with latest turns window",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "latest-turns log lookup should preserve org scope")
+					require.Equal(t, threadID, gotThreadID, "latest-turns log lookup should preserve thread scope")
+					require.Equal(t, 50, latestTurns, "latest-turns log lookup should pass the requested window")
+					return []models.SessionLog{{ID: 9}}, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
+			name: "turn filter wins over latest turns",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadTurnsFn = func(_ context.Context, _, _ uuid.UUID, turns []int) ([]models.SessionLog, error) {
+					require.Equal(t, []int{5, 6}, turns, "explicit turns should take precedence")
+					return []models.SessionLog{{ID: 6}}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, _, _ uuid.UUID, _ int) ([]models.SessionLog, error) {
+					t.Fatal("latest-turns lookup must not run when explicit turn numbers are provided")
+					return nil, nil
 				}
 			},
 			expectLen: 1,
@@ -3234,6 +3313,13 @@ func TestService_GetLogs(t *testing.T) {
 			opts := db.SessionLogFilterOptions{}
 			if tt.name == "success with turn filter" {
 				opts.TurnNumbers = []int{5, 6}
+			}
+			if tt.name == "success with latest turns window" {
+				opts.LatestTurns = 50
+			}
+			if tt.name == "turn filter wins over latest turns" {
+				opts.TurnNumbers = []int{5, 6}
+				opts.LatestTurns = 50
 			}
 			logs, err := svc.GetLogs(context.Background(), orgID, sessionID, threadID, opts)
 			if tt.expectErr != nil {

@@ -221,6 +221,16 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 	summary := strings.TrimSpace(assistantSummary)
 	switch pass.Status {
 	case models.ReviewLoopPassStatusReviewing:
+		decision, err := parseDecision(summary)
+		if err == nil && decision == models.ReviewLoopDecisionClean {
+			if loop.AutomationRunID != nil {
+				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+			}
+			if err := s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary); err != nil {
+				return err
+			}
+			return nil
+		}
 		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopDecisionPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "decision")))
 		if err != nil {
 			_ = s.failLoop(ctx, orgID, loop, fmt.Sprintf("failed to request review decision: %s", err))
@@ -421,13 +431,42 @@ func (s *Service) sendPlain(ctx context.Context, loop models.SessionReviewLoop, 
 }
 
 func parseDecision(summary string) (models.ReviewLoopDecision, error) {
-	switch strings.TrimSpace(summary) {
-	case string(models.ReviewLoopDecisionClean):
+	hasClean := containsDecisionSentinel(summary, models.ReviewLoopDecisionClean)
+	hasNeedsFix := containsDecisionSentinel(summary, models.ReviewLoopDecisionNeedsFix)
+	switch {
+	case hasClean && !hasNeedsFix:
 		return models.ReviewLoopDecisionClean, nil
-	case string(models.ReviewLoopDecisionNeedsFix):
+	case hasNeedsFix && !hasClean:
 		return models.ReviewLoopDecisionNeedsFix, nil
 	default:
 		return "", ErrUnrecognizedDecision
+	}
+}
+
+func containsDecisionSentinel(summary string, decision models.ReviewLoopDecision) bool {
+	sentinel := string(decision)
+	lines := strings.Split(strings.ReplaceAll(summary, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == sentinel {
+			return true
+		}
+		if i == 0 && strings.HasPrefix(trimmed, sentinel) && isDecisionDirectiveBoundary(trimmed, len(sentinel)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDecisionDirectiveBoundary(line string, sentinelLen int) bool {
+	if len(line) == sentinelLen {
+		return true
+	}
+	switch line[sentinelLen] {
+	case ':', '-', ' ', '\t':
+		return true
+	default:
+		return false
 	}
 }
 

@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # If SOPS_AGE_KEY is set, decrypt .env.production.enc and export the values.
-# This lets Render (or any deploy target) store a single secret — the age
-# private key — while all other secrets live in the encrypted file in git.
+# The deploy target stores a single secret — the age private key — while all
+# other secrets live in the encrypted bundle bind-mounted into the workdir
+# from the host (staged there by deploy.sh from the private secrets repo).
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f .env.production.enc ]; then
   export SOPS_AGE_KEY_FILE=/tmp/age-key.txt
   echo "$SOPS_AGE_KEY" > "$SOPS_AGE_KEY_FILE"
