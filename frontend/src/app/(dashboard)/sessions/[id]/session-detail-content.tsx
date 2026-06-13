@@ -675,6 +675,10 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
   const isActive = !terminalSessionStatuses.has(session.status);
   const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
+  const branchLabel = session.working_branch || session.target_branch;
+  const repoBranchLabel = session.repository_full_name && branchLabel
+    ? `${session.repository_full_name} · ${branchLabel}`
+    : session.repository_full_name || branchLabel;
 
   const triggeredByMember = session.triggered_by_user_id
     ? members.find((m) => m.id === session.triggered_by_user_id)
@@ -872,6 +876,12 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
+          {repoBranchLabel && (
+            <>
+              <span>{repoBranchLabel}</span>
+              <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+            </>
+          )}
           {terminalSessionStatuses.has(session.status) &&
             !((session.status === "failed" || session.status === "cancelled") &&
               !hasMeaningfulDuration(session.started_at, session.completed_at)) && (

@@ -166,6 +166,13 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(screen.getAllByText(/Claude Code/).length).toBeGreaterThanOrEqual(1);
   });
 
+  it('shows the current repository and branch in the overview details', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    expect(screen.getByText('assembledhq/143 · 143/feature-session-details')).toBeInTheDocument();
+  });
+
   it('renders the session Linear chip as an outbound link when only linear_identifier_hint is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
