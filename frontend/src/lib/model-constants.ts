@@ -83,6 +83,46 @@ export const AVAILABLE_PI_MODELS = [
   PI_MODEL_GEMINI_2_5_PRO,
 ] as const;
 
+export const OPENCODE_MODEL_GPT_5_4_MINI = "openai/gpt-5.4-mini";
+export const OPENCODE_MODEL_GPT_5_3_CODEX_SPARK = "openai/gpt-5.3-codex-spark";
+export const OPENCODE_MODEL_CLAUDE_HAIKU_45 = "anthropic/claude-haiku-4-5";
+export const OPENCODE_MODEL_GEMINI_3_FLASH = "google/gemini-3-flash";
+export const OPENCODE_MODEL_GEMINI_2_5_FLASH = "google/gemini-2.5-flash";
+export const OPENCODE_MODEL_MINIMAX_M2_1 = "minimax/minimax-m2.1";
+export const OPENCODE_MODEL_QWEN_3_CODER = "qwen/qwen3-coder";
+export const OPENCODE_MODEL_DEEPSEEK_CHAT = "deepseek/deepseek-chat";
+export const OPENCODE_MODEL_GPT_5_4 = "openai/gpt-5.4";
+export const OPENCODE_MODEL_GPT_5_2_CODEX = "openai/gpt-5.2-codex";
+export const OPENCODE_MODEL_CLAUDE_SONNET_46 = "anthropic/claude-sonnet-4-6";
+export const OPENCODE_MODEL_GEMINI_3_PRO = "google/gemini-3-pro";
+export const OPENCODE_MODEL_KIMI_K2 = "moonshot/kimi-k2";
+export const OPENCODE_MODEL_GPT_5_2 = "opencode/gpt-5.2";
+export const OPENCODE_MODEL_GPT_5_1_CODEX = "opencode/gpt-5.1-codex";
+export const OPENCODE_MODEL_CLAUDE_OPUS_48 = "anthropic/claude-opus-4-8";
+export const OPENCODE_MODEL_CLAUDE_OPUS_47 = "anthropic/claude-opus-4-7";
+export const OPENCODE_MODEL_GPT_5_5 = "openai/gpt-5.5";
+
+export const AVAILABLE_OPENCODE_MODELS = [
+  OPENCODE_MODEL_GPT_5_4_MINI,
+  OPENCODE_MODEL_GPT_5_3_CODEX_SPARK,
+  OPENCODE_MODEL_CLAUDE_HAIKU_45,
+  OPENCODE_MODEL_GEMINI_3_FLASH,
+  OPENCODE_MODEL_GEMINI_2_5_FLASH,
+  OPENCODE_MODEL_MINIMAX_M2_1,
+  OPENCODE_MODEL_QWEN_3_CODER,
+  OPENCODE_MODEL_DEEPSEEK_CHAT,
+  OPENCODE_MODEL_GPT_5_4,
+  OPENCODE_MODEL_GPT_5_2_CODEX,
+  OPENCODE_MODEL_CLAUDE_SONNET_46,
+  OPENCODE_MODEL_GEMINI_3_PRO,
+  OPENCODE_MODEL_KIMI_K2,
+  OPENCODE_MODEL_GPT_5_2,
+  OPENCODE_MODEL_GPT_5_1_CODEX,
+  OPENCODE_MODEL_CLAUDE_OPUS_48,
+  OPENCODE_MODEL_CLAUDE_OPUS_47,
+  OPENCODE_MODEL_GPT_5_5,
+] as const;
+
 export const DEFAULT_PM_MODEL = CODEX_MODEL_GPT_5_4;
 
 // PM and session model dropdowns are both built from the AGENTS registry in

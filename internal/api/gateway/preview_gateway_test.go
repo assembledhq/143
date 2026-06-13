@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -1406,6 +1407,9 @@ func TestGateway_ProxyToWorker_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
 			endpointURL, "handle-1", 8080, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
 			now, nil, nil, "", "", now, now,
 		))
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodGet, "/static/js/ApplicationRoutes.chunk.js?cache=miss", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
@@ -1418,8 +1422,9 @@ func TestGateway_ProxyToWorker_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
 	require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should return a bad gateway when the worker connection drops")
 	require.NotEmpty(t, logs.String(), "proxy error should emit a structured log")
 
+	lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
 	var event map[string]any
-	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "proxy error log should be valid JSON")
+	require.NoError(t, json.Unmarshal(lines[len(lines)-1], &event), "proxy error log should be valid JSON")
 	require.Equal(t, "proxy error", event["message"], "proxy error log should keep the event message")
 	require.Equal(t, previewID.String(), event["preview_id"], "proxy error log should include preview id")
 	require.Equal(t, orgID.String(), event["org_id"], "proxy error log should include org id")
@@ -1435,6 +1440,79 @@ func TestGateway_ProxyToWorker_LogsRequestAndRuntimeOnProxyError(t *testing.T) {
 	require.Equal(t, float64(8080), event["primary_port"], "proxy error log should include primary port")
 	require.Equal(t, "/internal/preview/"+previewID.String()+"/proxy/static/js/ApplicationRoutes.chunk.js", event["upstream_path"], "proxy error log should include rewritten upstream path")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ProxyToWorker_MarksRuntimeLostWhenEndpointUnreachable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "test listener should bind a local port")
+	endpointURL := "http://" + listener.Addr().String()
+	require.NoError(t, listener.Close(), "closing the listener should make the endpoint unreachable")
+
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 7, "worker-runtime",
+			endpointURL, "handle-1", 8080, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		))
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+
+	require.Equal(t, http.StatusBadGateway, rr.Code, "proxyToWorker should return bad gateway for an unreachable endpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "gateway should persist unreachable runtime loss")
+}
+
+func TestShouldMarkRuntimeLostOnProxyError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "connection refused is endpoint loss", err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}, want: true},
+		{name: "connection reset is endpoint loss", err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("read: connection reset by peer")}, want: true},
+		{name: "client cancellation is not endpoint loss", err: context.Canceled, want: false},
+		{name: "deadline cancellation is not endpoint loss", err: context.DeadlineExceeded, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, shouldMarkRuntimeLostOnProxyError(tt.err), "proxy error classification should match endpoint reachability")
+		})
+	}
 }
 
 func TestGateway_ProxyToWorker_UnavailableRuntime(t *testing.T) {
@@ -1520,6 +1598,9 @@ func TestGateway_ProxyToWorker_TranslatesWorkerRuntimeMismatch(t *testing.T) {
 			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
 			now, nil, nil, "", "", now, now,
 		))
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
 	rr := httptest.NewRecorder()

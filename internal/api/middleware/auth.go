@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -351,7 +352,8 @@ func handleUserCLIToken(w http.ResponseWriter, r *http.Request, next http.Handle
 }
 
 func handleGeneralAPIToken(w http.ResponseWriter, r *http.Request, next http.Handler, stores AuthStores, logger zerolog.Logger, rawToken string) bool {
-	resolved, err := stores.APITokens.GetByToken(r.Context(), rawToken, remoteAddrIP(r), r.UserAgent())
+	sourceIP := remoteAddrIP(r)
+	resolved, err := stores.APITokens.GetByToken(r.Context(), rawToken, sourceIP, r.UserAgent())
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			logger.Warn().Err(err).Msg("auth: api token lookup failed")
@@ -364,11 +366,38 @@ func handleGeneralAPIToken(w http.ResponseWriter, r *http.Request, next http.Han
 		writeError(w, http.StatusForbidden, "API_CLIENT_DISABLED", "API client is disabled")
 		return true
 	}
+	if !apiTokenAllowsSourceIP(resolved.Token, sourceIP) {
+		writeError(w, http.StatusForbidden, "IP_NOT_ALLOWED", "API token is not allowed from this source IP")
+		return true
+	}
 	ctx := WithAPIIdentity(r.Context(), &resolved.Client, &resolved.Token)
 	ctx = WithActiveRole(ctx, "api_token")
 	emitAPITokenUsed(r, stores.Audit, resolved)
 	next.ServeHTTP(w, r.WithContext(ctx))
 	return true
+}
+
+func apiTokenAllowsSourceIP(token models.APIToken, sourceIP string) bool {
+	if len(token.AllowedIPCidrs) == 0 {
+		return true
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(sourceIP))
+	if err != nil {
+		return false
+	}
+	for _, raw := range token.AllowedIPCidrs {
+		allowed := strings.TrimSpace(raw)
+		if allowed == "" {
+			continue
+		}
+		if allowedAddr, parseErr := netip.ParseAddr(allowed); parseErr == nil && allowedAddr == addr {
+			return true
+		}
+		if prefix, parseErr := netip.ParsePrefix(allowed); parseErr == nil && prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func emitAPITokenUsed(r *http.Request, emitter *db.AuditEmitter, resolved models.AuthenticatedAPIToken) {

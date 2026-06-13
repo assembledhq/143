@@ -57,6 +57,7 @@ const settingsGroups: SettingsGroup[] = [
       { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
       { label: "Runtime", icon: Activity, href: "/settings/runtime", adminOnly: true },
       { label: "Preview", icon: KeyRound, href: "/settings/previews", adminOnly: true },
+      { label: "API keys", icon: KeyRound, href: "/settings/api-keys", adminOnly: true },
       { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },

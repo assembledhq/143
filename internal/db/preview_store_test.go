@@ -2732,6 +2732,87 @@ func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerRecordsUnavailableRea
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_MarkPreviewRuntimeLostIfCurrentMarksPreviewUnavailable(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+runtime_epoch = @runtime_epoch[\\s\\S]+NOT EXISTS[\\s\\S]+UPDATE preview_instances[\\s\\S]+preview_holding_container = FALSE").
+		WithArgs(previewAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	updated, err := store.MarkPreviewRuntimeLostIfCurrent(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		3,
+		"preview runtime endpoint unreachable: dial tcp timeout",
+		models.PreviewUnavailableReasonEndpointUnreachable,
+	)
+	require.NoError(t, err, "MarkPreviewRuntimeLostIfCurrent should mark the selected runtime lost")
+	require.True(t, updated, "MarkPreviewRuntimeLostIfCurrent should report when the preview was marked unavailable")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkPreviewRuntimeLostIfCurrentNoopsWhenNewerRuntimeExists(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+NOT EXISTS[\\s\\S]+runtime_epoch > @runtime_epoch").
+		WithArgs(previewAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	updated, err := store.MarkPreviewRuntimeLostIfCurrent(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		3,
+		"preview runtime endpoint unreachable: dial tcp timeout",
+		models.PreviewUnavailableReasonEndpointUnreachable,
+	)
+	require.NoError(t, err, "MarkPreviewRuntimeLostIfCurrent should no-op cleanly when a newer runtime owns routing")
+	require.False(t, updated, "MarkPreviewRuntimeLostIfCurrent should not mark the preview unavailable when a newer runtime exists")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_MarkPreviewRuntimeLostIfCurrentNoopsWhenAlreadyTerminal(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectExec("WITH lost AS[\\s\\S]+status IN").
+		WithArgs(previewAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	updated, err := store.MarkPreviewRuntimeLostIfCurrent(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		3,
+		"preview runtime endpoint unreachable: dial tcp timeout",
+		models.PreviewUnavailableReasonEndpointUnreachable,
+	)
+	require.NoError(t, err, "MarkPreviewRuntimeLostIfCurrent should no-op cleanly for terminal runtimes")
+	require.False(t, updated, "MarkPreviewRuntimeLostIfCurrent should not report an update for terminal runtimes")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_MarkExpiredPreviewRuntimesLostClearsPreviewHold(t *testing.T) {
 	t.Parallel()
 

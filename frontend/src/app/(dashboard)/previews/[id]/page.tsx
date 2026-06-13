@@ -50,6 +50,18 @@ import { pollMs } from "@/lib/poll-intervals";
 
 type PreviewStepTone = "complete" | "active" | "failed" | "pending";
 
+function previewUnavailableRecoveryCopy(unavailableReason?: string) {
+  if (unavailableReason === "endpoint_unreachable") {
+    return {
+      title: "Preview connection lost",
+      description:
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+    };
+  }
+
+  return null;
+}
+
 export default function PreviewLandingPage({
   params,
 }: {
@@ -124,6 +136,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
     preview?.preview_config_name ? `Config ${preview.preview_config_name}` : null,
   ].filter(Boolean);
   const status = preview?.status ? formatPreviewStatus(preview.status) : "Loading";
+  const unavailableRecovery = previewUnavailableRecoveryCopy(preview?.unavailable_reason);
   const stoppedAtText = preview?.stopped_at ? formatDateTime(preview.stopped_at) : null;
   const launchTargetId = preview?.preview_id ?? preview?.target_id;
   const launchError =
@@ -271,6 +284,16 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
                 <PreviewProgress preview={preview} prominent={isStarting || isFailed} />
 
+
+                {unavailableRecovery ? (
+                  <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div>
+                      <p className="font-medium text-foreground">{unavailableRecovery.title}</p>
+                      <p className="text-muted-foreground">{unavailableRecovery.description}</p>
+                    </div>
+                  </div>
+                ) : null}
                 {stopPreview.isError ? (
                   <PreviewError
                     title="Preview could not be stopped"

@@ -118,7 +118,7 @@ export default function NewAutomationPage() {
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
-  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi"].includes(effectiveAgentType);
+  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi", "opencode"].includes(effectiveAgentType);
   const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
   const prePRReviewDescription = supportsNativeReviewLoop
     ? effectivePrePRReviewLoops === 0

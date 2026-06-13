@@ -301,6 +301,22 @@ export const api = {
         }),
     },
   },
+  apiKeys: {
+    create: (body: import('./types').CreateAPIKeyRequest) =>
+      post<import('./types').SingleResponse<import('./types').CreateAPIKeyResponse>>('/api/v1/api-keys', body),
+    listClients: () =>
+      get<import('./types').ListResponse<import('./types').APIClient>>('/api/v1/api-keys'),
+    updateClient: (id: string, body: Partial<Pick<import('./types').APIClient, 'name' | 'description' | 'status'>>) =>
+      patch<import('./types').SingleResponse<import('./types').APIClient>>(`/api/v1/api-keys/${id}`, body),
+    disableClient: (id: string) =>
+      del<void>(`/api/v1/api-keys/${id}`),
+    listTokens: (clientId: string) =>
+      get<import('./types').ListResponse<import('./types').APIToken>>(`/api/v1/api-keys/${clientId}/tokens`),
+    createToken: (clientId: string, body: import('./types').CreateAPITokenRequest) =>
+      post<import('./types').SingleResponse<import('./types').APIToken & { token: string }>>(`/api/v1/api-keys/${clientId}/tokens`, body),
+    revokeToken: (clientId: string, tokenId: string) =>
+      del<void>(`/api/v1/api-keys/${clientId}/tokens/${tokenId}`),
+  },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
       const searchParams = new URLSearchParams({ repository_id: repositoryId, q: query });

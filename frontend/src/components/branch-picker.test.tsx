@@ -75,6 +75,28 @@ describe("BranchPicker", () => {
     expect(screen.queryByRole("textbox", { name: "Base branch" })).not.toBeInTheDocument();
   });
 
+  it("anchors empty branch results to the trigger width", async () => {
+    const user = userEvent.setup();
+
+    mocks.branchesMock.mockResolvedValue({ data: [] });
+
+    renderWithProviders(
+      <BranchPicker
+        repositoryId="repo-1"
+        value=""
+        defaultBranch="main"
+        onValueChange={vi.fn()}
+        label="Base branch"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Base branch" }));
+
+    const emptyState = await screen.findByText("No branches found.");
+    const content = emptyState.closest('[data-slot="popover-content"]');
+    expect(content).toHaveClass("w-[var(--radix-popover-trigger-width)]");
+  });
+
   it("refreshes branches when the picker is reopened", async () => {
     const user = userEvent.setup();
 

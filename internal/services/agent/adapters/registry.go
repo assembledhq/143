@@ -23,5 +23,6 @@ func DefaultMap(logger zerolog.Logger) map[models.AgentType]agent.AgentAdapter {
 		models.AgentTypeCodex:      NewCodexAdapter(logger),
 		models.AgentTypeAmp:        NewAmpAdapter(logger),
 		models.AgentTypePi:         NewPiAdapter(logger),
+		models.AgentTypeOpenCode:   NewOpenCodeAdapter(logger),
 	}
 }

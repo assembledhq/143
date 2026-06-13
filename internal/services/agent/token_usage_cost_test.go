@@ -174,6 +174,29 @@ func TestFinalizeTokenUsage(t *testing.T) {
 			},
 		},
 		{
+			name: "derives opencode anthropic usd cost and preserves backing provider",
+			usage: TokenUsage{
+				InputTokens:       1_000_000,
+				CachedInputTokens: 1_000_000,
+				OutputTokens:      1_000_000,
+			},
+			hint: TokenUsageHint{
+				AgentType:      models.AgentTypeOpenCode,
+				EffectiveModel: models.OpenCodeModelClaudeHaiku45,
+				BillingMode:    TokenBillingModeAPIKey,
+			},
+			validate: func(t *testing.T, usage TokenUsage) {
+				t.Helper()
+				require.NotNil(t, usage.Cost, "opencode should derive usd cost for curated provider-backed models")
+				require.Equal(t, TokenCostSourceDerived, usage.Cost.Source, "opencode cost should be marked derived")
+				require.Equal(t, TokenCostUnitUSD, usage.Cost.Unit, "opencode derivation should yield usd for API-key provider models")
+				require.InDelta(t, 6.1, usage.Cost.Amount, 0.0001, "opencode derivation should use the backing provider token pricing")
+				require.NotNil(t, usage.NativeUsage, "opencode should attach native usage metadata")
+				require.Equal(t, "anthropic", usage.NativeUsage.Provider, "opencode native usage should preserve the backing provider parsed from provider/model")
+				require.Equal(t, models.OpenCodeModelClaudeHaiku45, usage.NativeUsage.Model, "opencode native usage should retain the full provider/model id")
+			},
+		},
+		{
 			name: "keeps amp usage native but leaves cost unavailable",
 			usage: TokenUsage{
 				InputTokens:  900,
@@ -207,6 +230,23 @@ func TestFinalizeTokenUsage(t *testing.T) {
 				require.False(t, usage.NativeUsage.Reported, "native usage should explicitly mark provider counters as unavailable when no token payload was emitted")
 				require.Nil(t, usage.Cost, "cost should remain unavailable when no usage was reported")
 				require.Nil(t, usage.NativeCost, "native cost should remain unavailable when no usage was reported")
+			},
+		},
+		{
+			name:  "opencode records an explicit unavailable estimate when no usage arrives",
+			usage: TokenUsage{},
+			hint: TokenUsageHint{
+				AgentType:      models.AgentTypeOpenCode,
+				EffectiveModel: models.OpenCodeModelGPT54Mini,
+				BillingMode:    TokenBillingModeAPIKey,
+			},
+			validate: func(t *testing.T, usage TokenUsage) {
+				t.Helper()
+				require.NotNil(t, usage.NativeUsage, "opencode should still attach provider and model metadata")
+				require.False(t, usage.NativeUsage.Reported, "opencode no-usage metadata should distinguish unavailable counters from reported zeros")
+				require.NotNil(t, usage.NativeCost, "opencode should persist explicit unavailable cost metadata when the CLI omits usage")
+				require.Equal(t, TokenCostSourceUnavailable, usage.NativeCost.Source, "opencode no-usage metadata should not be marked direct or derived")
+				require.Equal(t, "opencode_usage_unreported", usage.NativeCost.Detail, "opencode unavailable metadata should explain why cost is absent")
 			},
 		},
 		{

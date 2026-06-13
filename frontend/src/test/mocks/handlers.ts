@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
+import type { APIClient, APIToken, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -273,6 +273,35 @@ export const mockMembers: User[] = [
     name: 'Alice Smith',
     role: 'admin',
     created_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+export const mockAPIClients: APIClient[] = [
+  {
+    id: 'api-client-1',
+    org_id: 'org-1',
+    name: 'CI automation',
+    description: 'Runs external API workflows from CI',
+    status: 'enabled',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+export const mockAPITokens: APIToken[] = [
+  {
+    id: 'api-token-1',
+    org_id: 'org-1',
+    api_client_id: 'api-client-1',
+    name: 'production',
+    token_prefix: '143_live_abc123',
+    scopes: ['sessions:read', 'sessions:create'],
+    repository_ids: [],
+    allowed_ip_cidrs: [],
+    last_used_at: '2026-02-17T08:00:00Z',
+    last_used_ip: '203.0.113.10',
+    last_used_user_agent: 'curl/8.7.1',
+    created_at: '2026-01-02T00:00:00Z',
   },
 ];
 
@@ -712,6 +741,104 @@ export const handlers = [
       data: [],
       meta: {},
     });
+  }),
+
+  http.get('/api/v1/api-keys', () => {
+    return HttpResponse.json({
+      data: mockAPIClients,
+      meta: {},
+    } satisfies ListResponse<APIClient>);
+  }),
+
+  http.post('/api/v1/api-keys', async ({ request }) => {
+    const body = await request.json() as {
+      integration_name?: string;
+      description?: string;
+      token_name?: string;
+      scopes?: string[];
+      repository_ids?: string[];
+      allowed_ip_cidrs?: string[];
+      expires_at?: string | null;
+    };
+    const client: APIClient = {
+      id: 'api-client-new',
+      org_id: 'org-1',
+      name: body.integration_name ?? 'New integration',
+      description: body.description,
+      status: 'enabled',
+      created_at: '2026-02-17T08:00:00Z',
+      updated_at: '2026-02-17T08:00:00Z',
+    };
+    return HttpResponse.json({
+      data: {
+        client,
+        token: {
+          id: 'api-token-new',
+          org_id: 'org-1',
+          api_client_id: client.id,
+          name: body.token_name ?? 'production',
+          token_prefix: '143_live_new',
+          token: '143_live_new_secret',
+          scopes: body.scopes ?? [],
+          repository_ids: body.repository_ids ?? [],
+          allowed_ip_cidrs: body.allowed_ip_cidrs ?? [],
+          expires_at: body.expires_at ?? undefined,
+          created_at: '2026-02-17T08:00:00Z',
+        },
+      },
+    }, { status: 201 });
+  }),
+
+  http.get('/api/v1/api-keys/:id/tokens', ({ params }) => {
+    return HttpResponse.json({
+      data: mockAPITokens.filter((token) => token.api_client_id === params.id),
+      meta: {},
+    } satisfies ListResponse<APIToken>);
+  }),
+
+  http.post('/api/v1/api-keys/:id/tokens', async ({ request, params }) => {
+    const body = await request.json() as {
+      name?: string;
+      scopes?: string[];
+      repository_ids?: string[];
+      allowed_ip_cidrs?: string[];
+      expires_at?: string | null;
+    };
+    return HttpResponse.json({
+      data: {
+        id: 'api-token-new',
+        org_id: 'org-1',
+        api_client_id: params.id as string,
+        name: body.name ?? 'rotation',
+        token_prefix: '143_live_rot',
+        token: '143_live_rot_secret',
+        scopes: body.scopes ?? [],
+        repository_ids: body.repository_ids ?? [],
+        allowed_ip_cidrs: body.allowed_ip_cidrs ?? [],
+        expires_at: body.expires_at ?? undefined,
+        created_at: '2026-02-17T08:00:00Z',
+      },
+    }, { status: 201 });
+  }),
+
+  http.patch('/api/v1/api-keys/:id', async ({ request, params }) => {
+    const body = await request.json() as { name?: string; description?: string };
+    return HttpResponse.json({
+      data: {
+        ...mockAPIClients[0],
+        id: params.id as string,
+        name: body.name ?? mockAPIClients[0].name,
+        description: body.description,
+      },
+    } satisfies SingleResponse<APIClient>);
+  }),
+
+  http.delete('/api/v1/api-keys/:id', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.delete('/api/v1/api-keys/:id/tokens/:tokenId', () => {
+    return new HttpResponse(null, { status: 204 });
   }),
 
   http.get('/api/v1/settings', () => {

@@ -95,12 +95,15 @@ RUN --mount=type=cache,target=/root/.npm \
     GEMINI_CLI_VERSION=$(jq -r '.gemini_cli' /tmp/versions.json) && \
     AMP_CLI_VERSION=$(jq -r '.amp_cli' /tmp/versions.json) && \
     PI_CLI_VERSION=$(jq -r '.pi_cli' /tmp/versions.json) && \
+    OPENCODE_CLI_VERSION=$(jq -r '.opencode_cli' /tmp/versions.json) && \
     npm install -g \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_CLI_VERSION}" \
       "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
       "@sourcegraph/amp@${AMP_CLI_VERSION}" \
-      "@earendil-works/pi-coding-agent@${PI_CLI_VERSION}" && \
+      "@earendil-works/pi-coding-agent@${PI_CLI_VERSION}" \
+      "opencode-ai@${OPENCODE_CLI_VERSION}" && \
+    opencode --version && \
     rm /tmp/versions.json
 
 # Copy 143-tools binary from Go builder.

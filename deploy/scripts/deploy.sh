@@ -1108,7 +1108,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   preview_rpc_auth_preflight() {
     local cid="$1"
     echo "Running preview RPC auth compatibility check from candidate api container ${cid:0:12}..."
-    docker exec "$cid" /bin/worker-deployctl preview-auth-check --json
+    docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json
   }
 
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:

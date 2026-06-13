@@ -2240,6 +2240,63 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 	return tag.RowsAffected(), nil
 }
 
+// MarkPreviewRuntimeLostIfCurrent marks one runtime lost and transitions its
+// preview unavailable only if that runtime is still the newest active route.
+func (s *PreviewStore) MarkPreviewRuntimeLostIfCurrent(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, runtimeEpoch int, reason string, unavailableReason models.PreviewUnavailableReason) (bool, error) {
+	if err := unavailableReason.Validate(); err != nil {
+		return false, err
+	}
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`WITH lost AS (
+			UPDATE preview_runtimes pr
+			SET status = 'lost',
+				error = @reason,
+				unavailable_reason = @unavailable_reason,
+				stopped_at = COALESCE(stopped_at, now()),
+				updated_at = now()
+			WHERE pr.org_id = @org_id
+			  AND pr.preview_instance_id = @preview_id
+			  AND pr.id = @runtime_id
+			  AND pr.runtime_epoch = @runtime_epoch
+			  AND pr.status IN %s
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM preview_runtimes newer
+				WHERE newer.org_id = @org_id
+				  AND newer.preview_instance_id = @preview_id
+				  AND newer.runtime_epoch > @runtime_epoch
+				  AND newer.status IN %s
+				  AND newer.lease_expires_at > now()
+			  )
+			RETURNING pr.org_id, pr.preview_instance_id
+		)
+		UPDATE preview_instances pi
+		SET status = 'unavailable',
+			current_phase = 'unavailable',
+			error = @reason,
+			unavailable_reason = @unavailable_reason,
+			preview_holding_container = FALSE,
+			stopped_at = COALESCE(stopped_at, now()),
+			updated_at = now()
+		FROM lost
+		WHERE pi.id = lost.preview_instance_id
+		  AND pi.org_id = lost.org_id
+		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeRuntimeStatusFilter, activeStatusFilter),
+		pgx.NamedArgs{
+			"org_id":             orgID,
+			"preview_id":         previewID,
+			"runtime_id":         runtimeID,
+			"runtime_epoch":      runtimeEpoch,
+			"reason":             reason,
+			"unavailable_reason": unavailableReason,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark preview runtime lost if current: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // MarkExpiredPreviewRuntimesLost marks runtimes with expired leases lost and
 // transitions their previews to unavailable.
 // lint:allow-no-orgid reason="cross-org recovery sweep repairs stale preview runtime ownership"
