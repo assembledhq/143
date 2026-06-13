@@ -486,7 +486,7 @@ func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *tes
 
 	orgID := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
 	userID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
-	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"gemini_cli":{"GEMINI_MODEL":"gemini-2.5-pro"}}}`)
+	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"opencode":{"OPENCODE_MODEL":"google/gemini-2.5-flash"}}}`)
 	env := NewAgentEnv(AgentEnvDeps{
 		Orgs: testInternalOrgStore{
 			org: models.Organization{
@@ -508,7 +508,7 @@ func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *tes
 	}{
 		{name: "codex", agentType: models.AgentTypeCodex, expected: models.CodexModelGPT54},
 		{name: "claude", agentType: models.AgentTypeClaudeCode, expected: models.ClaudeCodeModelSonnet46},
-		{name: "gemini", agentType: models.AgentTypeGeminiCLI, expected: models.GeminiCLIModelGemini25Pro},
+		{name: "opencode", agentType: models.AgentTypeOpenCode, expected: models.OpenCodeModelGemini25Flash},
 	}
 
 	for _, tt := range tests {

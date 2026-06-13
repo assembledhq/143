@@ -15,7 +15,6 @@ var AvailablePMModels []string
 
 func init() {
 	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
-	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableAmpModes...)
 	AvailablePMModels = append(AvailablePMModels, AvailablePiModels...)
@@ -66,20 +65,6 @@ const (
 )
 
 var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
-
-const (
-	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
-	GeminiCLIModelGemini3FlashPreview = "gemini-3-flash-preview"
-	GeminiCLIModelGemini25Pro         = "gemini-2.5-pro"
-	GeminiCLIModelGemini25Flash       = "gemini-2.5-flash"
-)
-
-var AvailableGeminiCLIModels = []string{
-	GeminiCLIModelGemini31ProPreview,
-	GeminiCLIModelGemini3FlashPreview,
-	GeminiCLIModelGemini25Pro,
-	GeminiCLIModelGemini25Flash,
-}
 
 const (
 	CodexModelGPT55           = "gpt-5.5"
@@ -191,11 +176,6 @@ func AgentTypeForModel(model string) AgentType {
 			return AgentTypeClaudeCode
 		}
 	}
-	for _, m := range AvailableGeminiCLIModels {
-		if m == model {
-			return AgentTypeGeminiCLI
-		}
-	}
 	for _, m := range AvailableAmpModes {
 		if m == model {
 			return AgentTypeAmp
@@ -235,15 +215,6 @@ func ValidatePMModel(model string) error {
 
 func IsSupportedClaudeCodeModel(model string) bool {
 	for _, supportedModel := range AvailableClaudeCodeModels {
-		if model == supportedModel {
-			return true
-		}
-	}
-	return false
-}
-
-func IsSupportedGeminiCLIModel(model string) bool {
-	for _, supportedModel := range AvailableGeminiCLIModels {
 		if model == supportedModel {
 			return true
 		}
@@ -340,10 +311,6 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 		if !IsSupportedClaudeCodeModel(model) {
 			return fmt.Errorf("model must be one of: %v", AvailableClaudeCodeModels)
 		}
-	case AgentTypeGeminiCLI:
-		if !IsSupportedGeminiCLIModel(model) {
-			return fmt.Errorf("model must be one of: %v", AvailableGeminiCLIModels)
-		}
 	case AgentTypeAmp:
 		if !IsSupportedAmpMode(model) {
 			return fmt.Errorf("amp mode must be one of: %v", AvailableAmpModes)
@@ -382,8 +349,6 @@ func ModelEnvVarForAgentType(agentType AgentType) string {
 		return "OPENAI_MODEL"
 	case AgentTypeClaudeCode:
 		return "ANTHROPIC_MODEL"
-	case AgentTypeGeminiCLI:
-		return "GEMINI_MODEL"
 	case AgentTypeAmp:
 		return "AMP_MODE"
 	case AgentTypePi:
@@ -593,11 +558,6 @@ func ValidateSettingsModels(settings OrgSettings) error {
 			model := envVars["ANTHROPIC_MODEL"]
 			if model != "" && !IsSupportedClaudeCodeModel(model) {
 				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v", AvailableClaudeCodeModels)
-			}
-		case AgentTypeGeminiCLI:
-			model := envVars["GEMINI_MODEL"]
-			if model != "" && !IsSupportedGeminiCLIModel(model) {
-				return fmt.Errorf("agent_config.gemini_cli.GEMINI_MODEL must be one of: %v", AvailableGeminiCLIModels)
 			}
 		case AgentTypeAmp:
 			mode := envVars["AMP_MODE"]

@@ -203,7 +203,7 @@ This keeps the common analytics path fast while avoiding session/concurrency inf
 #### `agent`
 
 - Source: `sessions.agent_type`
-- Label: product label such as `Codex`, `Claude Code`, `Gemini CLI`, `Amp`, `Pi`
+- Label: product label such as `Codex`, `Claude Code`, `OpenCode`, `Amp`, `Pi`
 - Purpose: execution-mix analysis
 
 #### `reasoning`

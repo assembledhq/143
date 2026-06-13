@@ -391,8 +391,8 @@ RUN curl -fsSL https://cli.anthropic.com/install.sh | sh
 # Codex CLI (OpenAI)
 RUN npm install -g @openai/codex
 
-# Gemini CLI (Google)
-RUN npm install -g @google/gemini-cli
+# OpenCode
+RUN npm install -g opencode-ai
 
 # Create the sandbox user. The Docker provider runs all commands as this user.
 # Home is /workspace so agent tools find their config files

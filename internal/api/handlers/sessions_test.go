@@ -408,7 +408,7 @@ func sessionRowNeedsPolicyDefaults(values []interface{}) bool {
 		return false
 	}
 	switch agentType {
-	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+	case "claude_code", "claude-code", "codex", "amp", "pi", "opencode", "pm_agent":
 		return true
 	default:
 		return false
@@ -423,8 +423,6 @@ func normalizeSessionAgentType(value interface{}) interface{} {
 	switch agentType {
 	case "claude-code":
 		return string(models.AgentTypeClaudeCode)
-	case "gemini-cli":
-		return string(models.AgentTypeGeminiCLI)
 	default:
 		return value
 	}
@@ -1860,10 +1858,10 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 			idParam: "",
 			body:    "",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
-				triggerFixIssueAndOrgDefaultMock(mock, orgID, "gemini_cli")
+				triggerFixIssueAndOrgDefaultMock(mock, orgID, "opencode")
 			},
 			expectedCode: http.StatusCreated,
-			expectedBody: "gemini_cli",
+			expectedBody: "opencode",
 		},
 		{
 			name:    "falls back to codex when org default agent type is missing",
@@ -1876,12 +1874,12 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 			expectedBody: "codex",
 		},
 		{
-			name:         "triggers fix with gemini_cli agent type",
+			name:         "triggers fix with opencode agent type",
 			idParam:      "",
-			body:         `{"agent_type":"gemini_cli"}`,
+			body:         `{"agent_type":"opencode"}`,
 			setupMock:    triggerFixIssueMock,
 			expectedCode: http.StatusCreated,
-			expectedBody: "gemini_cli",
+			expectedBody: "opencode",
 		},
 		{
 			name:         "triggers fix with codex agent type",
@@ -4373,7 +4371,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"opencode"}`), now, now),
 					)
 
 				expectManualSessionCreate(mock, runID, now)
@@ -4395,7 +4393,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 			},
 			expectedCode: http.StatusCreated,
-			expectedBody: "gemini_cli",
+			expectedBody: "opencode",
 		},
 		{
 			name: "uses user default model when no model or agent type is specified",
@@ -4411,7 +4409,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"opencode"}`), now, now),
 					)
 
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
@@ -4454,7 +4452,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"opencode"}`), now, now),
 					)
 
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
@@ -4480,7 +4478,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			setUserStore:    true,
 			withUserContext: true,
 			expectedCode:    http.StatusCreated,
-			expectedBody:    "gemini_cli",
+			expectedBody:    "opencode",
 		},
 		{
 			name:         "returns bad request for empty message",
@@ -4666,7 +4664,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 		},
 		{
 			name: "returns bad request when reasoning effort is unsupported for agent type",
-			body: `{"message":"Fix bug","agent_type":"gemini_cli","reasoning_effort":"high"}`,
+			body: `{"message":"Fix bug","agent_type":"amp","reasoning_effort":"high"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").

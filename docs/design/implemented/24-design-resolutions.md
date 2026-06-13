@@ -344,7 +344,7 @@ func (o *Orchestrator) AssembleContext(ctx context.Context, repo *models.Reposit
 ```
 sandbox/
 ├── Dockerfile          # sandbox image definition
-├── install-agents.sh   # installs Claude Code, Codex CLI, Gemini CLI
+├── install-agents.sh   # installs Claude Code, Codex CLI, OpenCode
 └── versions.json       # pinned agent CLI versions
 ```
 
@@ -354,7 +354,7 @@ sandbox/
 {
   "claude_code": "2.1.34",
   "codex_cli": "0.115.0",
-  "gemini_cli": "0.34.0"
+  "opencode": "0.34.0"
 }
 ```
 

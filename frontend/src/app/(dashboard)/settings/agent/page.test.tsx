@@ -137,7 +137,7 @@ describe("Agent settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
 
-    expect(await screen.findByText("Gemini CLI")).toBeInTheDocument();
+    expect(await screen.findByText("OpenCode")).toBeInTheDocument();
     expect(screen.getAllByText("Amp").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pi").length).toBeGreaterThan(0);
     expect(screen.queryByText(/Leave blank and we'll generate a sensible name/)).not.toBeInTheDocument();
@@ -153,7 +153,7 @@ describe("Agent settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
     const dialog = await screen.findByRole("dialog");
-    await user.click(screen.getByLabelText("Gemini CLI"));
+    await user.click(screen.getByLabelText("OpenCode"));
 
     expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
 
@@ -353,11 +353,6 @@ describe("Agent settings page", () => {
     await user.hover(within(dialog).getByRole("button", { name: "Where to get a Claude Code API key" }));
     const claudeLinks = await screen.findAllByRole("link", { name: "Claude API key management" });
     expect(claudeLinks[0]).toHaveAttribute("href", "https://platform.claude.com/settings/keys");
-
-    await user.click(screen.getByLabelText("Gemini CLI"));
-    await user.hover(within(dialog).getByRole("button", { name: "Where to get a Gemini CLI API key" }));
-    const geminiLinks = await screen.findAllByRole("link", { name: "Google AI Studio API keys" });
-    expect(geminiLinks[0]).toHaveAttribute("href", "https://aistudio.google.com/apikey");
 
     await user.click(screen.getByLabelText("Amp"));
     await user.hover(within(dialog).getByRole("button", { name: "Where to get a Amp API key" }));
