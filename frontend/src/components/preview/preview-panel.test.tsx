@@ -230,6 +230,65 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText(/Stopped 1m ago/)).toHaveClass("rounded-full");
   });
 
+  it("shows endpoint-unreachable recovery copy when the preview runtime connection was lost", async () => {
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 60_000).toISOString();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "unavailable",
+        unavailable_reason: "endpoint_unreachable",
+        created_at: startedAt,
+        stopped_at: stoppedAt,
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Preview connection lost").length).toBeGreaterThan(0);
+    });
+    expect(
+      screen.getByText(
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Unavailable 1m ago/)).toHaveClass("rounded-full");
+    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+  });
+
+  it("uses endpoint-unreachable copy in the startup checklist open-preview row", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        {
+          status: "unavailable",
+          unavailable_reason: "endpoint_unreachable",
+          stopped_at: new Date(Date.now() - 60_000).toISOString(),
+        },
+        [
+          {
+            id: "svc-1",
+            preview_instance_id: "prev-1",
+            service_name: "web",
+            role: "primary",
+            status: "ready",
+            command: ["npm", "start"],
+            cwd: ".",
+            port: 3000,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Preview connection lost").length).toBeGreaterThan(0);
+    });
+    expect(screen.getByText("Worker connection lost before the preview could be opened.")).toBeInTheDocument();
+    expect(screen.queryByText("The worker runtime that owned this preview is unavailable.")).not.toBeInTheDocument();
+  });
+
   it("treats async start success as startup in progress and resumes polling", async () => {
     const user = userEvent.setup();
     mockGet

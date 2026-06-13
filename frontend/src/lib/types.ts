@@ -212,6 +212,13 @@ export interface BranchPreviewResponse {
   expires_at?: string;
   stopped_at?: string;
   stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  unavailable_reason?:
+    | "owner_lost"
+    | "deploy_drain_timeout"
+    | "host_maintenance"
+    | "emergency_force"
+    | "lease_expired"
+    | "endpoint_unreachable";
   resumable?: boolean;
   resume_estimate_seconds?: number;
   services?: import('./preview-types').PreviewService[];

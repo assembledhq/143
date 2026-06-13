@@ -146,6 +146,7 @@ function buildStartupChecklist(
   status: PreviewStatus | undefined,
   services: PreviewService[],
   infrastructure: PreviewInfrastructure[],
+  unavailableReason?: string,
 ): StartupChecklistStep[] {
   // When the parent preview reaches a terminal state, force any child rows
   // that were still pending to render as terminal too. The backend cascades
@@ -196,7 +197,9 @@ function buildStartupChecklist(
         : status === "failed"
           ? "Preview startup failed before the app became reachable."
           : status === "unavailable"
-            ? "The worker runtime that owned this preview is unavailable."
+            ? unavailableReason === "endpoint_unreachable"
+              ? "Worker connection lost before the preview could be opened."
+              : "The worker runtime that owned this preview is unavailable."
             : "Waiting for the preview URL to become reachable.";
 
   const steps: StartupChecklistStep[] = [];
@@ -302,6 +305,22 @@ function getStartupSubtitle(
   }
 
   return "Starting services";
+}
+
+function unavailablePreviewRecoveryCopy(unavailableReason?: string) {
+  if (unavailableReason === "endpoint_unreachable") {
+    return {
+      title: "Preview connection lost",
+      description:
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+    };
+  }
+
+  return {
+    title: "No preview running",
+    description:
+      "Start a preview to see live changes from the agent. Note that it can take a few minutes for the environment to finish booting.",
+  };
 }
 
 function formatPreviewShutdownTime(expiresAt: string): string {
@@ -510,6 +529,9 @@ export function PreviewPanel({
     [rawInfrastructure],
   );
   const status = instance?.status;
+  const unavailableReason = instance?.unavailable_reason;
+  const isEndpointUnreachable =
+    status === "unavailable" && unavailableReason === "endpoint_unreachable";
   const freshnessState = previewStatus?.freshness?.state;
   const lastPreviewStoppedAt =
     status === "stopped" || status === "expired" || status === "unavailable"
@@ -863,11 +885,12 @@ export function PreviewPanel({
   const startupChecklist = useMemo(
     () =>
       showStartupProgress
-        ? buildStartupChecklist(status, services, infrastructure)
+        ? buildStartupChecklist(status, services, infrastructure, unavailableReason)
         : [],
-    [showStartupProgress, status, services, infrastructure],
+    [showStartupProgress, status, services, infrastructure, unavailableReason],
   );
   const startupSubtitle = getStartupSubtitle(status, services, infrastructure);
+  const idleRecoveryCopy = unavailablePreviewRecoveryCopy(unavailableReason);
   const showTopControls =
     status !== "starting" &&
     status !== "stopped" &&
@@ -1227,7 +1250,7 @@ export function PreviewPanel({
       )}
 
       {/* Failure diagnostics */}
-      {status === "failed" && instance && (
+      {(status === "failed" || (isEndpointUnreachable && hasStartupRows)) && instance && (
         <Card
           role="alert"
           className={cn(
@@ -1243,10 +1266,14 @@ export function PreviewPanel({
                 </div>
                 <div className="min-w-0">
                   <div className="text-sm font-medium leading-5 text-foreground">
-                    Preview failed to start
+                    {isEndpointUnreachable
+                      ? "Preview connection lost"
+                      : "Preview failed to start"}
                   </div>
                   <div className="text-xs leading-5 text-muted-foreground">
-                    The app never became reachable during startup.
+                    {isEndpointUnreachable
+                      ? "The worker that was serving this preview stopped responding."
+                      : "The app never became reachable during startup."}
                   </div>
                 </div>
               </div>
@@ -1405,10 +1432,9 @@ export function PreviewPanel({
               <Monitor className="size-5 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">No preview running</p>
+              <p className="text-sm font-medium">{idleRecoveryCopy.title}</p>
               <p className="text-xs text-muted-foreground">
-                Start a preview to see live changes from the agent. Note that it
-                can take a few minutes for the environment to finish booting.
+                {idleRecoveryCopy.description}
               </p>
               {instance?.created_at && lastPreviewStoppedAt && (
                 <div className="flex flex-wrap items-center justify-center gap-2">
