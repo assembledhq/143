@@ -530,7 +530,7 @@ func TestHandleLinearAgentCreatedMapsCreatorEmailToSessionTrigger(t *testing.T) 
 	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 		WithArgs(orgID, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
-			creatorID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
+			creatorID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, []string(nil), now,
 		))
 
 	mock.ExpectBegin()

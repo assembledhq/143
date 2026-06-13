@@ -22,7 +22,7 @@ type emitOnceRetryClient struct {
 }
 
 var linearAgentUserColumns = []string{
-	"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at",
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "secondary_emails", "created_at",
 }
 
 func (c *emitOnceRetryClient) AgentActivityCreate(context.Context, linear.AgentActivityInput) (linear.AgentActivityResult, error) {
@@ -111,7 +111,7 @@ func TestApplyLinearCreatorAttribution(t *testing.T) {
 				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
-						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
+						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, []string(nil), now,
 					))
 			},
 			expectUser: true,

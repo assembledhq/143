@@ -34,8 +34,13 @@ type User struct {
 	GitHubNoreplyEmail *string   `db:"github_noreply_email" json:"-"`
 	AvatarURL          *string   `db:"avatar_url" json:"avatar_url,omitempty"`
 	PasswordHash       *string   `db:"password_hash" json:"-"`
-	GoogleID           *string   `db:"google_id" json:"google_id,omitempty"`
-	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+	GoogleID           *string  `db:"google_id" json:"google_id,omitempty"`
+	// SecondaryEmails holds additional email addresses associated with this
+	// user (e.g. the work email an admin used when sending the invite, when
+	// the user later authenticated via GitHub with a different personal email).
+	// Values are stored lowercase and are matched case-insensitively.
+	SecondaryEmails []string  `db:"secondary_emails" json:"-"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
 }
 
 type UserWithSettings struct {

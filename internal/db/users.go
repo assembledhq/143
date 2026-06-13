@@ -34,7 +34,7 @@ func NewUserStore(db DBTX) *UserStore {
 	return &UserStore{db: db}
 }
 
-const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, created_at`
+const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, secondary_emails, created_at`
 const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, email_verified_at, created_at, settings`
 
 // UpsertFromGitHub creates or updates a user based on their GitHub ID.
@@ -250,13 +250,38 @@ func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email
 		SELECT %s
 		FROM users
 		WHERE org_id = @org_id
-		  AND (LOWER(email) = LOWER(@email) OR LOWER(github_noreply_email) = LOWER(@email))`, userSelectColumns)
+		  AND (LOWER(email) = LOWER(@email)
+		       OR LOWER(github_noreply_email) = LOWER(@email)
+		       OR LOWER(@email) = ANY(secondary_emails))`, userSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
 	if err != nil {
 		return models.User{}, fmt.Errorf("query user by org and email: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
+// AddSecondaryEmail appends email (lowercased) to the user's secondary_emails
+// array if it is not already present. Callers use this to record an invite
+// email that differs from the OAuth provider's primary email, so that a later
+// lookup by that invite address still resolves to the correct user.
+func (s *UserStore) AddSecondaryEmail(ctx context.Context, orgID, userID uuid.UUID, email string) error {
+	query := `
+		UPDATE users
+		SET secondary_emails = array_append(secondary_emails, LOWER(@email))
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND NOT (LOWER(@email) = ANY(secondary_emails))`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     userID,
+		"org_id": orgID,
+		"email":  email,
+	})
+	if err != nil {
+		return fmt.Errorf("add secondary email: %w", err)
+	}
+	return nil
 }
 
 // GetByGoogleID looks up a user by Google subject ID.
@@ -450,7 +475,7 @@ func (s *UserStore) ListByOrgViaMemberships(
 	query := `
 		SELECT u.id, m.org_id, u.email, u.name, m.role,
 		       u.github_id, u.github_login, u.github_noreply_email, u.avatar_url,
-		       u.password_hash, u.google_id, u.created_at,
+		       u.password_hash, u.google_id, u.secondary_emails, u.created_at,
 		       captured.github_org_login AS captured_github_org_login,
 		       m.created_at AS membership_created_at
 		FROM users u
@@ -503,7 +528,7 @@ func (s *UserStore) ListByOrgViaMemberships(
 		if err := rows.Scan(
 			&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role,
 			&u.GitHubID, &u.GitHubLogin, &u.GitHubNoreplyEmail, &u.AvatarURL,
-			&u.PasswordHash, &u.GoogleID, &u.CreatedAt,
+			&u.PasswordHash, &u.GoogleID, &u.SecondaryEmails, &u.CreatedAt,
 			&capturedGitHubOrg,
 			&memTime,
 		); err != nil {

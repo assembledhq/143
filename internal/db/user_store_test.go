@@ -15,7 +15,7 @@ import (
 )
 
 var userColumns = []string{
-	"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at",
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "secondary_emails", "created_at",
 }
 
 var userColumnsWithSettings = []string{
@@ -85,7 +85,7 @@ func TestUserStore_GetByID(t *testing.T) {
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, "test@example.com", "Test User", "member", &ghID, &ghLogin, nil, &avatarURL, nil, nil, now),
+							AddRow(userID, orgID, "test@example.com", "Test User", "member", &ghID, &ghLogin, nil, &avatarURL, nil, nil, []string(nil), now),
 					)
 			},
 		},
@@ -145,7 +145,7 @@ func TestUserStore_GetByEmail(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, "found@example.com", "Found User", "admin", nil, nil, nil, nil, nil, nil, now),
+							AddRow(userID, orgID, "found@example.com", "Found User", "admin", nil, nil, nil, nil, nil, nil, []string(nil), now),
 					)
 			},
 		},
@@ -204,7 +204,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now),
+							AddRow(userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, []string(nil), now),
 					)
 			},
 		},
@@ -217,7 +217,19 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, &noreply, nil, nil, nil, now),
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, &noreply, nil, nil, nil, []string(nil), now),
+					)
+			},
+		},
+		{
+			name:        "returns org user when secondary email matches",
+			lookupEmail: "alice@company.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, nil, nil, nil, nil, []string{"alice@company.com"}, now),
 					)
 			},
 		},
@@ -260,6 +272,57 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 	}
 }
 
+func TestUserStore_AddSecondaryEmail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID)
+		expectErr bool
+	}{
+		{
+			name: "appends new lowercase email when not already present",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "returns error when database exec fails",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			orgID := uuid.New()
+			tt.setupMock(mock, userID, orgID)
+
+			err = store.AddSecondaryEmail(context.Background(), orgID, userID, "Work@Example.com")
+			if tt.expectErr {
+				require.Error(t, err, "AddSecondaryEmail should return an error on DB failure")
+				return
+			}
+			require.NoError(t, err, "AddSecondaryEmail should succeed when DB exec succeeds")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestUserStore_GetByGoogleID(t *testing.T) {
 	t.Parallel()
 
@@ -276,7 +339,7 @@ func TestUserStore_GetByGoogleID(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, "google@example.com", "Google User", "admin", nil, nil, nil, nil, nil, &googleID, now),
+							AddRow(userID, orgID, "google@example.com", "Google User", "admin", nil, nil, nil, nil, nil, &googleID, []string(nil), now),
 					)
 			},
 		},
@@ -333,7 +396,7 @@ func TestUserStore_GetByIDGlobal(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumns).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, nil, now))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, nil, []string(nil), now))
 
 	u, err := store.GetByIDGlobal(context.Background(), userID)
 	require.NoError(t, err)
@@ -814,7 +877,7 @@ func TestUserStore_GetByGitHubID(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, "octocat@example.com", "Octocat", "admin", &ghID, &ghLogin, nil, &avatarURL, nil, nil, now),
+							AddRow(userID, orgID, "octocat@example.com", "Octocat", "admin", &ghID, &ghLogin, nil, &avatarURL, nil, nil, []string(nil), now),
 					)
 			},
 		},
@@ -874,8 +937,8 @@ func TestUserStore_ListByOrg(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(userColumns).
-				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, now).
-				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, now),
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, []string(nil), now).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, []string(nil), now),
 		)
 
 	users, err := store.ListByOrg(context.Background(), orgID)
@@ -906,8 +969,8 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(cols).
-				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, now, "acme", membershipTime1).
-				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, now, nil, membershipTime2),
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, []string(nil), now, "acme", membershipTime1).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, []string(nil), now, nil, membershipTime2),
 		)
 
 	users, lastMembershipTime, err := store.ListByOrgViaMemberships(context.Background(), orgID, MembershipPageFilters{Limit: 100})
