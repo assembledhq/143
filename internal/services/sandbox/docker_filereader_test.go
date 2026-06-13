@@ -384,16 +384,16 @@ func TestDockerFileReader_ReadFile_NonNotFoundNotSentinel(t *testing.T) {
 }
 
 // TestDockerFileReader_ReadFileContext_NotFoundSentinel verifies that ENOENT
-// stderr from `sed` (used by ReadFileContext) surfaces as ErrFileNotFound,
+// stderr from `awk` (used by ReadFileContext) surfaces as ErrFileNotFound,
 // matching ReadFile's behavior so callers can use a single sentinel.
 func TestDockerFileReader_ReadFileContext_NotFoundSentinel(t *testing.T) {
 	t.Parallel()
 
-	client := newMockClientWithStderr("sed: can't read /workspace/missing: No such file or directory", 1)
+	client := newMockClientWithStderr("awk: can't open /workspace/missing: No such file or directory", 1)
 	reader := NewDockerFileReader(client)
 	_, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", "missing", 5, 2, 2)
 	require.Error(t, err)
-	require.ErrorIs(t, err, ErrFileNotFound, "ENOENT from sed must be surfaced as ErrFileNotFound")
+	require.ErrorIs(t, err, ErrFileNotFound, "ENOENT from awk must be surfaced as ErrFileNotFound")
 }
 
 // TestDockerFileReader_ForcesCLocale guards isNotFoundStderr: if the exec
@@ -428,7 +428,7 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 	}{
 		{
 			name:     "extracts line range",
-			client:   newMockSequenceClient([]string{"line 8\nline 9\nline 10\nline 11\nline 12\n", "12 /workspace/main.go\n"}, []int{0, 0}),
+			client:   newMockClient("L8\tline 8\nL9\tline 9\nL10\tline 10\nL11\tline 11\nL12\tline 12\nT12\n", 0),
 			filePath: "main.go",
 			line:     10,
 			above:    2,
@@ -445,7 +445,7 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 		},
 		{
 			name:     "clamps start line to 1",
-			client:   newMockSequenceClient([]string{"line 1\nline 2\nline 3\n", "3 /workspace/main.go\n"}, []int{0, 0}),
+			client:   newMockClient("L1\tline 1\nL2\tline 2\nL3\tline 3\nT3\n", 0),
 			filePath: "main.go",
 			line:     2,
 			above:    5,
@@ -460,7 +460,7 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 		},
 		{
 			name:     "counts final line without trailing newline",
-			client:   newMockSequenceClient([]string{"line 2\nline 3", "3\n"}, []int{0, 0}),
+			client:   newMockClient("L2\tline 2\nL3\tline 3\nT3", 0),
 			filePath: "main.go",
 			line:     2,
 			above:    0,
@@ -492,29 +492,8 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name: "returns error when line count exec fails",
-			client: &mockDockerClient{
-				createResps: []container.ExecCreateResponse{
-					{ID: "exec-0"},
-					{ID: "exec-1"},
-				},
-				attachResps: []types.HijackedResponse{
-					newHijackedResponse(dockerStdoutFrame("line 1\n")),
-				},
-				inspectResps: []container.ExecInspect{
-					{ExitCode: 0},
-				},
-				attachErr: fmt.Errorf("awk failed"),
-			},
-			filePath:  "main.go",
-			line:      1,
-			above:     0,
-			below:     0,
-			expectErr: true,
-		},
-		{
-			name:      "returns error when line count exits non zero",
-			client:    newMockSequenceClient([]string{"line 1\n", "missing"}, []int{0, 1}),
+			name:      "returns error when total count is missing",
+			client:    newMockClient("L1\tline 1\n", 0),
 			filePath:  "main.go",
 			line:      1,
 			above:     0,
@@ -523,12 +502,26 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 		},
 		{
 			name:      "returns error when line count cannot be parsed",
-			client:    newMockSequenceClient([]string{"line 1\n", "not-a-number"}, []int{0, 0}),
+			client:    newMockClient("L1\tline 1\nTnot-a-number\n", 0),
 			filePath:  "main.go",
 			line:      1,
 			above:     0,
 			below:     0,
 			expectErr: true,
+		},
+		{
+			name:   "preserves tabs in file content",
+			client: newMockClient("L5\tcol1\tcol2\nT5\n", 0),
+			filePath: "main.go",
+			line:     5,
+			above:    0,
+			below:    0,
+			expected: []FileLine{
+				{Number: 5, Content: "col1\tcol2"},
+			},
+			expectedTotal:    5,
+			expectedHasAbove: true,
+			expectedHasBelow: false,
 		},
 		{
 			name:     "returns error on exec create failure",
@@ -562,4 +555,33 @@ func TestDockerFileReader_ReadFileContext(t *testing.T) {
 			require.Equal(t, tt.expectedHasBelow, result.HasMoreBelow, "ReadFileContext should report whether more lines exist below the window")
 		})
 	}
+}
+
+func TestDockerFileReader_ReadFileContextUsesSingleExec(t *testing.T) {
+	t.Parallel()
+
+	client := newMockSequenceClient([]string{"L1\tline 1\nT1\n"}, []int{0})
+	reader := NewDockerFileReader(client)
+
+	_, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", "main.go", 1, 0, 0)
+
+	require.NoError(t, err, "ReadFileContext should not return an error")
+	require.Equal(t, 1, client.callIndex, "ReadFileContext should fetch lines and total count with one Docker exec")
+}
+
+func TestDockerFileReader_ReadFileContext_EmptyFile(t *testing.T) {
+	t.Parallel()
+
+	client := newMockClient("T0\n", 0)
+	reader := NewDockerFileReader(client)
+
+	result, err := reader.ReadFileContext(context.Background(), "container-1", "/workspace", "empty.go", 1, 0, 0)
+
+	require.NoError(t, err, "ReadFileContext should not return an error for an empty file")
+	require.Empty(t, result.Lines, "ReadFileContext should return no lines for an empty file")
+	require.Equal(t, 0, result.TotalLines, "ReadFileContext should report zero total lines for an empty file")
+	require.Equal(t, 0, result.StartLine)
+	require.Equal(t, 0, result.EndLine)
+	require.False(t, result.HasMoreAbove)
+	require.False(t, result.HasMoreBelow)
 }
