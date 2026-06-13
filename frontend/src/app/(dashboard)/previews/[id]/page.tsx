@@ -264,7 +264,6 @@ export function PreviewLandingContent({ id }: { id: string }) {
                   isExpired={isExpired}
                   launchError={launchError}
                   stoppedAtText={stoppedAtText}
-                  restartPending={restartPreview.isPending}
                   startLatest={startLatest}
                 />
 
@@ -351,7 +350,6 @@ function PreviewCommandState({
   isExpired,
   launchError,
   stoppedAtText,
-  restartPending,
   startLatest,
 }: {
   preview: BranchPreviewResponse;
@@ -362,7 +360,6 @@ function PreviewCommandState({
   isExpired: boolean;
   launchError: string | null;
   stoppedAtText: string | null;
-  restartPending: boolean;
   startLatest: () => void;
 }) {
   const previewUrl = safeExternalUrl(preview.preview_url);
