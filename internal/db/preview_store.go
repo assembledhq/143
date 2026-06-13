@@ -27,6 +27,17 @@ type PreviewStore struct {
 	db TxStarter
 }
 
+// PreviewHealthSample is a platform-wide preview lifecycle snapshot for ops
+// dashboards. It intentionally aggregates across orgs.
+type PreviewHealthSample struct {
+	ActivePreviews              int64
+	PreviewsStarted             int64
+	PreviewsReady               int64
+	PreviewsFailedOrUnavailable int64
+	StartupP50Seconds           float64
+	StartupP95Seconds           float64
+}
+
 // NewPreviewStore creates a new PreviewStore.
 func NewPreviewStore(db TxStarter) *PreviewStore {
 	return &PreviewStore{db: db}
@@ -1401,6 +1412,46 @@ func (s *PreviewStore) UpdatePreviewRuntimeWorkspaceRevision(ctx context.Context
 }
 
 const minPreviewStartupEstimateSamples = 5
+
+// PreviewHealthSample returns a compact platform-wide preview health aggregate
+// for the Grafana lifecycle sampler.
+// lint:allow-no-orgid reason="platform preview health dashboard intentionally aggregates preview lifecycle across orgs"
+func (s *PreviewStore) PreviewHealthSample(ctx context.Context) (PreviewHealthSample, error) {
+	query := fmt.Sprintf(`
+		/* preview health sample */
+		WITH recent_ready AS (
+			SELECT EXTRACT(EPOCH FROM (ready_at - created_at))::double precision AS startup_seconds
+			FROM preview_instances
+			WHERE ready_at IS NOT NULL
+			  AND ready_at >= created_at
+			  AND ready_at >= now() - interval '15 minutes'
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE status IN %s)::bigint AS active_previews,
+			COUNT(*) FILTER (WHERE created_at >= now() - interval '15 minutes')::bigint AS previews_started,
+			COUNT(*) FILTER (WHERE ready_at IS NOT NULL AND ready_at >= now() - interval '15 minutes')::bigint AS previews_ready,
+			COUNT(*) FILTER (WHERE status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')::bigint AS previews_failed_unavailable,
+			COALESCE((SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p50_seconds,
+			COALESCE((SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p95_seconds
+		FROM preview_instances
+		WHERE status IN %s
+		   OR created_at >= now() - interval '15 minutes'
+		   OR ready_at >= now() - interval '15 minutes'
+		   OR (status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')`, activeStatusFilter, activeStatusFilter)
+
+	var sample PreviewHealthSample
+	if err := s.db.QueryRow(ctx, query).Scan(
+		&sample.ActivePreviews,
+		&sample.PreviewsStarted,
+		&sample.PreviewsReady,
+		&sample.PreviewsFailedOrUnavailable,
+		&sample.StartupP50Seconds,
+		&sample.StartupP95Seconds,
+	); err != nil {
+		return PreviewHealthSample{}, fmt.Errorf("preview health sample: %w", err)
+	}
+	return sample, nil
+}
 
 func (s *PreviewStore) GetPreviewStartupEstimate(ctx context.Context, orgID, previewID uuid.UUID, configDigest string) (*models.PreviewStartupEstimate, error) {
 	if strings.TrimSpace(configDigest) == "" {
