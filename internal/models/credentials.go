@@ -1010,7 +1010,7 @@ type UpdateCodingAuthInput struct {
 var CodingAgentProviders = []ProviderName{
 	ProviderAnthropic, ProviderAnthropicSubscription,
 	ProviderOpenAI, ProviderOpenAISubscription,
-	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenCode, ProviderOpenRouter,
+	ProviderAmp, ProviderPi, ProviderOpenCode, ProviderOpenRouter,
 }
 
 // MaskKey preserves the first 6 and last 4 characters of a key.

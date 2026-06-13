@@ -4,10 +4,10 @@ import {
   OPENCODE_MODEL_GPT_5_4_MINI,
 } from "@/lib/model-constants";
 
-export type StackAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi" | "opencode";
+export type StackAgent = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 export type ModalProvider = StackAgent;
 export type ApiKeyProvider = StackAgent;
-export type PersonalProvider = "openai" | "anthropic" | "gemini" | "amp" | "pi" | "opencode";
+export type PersonalProvider = "openai" | "anthropic" | "amp" | "pi" | "opencode";
 
 // PERSONAL_PROVIDER_TO_AGENT is the single source of truth for the personal
 // page's provider → agent mapping. Typed as Record<PersonalProvider, StackAgent>
@@ -17,7 +17,6 @@ export type PersonalProvider = "openai" | "anthropic" | "gemini" | "amp" | "pi" 
 export const PERSONAL_PROVIDER_TO_AGENT: Record<PersonalProvider, StackAgent> = {
   openai: "codex",
   anthropic: "claude_code",
-  gemini: "gemini_cli",
   amp: "amp",
   pi: "pi",
   opencode: "opencode",
@@ -49,13 +48,6 @@ export const ORG_PROVIDER_OPTIONS: Array<{
     label: "Claude Code",
     iconSrc: "/agents/claude_code.svg",
     supportsSubscription: true,
-    supportsStackOrder: true,
-  },
-  {
-    key: "gemini_cli",
-    label: "Gemini CLI",
-    iconSrc: "/agents/gemini_cli.svg",
-    supportsSubscription: false,
     supportsStackOrder: true,
   },
   {
@@ -93,7 +85,6 @@ export const PERSONAL_PROVIDER_OPTIONS: Array<{
 }> = [
   { key: "openai", label: "Codex", iconSrc: "/agents/codex.svg", supportsSubscription: true },
   { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg", supportsSubscription: true },
-  { key: "gemini", label: "Gemini CLI", iconSrc: "/agents/gemini_cli.svg", supportsSubscription: false },
   { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg", supportsSubscription: false },
   { key: "pi", label: "Pi", iconSrc: "/agents/pi.svg", supportsSubscription: false },
   { key: "opencode", label: "OpenCode", iconSrc: "/agents/opencode.svg", supportsSubscription: false },
@@ -117,14 +108,6 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
         href: "https://platform.claude.com/settings/keys",
         linkLabel: "Claude API key management",
       };
-    case "gemini_cli":
-    case "gemini":
-      return {
-        label: "Gemini CLI",
-        description: "Open the Google AI Studio API key management page to create or manage Gemini keys.",
-        href: "https://aistudio.google.com/apikey",
-        linkLabel: "Google AI Studio API keys",
-      };
     case "amp":
       return {
         label: "Amp",
@@ -142,7 +125,7 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
     case "opencode":
       return {
         label: "OpenCode",
-        description: "Use an OpenCode-scoped key. If it targets a backing provider, store it here rather than reusing Codex, Claude Code, or Gemini credentials.",
+        description: "Use an OpenCode-scoped key. If it targets a backing provider, store it here rather than reusing Codex or Claude Code credentials.",
         href: "https://opencode.ai/docs",
         linkLabel: "OpenCode docs",
       };

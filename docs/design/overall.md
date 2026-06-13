@@ -557,7 +557,7 @@ After the core loop is proven with Sentry:
 
 - **Linear ingestion** — webhook + polling adapter, issue type classification
 - **Support tool ingestion** — Zendesk/Intercom adapters, customer pain extraction
-- **Additional agent adapters** — Codex, Gemini CLI, custom agents
+- **Additional agent adapters** — Codex, OpenCode, custom agents
 - **Time to First Fix optimization** (doc 15) — demo mode, quick-win scan, progress UX
 
 # Architecture

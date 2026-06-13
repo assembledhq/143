@@ -35,7 +35,7 @@ import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
 import { capitalizeWords } from "@/lib/utils";
 
-type ModalProvider = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi" | "opencode";
+type ModalProvider = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 type AddFlowAuthType = "subscription" | "api_key";
 type InsertionMode = "make_default" | "next_fallback";
 
@@ -101,8 +101,6 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
       return authType === "subscription" ? "Codex subscription" : "Codex API key";
     case "claude_code":
       return authType === "subscription" ? "Claude Code subscription" : "Claude Code API key";
-    case "gemini_cli":
-      return "Gemini CLI API key";
     case "amp":
       return "Amp API key";
     case "pi":
@@ -410,10 +408,10 @@ export default function AgentPage() {
                       ? "Codex"
                       : selected.agent === "claude_code"
                         ? "Claude Code"
-                        : selected.agent === "gemini_cli"
-                          ? "Gemini CLI"
-                          : selected.agent === "amp"
-                            ? "Amp"
+                        : selected.agent === "amp"
+                          ? "Amp"
+                          : selected.agent === "opencode"
+                            ? "OpenCode"
                             : "Pi"} {selected.auth_type === "subscription" ? "subscription" : "API key"} auth
                   </SheetDescription>
                 </SheetHeader>
@@ -627,7 +625,7 @@ export default function AgentPage() {
                     type="password"
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "opencode" ? "OpenCode or provider key" : provider === "gemini_cli" ? "AIza..." : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
+                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "opencode" ? "OpenCode or provider key" : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
                   />
                 </div>
               </>

@@ -1138,7 +1138,7 @@ func sessionTabToolDefinitions() []Tool {
 			Name:        "session_tabs_create",
 			Description: "Create a blank idle tab in the current session only. Does not start agent execution.",
 			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
-				"agent":        {Type: "string", Description: "Agent type for the new tab", Enum: []string{"codex", "claude_code", "gemini_cli", "amp", "pi"}},
+				"agent":        {Type: "string", Description: "Agent type for the new tab", Enum: []string{"codex", "claude_code", "amp", "pi", "opencode"}},
 				"instructions": {Type: "string", Description: "Optional stored instructions for the new tab"},
 				"label":        {Type: "string", Description: "Optional tab label"},
 				"model":        {Type: "string", Description: "Optional model override"},

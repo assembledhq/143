@@ -7,7 +7,7 @@ import (
 
 // EnsureSlashCommandsInPrompt is the default serialization helper for slash
 // commands attached to a manual session message. Every supported coding agent
-// today (Claude Code, Codex, Gemini CLI, Amp) recognizes `/foo` tokens
+// today (Claude Code, Codex, OpenCode, Amp) recognizes `/foo` tokens
 // natively in the prompt, so the canonical default is "the textarea is the
 // source of truth — pass the user's text through verbatim". This helper
 // guards the edge case where the structured commands[] payload disagrees with

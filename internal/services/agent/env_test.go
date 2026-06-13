@@ -419,22 +419,6 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 			},
 		},
 		{
-			name:      "gemini resolves the org-scoped unified row",
-			agentType: models.AgentTypeGeminiCLI,
-			coding: &envCodingCredentialProvider{
-				resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
-					models.ProviderGemini: {
-						{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Status: models.CodingCredentialStatusActive, Config: models.GeminiConfig{APIKey: "gem-key", Model: "gemini-2.5-pro"}},
-					},
-				},
-			},
-			orgCreds: &envCredentialProvider{},
-			expected: map[string]string{
-				"GEMINI_API_KEY": "gem-key",
-				"GEMINI_MODEL":   "gemini-2.5-pro",
-			},
-		},
-		{
 			name:      "opencode uses explicit opencode credential with openai backing",
 			agentType: models.AgentTypeOpenCode,
 			coding: &envCodingCredentialProvider{

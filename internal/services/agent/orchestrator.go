@@ -5476,7 +5476,7 @@ func (o *Orchestrator) billingModeForAgent(
 			return TokenBillingModeAPIKey
 		}
 		return TokenBillingModeUnknown
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
+	case models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return TokenBillingModeAPIKey
 	default:
 		return TokenBillingModeUnknown
@@ -7200,9 +7200,6 @@ func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) 
 	case models.AgentTypeCodex:
 		delete(env, "OPENAI_API_KEY")
 		delete(env, "OPENAI_BASE_URL")
-	case models.AgentTypeGeminiCLI:
-		delete(env, "GEMINI_API_KEY")
-		delete(env, "GEMINI_MODEL")
 	case models.AgentTypeAmp:
 		delete(env, "AMP_API_KEY")
 	case models.AgentTypePi:
@@ -7353,8 +7350,6 @@ func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 		return models.ProviderAnthropic
 	case models.AgentTypeCodex:
 		return models.ProviderOpenAI
-	case models.AgentTypeGeminiCLI:
-		return models.ProviderGemini
 	case models.AgentTypeAmp:
 		return models.ProviderAmp
 	case models.AgentTypePi:

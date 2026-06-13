@@ -134,26 +134,6 @@ func TestFinalizeTokenUsage(t *testing.T) {
 			},
 		},
 		{
-			name: "derives gemini api key usd cost when model pricing is known",
-			usage: TokenUsage{
-				InputTokens:       1_000_000,
-				CachedInputTokens: 1_000_000,
-				OutputTokens:      1_000_000,
-			},
-			hint: TokenUsageHint{
-				AgentType:      models.AgentTypeGeminiCLI,
-				EffectiveModel: models.GeminiCLIModelGemini25Pro,
-				BillingMode:    TokenBillingModeAPIKey,
-			},
-			validate: func(t *testing.T, usage TokenUsage) {
-				t.Helper()
-				require.NotNil(t, usage.Cost, "gemini api-key runs should derive usd cost when model pricing is known")
-				require.Equal(t, TokenCostSourceDerived, usage.Cost.Source, "gemini cost should be marked derived")
-				require.Equal(t, TokenCostUnitUSD, usage.Cost.Unit, "gemini api-key derivation should yield usd")
-				require.InDelta(t, 11.375, usage.Cost.Amount, 0.0001, "gemini derivation should include input, cached-input, and output pricing")
-			},
-		},
-		{
 			name: "derives pi anthropic usd cost from provider model",
 			usage: TokenUsage{
 				InputTokens:       1_000_000,

@@ -65,7 +65,7 @@ func (o *Orchestrator) resolveRuntimeConfig(ctx context.Context, orgID uuid.UUID
 
 func checkpointCapabilityForAgent(agentType models.AgentType) models.CheckpointCapability {
 	switch agentType {
-	case models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeGeminiCLI, models.AgentTypeOpenCode:
+	case models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeOpenCode:
 		return models.CheckpointCapabilityFullResume
 	case models.AgentTypeAmp, models.AgentTypePi:
 		return models.CheckpointCapabilityFilesystemOnly

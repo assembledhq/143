@@ -31,7 +31,6 @@ type AgentType string
 
 const (
 	AgentTypeClaudeCode AgentType = "claude_code"
-	AgentTypeGeminiCLI  AgentType = "gemini_cli"
 	AgentTypeCodex      AgentType = "codex"
 	AgentTypeAmp        AgentType = "amp"
 	AgentTypePi         AgentType = "pi"
@@ -42,7 +41,7 @@ const (
 // Validate returns an error if the agent type is not a recognized value.
 func (a AgentType) Validate() error {
 	switch a {
-	case AgentTypeClaudeCode, AgentTypeGeminiCLI, AgentTypeCodex, AgentTypeAmp, AgentTypePi, AgentTypeOpenCode:
+	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeAmp, AgentTypePi, AgentTypeOpenCode:
 		return nil
 	default:
 		return fmt.Errorf("invalid agent type: %q", a)
@@ -50,13 +49,13 @@ func (a AgentType) Validate() error {
 }
 
 // AgentEnvConfig holds per-agent environment variable overrides.
-// Keys are agent type names (e.g. "claude_code", "gemini_cli", "codex"),
+// Keys are agent type names (e.g. "claude_code", "codex", "opencode"),
 // values are maps of env var name → value.
 //
 // Injection scope: the orchestrator only injects agent_config.<type>.* into
 // the sandbox env for Amp and Pi, and only for their non-secret runtime
 // defaults (for example `AMP_MODE` and `PI_MODEL`). For
-// claude_code/codex/gemini_cli the legacy behavior stands — provider creds
+// claude_code/codex the legacy behavior stands — provider creds
 // come exclusively from resolveProviderConfig and entries here are validated
 // and stored, but not injected, so the same key in both places doesn't
 // silently override the credential store. See Orchestrator.resolveAgentEnv

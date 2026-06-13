@@ -562,8 +562,6 @@ func codingAgentForProvider(p models.ProviderName) models.AgentType {
 		return models.AgentTypeClaudeCode
 	case models.ProviderOpenAI, models.ProviderOpenAISubscription:
 		return models.AgentTypeCodex
-	case models.ProviderGemini:
-		return models.AgentTypeGeminiCLI
 	case models.ProviderAmp:
 		return models.AgentTypeAmp
 	case models.ProviderPi:
@@ -625,8 +623,6 @@ func defaultLabelFor(agent models.AgentType, authType models.CodingAuthType) str
 		return "Claude Code subscription"
 	case agent == models.AgentTypeClaudeCode && authType == models.CodingAuthTypeAPIKey:
 		return "Claude Code API key"
-	case agent == models.AgentTypeGeminiCLI:
-		return "Gemini CLI API key"
 	case agent == models.AgentTypeAmp:
 		return "Amp API key"
 	case agent == models.AgentTypePi:
@@ -654,11 +650,6 @@ func codingCredentialConfigFromInput(input models.CreateCodingCredentialInput) (
 			APIKey:  input.APIKey,
 			BaseURL: input.BaseURL,
 		}, models.ProviderAnthropic, nil
-	case models.AgentTypeGeminiCLI:
-		return models.GeminiConfig{
-			APIKey: input.APIKey,
-			Model:  coalesce(input.APIType, models.GeminiCLIModelGemini25Pro),
-		}, models.ProviderGemini, nil
 	case models.AgentTypeAmp:
 		return models.AmpConfig{APIKey: input.APIKey}, models.ProviderAmp, nil
 	case models.AgentTypePi:

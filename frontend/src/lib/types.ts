@@ -805,7 +805,7 @@ export interface SessionInputReference {
   display: string;
 }
 
-export type SessionComposerAgentType = "claude_code" | "codex" | "gemini_cli" | "amp" | "pi" | "opencode";
+export type SessionComposerAgentType = "claude_code" | "codex" | "amp" | "pi" | "opencode";
 
 export type SessionInputCommandSource = "builtin" | "project";
 
@@ -1082,7 +1082,7 @@ export interface OrgSettings {
   llm_model?: string;
   llm_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '';
   agent_config?: Record<string, Record<string, string>>;
-  default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli' | 'amp' | 'pi' | 'opencode';
+  default_agent_type?: 'codex' | 'claude_code' | 'amp' | 'pi' | 'opencode';
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
@@ -1497,7 +1497,7 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
-export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi" | "opencode";
+export type CodingAuthAgent = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
 

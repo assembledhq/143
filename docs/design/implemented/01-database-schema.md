@@ -602,7 +602,7 @@ Execution records for eval jobs tied to exact prompt/model/config versions.
 | status | text | `queued`, `running`, `succeeded`, `failed`, `cancelled` |
 | prompt_version_id | uuid | FK -> prompt_versions |
 | model | text | model used |
-| adapter | text | `claude_code`, `codex`, `gemini_cli`, etc. |
+| adapter | text | `claude_code`, `codex`, `opencode`, etc. |
 | config_snapshot | jsonb | routing/validation settings used |
 | summary_metrics | jsonb | pass@1, pass@k, per-slice metrics |
 | started_at | timestamptz | |
