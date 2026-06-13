@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { AGENTS_BY_KEY, AGENT_DISPLAY_LABELS } from "@/lib/agents";
 
 // Agent keys that have a brand SVG available at /agents/<key>.svg.
-const AGENTS_WITH_ICON = new Set(["codex", "claude_code", "gemini_cli", "amp", "opencode"]);
+const AGENTS_WITH_ICON = new Set(["codex", "claude_code", "amp", "opencode"]);
 
 export function AgentBadge({
   agentType,

@@ -54,7 +54,7 @@ func TestParseUserSettings(t *testing.T) {
 		},
 		{
 			name:    "rejects unsupported agent type",
-			raw:     json.RawMessage(`{"coding_agent_reasoning_defaults":{"gemini_cli":"high"}}`),
+			raw:     json.RawMessage(`{"coding_agent_reasoning_defaults":{"deprecated_agent":"high"}}`),
 			wantErr: true,
 		},
 		{

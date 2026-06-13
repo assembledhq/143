@@ -75,11 +75,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
-    gemini_cli: {
-      description: "Your own Google Gemini API key is required for agent sessions. Platform keys are used for internal features only.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
     amp: {
       description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush) and stores auth in the shared coding-agent credential stack.",
       configureLabel: "Configure",

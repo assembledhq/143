@@ -383,7 +383,7 @@ Repeatable form section. Each criterion:
 ### Single task run
 
 From the eval task detail page, click **Run** and choose:
-- **Model**: dropdown of available models (claude-opus-4-6, claude-sonnet-4-6, codex, gemini-cli, etc.)
+- **Model**: dropdown of available models (claude-opus-4-6, claude-sonnet-4-6, codex, opencode, etc.)
 - **PM documents**: override the pinned document set for this run
 
 The run:

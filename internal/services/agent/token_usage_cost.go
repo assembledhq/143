@@ -52,7 +52,6 @@ var anthropicRates = map[string]tokenRate{
 }
 
 var googleRates = map[string]tokenRate{
-	models.GeminiCLIModelGemini25Pro: {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
 	models.PiModelGemini25Pro:        {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
 }
 
@@ -150,8 +149,6 @@ func nativeProviderForHint(hint TokenUsageHint) string {
 		return "anthropic"
 	case models.AgentTypeCodex:
 		return "openai"
-	case models.AgentTypeGeminiCLI:
-		return "google"
 	case models.AgentTypeAmp:
 		return "amp"
 	case models.AgentTypePi:
@@ -188,12 +185,6 @@ func deriveTokenCost(usage TokenUsage, hint TokenUsageHint) *TokenCost {
 			}
 		case TokenBillingModeSubscription:
 			if rate, ok := codexCreditRates[hint.EffectiveModel]; ok {
-				return deriveCostFromRate(usage, rate)
-			}
-		}
-	case models.AgentTypeGeminiCLI:
-		if hint.BillingMode == TokenBillingModeAPIKey {
-			if rate, ok := googleRates[hint.EffectiveModel]; ok {
 				return deriveCostFromRate(usage, rate)
 			}
 		}

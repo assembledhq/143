@@ -8,7 +8,7 @@ Amp and Pi are installed in the sandbox and selectable as coding agents, but the
 
 Today:
 
-- Codex, Claude Code, and Gemini CLI use the coding-auth stack backed by `org_credentials`.
+- Codex, Claude Code, and OpenCode use the coding-auth stack backed by `org_credentials`.
 - Codex and Claude Code also have provider-specific subscription flows that still land in `org_credentials`.
 - Amp does **not** use the coding-auth stack. Its API key lives in `settings.agent_config.amp.AMP_API_KEY`.
 - Pi does **not** have its own auth at all. It inherits `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY` from other configured agents, then narrows them based on `PI_MODEL`.
@@ -27,7 +27,7 @@ It also creates real architecture problems:
 
 ### Backend
 
-- `internal/services/agent/env.go` resolves Codex, Claude Code, and Gemini CLI via `resolveProviderConfig(...)` from the credential stores.
+- `internal/services/agent/env.go` resolves Codex, Claude Code, and OpenCode via `resolveProviderConfig(...)` from the credential stores.
 - The same file explicitly documents that Amp and Pi have **no first-class provider credential store** and therefore use `agent_config` overrides instead.
 - `CheckAuth(...)` only validates `AMP_API_KEY` directly for Amp and validates Pi by checking for inherited sibling-provider keys.
 - `NarrowScopedCredentials(...)` exists only because Pi currently receives multiple foreign provider keys and needs post-processing to remove some of them.
@@ -35,7 +35,7 @@ It also creates real architecture problems:
 ### Storage
 
 - `internal/db/org_credentials.go` only includes `anthropic`, `openai`, `openai_chatgpt`, and `gemini` in `ListCodingAuths(...)`.
-- `CreateCodingAuth(...)` only supports Codex, Claude Code, and Gemini CLI.
+- `CreateCodingAuth(...)` only supports Codex, Claude Code, and OpenCode.
 - There is no `ProviderAmp` or `ProviderPi`.
 
 ### Frontend
@@ -45,7 +45,7 @@ It also creates real architecture problems:
   - Pi only writes `settings.agent_config.pi.PI_MODEL`.
   - neither appears in the fallback stack returned from `/api/v1/settings/coding-auths`.
 - `frontend/src/lib/coding-auth-metadata.ts` explicitly marks Amp and Pi as not participating in stack order.
-- `frontend/src/app/(dashboard)/settings/account/page.tsx` only supports personal API-key auth for Codex, Claude Code, and Gemini CLI.
+- `frontend/src/app/(dashboard)/settings/account/page.tsx` only supports personal API-key auth for Codex, Claude Code, and OpenCode.
 - `frontend/src/lib/agents.ts` still documents Pi as a meta-agent that inherits other providers' keys and uses `inheritsProviderKeys` to keep it out of the normal credential flows.
 - Agent/model selection surfaces already know about `amp` and `pi` as agent types, but their credential UX is inconsistent with the rest of the product because those agents do not participate in the same auth primitives.
 
@@ -56,7 +56,7 @@ It also creates real architecture problems:
 
 ## Goal
 
-Amp and Pi should use the same coding-agent primitives as Codex, Claude Code, and Gemini CLI:
+Amp and Pi should use the same coding-agent primitives as Codex, Claude Code, and OpenCode:
 
 - auth stored in the same credential system
 - visible in the same coding-auth stack

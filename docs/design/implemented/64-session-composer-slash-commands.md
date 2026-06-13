@@ -6,7 +6,7 @@
 
 ## Problem
 
-The session composers — both `/sessions/new` and the follow-up editor on `/sessions/[id]` — let the user type free-form prompts and `@` references, but they do not surface the slash commands that the underlying coding agent (Claude Code, Codex, Gemini CLI, Amp, Pi) already understands.
+The session composers — both `/sessions/new` and the follow-up editor on `/sessions/[id]` — let the user type free-form prompts and `@` references, but they do not surface the slash commands that the underlying coding agent (Claude Code, Codex, OpenCode, Amp, Pi) already understands.
 
 Today a user who knows Claude Code's `/review` or Gemini's `/compress` has to remember the command, type it perfectly, and hope the agent recognizes it. The UI does not advertise what is available, does not validate against the selected agent, and does not adapt when the user switches agents on the same form.
 
@@ -42,11 +42,11 @@ We **reuse the existing mention picker UI** rather than ship a parallel componen
 - Codex's app-server protocol distinguishes structured `skill` ($-prefix) and `mention` items from free text — slash commands sit in the `skill` family.
 - Source: [Codex app-server README](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
 
-### Gemini CLI
+### OpenCode
 
 - Documented `/`-prefixed commands such as `/help`, `/clear`, `/compress`, `/tools`, `/quit`, `/chat`, `/memory`.
-- Gemini CLI processes slash commands locally before sending the residual prompt to the model.
-- Source: [Gemini CLI commands](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/commands.md).
+- OpenCode processes slash commands locally before sending the residual prompt to the model.
+- Source: [OpenCode commands](https://github.com/google-gemini/opencode/blob/main/docs/reference/commands.md).
 
 ### Amp
 
@@ -139,7 +139,7 @@ The composer should additionally maintain `commands[]` next to `references[]`:
 ```ts
 type SessionInputCommand = {
   kind: "command";
-  agentType: AgentType;          // claude_code | codex | gemini_cli | amp | pi
+  agentType: AgentType;          // claude_code | codex | opencode | amp | pi
   name: string;                  // canonical command without leading slash, e.g. "review"
   token: string;                 // the literal text inserted, e.g. "/review"
   display: string;               // human label for chips, usually same as token
@@ -213,7 +213,7 @@ Each adapter decides what to do:
 
 - **Claude adapter:** emit the `/foo` token verbatim at the start of the prompt; arguments follow the token. Claude Code parses these natively at turn boundaries.
 - **Codex adapter:** emit `/foo` in the visible prompt and, when we move to the richer Codex protocol surface, also send a structured `skill` item (`{ "type": "skill", "name": "foo" }`) — same pattern we use for `@` mentions vs structured mention items.
-- **Gemini adapter:** emit `/foo` in the prompt; Gemini CLI handles them locally before model invocation.
+- **OpenCode adapter:** emit `/foo` in the prompt; OpenCode handles them locally before model invocation.
 - **Amp adapter:** emit `/foo` in the prompt; for MCP-prompt-style commands, the adapter may later upgrade to Amp's structured JSON input blocks.
 - **Pi adapter:** v1 has no Pi catalog, so this is a no-op. If we add one later, treat it as text-only.
 
@@ -245,7 +245,7 @@ var ClaudeCodeSlashCommands = []SlashCommand{
 }
 
 var CodexSlashCommands = []SlashCommand{ /* ... */ }
-var GeminiCLISlashCommands = []SlashCommand{ /* ... */ }
+var OpenCodeSlashCommands = []SlashCommand{ /* ... */ }
 var AmpSlashCommands = []SlashCommand{ /* ... */ }
 // Pi: empty in v1
 ```
@@ -260,7 +260,7 @@ A static Go catalog cannot represent commands the user wrote themselves. The mos
 
 - **Claude Code:** `.claude/commands/*.md`
 - **Codex:** `.codex/commands/*.md`
-- **Gemini CLI:** `.gemini/commands/*.toml`
+- **OpenCode:** `.gemini/commands/*.toml`
 - **Amp / Pi:** no widely-adopted project-scope convention to read today.
 
 Repo-scoped discovery covers this case cleanly using infrastructure that already exists for `@` mentions. We deliberately scope discovery to the repo and **do not** reach into the user's global config (`~/.claude/commands/`), MCP prompts, or plugin commands in this design — those would require runtime introspection inside the sandbox, which adds complexity and runtime cost, and the population mechanism for user-global commands inside our sandboxes isn't even well-defined today.
@@ -279,7 +279,7 @@ type ProjectCommandSpec struct {
 var ProjectCommandPaths = map[AgentType]ProjectCommandSpec{
     AgentTypeClaudeCode: {Dir: ".claude/commands", FileGlob: "*.md"},
     AgentTypeCodex:      {Dir: ".codex/commands",  FileGlob: "*.md"},
-    AgentTypeGeminiCLI:  {Dir: ".gemini/commands", FileGlob: "*.toml"},
+    AgentTypeOpenCode:   {Dir: ".opencode/commands", FileGlob: "*.md"},
     // Amp / Pi: omitted until upstream conventions stabilize
 }
 ```
@@ -439,7 +439,7 @@ The textarea text is the source of truth for what the agent will see. `commands[
 
 ### Phase 1: Static catalog, both surfaces
 
-- Catalog endpoint + Go-side static catalogs for Claude Code, Codex, Gemini CLI, Amp.
+- Catalog endpoint + Go-side static catalogs for Claude Code, Codex, OpenCode, Amp.
 - Generalized trigger parser + lifted popover component.
 - Slash trigger wired into `/sessions/new` and `/sessions/[id]` composers.
 - `commands[]` persisted on user messages.

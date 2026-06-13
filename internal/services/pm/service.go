@@ -232,7 +232,7 @@ func (s *Service) injectRequiredAgentAuth(ctx context.Context, orgID uuid.UUID, 
 				Detail:    fmt.Sprintf("failed to prepare Anthropic API-key fallback: %v", err),
 			}
 		}
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
+	case models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return agent.TokenBillingModeAPIKey, nil
 	default:
 		return agent.TokenBillingModeUnknown, nil
@@ -396,7 +396,7 @@ func effectivePMBillingMode(agentType models.AgentType, env map[string]string, f
 			return agent.TokenBillingModeAPIKey
 		}
 		return agent.TokenBillingModeUnknown
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
+	case models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return agent.TokenBillingModeAPIKey
 	default:
 		return agent.TokenBillingModeUnknown

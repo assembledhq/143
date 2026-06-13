@@ -938,7 +938,7 @@ func TestIsCodingAgentProvider(t *testing.T) {
 	}{
 		{"anthropic is coding agent", ProviderAnthropic, true},
 		{"openai is coding agent", ProviderOpenAI, true},
-		{"gemini is coding agent", ProviderGemini, true},
+		{"gemini is not coding agent", ProviderGemini, false},
 		{"openrouter is coding agent", ProviderOpenRouter, true},
 		{"amp is coding agent", ProviderAmp, true},
 		{"pi is coding agent", ProviderPi, true},

@@ -30,7 +30,7 @@ const dispatches = [
     accentRgb: "59,130,246",
   },
   {
-    agent: "Gemini CLI",
+    agent: "OpenCode",
     task: "Update deprecated API calls",
     source: "Tech Debt",
     status: "CI running",

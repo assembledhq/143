@@ -16,18 +16,6 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_HAIKU_45,
 ] as const;
 
-export const GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview";
-export const GEMINI_CLI_MODEL_GEMINI_3_FLASH_PREVIEW = "gemini-3-flash-preview";
-export const GEMINI_CLI_MODEL_GEMINI_2_5_PRO = "gemini-2.5-pro";
-export const GEMINI_CLI_MODEL_GEMINI_2_5_FLASH = "gemini-2.5-flash";
-
-export const AVAILABLE_GEMINI_CLI_MODELS = [
-  GEMINI_CLI_MODEL_GEMINI_3_1_PRO_PREVIEW,
-  GEMINI_CLI_MODEL_GEMINI_3_FLASH_PREVIEW,
-  GEMINI_CLI_MODEL_GEMINI_2_5_PRO,
-  GEMINI_CLI_MODEL_GEMINI_2_5_FLASH,
-] as const;
-
 export const CODEX_MODEL_GPT_5_5 = "gpt-5.5";
 export const CODEX_MODEL_GPT_5_5_FAST = "gpt-5.5-fast";
 export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
