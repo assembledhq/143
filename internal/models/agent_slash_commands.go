@@ -138,6 +138,11 @@ var AmpSlashCommands = []SlashCommand{
 // stabilize. Source: https://www.npmjs.com/package/@mariozechner/pi-agent
 var PiSlashCommands = []SlashCommand{}
 
+// OpenCodeSlashCommands is intentionally empty in v1. 143 still passes through
+// user-entered slash tokens and discovers .opencode/commands/*.md project
+// commands, but built-ins should only be surfaced after probing exact names.
+var OpenCodeSlashCommands = []SlashCommand{}
+
 // agentSlashCommandCatalog binds an agent's built-in command list to the label
 // rendered above it in the picker. Keying both off the same map prevents the
 // label switch and the catalog switch from drifting (e.g. renaming an agent
@@ -153,6 +158,7 @@ var agentSlashCommandCatalogs = map[AgentType]agentSlashCommandCatalog{
 	AgentTypeGeminiCLI:  {Label: "Gemini CLI commands", Commands: GeminiCLISlashCommands},
 	AgentTypeAmp:        {Label: "Amp commands", Commands: AmpSlashCommands},
 	AgentTypePi:         {Label: "Pi commands", Commands: PiSlashCommands},
+	AgentTypeOpenCode:   {Label: "OpenCode commands", Commands: OpenCodeSlashCommands},
 }
 
 // SlashCommandsForAgent returns the built-in command catalog for an agent. The
@@ -241,6 +247,7 @@ var ProjectCommandPaths = map[AgentType]ProjectCommandSpec{
 	AgentTypeClaudeCode: {Dir: ".claude/commands", FileExtension: "md"},
 	AgentTypeCodex:      {Dir: ".codex/commands", FileExtension: "md"},
 	AgentTypeGeminiCLI:  {Dir: ".gemini/commands", FileExtension: "toml"},
+	AgentTypeOpenCode:   {Dir: ".opencode/commands", FileExtension: "md"},
 }
 
 // SupportsProjectCommands reports whether an agent type has a registered

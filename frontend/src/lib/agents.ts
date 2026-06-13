@@ -8,6 +8,7 @@ import {
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_GEMINI_CLI_MODELS,
+  AVAILABLE_OPENCODE_MODELS,
   AVAILABLE_PI_MODELS,
 } from "@/lib/model-constants";
 import type { CodexAuthStatus, CodingCredentialSummary, ResolvedCredential } from "@/lib/types";
@@ -118,6 +119,29 @@ export const AGENTS: readonly AgentMeta[] = [
       },
     ],
   },
+  {
+    key: "opencode",
+    label: "OpenCode",
+    short: "OC",
+    color: "#111827",
+    description: "OpenCode multi-provider coding agent",
+    providerKey: "opencode",
+    models: AVAILABLE_OPENCODE_MODELS,
+    note: "OpenCode uses explicit OpenCode-scoped keys. A key may target OpenCode native auth or a backing provider, but it is stored separately from Codex, Claude Code, and Gemini keys.",
+    envVars: [
+      { name: "OPENCODE_API_KEY", label: "API Key", sensitive: true, placeholder: "OpenCode or provider API key" },
+      { name: "OPENCODE_MODEL", label: "Default model", options: [...AVAILABLE_OPENCODE_MODELS] },
+      {
+        name: "OPENCODE_MODEL_CUSTOM",
+        label: "Custom model override",
+        placeholder: "provider/model (e.g. xai/grok-code-fast)",
+        advanced: true,
+        helpText: "Wins over Default model. OpenCode accepts provider/model ids from its upstream catalog.",
+      },
+      { name: "OPENCODE_BACKING_PROVIDER", label: "Backing provider", placeholder: "opencode, openai, anthropic, gemini, or openrouter", advanced: true },
+      { name: "OPENCODE_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
+    ],
+  },
 ] as const;
 
 export const AGENTS_BY_KEY: Readonly<Record<string, AgentMeta>> = Object.fromEntries(
@@ -139,7 +163,15 @@ export function agentDisplayLabel(agentType: string): string {
 
 // Resolve the agent type key for a given model string.
 export function agentTypeForModel(model: string): string | undefined {
-  return AGENTS.find((a) => a.models.includes(model))?.key;
+  if (!model) return undefined;
+  for (const agent of AGENTS) {
+    if (agent.key === "pi") continue;
+    if (agent.models.includes(model)) return agent.key;
+  }
+  if (AGENTS_BY_KEY.pi.models.includes(model)) return "pi";
+  // Unknown provider/model strings (custom Pi or custom OpenCode models) cannot
+  // be unambiguously classified — let callers fall back to their default agent.
+  return undefined;
 }
 
 // True when the user has the credentials needed to run the given agent.

@@ -82,6 +82,7 @@ func TestSlashCommandAgentLabel(t *testing.T) {
 
 	require.Equal(t, "Claude Code commands", SlashCommandAgentLabel(AgentTypeClaudeCode))
 	require.Equal(t, "Codex commands", SlashCommandAgentLabel(AgentTypeCodex))
+	require.Equal(t, "OpenCode commands", SlashCommandAgentLabel(AgentTypeOpenCode))
 	require.Equal(t, "Slash commands", SlashCommandAgentLabel(AgentType("nope")))
 }
 
@@ -120,6 +121,8 @@ func TestSupportsProjectCommands(t *testing.T) {
 	require.True(t, SupportsProjectCommands(AgentTypeClaudeCode))
 	require.True(t, SupportsProjectCommands(AgentTypeCodex))
 	require.True(t, SupportsProjectCommands(AgentTypeGeminiCLI))
+	require.True(t, SupportsProjectCommands(AgentTypeOpenCode))
+	require.Equal(t, ProjectCommandSpec{Dir: ".opencode/commands", FileExtension: "md"}, ProjectCommandPaths[AgentTypeOpenCode], "OpenCode should discover project commands from .opencode/commands/*.md")
 	require.False(t, SupportsProjectCommands(AgentTypeAmp))
 	require.False(t, SupportsProjectCommands(AgentTypePi))
 }
