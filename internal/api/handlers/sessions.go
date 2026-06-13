@@ -816,6 +816,14 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.enrichSessionLinks(r.Context(), orgID, &run)
 
 	detail := models.SessionDetail{Session: run}
+	if h.repoStore != nil && run.RepositoryID != nil {
+		repo, err := h.repoStore.GetByID(r.Context(), orgID, *run.RepositoryID)
+		if err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", runID.String()).Str("repository_id", run.RepositoryID.String()).Msg("failed to load repository for session detail")
+		} else {
+			detail.RepositoryFullName = &repo.FullName
+		}
+	}
 	if h.threadStore != nil {
 		threads, err := h.threadStore.ListBySession(r.Context(), orgID, runID)
 		if err != nil {
