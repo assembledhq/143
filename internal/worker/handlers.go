@@ -4222,13 +4222,6 @@ func parseSlackSessionJobIDs(orgIDRaw, sessionIDRaw string) (uuid.UUID, uuid.UUI
 	return orgID, sessionID, nil
 }
 
-func renderSlackFinal(services *Services, content string, sessionID uuid.UUID) string {
-	return slackbotsvc.RenderFinalResponse(content, slackbotsvc.SlackSessionRenderInput{
-		Session:    models.Session{ID: sessionID},
-		SessionURL: slackSessionURL(services, sessionID),
-	}).Text
-}
-
 func renderSlackFinalBlocks(services *Services, content string, orgID, sessionID uuid.UUID, link models.SlackSessionLink, details slackSessionOutcomeDetails) (string, []ingestion.SlackBlock) {
 	actions := []slackbotsvc.SlackAction{}
 	if details.Preview != nil {
