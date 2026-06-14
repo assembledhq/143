@@ -283,6 +283,118 @@ export interface Integration {
   created_at: string;
 }
 
+export type SlackRoutingMode = "auto" | "answer_only" | "start_work";
+export type SlackResponseVisibility = "thread" | "dm";
+export type SlackNotificationPreset = "quiet" | "balanced" | "verbose" | "custom";
+export type SlackChannelAction = "session" | "preview" | "pr_request" | "human_input";
+
+export interface SlackBotSettings {
+  id?: string;
+  org_id: string;
+  slack_installation_id: string;
+  default_repository_id?: string;
+  default_branch?: string;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  notification_subscriptions?: Record<string, unknown>;
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type SlackBotSettingsUpdate = Partial<{
+  default_repository_id: string | null;
+  default_branch: string | null;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  notification_subscriptions: Record<string, unknown>;
+}>;
+
+export interface SlackUserLink {
+  id: string;
+  org_id: string;
+  slack_installation_id: string;
+  slack_team_id: string;
+  slack_user_id: string;
+  slack_email?: string;
+  slack_display_name?: string;
+  user_id?: string;
+  source: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SlackUserLinkUpsert {
+  user_id: string;
+  slack_user_id: string;
+  slack_email?: string;
+  slack_display_name?: string;
+}
+
+export type SlackChannelSettingsUpdate = Partial<{
+  slack_channel_name: string;
+  channel_type: string;
+  default_repository_id: string | null;
+  default_branch: string | null;
+  routing_mode: SlackRoutingMode | "";
+  response_visibility: SlackResponseVisibility | "";
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset | "";
+  notification_subscriptions: Record<string, unknown>;
+}>;
+
+export interface EffectiveSlackChannelSettings {
+  slack_channel_id: string;
+  default_repository_id?: string;
+  default_branch?: string;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  has_channel_override: boolean;
+}
+
+export interface SlackChannel {
+  id: string;
+  name: string;
+  type?: string;
+  selected: boolean;
+  monitoring_enabled?: boolean;
+  bot_configured?: boolean;
+  settings?: Partial<EffectiveSlackChannelSettings>;
+  effective_settings?: EffectiveSlackChannelSettings;
+}
+
+export interface SlackInstallation {
+  id: string;
+  org_id: string;
+  team_id: string;
+  team_name: string;
+  bot_user_id: string;
+  scope: string[];
+  status: string;
+  last_event_at?: string;
+  updated_at: string;
+}
+
+export interface SlackInstallationHealth {
+  installation: SlackInstallation;
+  required_scopes: string[];
+  missing_scopes: string[];
+  last_event_at?: string;
+  last_auth_check_at?: string;
+  auth_ok: boolean;
+  auth_error?: {
+    reason: string;
+    at: string;
+  };
+}
+
 export type GitHubRepositoryClaimStatus =
   | "unclaimed"
   | "owned_by_current_org"

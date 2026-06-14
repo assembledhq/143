@@ -103,6 +103,16 @@ type SlackInstallation struct {
 	UpdatedAt         time.Time               `db:"updated_at" json:"updated_at"`
 }
 
+type SlackInstallationHealth struct {
+	Installation    SlackInstallation     `json:"installation"`
+	RequiredScopes  []string              `json:"required_scopes"`
+	MissingScopes   []string              `json:"missing_scopes"`
+	LastEventAt     *time.Time            `json:"last_event_at,omitempty"`
+	LastAuthCheckAt *time.Time            `json:"last_auth_check_at,omitempty"`
+	AuthOK          bool                  `json:"auth_ok"`
+	AuthError       *IntegrationAuthError `json:"auth_error,omitempty"`
+}
+
 type SlackUserLink struct {
 	ID                  uuid.UUID           `db:"id" json:"id"`
 	OrgID               uuid.UUID           `db:"org_id" json:"org_id"`
@@ -119,21 +129,123 @@ type SlackUserLink struct {
 }
 
 type SlackChannelSettings struct {
-	ID                        uuid.UUID       `db:"id" json:"id"`
-	OrgID                     uuid.UUID       `db:"org_id" json:"org_id"`
-	SlackInstallationID       uuid.UUID       `db:"slack_installation_id" json:"slack_installation_id"`
-	SlackTeamID               string          `db:"slack_team_id" json:"slack_team_id"`
-	SlackChannelID            string          `db:"slack_channel_id" json:"slack_channel_id"`
-	SlackChannelName          string          `db:"slack_channel_name" json:"slack_channel_name"`
-	ChannelType               string          `db:"channel_type" json:"channel_type"`
-	DefaultRepositoryID       *uuid.UUID      `db:"default_repository_id" json:"default_repository_id,omitempty"`
-	DefaultBranch             *string         `db:"default_branch" json:"default_branch,omitempty"`
-	ResponseVisibility        string          `db:"response_visibility" json:"response_visibility"`
-	AllowedActions            []string        `db:"allowed_actions" json:"allowed_actions"`
-	NotificationSubscriptions json.RawMessage `db:"notification_subscriptions" json:"notification_subscriptions,omitempty"`
-	Active                    bool            `db:"active" json:"active"`
-	CreatedAt                 time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt                 time.Time       `db:"updated_at" json:"updated_at"`
+	ID                        uuid.UUID                `db:"id" json:"id"`
+	OrgID                     uuid.UUID                `db:"org_id" json:"org_id"`
+	SlackInstallationID       uuid.UUID                `db:"slack_installation_id" json:"slack_installation_id"`
+	SlackTeamID               string                   `db:"slack_team_id" json:"slack_team_id"`
+	SlackChannelID            string                   `db:"slack_channel_id" json:"slack_channel_id"`
+	SlackChannelName          string                   `db:"slack_channel_name" json:"slack_channel_name"`
+	ChannelType               string                   `db:"channel_type" json:"channel_type"`
+	DefaultRepositoryID       *uuid.UUID               `db:"default_repository_id" json:"default_repository_id,omitempty"`
+	DefaultBranch             *string                  `db:"default_branch" json:"default_branch,omitempty"`
+	RoutingMode               *SlackRoutingMode        `db:"routing_mode" json:"routing_mode,omitempty"`
+	ResponseVisibility        *SlackResponseVisibility `db:"response_visibility" json:"response_visibility,omitempty"`
+	AllowedActions            []string                 `db:"allowed_actions" json:"allowed_actions,omitempty"`
+	NotificationPreset        *SlackNotificationPreset `db:"notification_preset" json:"notification_preset,omitempty"`
+	NotificationSubscriptions json.RawMessage          `db:"notification_subscriptions" json:"notification_subscriptions,omitempty"`
+	Active                    bool                     `db:"active" json:"active"`
+	CreatedAt                 time.Time                `db:"created_at" json:"created_at"`
+	UpdatedAt                 time.Time                `db:"updated_at" json:"updated_at"`
+}
+
+type SlackResponseVisibility string
+
+const (
+	SlackResponseVisibilityThread SlackResponseVisibility = "thread"
+	SlackResponseVisibilityDM     SlackResponseVisibility = "dm"
+)
+
+func (s SlackResponseVisibility) Validate() error {
+	switch s {
+	case SlackResponseVisibilityThread, SlackResponseVisibilityDM:
+		return nil
+	default:
+		return fmt.Errorf("invalid SlackResponseVisibility: %q", s)
+	}
+}
+
+type SlackChannelAction string
+
+const (
+	SlackChannelActionSession    SlackChannelAction = "session"
+	SlackChannelActionPreview    SlackChannelAction = "preview"
+	SlackChannelActionPRRequest  SlackChannelAction = "pr_request"
+	SlackChannelActionHumanInput SlackChannelAction = "human_input"
+)
+
+func (s SlackChannelAction) Validate() error {
+	switch s {
+	case SlackChannelActionSession, SlackChannelActionPreview, SlackChannelActionPRRequest, SlackChannelActionHumanInput:
+		return nil
+	default:
+		return fmt.Errorf("invalid SlackChannelAction: %q", s)
+	}
+}
+
+type SlackRoutingMode string
+
+const (
+	SlackRoutingModeAuto       SlackRoutingMode = "auto"
+	SlackRoutingModeAnswerOnly SlackRoutingMode = "answer_only"
+	SlackRoutingModeStartWork  SlackRoutingMode = "start_work"
+)
+
+func (s SlackRoutingMode) Validate() error {
+	switch s {
+	case SlackRoutingModeAuto, SlackRoutingModeAnswerOnly, SlackRoutingModeStartWork:
+		return nil
+	default:
+		return fmt.Errorf("invalid SlackRoutingMode: %q", s)
+	}
+}
+
+type SlackNotificationPreset string
+
+const (
+	SlackNotificationPresetQuiet    SlackNotificationPreset = "quiet"
+	SlackNotificationPresetBalanced SlackNotificationPreset = "balanced"
+	SlackNotificationPresetVerbose  SlackNotificationPreset = "verbose"
+	SlackNotificationPresetCustom   SlackNotificationPreset = "custom"
+)
+
+func (s SlackNotificationPreset) Validate() error {
+	switch s {
+	case SlackNotificationPresetQuiet, SlackNotificationPresetBalanced, SlackNotificationPresetVerbose, SlackNotificationPresetCustom:
+		return nil
+	default:
+		return fmt.Errorf("invalid SlackNotificationPreset: %q", s)
+	}
+}
+
+type SlackBotSettings struct {
+	ID                        uuid.UUID               `db:"id" json:"id"`
+	OrgID                     uuid.UUID               `db:"org_id" json:"org_id"`
+	SlackInstallationID       uuid.UUID               `db:"slack_installation_id" json:"slack_installation_id"`
+	DefaultRepositoryID       *uuid.UUID              `db:"default_repository_id" json:"default_repository_id,omitempty"`
+	DefaultBranch             *string                 `db:"default_branch" json:"default_branch,omitempty"`
+	RoutingMode               SlackRoutingMode        `db:"routing_mode" json:"routing_mode"`
+	ResponseVisibility        SlackResponseVisibility `db:"response_visibility" json:"response_visibility"`
+	AllowedActions            []string                `db:"allowed_actions" json:"allowed_actions"`
+	NotificationPreset        SlackNotificationPreset `db:"notification_preset" json:"notification_preset"`
+	NotificationSubscriptions json.RawMessage         `db:"notification_subscriptions" json:"notification_subscriptions,omitempty"`
+	Active                    bool                    `db:"active" json:"active"`
+	CreatedAt                 time.Time               `db:"created_at" json:"created_at"`
+	UpdatedAt                 time.Time               `db:"updated_at" json:"updated_at"`
+}
+
+type EffectiveSlackChannelSettings struct {
+	OrgID                     uuid.UUID               `db:"org_id" json:"org_id"`
+	SlackInstallationID       uuid.UUID               `db:"slack_installation_id" json:"slack_installation_id"`
+	SlackTeamID               string                  `db:"slack_team_id" json:"slack_team_id"`
+	SlackChannelID            string                  `db:"slack_channel_id" json:"slack_channel_id"`
+	DefaultRepositoryID       *uuid.UUID              `db:"default_repository_id" json:"default_repository_id,omitempty"`
+	DefaultBranch             *string                 `db:"default_branch" json:"default_branch,omitempty"`
+	RoutingMode               SlackRoutingMode        `db:"routing_mode" json:"routing_mode"`
+	ResponseVisibility        SlackResponseVisibility `db:"response_visibility" json:"response_visibility"`
+	AllowedActions            []string                `db:"allowed_actions" json:"allowed_actions"`
+	NotificationPreset        SlackNotificationPreset `db:"notification_preset" json:"notification_preset"`
+	NotificationSubscriptions json.RawMessage         `db:"notification_subscriptions" json:"notification_subscriptions,omitempty"`
+	HasChannelOverride        bool                    `db:"has_channel_override" json:"has_channel_override"`
 }
 
 type SlackSessionLink struct {
@@ -150,6 +262,7 @@ type SlackSessionLink struct {
 	MappedUserID          *uuid.UUID `db:"mapped_user_id" json:"mapped_user_id,omitempty"`
 	TeamSession           bool       `db:"team_session" json:"team_session"`
 	LatestStatusMessageTS *string    `db:"latest_status_message_ts" json:"latest_status_message_ts,omitempty"`
+	LatestProgressKind    *string    `db:"latest_progress_kind" json:"latest_progress_kind,omitempty"`
 	FinalMessageTS        *string    `db:"final_message_ts" json:"final_message_ts,omitempty"`
 	CreatedAt             time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt             time.Time  `db:"updated_at" json:"updated_at"`
