@@ -1578,6 +1578,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1677,6 +1678,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedStaticEgressNoCapableWorkers(t 
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1739,6 +1741,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -2001,6 +2004,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
