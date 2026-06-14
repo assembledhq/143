@@ -563,8 +563,7 @@ describe('SessionDetailPage session states', () => {
     const startedLabel = screen.getByText(/Started/);
     expect(startedLabel).toBeInTheDocument();
 
-    const metadataRow = startedLabel.closest('div');
-    expect(metadataRow?.textContent?.trim().startsWith('Started')).toBe(true);
+    expect(startedLabel.textContent?.trim().startsWith('Started')).toBe(true);
   });
 
   it('shows raw agent type when not in known labels', async () => {
