@@ -9,6 +9,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -128,9 +129,9 @@ export default function EvalTaskDetailPage() {
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     {archiveMutation.isError && (
-                      <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
                         Failed to archive eval task. Please try again.
-                      </div>
+                      </ErrorText>
                     )}
                     <AlertDialogFooter>
                       <AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -410,9 +411,9 @@ function RunEvalDialog({ taskId }: { taskId: string }) {
           </div>
         </div>
         {runMutation.isError && (
-          <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
             Failed to start eval run. Please try again.
-          </div>
+          </ErrorText>
         )}
         <div className="flex items-center justify-end gap-2">
           <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>

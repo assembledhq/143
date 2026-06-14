@@ -21,7 +21,6 @@ import {
   Clock,
   Palette,
   RefreshCw,
-  X,
   ChevronDown,
   MoreHorizontal,
   Copy,
@@ -30,6 +29,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { errorSurfaceClassNames } from "@/components/ui/error-styles";
 import {
   Tooltip,
@@ -1149,33 +1149,19 @@ export function PreviewPanel({
 
       {/* Mutation error banner */}
       {mutationError && (
-        <div className="flex items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-2 text-sm text-destructive">
-          <AlertTriangle className="size-4 shrink-0" />
-          <span className="flex-1">{mutationError}</span>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            onClick={() => setMutationError(null)}
-            className="rounded p-0.5 hover:bg-destructive/10"
-          >
-            <X className="size-3.5" />
-          </Button>
-        </div>
+        <ErrorNotice
+          title={mutationError}
+          onDismiss={() => setMutationError(null)}
+        />
       )}
 
       {/* Query error state */}
       {statusError && (
-        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 space-y-2">
-          <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-            <AlertTriangle className="size-4" />
-            Failed to load preview status
-          </div>
-          <p className="text-xs text-muted-foreground">{statusError.message}</p>
-          <Button size="sm" variant="outline" onClick={() => refetchStatus()}>
-            <RefreshCw className="size-3.5" />
-            Retry
-          </Button>
-        </div>
+        <ErrorNotice
+          title="Failed to load preview status"
+          description={statusError.message}
+          action={{ label: "Retry", onClick: () => refetchStatus() }}
+        />
       )}
 
       {/* Startup progress */}

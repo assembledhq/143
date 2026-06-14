@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Clock, Plus, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 
@@ -174,7 +175,7 @@ export function TTLWarning({
         </Button>
       )}
       {extendError && (
-        <span className="text-xs text-destructive">{extendError}</span>
+        <ErrorText>{extendError}</ErrorText>
       )}
     </div>
   );
