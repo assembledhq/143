@@ -6,6 +6,8 @@
 -- preview_dependency_cache_locations: ephemeral worker hints; stale rows acceptable;
 --   cleanup handled by TTL-based DeleteExpiredDependencyCacheLocations.
 
+BEGIN;
+
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE session_logs DROP CONSTRAINT IF EXISTS fk_session_logs_session;
@@ -14,3 +16,5 @@ ALTER TABLE session_logs DROP CONSTRAINT IF EXISTS fk_session_logs_thread;
 
 ALTER TABLE preview_dependency_cache_locations DROP CONSTRAINT IF EXISTS preview_dependency_cache_locations_org_id_fkey;
 ALTER TABLE preview_dependency_cache_locations DROP CONSTRAINT IF EXISTS preview_dependency_cache_locations_repo_id_fkey;
+
+COMMIT;
