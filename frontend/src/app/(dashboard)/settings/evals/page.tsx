@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ErrorText } from "@/components/ui/error-notice";
 import {
   Select,
   SelectContent,
@@ -242,9 +243,9 @@ export default function EvalsSettingsPage() {
               </Select>
             </div>
             {bootstrapMutation.isError && (
-              <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
                 Bootstrap scan failed. Please try again.
-              </div>
+              </ErrorText>
             )}
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -839,14 +840,14 @@ function BootstrapCandidateReview({ bootstrap, repoName, onOpenCandidate }: { bo
       </div>
 
       {acceptMutation.isError ? (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2">
           Failed to accept selected candidates.
-        </div>
+        </ErrorText>
       ) : null}
       {reviewMutation.isError ? (
-        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2">
           Failed to update candidate review.
-        </div>
+        </ErrorText>
       ) : null}
 
       <div className="grid gap-3">

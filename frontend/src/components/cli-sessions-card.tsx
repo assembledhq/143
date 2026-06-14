@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import type { CliToken, ListResponse } from "@/lib/types";
 
 function formatWhen(value?: string | null): string {
@@ -50,9 +51,9 @@ export function CLISessionsCard() {
         signs its CLI out and cuts its local agents off immediately.
       </p>
       {error && (
-        <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
           {error}
-        </div>
+        </ErrorText>
       )}
       <Card>
         <CardContent className="p-0">
