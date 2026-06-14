@@ -1073,8 +1073,16 @@ describe('api client', () => {
         }),
       );
 
-      await api.issues.triggerFix('issue-1', { agent_type: 'codex', autonomy_level: 'full' });
-      expect(capturedBody).toEqual({ agent_type: 'codex', autonomy_level: 'full' });
+      await api.issues.triggerFix('issue-1', {
+        agent_type: 'codex',
+        autonomy_level: 'full',
+        message: 'Prioritize the mobile checkout notes.',
+      });
+      expect(capturedBody).toEqual({
+        agent_type: 'codex',
+        autonomy_level: 'full',
+        message: 'Prioritize the mobile checkout notes.',
+      });
     });
   });
 

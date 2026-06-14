@@ -367,7 +367,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Issue>>(`/api/v1/issues${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Issue>>(`/api/v1/issues/${id}`),
-    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string; message?: string; force?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
   autopilot: {
