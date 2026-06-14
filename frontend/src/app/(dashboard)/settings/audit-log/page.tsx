@@ -12,6 +12,7 @@ import { AuditLogDetailDrawer } from "@/components/audit/audit-log-detail-drawer
 import { EmptyState } from "@/components/empty-state";
 import { ScrollText, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import {
   Select,
   SelectContent,
@@ -198,9 +199,9 @@ export default function AuditLogPage() {
             </div>
           </div>
           {error ? (
-            <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive m-3">
+            <ErrorText className="m-3 rounded-md bg-destructive/10 px-3 py-2">
               Failed to load audit logs.
-            </div>
+            </ErrorText>
           ) : isLoading && entries.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               Loading audit logs...

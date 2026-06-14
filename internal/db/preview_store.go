@@ -959,6 +959,30 @@ func (s *PreviewStore) GetActivePreviewRuntime(ctx context.Context, orgID, previ
 	return &row, nil
 }
 
+// ListActivePreviewRuntimesForReachability returns active runtime endpoints for app-side probes.
+// lint:allow-no-orgid reason="cross-org app-side reachability sweep probes active preview runtime endpoints"
+func (s *PreviewStore) ListActivePreviewRuntimesForReachability(ctx context.Context, limit int) ([]models.PreviewRuntime, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM preview_runtimes
+		WHERE status IN %s
+		  AND lease_expires_at > now()
+		ORDER BY last_heartbeat_at ASC, updated_at ASC
+		LIMIT @limit`, previewRuntimeColumns, activeRuntimeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview runtimes for reachability: %w", err)
+	}
+	runtimes, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewRuntime])
+	if err != nil {
+		return nil, fmt.Errorf("scan active preview runtimes for reachability: %w", err)
+	}
+	return runtimes, nil
+}
+
 // MarkPreviewRuntimeReady marks a runtime ready and mirrors routing fields onto
 // preview_instances for API compatibility.
 func (s *PreviewStore) MarkPreviewRuntimeReady(ctx context.Context, orgID, runtimeID uuid.UUID, handle string, port int) error {

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_CLAUDE_CODE_MODELS,
-  AVAILABLE_GEMINI_CLI_MODELS,
   AVAILABLE_OPENCODE_MODELS,
   AVAILABLE_PI_MODELS,
   DEFAULT_PM_MODEL,
@@ -28,15 +27,6 @@ describe("model constants", () => {
       "claude-sonnet-4-6",
       "claude-sonnet-4-5",
       "claude-haiku-4-5",
-    ]);
-  });
-
-  it("includes latest Gemini CLI models", () => {
-    expect(AVAILABLE_GEMINI_CLI_MODELS).toEqual([
-      "gemini-3.1-pro-preview",
-      "gemini-3-flash-preview",
-      "gemini-2.5-pro",
-      "gemini-2.5-flash",
     ]);
   });
 

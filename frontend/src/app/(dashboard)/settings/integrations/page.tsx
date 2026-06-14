@@ -12,6 +12,7 @@ import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ErrorNotice, ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -305,9 +306,9 @@ function GitHubRepositoryClaims({
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading repositories...</p>
         ) : error ? (
-          <p className="text-sm text-destructive">
+          <ErrorText className="text-sm">
             {error instanceof Error ? error.message : "Failed to load GitHub repositories."}
-          </p>
+          </ErrorText>
         ) : repos.length === 0 ? (
           <p className="text-sm text-muted-foreground">No repositories are available to this GitHub App installation.</p>
         ) : (
@@ -353,16 +354,17 @@ function GitHubRepositoryClaims({
               })}
             </div>
             {claimMutation.isError && (
-              <div className="flex flex-col items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                <p className="text-sm text-destructive">
-                  {claimError instanceof Error ? claimError.message : "Failed to claim repository."}
-                </p>
-                {needsGitHubUserAuth && (
-                  <Button size="sm" variant="outline" onClick={() => api.githubStatus.connect()}>
-                    Connect GitHub account
-                  </Button>
-                )}
-              </div>
+              <ErrorNotice
+                title={claimError instanceof Error ? claimError.message : "Failed to claim repository."}
+                action={
+                  needsGitHubUserAuth
+                    ? {
+                        label: "Connect GitHub account",
+                        onClick: () => api.githubStatus.connect(),
+                      }
+                    : undefined
+                }
+              />
             )}
             {actionable.length === 0 && (
               <p className="text-xs text-muted-foreground">All available repositories are already accounted for.</p>
@@ -1075,7 +1077,7 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
             </Button>
           </div>
           {updateSettings.isError || upsertMapping.isError || deleteMapping.isError ? (
-            <p className="text-xs text-destructive">Failed to update Linear agent routing.</p>
+            <ErrorText>Failed to update Linear agent routing.</ErrorText>
           ) : null}
         </div>
       </div>

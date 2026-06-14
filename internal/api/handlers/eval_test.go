@@ -3061,3 +3061,14 @@ func TestEvalHandler_StreamBootstrapUpdates_DeliversPublishedEvent(t *testing.T)
 	require.Contains(t, rr.BodyString(), runID.String(), "SSE response should include the published bootstrap run ID")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestEvalRunAgentType(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, models.AgentTypeClaudeCode, evalRunAgentType("claude-opus-4-6"))
+	require.Equal(t, models.AgentTypeClaudeCode, evalRunAgentType("claude-sonnet-4-6"))
+	require.Equal(t, models.AgentTypeCodex, evalRunAgentType("codex"))
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelDeepSeekChat), "OpenCode models should dispatch to the OpenCode adapter")
+}

@@ -15,7 +15,6 @@ func TestPMModelConstants(t *testing.T) {
 	// matching the session picker (frontend availableAgentModelGroups).
 	var expected []string
 	expected = append(expected, AvailableClaudeCodeModels...)
-	expected = append(expected, AvailableGeminiCLIModels...)
 	expected = append(expected, AvailableCodexModels...)
 	expected = append(expected, AvailableAmpModes...)
 	expected = append(expected, AvailablePiModels...)
@@ -30,16 +29,6 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 		[]string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
-	)
-}
-
-func TestGeminiCLIModelConstants(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t,
-		[]string{GeminiCLIModelGemini31ProPreview, GeminiCLIModelGemini3FlashPreview, GeminiCLIModelGemini25Pro, GeminiCLIModelGemini25Flash},
-		AvailableGeminiCLIModels,
-		"AvailableGeminiCLIModels should include current Gemini 3 and 2.5 options",
 	)
 }
 
@@ -175,7 +164,6 @@ func TestValidateModelForAgentType(t *testing.T) {
 	}{
 		{name: "valid codex model", agentType: AgentTypeCodex, model: CodexModelGPT53Codex},
 		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet45},
-		{name: "valid gemini model", agentType: AgentTypeGeminiCLI, model: GeminiCLIModelGemini31ProPreview},
 		{name: "valid amp mode", agentType: AgentTypeAmp, model: AmpModeSmart},
 		{name: "valid pi model", agentType: AgentTypePi, model: PiModelClaudeSonnet46},
 		{name: "valid opencode curated model", agentType: AgentTypeOpenCode, model: OpenCodeModelGPT54Mini},
@@ -183,7 +171,6 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "pi accepts non-curated model", agentType: AgentTypePi, model: "xai/grok-code-fast"},
 		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
 		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},
-		{name: "invalid gemini model", agentType: AgentTypeGeminiCLI, model: "bad", wantErr: true},
 		{name: "invalid amp mode", agentType: AgentTypeAmp, model: "turbo", wantErr: true},
 		{name: "empty opencode model rejected", agentType: AgentTypeOpenCode, model: "", wantErr: true},
 		{name: "opencode model missing provider prefix rejected", agentType: AgentTypeOpenCode, model: "claude-sonnet-4-6", wantErr: true},
@@ -210,7 +197,6 @@ func TestModelEnvVarForAgentType(t *testing.T) {
 
 	require.Equal(t, "OPENAI_MODEL", ModelEnvVarForAgentType(AgentTypeCodex))
 	require.Equal(t, "ANTHROPIC_MODEL", ModelEnvVarForAgentType(AgentTypeClaudeCode))
-	require.Equal(t, "GEMINI_MODEL", ModelEnvVarForAgentType(AgentTypeGeminiCLI))
 	require.Equal(t, "AMP_MODE", ModelEnvVarForAgentType(AgentTypeAmp))
 	require.Equal(t, "PI_MODEL", ModelEnvVarForAgentType(AgentTypePi))
 	require.Equal(t, "OPENCODE_MODEL", ModelEnvVarForAgentType(AgentTypeOpenCode))
@@ -247,7 +233,6 @@ func TestAgentTypeForModel(t *testing.T) {
 		{"", ""},
 		{CodexModelGPT54, AgentTypeCodex},
 		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},
-		{GeminiCLIModelGemini25Pro, AgentTypeGeminiCLI},
 		{AmpModeSmart, AgentTypeAmp},
 		{OpenCodeModelGPT54Mini, AgentTypeOpenCode},
 		// OpenCode registers provider/model IDs explicitly, including some
@@ -297,7 +282,6 @@ func TestValidateSettingsModels(t *testing.T) {
 				AgentConfig: AgentEnvConfig{
 					"codex":       {"OPENAI_MODEL": CodexModelGPT53Codex},
 					"claude_code": {"ANTHROPIC_MODEL": ClaudeCodeModelSonnet45},
-					"gemini_cli":  {"GEMINI_MODEL": GeminiCLIModelGemini31ProPreview},
 				},
 			},
 		},
@@ -305,12 +289,6 @@ func TestValidateSettingsModels(t *testing.T) {
 			name: "accepts claude code model as pm model",
 			settings: OrgSettings{
 				PMModel: ClaudeCodeModelSonnet45,
-			},
-		},
-		{
-			name: "accepts gemini model as pm model",
-			settings: OrgSettings{
-				PMModel: GeminiCLIModelGemini31ProPreview,
 			},
 		},
 		{
@@ -431,15 +409,6 @@ func TestValidateSettingsModels(t *testing.T) {
 			settings: OrgSettings{
 				AgentConfig: AgentEnvConfig{
 					"claude_code": {"ANTHROPIC_MODEL": "invalid-model"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "rejects invalid gemini model",
-			settings: OrgSettings{
-				AgentConfig: AgentEnvConfig{
-					"gemini_cli": {"GEMINI_MODEL": "invalid-model"},
 				},
 			},
 			wantErr: true,

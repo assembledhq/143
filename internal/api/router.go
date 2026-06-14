@@ -55,6 +55,18 @@ const (
 	uploadMaxRequestBodyBytes = uploadMaxRequestBodyMiB << 20
 )
 
+func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
+	if shutdownCh == nil {
+		return context.Background()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-shutdownCh
+		cancel()
+	}()
+	return ctx
+}
+
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
@@ -755,6 +767,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}
 		}()
+		reachabilityMonitor := preview.NewReachabilityMonitor(preview.ReachabilityMonitorConfig{
+			Store:  previewStore,
+			Logger: logger,
+		})
+		go reachabilityMonitor.Start(contextFromShutdown(shutdownCh))
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)

@@ -373,8 +373,6 @@ func agentTypeForRuntimeProvider(provider models.ProviderName) models.AgentType 
 		return models.AgentTypeCodex
 	case models.ProviderAnthropic, models.ProviderAnthropicSubscription:
 		return models.AgentTypeClaudeCode
-	case models.ProviderGemini:
-		return models.AgentTypeGeminiCLI
 	case models.ProviderAmp:
 		return models.AgentTypeAmp
 	case models.ProviderPi:
@@ -661,18 +659,6 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 		// redundant and fails because gVisor doesn't support the
 		// unprivileged user namespaces that bwrap requires.
 		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
-	case models.AgentTypeGeminiCLI:
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
-		if gc, ok := cfg.(models.GeminiConfig); ok {
-			if gc.APIKey != "" {
-				merged["GEMINI_API_KEY"] = gc.APIKey
-			}
-			if gc.Model != "" {
-				merged["GEMINI_MODEL"] = gc.Model
-			}
-		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderGemini); ok {
-			setAuthBlockedEnv(merged, block)
-		}
 	case models.AgentTypeAmp:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
@@ -769,7 +755,7 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
 	// Scoped to Amp and Pi only — these are non-secret runtime defaults
 	// (AMP_MODE, PI_MODEL, PI_MODEL_CUSTOM), while auth itself comes from the
-	// credential stores. For claude_code/codex/gemini_cli we keep the legacy
+	// credential stores. For claude_code/codex we keep the legacy
 	// behavior: provider creds come exclusively from resolveProviderConfig,
 	// and agent_config is treated as model-default metadata (validated,
 	// stored, but not injected here) — changing that would silently flip

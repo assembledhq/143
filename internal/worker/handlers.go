@@ -5322,7 +5322,7 @@ func legacyEvalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model s
 	agentType := legacyEvalRunAgentType(model)
 	baseCommitSHA := task.BaseCommitSHA
 	var modelOverride *string
-	if model != "codex" && model != "gemini-cli" {
+	if model != "codex" {
 		modelOverride = &model
 	}
 	configLine := "Use the repository's default runtime configuration."
@@ -5394,10 +5394,10 @@ func legacyEvalBootstrapSession(orgID, repoID uuid.UUID, createdBy *uuid.UUID) *
 
 func legacyEvalRunAgentType(model string) models.AgentType {
 	switch model {
-	case "gemini-cli":
-		return models.AgentTypeGeminiCLI
 	case "claude-opus-4-6", "claude-sonnet-4-6":
 		return models.AgentTypeClaudeCode
+	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekChat:
+		return models.AgentTypeOpenCode
 	default:
 		return models.AgentTypeCodex
 	}

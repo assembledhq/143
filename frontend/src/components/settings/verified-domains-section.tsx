@@ -9,6 +9,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -180,9 +181,9 @@ export function VerifiedDomainsSection() {
       </div>
 
       {error && (
-        <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
           {error}
-        </div>
+        </ErrorText>
       )}
 
       <Card>

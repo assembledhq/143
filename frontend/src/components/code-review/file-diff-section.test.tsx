@@ -370,6 +370,79 @@ describe("FileDiffSection", () => {
     expect(screen.getByTestId("gap-visible-middle")).toHaveTextContent("3-7");
   });
 
+  it("keeps the bottom expander below newly revealed trailing context", async () => {
+    const user = userEvent.setup();
+    const file = makeDiffFile({
+      hunks: [
+        makeHunk(
+          [
+            makeLine("context", "line 10", 10, 10),
+            makeLine("add", "line 11", null, 11),
+            makeLine("context", "line 12", 12, 12),
+          ],
+          10,
+          10,
+        ),
+      ],
+    });
+
+    render(
+      <FileDiffSection
+        file={file}
+        viewMode="unified"
+        fileContextMeta={{ "src/app.ts": { totalLines: 20 } }}
+      />
+    );
+
+    await user.click(screen.getByTestId("expand-bottom-below"));
+
+    const changedLine = screen.getByText("line 12|old:12|new:12");
+    const revealedLine = screen.getByText("line 20|old:20|new:20");
+    const expander = screen.getByTestId("gap-bottom");
+    expect(changedLine.compareDocumentPosition(revealedLine) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(revealedLine.compareDocumentPosition(expander) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps middle context ordered around the remaining hidden boundary", async () => {
+    const user = userEvent.setup();
+    const file = makeDiffFile({
+      hunks: [
+        makeHunk(
+          [
+            makeLine("context", "line 1", 1, 1),
+            makeLine("context", "line 2", 2, 2),
+          ],
+          1,
+          1,
+        ),
+        makeHunk(
+          [
+            makeLine("context", "line 8", 8, 8),
+            makeLine("context", "line 9", 9, 9),
+          ],
+          8,
+          8,
+        ),
+      ],
+    });
+
+    render(<FileDiffSection file={file} viewMode="unified" />);
+
+    await user.click(screen.getByTestId("expand-middle-below"));
+    await user.click(screen.getByTestId("expand-middle-above"));
+
+    const firstHunkLine = screen.getByText("line 2|old:2|new:2");
+    const lowerContext = screen.getByText("line 3|old:3|new:3");
+    const expander = screen.getByTestId("gap-middle");
+    const upperContext = screen.getByText("line 7|old:7|new:7");
+    const secondHunkLine = screen.getByText("line 8|old:8|new:8");
+
+    expect(firstHunkLine.compareDocumentPosition(lowerContext) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(lowerContext.compareDocumentPosition(expander) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(expander.compareDocumentPosition(upperContext) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(upperContext.compareDocumentPosition(secondHunkLine) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("passes onAddComment to hunks", () => {
     const onAddComment = vi.fn();
     render(

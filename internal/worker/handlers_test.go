@@ -1080,7 +1080,7 @@ func workerSessionNeedsPolicyDefaults(values []any) bool {
 		return false
 	}
 	switch agentType {
-	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+	case "claude_code", "claude-code", "codex", "amp", "pi", "opencode", "pm_agent":
 		return true
 	default:
 		return false
@@ -7539,7 +7539,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 	continuationErr := errors.New("sandbox hydrate failed")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -7552,7 +7552,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 	mock.ExpectExec("UPDATE session_threads SET status = @status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -7561,7 +7561,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			require.NotNil(t, opts, "continue_session should pass thread execution options to the orchestrator")
-			require.Equal(t, models.AgentTypeGeminiCLI, opts.AgentType, "thread execution should use the thread agent type")
+			require.Equal(t, models.AgentTypeOpenCode, opts.AgentType, "thread execution should use the thread agent type")
 			require.NotNil(t, opts.ModelOverride, "thread execution should include the thread model override")
 			require.Equal(t, threadModel, *opts.ModelOverride, "thread execution should use the thread model")
 			return continuationErr
@@ -7643,7 +7643,7 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 	continuationErr := errors.New("worker drain cancelled mid-turn")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -7656,7 +7656,7 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 	// The CRITICAL expectation: the UPDATE must still fire even though the
 	// handler's outer ctx is cancelled by the time the orchestrator returns.
@@ -7695,7 +7695,7 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 	cancelErr := fmt.Errorf("%w: %w", agent.ErrSessionCancelled, context.Canceled)
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -7708,7 +7708,7 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 
 	orch := &orchestratorServiceStub{
@@ -7740,7 +7740,7 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 
 	const sessionTurnBefore = 5
 	const expectedThreadTurnAfter = 2 // workerSessionThreadRow seeds current_turn=1, so +1=2.
@@ -7755,7 +7755,7 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 	// CompleteTurn query: arg order follows the @placeholders in the SQL
 	// (current_turn, id, org_id). Pinning the literal value here is what
@@ -8225,4 +8225,15 @@ func TestFinalizeSessionBackedEvalBootstrapLoadsPrimaryThread(t *testing.T) {
 	})
 
 	require.NoError(t, mock.ExpectationsWereMet(), "bootstrap finalizer should resolve the primary thread and update the bootstrap run")
+}
+
+func TestLegacyEvalRunAgentType(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, models.AgentTypeClaudeCode, legacyEvalRunAgentType("claude-opus-4-6"))
+	require.Equal(t, models.AgentTypeClaudeCode, legacyEvalRunAgentType("claude-sonnet-4-6"))
+	require.Equal(t, models.AgentTypeCodex, legacyEvalRunAgentType("codex"))
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelDeepSeekChat), "OpenCode models should dispatch to the OpenCode adapter")
 }

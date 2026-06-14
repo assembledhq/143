@@ -14,6 +14,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -617,9 +618,9 @@ export function VisualEditingPanel({
       {hasValidationErrors && (
         <div className="px-2 py-1.5 text-xs text-destructive space-y-0.5">
           {validationErrors.map((err) => (
-            <div key={err} className="flex items-center gap-1">
+            <div key={err} className="flex min-w-0 items-start gap-1">
               <AlertTriangle className="size-3 shrink-0" />
-              {err}
+              <ErrorText className="text-xs">{err}</ErrorText>
             </div>
           ))}
         </div>
@@ -627,16 +628,17 @@ export function VisualEditingPanel({
 
       {/* Apply error */}
       {applyError && (
-        <div className="mx-2 mb-1 flex items-center gap-1.5 rounded border border-destructive/20 bg-destructive/5 p-1.5 text-xs text-destructive">
-          <AlertTriangle className="size-3 shrink-0" />
-          <span className="flex-1">{applyError}</span>
+        <div className="mx-2 mb-1 flex min-w-0 items-start gap-1.5 rounded border border-destructive/20 bg-destructive/5 p-1.5 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+          <ErrorText className="flex-1 text-xs">{applyError}</ErrorText>
           <Button
             variant="ghost"
             size="icon-xs"
+            aria-label="Dismiss error"
             onClick={() => setApplyError(null)}
             className="rounded p-0.5 hover:bg-destructive/10"
           >
-            <X className="size-3" />
+            <X className="size-3" aria-hidden="true" />
           </Button>
         </div>
       )}

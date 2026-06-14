@@ -20,6 +20,13 @@ vi.mock("@/hooks/use-analyze", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { id: "user-1", role: "admin" },
+    isLoading: false,
+  }),
+}));
+
 const queueRow: AutopilotQueueRow = {
   id: "issue-1",
   rank: 1,
@@ -134,28 +141,66 @@ describe("AutopilotPageContent", () => {
     expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
   });
 
-  it("does not offer to start a run for a blocked issue that has an explicit disabled reason", async () => {
+  it("lets admins start a blocked queue issue and attach session notes", async () => {
     queueRows = [
       {
         ...queueRow,
         available_action: "blocked",
-        action_disabled_reason: "No repository selected",
+        action_disabled_reason: "Autopilot skipped this issue.",
         latest_session: undefined,
       },
     ];
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Blocked" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
+
+    const notes = screen.getByLabelText("Session notes");
+    await userEvent.type(notes, "Focus on the mobile checkout regression.");
+    expect(notes).toHaveValue("Focus on the mobile checkout regression.");
+    expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
   });
 
-  it("does not offer to start a run for a blocked issue that already has a linked session", async () => {
+  it("lets admins start a blocked issue that already has a linked session", async () => {
     queueRows = [
       {
         ...queueRow,
         available_action: "blocked",
-        action_disabled_reason: null,
+        action_disabled_reason: "Autopilot skipped this issue.",
+        latest_session: { id: "sess-1", title: "Existing session", updated_at: "2024-01-01T00:00:00Z" },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
+  });
+
+  it("lets admins start a failed (retry) issue with a linked session instead of showing Retry", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "retry",
+        latest_session: { id: "sess-1", title: "Failed session", updated_at: "2024-01-01T00:00:00Z" },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Start run" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer to start a run for a blocked issue without a repository", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: "No repository selected",
+        repo: undefined,
         latest_session: { id: "sess-1", title: "Existing session", updated_at: "2024-01-01T00:00:00Z" },
       },
     ];

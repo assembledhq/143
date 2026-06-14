@@ -1625,15 +1625,34 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
     });
 
-    // Click the dismiss button (X icon)
-    const dismissBtn = screen.getByText("Failed to start preview: connection refused")
-      .closest("div")!
-      .querySelector("button")!;
-    await user.click(dismissBtn);
+    await user.click(screen.getByRole("button", { name: "Dismiss error" }));
 
     await waitFor(() => {
       expect(screen.queryByText("Failed to start preview: connection refused")).not.toBeInTheDocument();
     });
+  });
+
+  it("wraps long mutation error messages inside the alert card", async () => {
+    const user = userEvent.setup();
+    const longPath =
+      "/home/sandbox/assembled/gocode/msgconsumer/msgconsumer/internal/super/long/generated/path/with/no/spaces/github.com/assembledhq/assembled/gocode/msgconsumer";
+    const backendMessage = `preview service did not pass its readiness probe. Details: provider start preview: ${longPath}`;
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const err = new Error(backendMessage);
+    (err as Error & { code?: string }).code =
+      PREVIEW_ERROR_CODES.SERVICE_NOT_READY;
+    mockEnsure.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    const message = await screen.findByText(backendMessage);
+    expect(message).toHaveClass("min-w-0", "break-words", "[overflow-wrap:anywhere]");
   });
 
   it("shows mutation error banner when stop fails", async () => {

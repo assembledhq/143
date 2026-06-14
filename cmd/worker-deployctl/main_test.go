@@ -16,10 +16,11 @@ import (
 )
 
 type previewAuthCheckRoundTripper struct {
-	delay       time.Duration
-	keyring     auth.PreviewTokenKeyring
-	inFlight    int32
-	maxInFlight int32
+	delay        time.Duration
+	keyring      auth.PreviewTokenKeyring
+	inFlight     int32
+	maxInFlight  int32
+	statusByHost map[string]int
 }
 
 func (rt *previewAuthCheckRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -49,6 +50,15 @@ func (rt *previewAuthCheckRoundTripper) RoundTrip(req *http.Request) (*http.Resp
 		return nil, fmt.Errorf("unexpected target %q for host %q", claims.TargetNodeID, req.URL.Host)
 	}
 
+	if status, ok := rt.statusByHost[req.URL.Host]; ok {
+		return &http.Response{
+			StatusCode: status,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("rejected")),
+			Request:    req,
+		}, nil
+	}
+
 	timer := time.NewTimer(rt.delay)
 	defer timer.Stop()
 	select {
@@ -73,11 +83,14 @@ func TestProbePreviewRPCAuthNodes_UsesBoundedConcurrency(t *testing.T) {
 
 	nodes := make([]previewAuthProbeNode, 0, 6)
 	expected := make([]string, 0, 6)
+	now := time.Now().UTC()
 	for i := 0; i < 6; i++ {
 		nodeID := fmt.Sprintf("worker-%d", i)
 		nodes = append(nodes, previewAuthProbeNode{
-			ID:      nodeID,
-			BaseURL: "http://" + nodeID + ".internal",
+			ID:              nodeID,
+			BaseURL:         "http://" + nodeID + ".internal",
+			Status:          models.NodeStatusActive,
+			LastHeartbeatAt: now,
 		})
 		expected = append(expected, nodeID)
 	}
@@ -96,6 +109,84 @@ func TestProbePreviewRPCAuthNodes_UsesBoundedConcurrency(t *testing.T) {
 	require.Equal(t, expected, checked, "probePreviewRPCAuthNodes should report checked nodes in input order")
 	require.GreaterOrEqual(t, atomic.LoadInt32(&roundTripper.maxInFlight), int32(2), "probePreviewRPCAuthNodes should send more than one probe at a time")
 	require.Less(t, elapsed, 500*time.Millisecond, "probePreviewRPCAuthNodes should not serialize per-node latency")
+}
+
+func TestProbePreviewRPCAuthNodes_SkipsUnreachableNodes(t *testing.T) {
+	t.Parallel()
+
+	keyring, err := auth.NewPreviewTokenKeyring([]string{"preview-secret"})
+	require.NoError(t, err, "NewPreviewTokenKeyring should accept the test secret")
+
+	staleHeartbeat := time.Now().UTC().Add(-previewAuthFreshHeartbeatWindow - time.Minute)
+	nodes := []previewAuthProbeNode{
+		{
+			ID:              "worker-slow",
+			BaseURL:         "http://worker-slow.internal",
+			Status:          models.NodeStatusDraining,
+			LastHeartbeatAt: time.Now().UTC(),
+		},
+		{
+			ID:              "worker-fast",
+			BaseURL:         "http://worker-fast.internal",
+			Status:          models.NodeStatusActive,
+			LastHeartbeatAt: staleHeartbeat,
+		},
+	}
+	client := &http.Client{Transport: &previewAuthCheckRoundTripper{
+		delay:   100 * time.Millisecond,
+		keyring: keyring,
+	}}
+
+	checked, err := probePreviewRPCAuthNodes(nodes, keyring, 20*time.Millisecond, 2, client)
+
+	require.NoError(t, err, "probePreviewRPCAuthNodes should not fail deploy compatibility on unreachable workers")
+	require.Empty(t, checked, "probePreviewRPCAuthNodes should not mark timed-out nodes as checked")
+}
+
+func TestProbePreviewRPCAuthNodes_FailsOnFreshActiveUnreachableNode(t *testing.T) {
+	t.Parallel()
+
+	keyring, err := auth.NewPreviewTokenKeyring([]string{"preview-secret"})
+	require.NoError(t, err, "NewPreviewTokenKeyring should accept the test secret")
+
+	nodes := []previewAuthProbeNode{{
+		ID:              "worker-active",
+		BaseURL:         "http://worker-active.internal",
+		Status:          models.NodeStatusActive,
+		LastHeartbeatAt: time.Now().UTC(),
+	}}
+	client := &http.Client{Transport: &previewAuthCheckRoundTripper{
+		delay:   100 * time.Millisecond,
+		keyring: keyring,
+	}}
+
+	_, err = probePreviewRPCAuthNodes(nodes, keyring, 20*time.Millisecond, 1, client)
+
+	require.Error(t, err, "probePreviewRPCAuthNodes should fail when a fresh active worker cannot answer")
+	require.Contains(t, err.Error(), "preview RPC auth-check unreachable", "probePreviewRPCAuthNodes should identify the unreachable worker")
+}
+
+func TestProbePreviewRPCAuthNodes_FailsOnAuthRejection(t *testing.T) {
+	t.Parallel()
+
+	keyring, err := auth.NewPreviewTokenKeyring([]string{"preview-secret"})
+	require.NoError(t, err, "NewPreviewTokenKeyring should accept the test secret")
+
+	nodes := []previewAuthProbeNode{{
+		ID:              "worker-rejects",
+		BaseURL:         "http://worker-rejects.internal",
+		Status:          models.NodeStatusActive,
+		LastHeartbeatAt: time.Now().UTC(),
+	}}
+	client := &http.Client{Transport: &previewAuthCheckRoundTripper{
+		keyring:      keyring,
+		statusByHost: map[string]int{"worker-rejects.internal": http.StatusUnauthorized},
+	}}
+
+	_, err = probePreviewRPCAuthNodes(nodes, keyring, time.Second, 1, client)
+
+	require.Error(t, err, "probePreviewRPCAuthNodes should fail when a worker rejects the signed token")
+	require.Contains(t, err.Error(), "status=401", "probePreviewRPCAuthNodes should include the rejection status")
 }
 
 func TestSelectPreviewAuthProbeNodesFiltersByNodeID(t *testing.T) {
@@ -118,8 +209,10 @@ func TestSelectPreviewAuthProbeNodesFiltersByNodeID(t *testing.T) {
 	selected, err := selectPreviewAuthProbeNodes(nodes, "worker-2")
 	require.NoError(t, err, "selectPreviewAuthProbeNodes should accept an existing node id")
 	require.Equal(t, []previewAuthProbeNode{{
-		ID:      "worker-2",
-		BaseURL: "http://worker-2:8080",
+		ID:              "worker-2",
+		BaseURL:         "http://worker-2:8080",
+		Status:          "",
+		LastHeartbeatAt: time.Time{},
 	}}, selected, "selectPreviewAuthProbeNodes should return only the requested node with a normalized base URL")
 
 	_, err = selectPreviewAuthProbeNodes(nodes, "missing-worker")

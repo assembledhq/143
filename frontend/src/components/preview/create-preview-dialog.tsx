@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ErrorText } from "@/components/ui/error-notice";
 import {
   Select,
   SelectContent,
@@ -257,13 +258,13 @@ function CreatePreviewForm({
       ) : null}
 
       {configOptions?.validation_errors?.length ? (
-        <p className="text-sm text-destructive">{configOptions.validation_errors[0]}</p>
+        <ErrorText className="text-sm">{configOptions.validation_errors[0]}</ErrorText>
       ) : null}
 
       {createPreview.isError ? (
-        <p className="text-sm text-destructive">
+        <ErrorText className="text-sm">
           {createPreview.error instanceof Error ? createPreview.error.message : "Preview could not be created."}
-        </p>
+        </ErrorText>
       ) : null}
 
       <DialogFooter>
