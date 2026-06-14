@@ -19,10 +19,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import type { AutopilotQueueRow, AutopilotRunState } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
@@ -68,9 +71,11 @@ const SORT_OPTIONS = [
 export function AutopilotPageContent() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [showDirectionEditor, setShowDirectionEditor] = useState(false);
   const [showDocumentsEditor, setShowDocumentsEditor] = useState(false);
   const [selectedIssue, setSelectedIssue] = useState<AutopilotQueueRow | null>(null);
+  const [sessionNotes, setSessionNotes] = useState("");
   const [source, setSource] = useQueryState("source", parseAsString.withDefault(ALL_VALUE));
   const [runState, setRunState] = useQueryState("run_state", parseAsString.withDefault(ALL_VALUE));
   const [automation, setAutomation] = useQueryState("automation", parseAsString.withDefault(ALL_VALUE));
@@ -95,6 +100,7 @@ export function AutopilotPageContent() {
     q: search || null,
   });
   const { handleAnalyze, isAnalyzing, isPending } = useAnalyze(pmStatus.is_running);
+  const isAdmin = user?.role === "admin";
 
   useEffect(() => {
     if (!isLoading && !isSetupComplete) {
@@ -103,9 +109,16 @@ export function AutopilotPageContent() {
   }, [isLoading, isSetupComplete, router]);
 
   const startRunMutation = useMutation({
-    mutationFn: (issueId: string) => api.issues.triggerFix(issueId, { autonomy_level: "semi", token_mode: "low" }),
+    mutationFn: ({ issueId, message, force }: { issueId: string; message: string; force?: boolean }) =>
+      api.issues.triggerFix(issueId, {
+        autonomy_level: "semi",
+        token_mode: "low",
+        message: message.trim() || undefined,
+        force: force || undefined,
+      }),
     onSuccess: () => {
       setSelectedIssue(null);
+      setSessionNotes("");
       void queryClient.invalidateQueries({ queryKey: ["autopilot", "queue"] });
     },
   });
@@ -158,6 +171,7 @@ export function AutopilotPageContent() {
           loadingNextPage={isFetchingNextQueuePage}
           onLoadMore={() => void fetchNextQueuePage()}
           onStartRun={setSelectedIssue}
+          canOverrideBlocked={isAdmin}
         />
 
         <AutopilotProposalCard />
@@ -185,11 +199,19 @@ export function AutopilotPageContent() {
           row={selectedIssue}
           pending={startRunMutation.isPending}
           error={startRunMutation.error instanceof Error ? startRunMutation.error.message : null}
+          notes={sessionNotes}
+          onNotesChange={setSessionNotes}
           onOpenChange={(open) => {
-            if (!open) setSelectedIssue(null);
+            if (!open) {
+              setSelectedIssue(null);
+              setSessionNotes("");
+            }
           }}
           onConfirm={() => {
-            if (selectedIssue) startRunMutation.mutate(selectedIssue.id);
+            if (selectedIssue) {
+              const isOverride = selectedIssue.available_action === "blocked" || selectedIssue.available_action === "retry";
+              startRunMutation.mutate({ issueId: selectedIssue.id, message: sessionNotes, force: isOverride || undefined });
+            }
           }}
         />
       </div>
@@ -308,6 +330,7 @@ function QueueTable({
   loadingNextPage,
   onLoadMore,
   onStartRun,
+  canOverrideBlocked,
 }: {
   rows: AutopilotQueueRow[];
   loading: boolean;
@@ -315,6 +338,7 @@ function QueueTable({
   loadingNextPage: boolean;
   onLoadMore: () => void;
   onStartRun: (row: AutopilotQueueRow) => void;
+  canOverrideBlocked: boolean;
 }) {
   if (loading) {
     return <Card><CardContent className="py-8 text-sm text-muted-foreground">Loading ranked issues...</CardContent></Card>;
@@ -376,7 +400,7 @@ function QueueTable({
                   </Tooltip>
                 </TableCell>
                 <TableCell><RunState row={row} /></TableCell>
-                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} /></TableCell>
+                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} canOverrideBlocked={canOverrideBlocked} /></TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -446,8 +470,8 @@ function RunState({ row }: { row: AutopilotQueueRow }) {
   );
 }
 
-function RowAction({ row, onStartRun }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void }) {
-  if (canStartSession(row)) {
+function RowAction({ row, onStartRun, canOverrideBlocked }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void; canOverrideBlocked: boolean }) {
+  if (canStartSession(row, canOverrideBlocked)) {
     return <Button size="sm" onClick={() => onStartRun(row)}><Play className="h-3.5 w-3.5" />Start run</Button>;
   }
   if ((row.available_action === "view_run" || row.available_action === "review") && row.latest_session) {
@@ -469,11 +493,29 @@ function RowAction({ row, onStartRun }: { row: AutopilotQueueRow; onStartRun: (r
   );
 }
 
-function canStartSession(row: AutopilotQueueRow) {
-  return row.available_action === "start_run" || (row.available_action === "blocked" && !row.latest_session && !row.action_disabled_reason);
+function canStartSession(row: AutopilotQueueRow, canOverrideBlocked: boolean) {
+  if (row.available_action === "start_run") return true;
+  if (!canOverrideBlocked || !row.repo) return false;
+  return row.available_action === "blocked" || row.available_action === "retry";
 }
 
-function StartRunSheet({ row, pending, error, onOpenChange, onConfirm }: { row: AutopilotQueueRow | null; pending: boolean; error: string | null; onOpenChange: (open: boolean) => void; onConfirm: () => void }) {
+function StartRunSheet({
+  row,
+  pending,
+  error,
+  notes,
+  onNotesChange,
+  onOpenChange,
+  onConfirm,
+}: {
+  row: AutopilotQueueRow | null;
+  pending: boolean;
+  error: string | null;
+  notes: string;
+  onNotesChange: (value: string) => void;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
   return (
     <Sheet open={Boolean(row)} onOpenChange={onOpenChange}>
       <SheetContent>
@@ -493,9 +535,23 @@ function StartRunSheet({ row, pending, error, onOpenChange, onConfirm }: { row: 
               <InfoRow label="Token mode" value="Low" />
               <InfoRow label="Ranking" value={`${row.low_hanging_fruit.label}: ${row.low_hanging_fruit.reasons.join(", ") || "no details"}`} />
             </div>
-            {row.action_disabled_reason && <p className="text-sm text-destructive">{row.action_disabled_reason}</p>}
+            <div className="space-y-2">
+              <Label htmlFor="autopilot-session-notes">Session notes</Label>
+              <Textarea
+                id="autopilot-session-notes"
+                value={notes}
+                onChange={(event) => onNotesChange(event.target.value)}
+                placeholder="Add extra instructions for this run"
+                className="min-h-28 text-sm"
+              />
+            </div>
+            {row.action_disabled_reason && (
+              <p className={`text-sm ${row.repo ? "text-muted-foreground" : "text-destructive"}`}>
+                {row.action_disabled_reason}
+              </p>
+            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button className="w-full" onClick={onConfirm} disabled={pending || Boolean(row.action_disabled_reason)}>
+            <Button className="w-full" onClick={onConfirm} disabled={pending || !row.repo}>
               {pending ? "Starting..." : "Create session"}
             </Button>
           </div>

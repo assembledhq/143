@@ -1957,6 +1957,66 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "INVALID_ID",
 		},
+		{
+			name:         "skips message insert for whitespace-only message",
+			idParam:      "",
+			body:         `{"agent_type":"codex","message":"   "}`,
+			setupMock:    triggerFixIssueMock,
+			expectedCode: http.StatusCreated,
+			expectedBody: "codex",
+		},
+		{
+			name:    "rejects message exceeding 10000 characters",
+			idParam: "",
+			body:    `{"agent_type":"codex","message":"` + strings.Repeat("x", 10001) + `"}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				issueID := uuid.New()
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{
+							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+							"created_at", "updated_at", "deleted_at",
+						}).AddRow(
+							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
+							"Test issue", nil, nil, "open", now, now,
+							1, 0, "medium", nil, "fp-1",
+							now, now, nil,
+						),
+				)
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "MESSAGE_TOO_LONG",
+		},
+		{
+			name:    "rejects force-start from non-admin",
+			idParam: "",
+			body:    `{"force":true}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				issueID := uuid.New()
+				mock.ExpectQuery("SELECT").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{
+							"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+							"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+							"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+							"created_at", "updated_at", "deleted_at",
+						}).AddRow(
+							issueID, orgID, "ISSUE-1", "sentry", nil, nil,
+							"Test issue", nil, nil, "open", now, now,
+							1, 0, "medium", nil, "fp-1",
+							now, now, nil,
+						),
+				)
+			},
+			expectedCode: http.StatusForbidden,
+			expectedBody: "FORBIDDEN",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1998,6 +2058,108 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionHandler_TriggerFix_AdminForceStart(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+	runID := uuid.New()
+	now := time.Now().UTC()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at", "deleted_at",
+			}).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, []byte(repoID.String()),
+				"Test issue", nil, nil, "open", now, now,
+				1, 0, "medium", nil, "fp-1",
+				now, now, nil,
+			),
+		)
+	expectIssueSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueID.String()+"/fix", strings.NewReader(`{"agent_type":"codex","force":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", issueID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithActiveRole(ctx, string(models.RoleAdmin))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.TriggerFix(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "admin should be able to force-start a session")
+	require.Contains(t, w.Body.String(), runID.String(), "response should include the created session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_TriggerFix_PersistsUserMessage(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	issueID := uuid.New()
+	repoID := uuid.New()
+	runID := uuid.New()
+	now := time.Now().UTC()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{
+				"id", "org_id", "external_id", "source", "source_integration_id", "repository_id",
+				"title", "description", "raw_data", "status", "first_seen_at", "last_seen_at",
+				"occurrence_count", "affected_customer_count", "severity", "tags", "fingerprint",
+				"created_at", "updated_at", "deleted_at",
+			}).AddRow(
+				issueID, orgID, "ISSUE-1", "sentry", nil, []byte(repoID.String()),
+				"Test issue", nil, nil, "open", now, now,
+				1, 0, "medium", nil, "fp-1",
+				now, now, nil,
+			),
+		)
+	expectIssueSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(sessionAnyArgs(11)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(42), now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueID.String()+"/fix", strings.NewReader(`{"agent_type":"codex","message":"Focus on the mobile checkout regression."}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", issueID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.TriggerFix(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "TriggerFix should create a session when optional notes are supplied")
+	require.Contains(t, w.Body.String(), runID.String(), "response should include the created session")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionHandler_ListQuestions_Success(t *testing.T) {

@@ -1006,9 +1006,24 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		AgentType     string `json:"agent_type"`
 		AutonomyLevel string `json:"autonomy_level"`
 		TokenMode     string `json:"token_mode"`
+		Message       string `json:"message"`
+		// Force allows an admin to kick off a session even when the autopilot
+		// state is blocked, failed, or skipped. Rejected for non-admins.
+		Force bool `json:"force"`
 	}
-	// Ignore decode errors — body is optional, fields default below.
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body", err)
+		return
+	}
+	if body.Force && middleware.ActiveRoleFromContext(r.Context()) != string(models.RoleAdmin) {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "admin role required to force-start a session")
+		return
+	}
+	const maxMessageLength = 10000
+	if utf8.RuneCountInString(body.Message) > maxMessageLength {
+		writeError(w, r, http.StatusBadRequest, "MESSAGE_TOO_LONG", fmt.Sprintf("message must not exceed %d characters", maxMessageLength))
+		return
+	}
 
 	agentType := models.AgentType(body.AgentType)
 	if agentType == "" {
@@ -1075,6 +1090,23 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run", err)
 		return
+	}
+
+	if initialMessage := strings.TrimSpace(body.Message); h.messageStore != nil && initialMessage != "" {
+		msg := &models.SessionMessage{
+			SessionID:  run.ID,
+			OrgID:      orgID,
+			ThreadID:   run.PrimaryThreadID,
+			TurnNumber: 0,
+			Role:       models.MessageRoleUser,
+			Content:    initialMessage,
+		}
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			msg.UserID = &user.ID
+		}
+		if err := h.messageStore.Create(r.Context(), msg); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to persist initial session message; session will proceed without it")
+		}
 	}
 
 	// Generate a title from the issue for non-manual sessions.
