@@ -55,6 +55,18 @@ const (
 	uploadMaxRequestBodyBytes = uploadMaxRequestBodyMiB << 20
 )
 
+func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
+	if shutdownCh == nil {
+		return context.Background()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-shutdownCh
+		cancel()
+	}()
+	return ctx
+}
+
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
@@ -504,6 +516,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// degrades to logged links rather than disabling itself.
 	authHandler.SetEmailVerificationDeps(db.NewEmailVerificationStore(pool), emailSender)
 	apiClientHandler := handlers.NewAPIClientHandler(apiClientStore, apiTokenStore)
+	apiClientHandler.SetTxStarter(pool)
 	apiClientHandler.SetLogger(logger)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -752,6 +765,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}
 		}()
+		reachabilityMonitor := preview.NewReachabilityMonitor(preview.ReachabilityMonitorConfig{
+			Store:  previewStore,
+			Logger: logger,
+		})
+		go reachabilityMonitor.Start(contextFromShutdown(shutdownCh))
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
@@ -1379,14 +1397,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Audit logs
 				r.Get("/api/v1/audit-logs", auditLogHandler.List)
 				r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
-				r.Get("/api/v1/api-clients", apiClientHandler.List)
-				r.Post("/api/v1/api-clients", apiClientHandler.Create)
-				r.Get("/api/v1/api-clients/{id}", apiClientHandler.Get)
-				r.Patch("/api/v1/api-clients/{id}", apiClientHandler.Update)
-				r.Delete("/api/v1/api-clients/{id}", apiClientHandler.Delete)
-				r.Get("/api/v1/api-clients/{id}/tokens", apiClientHandler.ListTokens)
-				r.Post("/api/v1/api-clients/{id}/tokens", apiClientHandler.CreateToken)
-				r.Delete("/api/v1/api-clients/{id}/tokens/{token_id}", apiClientHandler.RevokeToken)
+				r.Post("/api/v1/api-keys", apiClientHandler.CreateAPIKey)
+				r.Get("/api/v1/api-keys", apiClientHandler.List)
+				r.Get("/api/v1/api-keys/{id}", apiClientHandler.Get)
+				r.Patch("/api/v1/api-keys/{id}", apiClientHandler.Update)
+				r.Delete("/api/v1/api-keys/{id}", apiClientHandler.Delete)
+				r.Get("/api/v1/api-keys/{id}/tokens", apiClientHandler.ListTokens)
+				r.Post("/api/v1/api-keys/{id}/tokens", apiClientHandler.CreateToken)
+				r.Delete("/api/v1/api-keys/{id}/tokens/{token_id}", apiClientHandler.RevokeToken)
 
 				// Team management. The roster read (GET /team/members) is registered
 				// in the admin+member group above; mutations and invite flows stay

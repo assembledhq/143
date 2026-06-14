@@ -472,21 +472,21 @@ describe('SessionDetailPage composer and session metadata', () => {
     expect(chips.querySelector('svg.lucide-slash')).toBeNull();
   });
 
-  it('shows Gemini CLI agent type label', async () => {
-    const geminiSession: Session = {
+  it('shows OpenCode agent type label', async () => {
+    const openCodeSession: Session = {
       ...mockSessions[0],
-      agent_type: 'gemini_cli',
+      agent_type: 'opencode',
     };
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
-        return HttpResponse.json({ data: geminiSession } satisfies SingleResponse<Session>);
+        return HttpResponse.json({ data: openCodeSession } satisfies SingleResponse<Session>);
       }),
     );
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(screen.getByText('Gemini CLI')).toBeInTheDocument();
+    expect(screen.getByText('OpenCode')).toBeInTheDocument();
   });
 
   it('renders Unknown user when triggered_by_user_id does not match any member', async () => {

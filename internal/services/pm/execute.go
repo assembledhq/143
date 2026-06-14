@@ -2,6 +2,8 @@ package pm
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -80,6 +82,9 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 			task.Status = models.PMTaskStatusSkippedCapacity
 			continue
 		}
+		if err := s.createInitialDelegatedSessionMessage(ctx, orgID, run); err != nil {
+			s.logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to create initial PM-delegated session message")
+		}
 
 		for _, issueID := range task.IssueIDs {
 			if err := s.issues.UpdateStatus(ctx, orgID, issueID, models.IssueStatusTriaged); err != nil {
@@ -105,4 +110,26 @@ func (s *Service) executePlan(ctx context.Context, orgID uuid.UUID, plan *Plan, 
 		return err
 	}
 	return s.plans.Update(ctx, model)
+}
+
+func (s *Service) createInitialDelegatedSessionMessage(ctx context.Context, orgID uuid.UUID, run *models.Session) error {
+	if s.sessionMessages == nil || run == nil || run.PMApproach == nil {
+		return nil
+	}
+	content := strings.TrimSpace(*run.PMApproach)
+	if content == "" {
+		return nil
+	}
+	msg := &models.SessionMessage{
+		SessionID:  run.ID,
+		OrgID:      orgID,
+		ThreadID:   run.PrimaryThreadID,
+		TurnNumber: 0,
+		Role:       models.MessageRoleUser,
+		Content:    content,
+	}
+	if err := s.sessionMessages.Create(ctx, msg); err != nil {
+		return fmt.Errorf("create initial PM-delegated session message: %w", err)
+	}
+	return nil
 }

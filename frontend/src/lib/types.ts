@@ -525,6 +525,7 @@ export interface Session {
   target_branch?: string;
   working_branch?: string;
   repository_id?: string;
+  repository_full_name?: string;
   linked_issues?: Array<{
     id: string;
     session_id: string;
@@ -845,7 +846,7 @@ export interface SessionInputReference {
   display: string;
 }
 
-export type SessionComposerAgentType = "claude_code" | "codex" | "gemini_cli" | "amp" | "pi";
+export type SessionComposerAgentType = "claude_code" | "codex" | "amp" | "pi" | "opencode";
 
 export type SessionInputCommandSource = "builtin" | "project";
 
@@ -1122,7 +1123,7 @@ export interface OrgSettings {
   llm_model?: string;
   llm_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '';
   agent_config?: Record<string, Record<string, string>>;
-  default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli' | 'amp' | 'pi';
+  default_agent_type?: 'codex' | 'claude_code' | 'amp' | 'pi' | 'opencode';
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
@@ -1537,7 +1538,7 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
-export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+export type CodingAuthAgent = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
 
@@ -1792,9 +1793,66 @@ export interface AIImprovementResponse {
   summary: string;
 }
 
+export type APIClientStatus = 'enabled' | 'disabled';
+
+export interface APIClient {
+  id: string;
+  org_id: string;
+  name: string;
+  description?: string;
+  status: APIClientStatus;
+  created_by_user_id?: string;
+  disabled_by_user_id?: string;
+  disabled_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface APIToken {
+  id: string;
+  org_id: string;
+  api_client_id: string;
+  name: string;
+  token_prefix: string;
+  scopes: string[];
+  repository_ids: string[];
+  allowed_ip_cidrs: string[];
+  expires_at?: string;
+  last_used_at?: string;
+  last_used_ip?: string;
+  last_used_user_agent?: string;
+  revoked_by_user_id?: string;
+  revoked_at?: string;
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CreateAPIKeyRequest {
+  integration_name: string;
+  description?: string;
+  token_name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPITokenRequest {
+  name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPIKeyResponse {
+  client: APIClient;
+  token: APIToken & { token: string };
+}
+
 // Audit log types
 export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user' | 'api_client' | 'api_token';
 
 export interface AuditLog {
   id: number;

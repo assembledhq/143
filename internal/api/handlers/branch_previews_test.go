@@ -1810,7 +1810,7 @@ func TestBranchPreviewHandler_SelectWorkerForRestart_DegradesWhenSnapshotWorkerA
 	warmWorker := "worker-a-warm"
 	fallbackWorker := "worker-z-fallback"
 	workerMetadata := func(baseURL string) []byte {
-		return []byte(fmt.Sprintf(`{"preview_capable":true,"preview_internal_base_url":%q}`, baseURL))
+		return []byte(fmt.Sprintf(`{"preview_capable":true,"preview_rpc_auth_check":true,"preview_internal_base_url":%q}`, baseURL))
 	}
 
 	store := db.NewPreviewStore(mock)

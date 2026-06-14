@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { agentDisplayLabel, availableAgentModelGroups, pmUsableResolvedCredentials } from "./agents";
+import {
+  AGENTS_BY_KEY,
+  agentDisplayLabel,
+  agentTypeForModel,
+  availableAgentModelGroups,
+  pmUsableResolvedCredentials,
+} from "./agents";
 import type { CodingCredentialSummary, ResolvedCredential } from "./types";
 
 const codexCred: ResolvedCredential = {
@@ -32,7 +38,9 @@ const ampCodingAuth: CodingCredentialSummary = {
 
 // makeCredential builds a unified coding-credential row with sensible
 // defaults; tests override only the dimensions they exercise.
-function makeCredential(overrides: Partial<CodingCredentialSummary>): CodingCredentialSummary {
+function makeCredential(
+  overrides: Partial<CodingCredentialSummary>,
+): CodingCredentialSummary {
   return {
     id: "cc-1",
     org_id: "org-1",
@@ -73,33 +81,59 @@ describe("availableAgentModelGroups", () => {
   });
 
   it("returns user-available agents and keeps the default first", () => {
-    const groups = availableAgentModelGroups([codexCred, claudeCred], null, [], "claude_code");
+    const groups = availableAgentModelGroups(
+      [codexCred, claudeCred],
+      null,
+      [],
+      "claude_code",
+    );
     expect(groups.map((g) => g.key)).toEqual(["claude_code", "codex"]);
   });
 
   it("relabels the Amp group as 'Amp modes' so mode rows aren't mistaken for model IDs", () => {
-    const groups = availableAgentModelGroups([], null, [ampCodingAuth], "codex");
+    const groups = availableAgentModelGroups(
+      [],
+      null,
+      [ampCodingAuth],
+      "codex",
+    );
     const amp = groups.find((g) => g.key === "amp");
     expect(amp?.label).toBe("Amp modes");
   });
 
   it("treats unified personal subscription rows as available for session agents", () => {
-    const groups = availableAgentModelGroups([], null, [personalClaudeSubscription], "codex");
-    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
-  });
-
-  it("orgAgentConfig surfaces agents whose API key is set even without user creds (PM scope)", () => {
     const groups = availableAgentModelGroups(
       [],
       null,
-      [],
+      [personalClaudeSubscription],
       "codex",
-      {
-        orgAgentConfig: {
-          claude_code: { ANTHROPIC_API_KEY: "sk-ant-***" },
-        },
-      },
     );
+    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
+  });
+
+  it("treats explicit OpenCode credential rows as available for OpenCode", () => {
+    const groups = availableAgentModelGroups(
+      [],
+      null,
+      [
+        makeCredential({
+          agent: "opencode",
+          provider: "opencode",
+          label: "OpenCode",
+        }),
+      ],
+      "codex",
+    );
+    expect(groups.map((g) => g.key)).toContain("opencode");
+    expect(AGENTS_BY_KEY.opencode.providerKey).toBe("opencode");
+  });
+
+  it("orgAgentConfig surfaces agents whose API key is set even without user creds (PM scope)", () => {
+    const groups = availableAgentModelGroups([], null, [], "codex", {
+      orgAgentConfig: {
+        claude_code: { ANTHROPIC_API_KEY: "sk-ant-***" },
+      },
+    });
     expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code"]);
   });
 
@@ -109,17 +143,11 @@ describe("availableAgentModelGroups", () => {
   });
 
   it("ignores org agent_config entries that point at the wrong env var", () => {
-    const groups = availableAgentModelGroups(
-      [],
-      null,
-      [],
-      "codex",
-      {
-        orgAgentConfig: {
-          claude_code: { ANTHROPIC_BASE_URL: "https://example.com" },
-        },
+    const groups = availableAgentModelGroups([], null, [], "codex", {
+      orgAgentConfig: {
+        claude_code: { ANTHROPIC_BASE_URL: "https://example.com" },
       },
-    );
+    });
     expect(groups.map((g) => g.key)).toEqual(["codex"]);
   });
 });
@@ -136,10 +164,39 @@ describe("agentDisplayLabel", () => {
   });
 });
 
+describe("agentTypeForModel", () => {
+  it("returns the correct agent for curated OpenCode models", () => {
+    expect(agentTypeForModel("anthropic/claude-haiku-4-5")).toBe("opencode");
+    expect(agentTypeForModel("anthropic/claude-opus-4-8")).toBe("opencode");
+  });
+
+  it("returns undefined for unknown provider/model strings so callers fall back to their default agent", () => {
+    // xai/grok-code-fast is not in any curated list; it could be a custom Pi
+    // or custom OpenCode model — the caller owns that context.
+    expect(agentTypeForModel("xai/grok-code-fast")).toBeUndefined();
+  });
+
+  it("exposes explicit OpenCode custom model metadata", () => {
+    expect(AGENTS_BY_KEY.opencode.envVars).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "OPENCODE_MODEL_CUSTOM",
+          placeholder: "provider/model (e.g. xai/grok-code-fast)",
+        }),
+      ]),
+    );
+  });
+});
+
 describe("pmUsableResolvedCredentials", () => {
   it("excludes personal-scoped rows because PM runs without a user id", () => {
     const credentials = pmUsableResolvedCredentials([
-      makeCredential({ scope: "personal", user_id: "user-1", agent: "claude_code", provider: "anthropic" }),
+      makeCredential({
+        scope: "personal",
+        user_id: "user-1",
+        agent: "claude_code",
+        provider: "anthropic",
+      }),
     ]);
     const groups = availableAgentModelGroups(credentials, null, [], "codex");
 
@@ -149,22 +206,46 @@ describe("pmUsableResolvedCredentials", () => {
 
   it("retains org-scoped rows from the resolved stack for PM runs", () => {
     const credentials = pmUsableResolvedCredentials([
-      makeCredential({ id: "cc-anthropic", agent: "claude_code", provider: "anthropic" }),
-      makeCredential({ id: "cc-gemini", agent: "gemini_cli", provider: "gemini", priority: 2 }),
+      makeCredential({
+        id: "cc-anthropic",
+        agent: "claude_code",
+        provider: "anthropic",
+      }),
+      makeCredential({
+        id: "cc-opencode",
+        agent: "opencode",
+        provider: "opencode",
+        priority: 2,
+      }),
     ]);
     const groups = availableAgentModelGroups(credentials, null, [], "codex");
 
     expect(credentials).toEqual([
       { provider: "anthropic", source: "org" },
-      { provider: "gemini", source: "org" },
+      { provider: "opencode", source: "org" },
     ]);
-    expect(groups.map((g) => g.key)).toEqual(["codex", "claude_code", "gemini_cli"]);
+    expect(groups.map((g) => g.key)).toEqual([
+      "codex",
+      "claude_code",
+      "opencode",
+    ]);
   });
 
   it("keeps org rows even when a personal row shadows them in the resolved stack", () => {
     const credentials = pmUsableResolvedCredentials([
-      makeCredential({ id: "cc-personal", scope: "personal", user_id: "user-1", agent: "claude_code", provider: "anthropic" }),
-      makeCredential({ id: "cc-org", agent: "claude_code", provider: "anthropic", priority: 2 }),
+      makeCredential({
+        id: "cc-personal",
+        scope: "personal",
+        user_id: "user-1",
+        agent: "claude_code",
+        provider: "anthropic",
+      }),
+      makeCredential({
+        id: "cc-org",
+        agent: "claude_code",
+        provider: "anthropic",
+        priority: 2,
+      }),
     ]);
     const groups = availableAgentModelGroups(credentials, null, [], "codex");
 
@@ -174,8 +255,18 @@ describe("pmUsableResolvedCredentials", () => {
 
   it("maps subscription rows onto the agent's provider key", () => {
     const credentials = pmUsableResolvedCredentials([
-      makeCredential({ agent: "codex", auth_type: "subscription", provider: "openai_subscription" }),
-      makeCredential({ id: "cc-2", agent: "claude_code", auth_type: "subscription", provider: "anthropic_subscription", priority: 2 }),
+      makeCredential({
+        agent: "codex",
+        auth_type: "subscription",
+        provider: "openai_subscription",
+      }),
+      makeCredential({
+        id: "cc-2",
+        agent: "claude_code",
+        auth_type: "subscription",
+        provider: "anthropic_subscription",
+        priority: 2,
+      }),
     ]);
     const groups = availableAgentModelGroups(credentials, null, [], "codex");
 
@@ -188,8 +279,19 @@ describe("pmUsableResolvedCredentials", () => {
 
   it("collapses multiple org rows for the same provider into the highest-priority row", () => {
     const credentials = pmUsableResolvedCredentials([
-      makeCredential({ id: "cc-1", agent: "codex", provider: "openai", priority: 1 }),
-      makeCredential({ id: "cc-2", agent: "codex", auth_type: "subscription", provider: "openai_subscription", priority: 2 }),
+      makeCredential({
+        id: "cc-1",
+        agent: "codex",
+        provider: "openai",
+        priority: 1,
+      }),
+      makeCredential({
+        id: "cc-2",
+        agent: "codex",
+        auth_type: "subscription",
+        provider: "openai_subscription",
+        priority: 2,
+      }),
     ]);
 
     expect(credentials).toEqual([{ provider: "openai", source: "org" }]);

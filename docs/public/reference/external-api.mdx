@@ -1,6 +1,6 @@
 ---
 title: External API
-description: Service-account API authentication, idempotency, rate limits, and examples.
+description: Service-account API authentication, scopes, idempotency, rate limits, and endpoint coverage.
 section: Reference
 order: 55
 status: stable
@@ -8,31 +8,116 @@ audience: engineer
 tags:
   - api
   - automation
-llm_summary: Use 143 external API clients with Bearer service tokens, scoped permissions, Idempotency-Key on POST requests, and 143-Version for client version logging.
+llm_summary: Use 143 external API keys with Bearer service-account tokens, explicit or resource-family scopes, optional repository and IP allowlists, Idempotency-Key on POST requests, and 143-Version for client version logging.
 ---
 
-The external API uses the same `/api/v1` resource paths as the application API, with service-account Bearer tokens.
+The external API uses `/api/v1` resource paths with service-account Bearer tokens. Create tokens from **Settings -> API keys**.
+
+API keys are built for CI systems, internal tools, and coding agents. Each key belongs to a durable integration identity. Each secret token under that integration is disposable and shown only once.
 
 ## Authentication
 
-Send API tokens in the `Authorization` header:
+Send the token in `Authorization`:
 
 ```bash
 curl https://your-143.example.com/api/v1/sessions \
-  -H "Authorization: Bearer 143_sk_..." \
+  -H "Authorization: Bearer 143_live_..." \
   -H "143-Version: 2026-06-01"
 ```
 
-Tokens are scoped. Missing scopes return `403` with `error.details.required_scope`.
+Recommended headers:
+
+| Header | Required | Notes |
+|---|---:|---|
+| `Authorization: Bearer <token>` | Yes | Use the one-time token value copied from Settings. |
+| `Content-Type: application/json` | For JSON bodies | Required for JSON `POST` and `PATCH` requests. |
+| `Idempotency-Key` | For retried `POST` requests | Required by well-behaved automation for create/run operations. |
+| `143-Version` | Recommended | Logged for client compatibility and debugging. |
+
+Disabled integrations, revoked tokens, expired tokens, missing scopes, and source IPs outside a token allowlist cannot authenticate.
+
+## Creating Keys
+
+Admins create keys in **Settings -> API keys**:
+
+1. Name the integration, for example `Cursor`, `GitHub Actions`, or `Deploy bot`.
+2. Choose **Full external API access** or **Custom access**.
+3. Optionally restrict repositories.
+4. Choose an expiration.
+5. Optionally restrict source IP addresses or CIDR ranges.
+6. Copy the one-time token into a secret manager.
+
+The token value is never shown again. Rotate by creating a replacement token under the same integration, deploying it, and revoking the old token.
+
+## Scopes
+
+Use the narrowest scope set that lets the caller do its job.
+
+| Scope | Allows |
+|---|---|
+| `sessions:read` | List sessions and read session details, logs, messages, threads, usage, diffs, previews, and related read-only session resources. |
+| `sessions:create` | Create sessions through `POST /api/v1/sessions`. |
+| `sessions:write` | Send session or thread messages and retry session work. |
+| `sessions:cancel` | Cancel or end sessions and threads. |
+| `sessions:publish` | Create PRs or branches from sessions. |
+| `sessions:all` | All current session scopes above. |
+| `automations:read` | List automations and read automation details, runs, and stats. |
+| `automations:create` | Create automations through `POST /api/v1/automations`. |
+| `automations:write` | Edit, pause, resume, or delete automations. |
+| `automations:run` | Trigger automation runs. |
+| `automations:all` | All current automation scopes above. |
+| `previews:read` | List and read previews. |
+| `previews:create` | Create previews through `POST /api/v1/previews`. |
+| `previews:stop` | Stop or restart previews. |
+| `previews:all` | All current preview scopes above. |
+
+There is no global wildcard scope. The dashboard's **Full external API access** preset expands to explicit operation scopes.
+
+## Repository Restrictions
+
+Tokens can be limited to repository IDs. An empty repository list means all repositories in the organization. When a request names or resolves a repository, the token must be allowed for that repository.
+
+## Source IP Restrictions
+
+Tokens can be limited to source IPs or CIDR ranges:
+
+```text
+203.0.113.10/32
+198.51.100.7
+2001:db8::/32
+```
+
+An empty IP allowlist means any source IP is accepted.
 
 ## Idempotency
 
-Send `Idempotency-Key` on mutating `POST` requests. Keys are scoped to the API client, method, and path, and are retained for 24 hours.
+Send `Idempotency-Key` on retried `POST` requests. Keys are scoped to the API client, method, and path, and retained for 24 hours.
+
+Idempotent `POST` routes:
+
+| Route | Scope |
+|---|---|
+| `POST /api/v1/sessions` | `sessions:create` or `sessions:all` |
+| `POST /api/v1/sessions/{id}/messages` | `sessions:write` or `sessions:all` |
+| `POST /api/v1/sessions/{id}/retry` | `sessions:write` or `sessions:all` |
+| `POST /api/v1/sessions/{id}/cancel` | `sessions:cancel` or `sessions:all` |
+| `POST /api/v1/sessions/{id}/end` | `sessions:cancel` or `sessions:all` |
+| `POST /api/v1/sessions/{id}/pr` | `sessions:publish` or `sessions:all` |
+| `POST /api/v1/sessions/{id}/branch` | `sessions:publish` or `sessions:all` |
+| `POST /api/v1/automations` | `automations:create` or `automations:all` |
+| `POST /api/v1/automations/{id}/run` | `automations:run` or `automations:all` |
+| `POST /api/v1/automations/{id}/pause` | `automations:write` or `automations:all` |
+| `POST /api/v1/automations/{id}/resume` | `automations:write` or `automations:all` |
+| `POST /api/v1/previews` | `previews:create` or `previews:all` |
+| `POST /api/v1/previews/{id}/stop` | `previews:stop` or `previews:all` |
+| `POST /api/v1/previews/{id}/restart` | `previews:stop` or `previews:all` |
+
+Example:
 
 ```bash
 curl https://your-143.example.com/api/v1/sessions \
   -X POST \
-  -H "Authorization: Bearer 143_sk_..." \
+  -H "Authorization: Bearer 143_live_..." \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: deploy-2026-06-01-001" \
   -d '{
@@ -46,12 +131,73 @@ Reusing a key with different request content returns `409 IDEMPOTENCY_KEY_REUSED
 
 ## Rate Limits
 
-External API tokens have per-token read and mutation budgets. Responses include:
+Rate limits are per token:
 
-- `X-RateLimit-Limit`
-- `X-RateLimit-Remaining`
-- `X-RateLimit-Reset`
-- `Retry-After` on `429 RATE_LIMITED`
+| Request kind | Limit |
+|---|---:|
+| Reads: `GET`, `HEAD`, `OPTIONS` | 600 requests per minute |
+| Mutations: every other method | 120 requests per minute |
+
+Responses include:
+
+| Header | Meaning |
+|---|---|
+| `X-RateLimit-Limit` | Limit for the current bucket. |
+| `X-RateLimit-Remaining` | Requests remaining in the current minute. |
+| `X-RateLimit-Reset` | Unix timestamp when the bucket resets. |
+| `Retry-After` | Seconds to wait after `429 RATE_LIMITED`. |
+
+## Errors
+
+Errors use the standard API envelope:
+
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "API token is missing required scope",
+    "details": {
+      "required_scope": "sessions:create"
+    }
+  }
+}
+```
+
+Common external API errors:
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| 401 | `UNAUTHORIZED` | Missing, invalid, expired, or revoked token. |
+| 403 | `FORBIDDEN` | Token is missing the required scope or route is not external-API enabled. |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | Same idempotency key was reused with different content. |
+| 429 | `RATE_LIMITED` | Token exceeded its read or mutation budget. |
+
+## Endpoint Coverage
+
+Only routes in this table accept external API tokens. Other protected app/admin routes return `403 FORBIDDEN`.
+
+| Route | Methods | Required scope | Family scope |
+|---|---:|---|---|
+| `/api/v1/sessions` | `GET` | `sessions:read` | `sessions:all` |
+| `/api/v1/sessions/{id}` and nested read routes | `GET` | `sessions:read` | `sessions:all` |
+| `/api/v1/sessions` | `POST` | `sessions:create` | `sessions:all` |
+| `/api/v1/sessions/{id}/messages` | `POST` | `sessions:write` | `sessions:all` |
+| `/api/v1/sessions/{id}/retry` | `POST` | `sessions:write` | `sessions:all` |
+| `/api/v1/sessions/{id}/cancel` | `POST` | `sessions:cancel` | `sessions:all` |
+| `/api/v1/sessions/{id}/end` | `POST` | `sessions:cancel` | `sessions:all` |
+| `/api/v1/sessions/{id}/pr` | `POST` | `sessions:publish` | `sessions:all` |
+| `/api/v1/sessions/{id}/branch` | `POST` | `sessions:publish` | `sessions:all` |
+| `/api/v1/automations` | `GET` | `automations:read` | `automations:all` |
+| `/api/v1/automations/{id}` and nested read routes | `GET` | `automations:read` | `automations:all` |
+| `/api/v1/automations` | `POST` | `automations:create` | `automations:all` |
+| `/api/v1/automations/{id}` | `PATCH`, `DELETE` | `automations:write` | `automations:all` |
+| `/api/v1/automations/{id}/pause` | `POST` | `automations:write` | `automations:all` |
+| `/api/v1/automations/{id}/resume` | `POST` | `automations:write` | `automations:all` |
+| `/api/v1/automations/{id}/run` | `POST` | `automations:run` | `automations:all` |
+| `/api/v1/previews` and nested preview read routes | `GET` | `previews:read` | `previews:all` |
+| `/api/v1/previews` | `POST` | `previews:create` | `previews:all` |
+| `/api/v1/previews/{id}/stop` | `POST` | `previews:stop` | `previews:all` |
+| `/api/v1/previews/{id}/restart` | `POST` | `previews:stop` | `previews:all` |
 
 ## Sessions
 
@@ -70,7 +216,7 @@ Create a session:
 }
 ```
 
-Required scope: `sessions:create`.
+Required scope: `sessions:create` or `sessions:all`.
 
 ## Automations
 
@@ -94,8 +240,36 @@ Create an automation:
 }
 ```
 
-Required scope: `automations:create`.
+Required scope: `automations:create` or `automations:all`. External API automations must use `identity.scope=org`.
 
 ## Previews
 
-General external API tokens can create, read, stop, and restart previews with `previews:*` scopes. Repository-scoped tokens must include `repository_id` where a list request could otherwise span repositories.
+Create a preview:
+
+```json
+{
+  "repository_id": "00000000-0000-0000-0000-000000000000",
+  "branch": "main",
+  "source": {
+    "type": "automation",
+    "external_id": "nightly-preview"
+  }
+}
+```
+
+Required scope: `previews:create` or `previews:all`.
+
+## Coding Agents
+
+For coding agents and automation runners:
+
+- Store the token in the platform secret manager, not in prompts or repository files.
+- Send `Idempotency-Key` for every retried `POST`.
+- Set `metadata.caller` and a stable workflow or run identifier on create requests.
+- Prefer family scopes such as `sessions:all` for agents that operate within one product area.
+- Prefer repository restrictions for single-repository agents.
+- Use `143-Version` so logs identify the client behavior during debugging.
+
+## Schema And OpenAPI
+
+The canonical schema is the route behavior documented here and the JSON examples above. If generated OpenAPI output is unavailable in your deployment, coding agents should use this page, `/llms.txt`, and the raw docs route at `/api/docs/raw/reference/external-api` as the source of truth.

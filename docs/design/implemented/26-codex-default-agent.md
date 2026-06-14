@@ -11,7 +11,7 @@
 
 1. **No access to gpt-5.3-codex**: OpenAI's most capable coding model (state-of-the-art on SWE-Bench Pro) is only available via ChatGPT-authenticated sessions — not the standard API. Users with ChatGPT Plus ($5 promotional credits) or Pro ($50 credits) subscriptions cannot use their quotas.
 
-2. **No Codex adapter**: While the orchestrator design (doc 06) mentions a Codex adapter, none is implemented. Only `claude_code` and `gemini_cli` adapters exist.
+2. **No Codex adapter**: While the orchestrator design (doc 06) mentions a Codex adapter, none is implemented. Only `claude_code` and `opencode` adapters exist.
 
 3. **Agent setup is buried**: Agent configuration lives under "Advanced Settings" (collapsed by default) in the Settings page. Without it configured, the entire agent pipeline is dead — no runs, no PRs, no value. This is the most critical setup step, yet it's treated as optional.
 
@@ -22,7 +22,7 @@
 3. Support API key fallback for pay-as-you-go users
 4. Change the default agent from `claude_code` to `codex`
 5. Make agent setup a first-class onboarding step (not an advanced setting)
-6. Maintain full backward compatibility for existing `claude_code` and `gemini_cli` users
+6. Maintain full backward compatibility for existing `claude_code` and `opencode` users
 
 ## Background: Codex CLI Authentication
 
@@ -164,7 +164,7 @@ The `org_credentials` table already accepts arbitrary `provider` text values. Ad
 
 ### Interface Implementation
 
-The adapter follows the same pattern as `claude_code.go` and `gemini_cli.go`:
+The adapter follows the same pattern as `claude_code.go` and `opencode.go`:
 
 ```go
 type CodexAdapter struct {
@@ -299,7 +299,7 @@ Add the Codex adapter to the map in `cmd/server/main.go`:
 ```go
 agentAdapters := map[string]agent.AgentAdapter{
     "claude_code": adapters.NewClaudeCodeAdapter(logger),
-    "gemini_cli":  adapters.NewGeminiCLIAdapter(logger),
+    "opencode":  adapters.NewOpenCodeAdapter(logger),
     "codex":       adapters.NewCodexAdapter(logger),
 }
 ```
@@ -315,7 +315,7 @@ Settings
 ├── General (org name)
 ├── Integrations (GitHub, Sentry, Linear)
 ├── Agent Setup                              ← NEW top-level section
-│   ├── Default Agent selector (Codex / Claude Code / Gemini CLI)
+│   ├── Default Agent selector (Codex / Claude Code / OpenCode)
 │   ├── Codex auth (ChatGPT OAuth or API key)
 │   ├── Claude Code auth (API key)
 │   └── Gemini auth (API key)
@@ -429,7 +429,7 @@ codexAuth: {
 // frontend/src/lib/types.ts
 export interface OrgSettings {
     // ... existing fields ...
-    default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli';
+    default_agent_type?: 'codex' | 'claude_code' | 'opencode';
 }
 ```
 

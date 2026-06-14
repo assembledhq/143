@@ -455,7 +455,7 @@ describe("NewAutomationPage", () => {
         data: {
           id: "org-1",
           name: "Test Org",
-          settings: { default_agent_type: "gemini_cli" },
+          settings: { default_agent_type: "opencode" },
         },
       })),
       http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({

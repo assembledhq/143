@@ -12,11 +12,14 @@ import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
-  previewOriginFromURL,
 } from "@/lib/preview-bootstrap";
-import { safeExternalUrl } from "@/lib/utils";
 
 const BOOTSTRAP_TIMEOUT_MS = 15_000;
+
+type BootstrapToken = {
+  token: string;
+  preview_id?: string;
+};
 
 type PendingOpen = {
   previewID: string;
@@ -34,6 +37,7 @@ export type OpenPreviewButtonProps = {
   variant?: ComponentProps<typeof Button>["variant"];
   size?: ComponentProps<typeof Button>["size"];
   className?: string;
+  bootstrapPreview?: (previewId: string) => Promise<BootstrapToken>;
 };
 
 type LaunchPreviewInput = {
@@ -42,7 +46,7 @@ type LaunchPreviewInput = {
   popup?: Window | null;
 };
 
-export function usePreviewLauncher(): {
+export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Promise<BootstrapToken>): {
   launchPreview: (input: LaunchPreviewInput) => Promise<void>;
   isOpening: boolean;
   error: Error | null;
@@ -81,10 +85,11 @@ export function usePreviewLauncher(): {
   );
 
   const bootstrapMutation = useMutation({
-    mutationFn: (id: string) => api.previews.bootstrap(id),
+    mutationFn: (id: string) =>
+      bootstrapPreview ? bootstrapPreview(id) : api.previews.bootstrap(id).then((response) => response.data),
     onSuccess: (response) => {
       const pending = pendingRef.current;
-      const token = response.data.token;
+      const token = response.token;
       if (!pending || !token) return;
 
       const contentWindow = iframeRef.current?.contentWindow;
@@ -103,13 +108,13 @@ export function usePreviewLauncher(): {
   });
 
   const launchPreview = useCallback(async ({ previewId, previewUrl, popup: providedPopup }: LaunchPreviewInput) => {
-    const safePreviewURL = safeExternalUrl(previewUrl);
-    const previewOrigin = safePreviewURL ? previewOriginFromURL(safePreviewURL) : undefined;
-    if (!previewId || !safePreviewURL || !previewOrigin) {
+    const safePreview = parsePreviewURL(previewUrl);
+    if (!previewId || !safePreview) {
       toast.error("Preview link is unavailable.");
       setError(new Error("Preview link is unavailable."));
       return;
     }
+    const { href: safePreviewURL, origin: previewOrigin } = safePreview;
 
     let popup: Window | null = providedPopup ?? null;
     if (!popup) {
@@ -201,13 +206,12 @@ export function OpenPreviewButton({
   variant,
   size,
   className,
+  bootstrapPreview,
 }: OpenPreviewButtonProps) {
-  const { launchPreview, isOpening, bootstrapFrame } = usePreviewLauncher();
-  const safePreviewURL = useMemo(() => safeExternalUrl(previewUrl), [previewUrl]);
-  const previewOrigin = useMemo(
-    () => (safePreviewURL ? previewOriginFromURL(safePreviewURL) : undefined),
-    [safePreviewURL],
-  );
+  const { launchPreview, isOpening, bootstrapFrame } = usePreviewLauncher(bootstrapPreview);
+  const safePreview = useMemo(() => parsePreviewURL(previewUrl), [previewUrl]);
+  const safePreviewURL = safePreview?.href;
+  const previewOrigin = safePreview?.origin;
 
   const openPreview = useCallback(() => {
     if (!previewId || !previewUrl) {
@@ -232,5 +236,29 @@ export function OpenPreviewButton({
       </Button>
       {bootstrapFrame}
     </>
+  );
+}
+
+function parsePreviewURL(url: string | undefined | null): { href: string; origin: string } | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" || isLocalPreviewHTTP(parsed)) {
+      return { href: url, origin: parsed.origin };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function isLocalPreviewHTTP(parsed: URL): boolean {
+  if (parsed.protocol !== "http:") return false;
+  return (
+    parsed.hostname === "localhost" ||
+    parsed.hostname === "127.0.0.1" ||
+    parsed.hostname === "[::1]" ||
+    parsed.hostname.endsWith(".localhost") ||
+    parsed.hostname.endsWith(".test")
   );
 }

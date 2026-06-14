@@ -148,7 +148,7 @@ type SessionReviewLoopPass struct {
 
 func AgentSupportsNativeReview(agentType AgentType) bool {
 	switch agentType {
-	case AgentTypeCodex, AgentTypeClaudeCode, AgentTypeAmp, AgentTypePi:
+	case AgentTypeCodex, AgentTypeClaudeCode, AgentTypeAmp, AgentTypePi, AgentTypeOpenCode:
 		return true
 	default:
 		return false

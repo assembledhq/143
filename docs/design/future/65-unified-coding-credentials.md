@@ -221,7 +221,7 @@ Every (agent, auth-type) pair maps to exactly one provider:
 | codex | subscription | `openai_subscription` | `OpenAISubscriptionConfig` (renamed from `OpenAIChatGPTConfig`) |
 | claude_code | api_key | `anthropic` | `AnthropicConfig` (cleaned up — no `Subscription` field) |
 | claude_code | subscription | `anthropic_subscription` | `AnthropicSubscriptionConfig` (new — extracted from `AnthropicConfig.Subscription`) |
-| gemini_cli | api_key | `gemini` | `GeminiConfig` |
+| opencode | api_key | `gemini` | `GeminiConfig` |
 | amp | api_key | `amp` | `AmpConfig` |
 | pi | api_key | `pi` | `PiConfig` |
 

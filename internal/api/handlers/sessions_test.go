@@ -408,7 +408,7 @@ func sessionRowNeedsPolicyDefaults(values []interface{}) bool {
 		return false
 	}
 	switch agentType {
-	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+	case "claude_code", "claude-code", "codex", "amp", "pi", "opencode", "pm_agent":
 		return true
 	default:
 		return false
@@ -423,8 +423,6 @@ func normalizeSessionAgentType(value interface{}) interface{} {
 	switch agentType {
 	case "claude-code":
 		return string(models.AgentTypeClaudeCode)
-	case "gemini-cli":
-		return string(models.AgentTypeGeminiCLI)
 	default:
 		return value
 	}
@@ -1544,6 +1542,7 @@ func TestSessionHandler_Get(t *testing.T) {
 				now := time.Now()
 				runID := uuid.New()
 				issueID := uuid.New()
+				repoID := uuid.New()
 				mock.ExpectQuery("SELECT").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
@@ -1558,13 +1557,13 @@ func TestSessionHandler_Get(t *testing.T) {
 							nil,                      // model_override
 							nil,                      // triggered_by_user_id
 							nil, 0, now, "none", nil, // agent_session_id, current_turn, last_activity_at, sandbox_state, snapshot_key
-							nil,      // target_branch
-							nil,      // working_branch
-							nil,      // repository_id
-							nil,      // diff_stats
-							nil,      // diff_history
-							nil,      // input_manifest
-							nil, nil, // archived_at, archived_by_user_id
+							ptr("main"),                         // target_branch
+							ptr("143/session-details-metadata"), // working_branch
+							&repoID,                             // repository_id
+							nil,                                 // diff_stats
+							nil,                                 // diff_history
+							nil,                                 // input_manifest
+							nil, nil,                            // archived_at, archived_by_user_id
 							nil,            // automation_run_id
 							"idle",         // pr_creation_state
 							(*string)(nil), // pr_creation_error
@@ -1572,9 +1571,16 @@ func TestSessionHandler_Get(t *testing.T) {
 							now,
 						),
 					)
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+					}).AddRow(
+						repoID, orgID, uuid.New(), int64(123), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(456), "active", nil, nil, json.RawMessage(`{}`), now, now,
+					))
 			},
 			expectedCode: http.StatusOK,
-			expectedBody: "running",
+			expectedBody: "assembledhq/143",
 		},
 		{
 			name:         "returns bad request for invalid UUID",
@@ -1613,8 +1619,8 @@ func TestSessionHandler_Get(t *testing.T) {
 
 			handler.Get(w, req)
 			require.Equal(t, tt.expectedCode, w.Code, "should return expected status code")
-			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+			require.Contains(t, w.Body.String(), tt.expectedBody, "response body should contain expected content")
 		})
 	}
 }
@@ -1852,10 +1858,10 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 			idParam: "",
 			body:    "",
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
-				triggerFixIssueAndOrgDefaultMock(mock, orgID, "gemini_cli")
+				triggerFixIssueAndOrgDefaultMock(mock, orgID, "opencode")
 			},
 			expectedCode: http.StatusCreated,
-			expectedBody: "gemini_cli",
+			expectedBody: "opencode",
 		},
 		{
 			name:    "falls back to codex when org default agent type is missing",
@@ -1868,12 +1874,12 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 			expectedBody: "codex",
 		},
 		{
-			name:         "triggers fix with gemini_cli agent type",
+			name:         "triggers fix with opencode agent type",
 			idParam:      "",
-			body:         `{"agent_type":"gemini_cli"}`,
+			body:         `{"agent_type":"opencode"}`,
 			setupMock:    triggerFixIssueMock,
 			expectedCode: http.StatusCreated,
-			expectedBody: "gemini_cli",
+			expectedBody: "opencode",
 		},
 		{
 			name:         "triggers fix with codex agent type",
@@ -4365,7 +4371,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"opencode"}`), now, now),
 					)
 
 				expectManualSessionCreate(mock, runID, now)
@@ -4387,7 +4393,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 			},
 			expectedCode: http.StatusCreated,
-			expectedBody: "gemini_cli",
+			expectedBody: "opencode",
 		},
 		{
 			name: "uses user default model when no model or agent type is specified",
@@ -4403,7 +4409,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"opencode"}`), now, now),
 					)
 
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
@@ -4446,7 +4452,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"gemini_cli"}`), now, now),
+							AddRow(orgID, "Acme", []byte(`{"default_agent_type":"opencode"}`), now, now),
 					)
 
 				mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
@@ -4472,7 +4478,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 			setUserStore:    true,
 			withUserContext: true,
 			expectedCode:    http.StatusCreated,
-			expectedBody:    "gemini_cli",
+			expectedBody:    "opencode",
 		},
 		{
 			name:         "returns bad request for empty message",
@@ -4658,7 +4664,7 @@ func TestSessionHandler_CreateManual(t *testing.T) {
 		},
 		{
 			name: "returns bad request when reasoning effort is unsupported for agent type",
-			body: `{"message":"Fix bug","agent_type":"gemini_cli","reasoning_effort":"high"}`,
+			body: `{"message":"Fix bug","agent_type":"amp","reasoning_effort":"high"}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").

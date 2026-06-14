@@ -57,8 +57,10 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
 
   const { data: rawMessages } = useQuery({
     queryKey: ["preview-console", sessionId],
-    queryFn: () => api.sessions.preview.console(sessionId),
+    queryFn: ({ signal }) =>
+      api.sessions.preview.console(sessionId, { signal, timeoutMs: 5000 }),
     refetchInterval: 10000,
+    retry: false,
   });
   const messages = useMemo(
     () => (Array.isArray(rawMessages) ? rawMessages : []),

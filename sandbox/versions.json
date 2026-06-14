@@ -1,8 +1,8 @@
 {
   "claude_code": "2.1.150",
   "codex_cli": "0.133.0",
-  "gemini_cli": "0.43.0",
   "amp_cli": "0.0.1779786108-g751b94",
   "pi_cli": "0.75.5",
+  "opencode_cli": "1.17.3",
   "gh_cli": "2.92.0"
 }

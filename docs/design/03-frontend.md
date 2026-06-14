@@ -386,7 +386,7 @@ The default settings page. Two sections on one page:
 #### Agent Configuration (`/settings/agents`)
 
 Everything about how the agent behaves day-to-day:
-- **Agent & model selection** — choose the coding agent (Claude Code, Codex, Gemini CLI, custom) and the model it should use
+- **Agent & model selection** — choose the coding agent (Claude Code, Codex, OpenCode, custom) and the model it should use
 - **Aggressiveness slider** — 4-position labeled slider (Conservative / Moderate / Aggressive / Maximum) that controls which complexity tiers the system will attempt. Each position shows a description, estimated cost impact, and expected issue coverage percentage.
 - **Per-issue-type overrides** (advanced, expandable) — override max tier and auto-proceed threshold per issue type (bug_fix, performance, security, etc.)
 

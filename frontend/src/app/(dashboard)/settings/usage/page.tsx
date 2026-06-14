@@ -159,9 +159,9 @@ export default function UsagePage() {
               <SelectItem value="any" className="text-xs">Any agent</SelectItem>
               <SelectItem value="codex" className="text-xs">Codex</SelectItem>
               <SelectItem value="claude_code" className="text-xs">Claude Code</SelectItem>
-              <SelectItem value="gemini_cli" className="text-xs">Gemini CLI</SelectItem>
               <SelectItem value="amp" className="text-xs">Amp</SelectItem>
               <SelectItem value="pi" className="text-xs">Pi</SelectItem>
+              <SelectItem value="opencode" className="text-xs">OpenCode</SelectItem>
             </SelectContent>
           </Select>
           <Select value={selectedReasoning ?? "any"} onValueChange={(v) => setSelectedReasoning(v === "any" ? null : v)}>

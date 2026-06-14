@@ -1,6 +1,6 @@
 # Non-Disruptive Worker Blue/Green Deploys
 
-> **Status:** Implemented v1 foundation with durable fleet-control primitives | **Last reviewed:** 2026-05-28
+> **Status:** Implemented v1 foundation with durable fleet-control primitives | **Last reviewed:** 2026-06-13
 >
 > **Related docs:** [overall.md](../overall.md), [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md), [82-durable-session-executors.md](../implemented/82-durable-session-executors.md), [88-preview-runtime-ownership-drain.md](88-preview-runtime-ownership-drain.md), [60-agent-runtime-timeouts-and-checkpointed-shutdown.md](60-agent-runtime-timeouts-and-checkpointed-shutdown.md)
 
@@ -61,6 +61,12 @@ changing runtime ownership semantics.
 - Routine worker deploys skip support-service recreation and block Docker/runsc
   mutation paths unless the operator explicitly chooses maintenance-style
   behavior.
+- App deploys run a preview RPC auth compatibility check from the candidate API
+  container. Workers that answer and reject the signed auth-check token remain
+  hard blockers, and fresh active workers that time out or cannot be reached
+  also block deploy. Unreachable stale or draining workers are reported as
+  skipped liveness failures so app deploys do not race-fail against concurrent
+  worker generation drains.
 - Maintenance/emergency drains require reason/operator metadata and refuse to
   proceed across active runtime ownership unless `--force` or
   `FORCE_INTERRUPT_ACTIVE_RUNTIMES=1` is supplied.

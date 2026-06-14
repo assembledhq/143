@@ -104,6 +104,18 @@ function get<T>(path: string, options?: RequestInit): Promise<T> {
   return request<T>(path, options);
 }
 
+function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  parent?.addEventListener('abort', abort, { once: true });
+  controller.signal.addEventListener('abort', () => {
+    globalThis.clearTimeout(timeout);
+    parent?.removeEventListener('abort', abort);
+  }, { once: true });
+  return controller.signal;
+}
+
 function post<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, {
     method: 'POST',
@@ -304,6 +316,22 @@ export const api = {
           body: JSON.stringify(body),
         }),
     },
+  },
+  apiKeys: {
+    create: (body: import('./types').CreateAPIKeyRequest) =>
+      post<import('./types').SingleResponse<import('./types').CreateAPIKeyResponse>>('/api/v1/api-keys', body),
+    listClients: () =>
+      get<import('./types').ListResponse<import('./types').APIClient>>('/api/v1/api-keys'),
+    updateClient: (id: string, body: Partial<Pick<import('./types').APIClient, 'name' | 'description' | 'status'>>) =>
+      patch<import('./types').SingleResponse<import('./types').APIClient>>(`/api/v1/api-keys/${id}`, body),
+    disableClient: (id: string) =>
+      del<void>(`/api/v1/api-keys/${id}`),
+    listTokens: (clientId: string) =>
+      get<import('./types').ListResponse<import('./types').APIToken>>(`/api/v1/api-keys/${clientId}/tokens`),
+    createToken: (clientId: string, body: import('./types').CreateAPITokenRequest) =>
+      post<import('./types').SingleResponse<import('./types').APIToken & { token: string }>>(`/api/v1/api-keys/${clientId}/tokens`, body),
+    revokeToken: (clientId: string, tokenId: string) =>
+      del<void>(`/api/v1/api-keys/${clientId}/tokens/${tokenId}`),
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
@@ -622,8 +650,11 @@ export const api = {
         return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
           .then(r => r.data ?? []);
       },
-      console: (sessionId: string) =>
-        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+      console: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(
+          `/api/v1/sessions/${sessionId}/preview/console`,
+          { signal: timeoutSignal(opts?.timeoutMs ?? 5000, opts?.signal) },
+        )
           .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })

@@ -83,9 +83,9 @@ The prompt includes:
 
 Runs OpenAI Codex CLI inside the sandbox. Similar prompt structure and execution model.
 
-#### Gemini CLI Adapter
+#### OpenCode Adapter
 
-Runs Google Gemini CLI inside the sandbox. Same adapter pattern — the orchestrator is agent-agnostic and delegates all model-specific behavior to the adapter.
+Runs Google OpenCode inside the sandbox. Same adapter pattern — the orchestrator is agent-agnostic and delegates all model-specific behavior to the adapter.
 
 #### Custom Adapter
 

@@ -69,9 +69,9 @@ Sources:
 - [Introducing the Codex app](https://openai.com/index/introducing-the-codex-app/)
 - [Codex app-server README](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
 
-### Gemini CLI
+### OpenCode
 
-Gemini CLI documents `@` commands directly.
+OpenCode documents `@` commands directly.
 
 - `@file` reads the file content.
 - `@directory` reads files in that directory and subdirectories.
@@ -82,7 +82,7 @@ This means Gemini's native mental model is: **file references in prompt text tha
 
 Source:
 
-- [Gemini CLI `@` commands](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/commands.md)
+- [OpenCode `@` commands](https://github.com/google-gemini/opencode/blob/main/docs/reference/commands.md)
 
 ### Amp
 
@@ -331,8 +331,8 @@ Each adapter should accept canonical references and translate them into the nati
   - app/plugin references become structured mention items when we integrate with a richer Codex protocol surface
   - until then, preserve readable text in the prompt and treat references as backend-side context hints
 
-- Gemini adapter:
-  - file/directory references become `@path` tokens because Gemini CLI expands them through `read_many_files`
+- OpenCode adapter:
+  - file/directory references become `@path` tokens because OpenCode expands them through `read_many_files`
 
 - Amp adapter:
   - file/resource references can be represented through prompt text
