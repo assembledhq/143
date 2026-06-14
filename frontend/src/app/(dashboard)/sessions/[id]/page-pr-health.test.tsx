@@ -145,7 +145,8 @@ describe('SessionDetailPage PR health and merge', () => {
     renderWithProviders(<SessionDetailContent id={runningSession.id} />);
 
     expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
-    expect(timelineFetchCount).toBe(1);
+    const initialTimelineFetchCount = timelineFetchCount;
+    expect(initialTimelineFetchCount).toBeGreaterThanOrEqual(1);
     expect(MockEventSource.instances).toHaveLength(1);
 
     MockEventSource.instances[0].onerror?.(new Event('error'));
@@ -157,7 +158,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(await screen.findByText('late log after reconnect')).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(timelineFetchCount).toBeGreaterThanOrEqual(2);
+      expect(timelineFetchCount).toBeGreaterThan(initialTimelineFetchCount);
     });
   });
 

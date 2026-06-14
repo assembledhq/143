@@ -125,6 +125,9 @@ func parseWorkerNodeFromMetadata(node models.Node, metadata WorkerNodeMetadata) 
 	if !metadata.PreviewCapable {
 		return WorkerNode{}, fmt.Errorf("node %s is not preview-capable", node.ID)
 	}
+	if !metadata.PreviewRPCAuthCheck {
+		return WorkerNode{}, fmt.Errorf("node %s preview RPC endpoint is not verified", node.ID)
+	}
 	baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
 	if baseURL == "" {
 		return WorkerNode{}, fmt.Errorf("node %s has no preview internal base url", node.ID)
