@@ -2,7 +2,7 @@
 
 import { use } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, GitBranch, GitPullRequest, RotateCw } from "lucide-react";
+import { AlertTriangle, GitBranch, GitPullRequest, Loader2, RotateCw } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
@@ -39,8 +39,10 @@ export function PullRequestPreviewContent({
     queryKey,
     queryFn: () => api.previews.getPullRequest(owner, repo, number),
     refetchInterval: (query) => {
-      const status = query.state.data?.data.status;
-      return status === "starting" ? pollMs(3000) : false;
+      const preview = query.state.data?.data;
+      const status = preview?.status;
+      const action = preview?.launch?.action;
+      return status === "starting" || action === "wait" ? pollMs(3000) : false;
     },
   });
   const startLatest = useMutation({
@@ -61,6 +63,11 @@ export function PullRequestPreviewContent({
   const status = preview?.status.replaceAll("_", " ") ?? "Loading";
   const canStartLatest = preview?.target_id || preview?.preview_id;
   const isExpired = preview?.status === "expired";
+  const launch = preview?.launch;
+  const launchState = launchStateCopy(preview);
+  const showStartAction =
+    canStartLatest &&
+    (!launch || launch.action === "start" || launch.action === "start_latest" || launch.action === "resume");
 
   return (
     <PageContainer size="default">
@@ -87,13 +94,27 @@ export function PullRequestPreviewContent({
                     <div className="min-w-0">
                       <p className="font-medium">New commits available</p>
                       <p className="break-all text-warning/80">
-                        Latest head: {preview.latest_commit_sha?.slice(0, 12) ?? "unknown"}
+                        {launch?.message ?? `Latest head: ${preview.latest_commit_sha?.slice(0, 12) ?? "unknown"}`}
                       </p>
                     </div>
                   </div>
                 ) : null}
 
-                {isExpired ? (
+                {launchState ? (
+                  <div className={`flex items-start gap-3 rounded-md border p-3 text-sm ${launchState.className}`}>
+                    {launchState.loading ? (
+                      <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />
+                    ) : (
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-medium">{launchState.title}</p>
+                      <p>{launchState.description}</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {isExpired && !launchState ? (
                   <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                     <div>
@@ -164,8 +185,16 @@ export function PullRequestPreviewContent({
                 ) : null}
 
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  {safeExternalUrl(preview.preview_url) && preview.preview_id ? (
-                    <OpenPreviewButton previewId={preview.preview_id} previewUrl={preview.preview_url} />
+                  {safeExternalUrl(preview.preview_url) && preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" && launch?.action !== "wait" && !preview.new_commits_available ? (
+                    <OpenPreviewButton previewId={preview.preview_id} previewUrl={preview.preview_url} label={launch?.primary_label ?? "Open preview"} />
+                  ) : null}
+                  {preview.new_commits_available && safeExternalUrl(launch?.stale_preview_url ?? preview.preview_url) && preview.preview_id ? (
+                    <OpenPreviewButton
+                      previewId={preview.preview_id}
+                      previewUrl={launch?.stale_preview_url ?? preview.preview_url}
+                      label={launch?.secondary_label ?? "Open stale preview"}
+                      variant="outline"
+                    />
                   ) : null}
                   {safeExternalUrl(preview.pull_request_url) ? (
                     <Button asChild variant="outline">
@@ -183,26 +212,26 @@ export function PullRequestPreviewContent({
                       </a>
                     </Button>
                   ) : null}
-                  {canStartLatest ? (
+                  {showStartAction ? (
                     <Button
                       type="button"
-                      variant="outline"
+                      variant={launch?.action === "start_latest" || launch?.action === "start" || launch?.action === "resume" ? "default" : "outline"}
                       onClick={() => startLatest.mutate(preview.target_id)}
                       disabled={startLatest.isPending}
                     >
                       <GitBranch className="h-4 w-4" />
-                      Start latest
+                      {startLatest.isPending ? "Starting..." : launchStartLabel(launch?.action, launch?.primary_label)}
                     </Button>
                   ) : null}
-                  {preview.preview_id ? (
+                  {preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" ? (
                     <Button
                       type="button"
-                      variant="outline"
+                      variant={launch?.action === "retry" ? "default" : "outline"}
                       onClick={() => restart.mutate(preview.preview_id!)}
                       disabled={restart.isPending}
                     >
                       <RotateCw className="h-4 w-4" />
-                      Retry
+                      {restart.isPending ? "Retrying..." : launch?.action === "retry" ? (launch.primary_label ?? "Retry preview") : "Retry"}
                     </Button>
                   ) : null}
                 </div>
@@ -213,4 +242,88 @@ export function PullRequestPreviewContent({
       </div>
     </PageContainer>
   );
+}
+
+function launchStartLabel(action: NonNullable<BranchPreviewResponse["launch"]>["action"] | undefined, label?: string): string {
+  if (label) return label;
+  switch (action) {
+    case "resume":
+      return "Resume preview";
+    case "start":
+      return "Start preview";
+    case "start_latest":
+      return "Start latest";
+    default:
+      return "Start latest";
+  }
+}
+
+function launchStateCopy(preview: BranchPreviewResponse | undefined): {
+  title: string;
+  description: string;
+  className: string;
+  loading?: boolean;
+} | null {
+  const launch = preview?.launch;
+  if (!launch) return null;
+  switch (launch.action) {
+    case "wait":
+      return {
+        title: "Starting preview",
+        description: launch.message ?? "The preview is starting and will be ready shortly.",
+        className: "border-border bg-muted/40 text-foreground",
+        loading: true,
+      };
+    case "resume":
+      return {
+        title: "Preview ready to resume",
+        description: launch.message ?? "Resume this preview to open the running app.",
+        className: "border-border bg-muted/40 text-foreground",
+      };
+    case "start":
+      return {
+        title: preview?.status === "expired" ? "Preview expired" : "Preview not started",
+        description: launch.message ?? (preview?.status === "expired"
+          ? "Start latest to launch a fresh runtime for this pull request."
+          : "Start a preview for the latest pull request head."),
+        className: "border-border bg-muted/40 text-foreground",
+      };
+    case "retry":
+      return {
+        title: "Preview failed",
+        description: launch.message ?? preview?.error ?? "Retry the preview to rebuild this pull request.",
+        className: "border-destructive/20 bg-destructive/5 text-destructive",
+      };
+    case "blocked":
+      return {
+        title: "Preview blocked",
+        description: launch.message ?? blockedLaunchMessage(launch.reason),
+        className: "border-destructive/20 bg-destructive/5 text-destructive",
+      };
+    case "closed":
+      return {
+        title: "Pull request closed",
+        description: launch.message ?? "This pull request is closed, so 143 will not start a new preview by default.",
+        className: "border-border bg-muted/40 text-foreground",
+      };
+    default:
+      return null;
+  }
+}
+
+function blockedLaunchMessage(reason: NonNullable<BranchPreviewResponse["launch"]>["reason"]): string {
+  switch (reason) {
+    case "capacity":
+      return "Preview capacity is currently full. Stop another preview or try again later.";
+    case "role_forbidden":
+      return "You can open existing previews, but you do not have permission to start a new preview for this pull request.";
+    case "token_forbidden":
+      return "This token is not scoped to start or read this preview.";
+    case "config_required":
+      return "This repository has multiple preview configs. Choose one before starting the preview.";
+    case "config_invalid":
+      return "The committed preview config is invalid.";
+    default:
+      return "This preview cannot be opened right now.";
+  }
 }

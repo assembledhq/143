@@ -38,6 +38,14 @@ func branchPreviewAnyArgs(n int) []any {
 	return args
 }
 
+func ptrToUUID(value uuid.UUID) *uuid.UUID {
+	return &value
+}
+
+func ptrToInt(value int) *int {
+	return &value
+}
+
 var branchPreviewTargetTestCols = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
 	"resolved_config_digest", "source_type", "source_id", "source_url",
@@ -208,6 +216,182 @@ func TestBranchPreviewHandlerWorkerSelectionRequirementsRequireStaticEgress(t *t
 	require.NoError(t, err, "branch preview worker selection should read org network settings")
 	require.True(t, reqs.StaticEgressRequired, "branch preview worker selection should require static-egress-capable workers for opted-in orgs")
 	require.Equal(t, "203.0.113.10", reqs.StaticEgressPublicIP, "branch preview worker selection should require workers verified against the configured static egress public IP")
+}
+
+func TestDerivePRPreviewLaunch(t *testing.T) {
+	t.Parallel()
+
+	previewURL := "https://target.preview.143.dev"
+	staleURL := "https://old.preview.143.dev"
+	tests := []struct {
+		name     string
+		resp     branchPreviewResponse
+		opts     prPreviewLaunchOptions
+		expected branchPreviewLaunch
+	}{
+		{
+			name: "ready latest preview opens",
+			resp: branchPreviewResponse{
+				Status:          string(models.PreviewStatusReady),
+				PreviewID:       ptrToUUID(uuid.New()),
+				PreviewURL:      &previewURL,
+				CommitSHA:       "abc123",
+				LatestCommitSHA: "abc123",
+			},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       true,
+				ClickedOpen:     true,
+				LatestCommitSHA: "abc123",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionOpen,
+				Reason:           models.PreviewLaunchReasonReady,
+				AutoOpen:         true,
+				RepresentsLatest: true,
+				PrimaryLabel:     "Open preview",
+			},
+		},
+		{
+			name: "starting latest preview waits and auto opens for open intent",
+			resp: branchPreviewResponse{
+				Status:          string(models.PreviewStatusStarting),
+				PreviewID:       ptrToUUID(uuid.New()),
+				PreviewURL:      &previewURL,
+				CommitSHA:       "abc123",
+				LatestCommitSHA: "abc123",
+			},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       true,
+				ClickedOpen:     true,
+				LatestCommitSHA: "abc123",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionWait,
+				Reason:           models.PreviewLaunchReasonStarting,
+				AutoOpen:         true,
+				RepresentsLatest: true,
+				PrimaryLabel:     "Opening when ready",
+			},
+		},
+		{
+			name: "resumable stopped preview resumes",
+			resp: branchPreviewResponse{
+				Status:                string(models.PreviewStatusStopped),
+				TargetID:              uuid.New(),
+				CommitSHA:             "abc123",
+				LatestCommitSHA:       "abc123",
+				Resumable:             true,
+				ResumeEstimateSeconds: ptrToInt(30),
+			},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       true,
+				ClickedOpen:     true,
+				LatestCommitSHA: "abc123",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionResume,
+				Reason:           models.PreviewLaunchReasonResumable,
+				AutoOpen:         true,
+				RepresentsLatest: true,
+				PrimaryLabel:     "Resume preview",
+				Message:          "This preview is ready to resume in about 30 seconds.",
+			},
+		},
+		{
+			name: "stale preview starts latest and does not auto open",
+			resp: branchPreviewResponse{
+				Status:              string(models.PreviewStatusReady),
+				PreviewID:           ptrToUUID(uuid.New()),
+				PreviewURL:          &staleURL,
+				CommitSHA:           "abc123",
+				LatestCommitSHA:     "def456",
+				NewCommitsAvailable: true,
+			},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       true,
+				ClickedOpen:     true,
+				LatestCommitSHA: "def456",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionStartLatest,
+				Reason:           models.PreviewLaunchReasonStale,
+				AutoOpen:         false,
+				RepresentsLatest: false,
+				PrimaryLabel:     "Start latest",
+				SecondaryLabel:   "Open stale preview",
+				StalePreviewURL:  &staleURL,
+				Message:          "This preview is for abc123; the pull request is now at def456.",
+			},
+		},
+		{
+			name: "failed latest preview retries",
+			resp: branchPreviewResponse{
+				Status:          string(models.PreviewStatusFailed),
+				PreviewID:       ptrToUUID(uuid.New()),
+				CommitSHA:       "abc123",
+				LatestCommitSHA: "abc123",
+			},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       true,
+				LatestCommitSHA: "abc123",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionRetry,
+				Reason:           models.PreviewLaunchReasonFailed,
+				AutoOpen:         false,
+				RepresentsLatest: true,
+				PrimaryLabel:     "Retry preview",
+			},
+		},
+		{
+			name: "closed pull request is terminal",
+			resp: branchPreviewResponse{Status: "target_created", CommitSHA: "abc123", LatestCommitSHA: "abc123"},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       true,
+				PRClosed:        true,
+				LatestCommitSHA: "abc123",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionClosed,
+				Reason:           models.PreviewLaunchReasonPullRequestClosed,
+				AutoOpen:         false,
+				RepresentsLatest: true,
+				Message:          "This pull request is closed, so 143 will not start a new preview by default.",
+			},
+		},
+		{
+			name: "viewer without runtime is blocked",
+			resp: branchPreviewResponse{Status: "target_created", CommitSHA: "abc123", LatestCommitSHA: "abc123"},
+			opts: prPreviewLaunchOptions{
+				CanRead:         true,
+				CanCreate:       false,
+				LatestCommitSHA: "abc123",
+			},
+			expected: branchPreviewLaunch{
+				Action:           models.PreviewLaunchActionBlocked,
+				Reason:           models.PreviewLaunchReasonRoleForbidden,
+				AutoOpen:         false,
+				RepresentsLatest: true,
+				Message:          "You can open existing previews, but you do not have permission to start a new preview for this pull request.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := derivePRPreviewLaunch(tt.resp, tt.opts)
+
+			require.Equal(t, tt.expected, *actual, "launch decision should match the PR preview state")
+		})
+	}
 }
 
 func TestBranchPreviewRuntimeMatchesWorkerRequirements(t *testing.T) {

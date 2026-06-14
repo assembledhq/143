@@ -282,8 +282,12 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
     get: (id: string) =>
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
-    getPullRequest: (owner: string, repo: string, number: string | number) =>
-      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}`),
+    getPullRequest: (owner: string, repo: string, number: string | number, params?: { intent?: 'open' | 'status' | 'diagnose' }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.intent) searchParams.set('intent', params.intent);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}${qs ? `?${qs}` : ''}`);
+    },
     restart: (id: string, body?: { start_latest?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
     startLatest: (id: string) =>

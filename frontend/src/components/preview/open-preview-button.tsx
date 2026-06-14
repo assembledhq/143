@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -36,26 +36,24 @@ export type OpenPreviewButtonProps = {
   className?: string;
 };
 
-export function OpenPreviewButton({
-  previewId,
-  previewUrl,
-  label = "Open preview",
-  disabled,
-  variant,
-  size,
-  className,
-}: OpenPreviewButtonProps) {
+type LaunchPreviewInput = {
+  previewId: string;
+  previewUrl: string;
+  popup?: Window | null;
+};
+
+export function usePreviewLauncher(): {
+  launchPreview: (input: LaunchPreviewInput) => Promise<void>;
+  isOpening: boolean;
+  error: Error | null;
+  bootstrapFrame: ReactNode;
+} {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const pendingRef = useRef<PendingOpen | null>(null);
   const timeoutRef = useRef<number | null>(null);
   const [iframeSrc, setIframeSrc] = useState<string | undefined>();
   const [isOpening, setIsOpening] = useState(false);
-
-  const safePreviewURL = useMemo(() => safeExternalUrl(previewUrl), [previewUrl]);
-  const previewOrigin = useMemo(
-    () => (safePreviewURL ? previewOriginFromURL(safePreviewURL) : undefined),
-    [safePreviewURL],
-  );
+  const [error, setError] = useState<Error | null>(null);
 
   const clearTimeoutRef = useCallback(() => {
     if (timeoutRef.current !== null) {
@@ -76,6 +74,7 @@ export function OpenPreviewButton({
       const pending = pendingRef.current;
       pending?.popup?.close();
       resetPendingOpen();
+      setError(new Error(message));
       toast.error(message);
     },
     [resetPendingOpen],
@@ -103,26 +102,32 @@ export function OpenPreviewButton({
     },
   });
 
-  const openPreview = useCallback(() => {
+  const launchPreview = useCallback(async ({ previewId, previewUrl, popup: providedPopup }: LaunchPreviewInput) => {
+    const safePreviewURL = safeExternalUrl(previewUrl);
+    const previewOrigin = safePreviewURL ? previewOriginFromURL(safePreviewURL) : undefined;
     if (!previewId || !safePreviewURL || !previewOrigin) {
       toast.error("Preview link is unavailable.");
+      setError(new Error("Preview link is unavailable."));
       return;
     }
 
-    let popup: Window | null = null;
-    try {
-      popup = window.open("about:blank", "_blank");
-      if (popup) {
-        popup.opener = null;
-        popup.document.write("<!doctype html><title>Opening preview</title><p>Opening preview...</p>");
-        popup.document.close();
+    let popup: Window | null = providedPopup ?? null;
+    if (!popup) {
+      try {
+        popup = window.open("about:blank", "_blank");
+        if (popup) {
+          popup.opener = null;
+          popup.document.write("<!doctype html><title>Opening preview</title><p>Opening preview...</p>");
+          popup.document.close();
+        }
+      } catch {
+        popup = null;
       }
-    } catch {
-      popup = null;
     }
 
     if (!popup) {
       toast.error("Your browser blocked the preview tab. Allow pop-ups and try again.");
+      setError(new Error("Your browser blocked the preview tab. Allow pop-ups and try again."));
       return;
     }
 
@@ -135,12 +140,13 @@ export function OpenPreviewButton({
       tokenRequested: false,
     };
     pendingRef.current = nextPending;
+    setError(null);
     setIsOpening(true);
     setIframeSrc(buildPreviewBootstrapSrc(previewOrigin));
     timeoutRef.current = window.setTimeout(() => {
       failOpen("Preview bootstrap timed out. Try opening it again.");
     }, BOOTSTRAP_TIMEOUT_MS);
-  }, [clearTimeoutRef, failOpen, previewId, previewOrigin, safePreviewURL]);
+  }, [clearTimeoutRef, failOpen]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -174,6 +180,43 @@ export function OpenPreviewButton({
     };
   }, [clearTimeoutRef]);
 
+  const bootstrapFrame = iframeSrc ? (
+    <iframe
+      ref={iframeRef}
+      src={iframeSrc}
+      title="Preview bootstrap"
+      className="sr-only"
+      aria-hidden="true"
+    />
+  ) : null;
+
+  return { launchPreview, isOpening, error, bootstrapFrame };
+}
+
+export function OpenPreviewButton({
+  previewId,
+  previewUrl,
+  label = "Open preview",
+  disabled,
+  variant,
+  size,
+  className,
+}: OpenPreviewButtonProps) {
+  const { launchPreview, isOpening, bootstrapFrame } = usePreviewLauncher();
+  const safePreviewURL = useMemo(() => safeExternalUrl(previewUrl), [previewUrl]);
+  const previewOrigin = useMemo(
+    () => (safePreviewURL ? previewOriginFromURL(safePreviewURL) : undefined),
+    [safePreviewURL],
+  );
+
+  const openPreview = useCallback(() => {
+    if (!previewId || !previewUrl) {
+      toast.error("Preview link is unavailable.");
+      return;
+    }
+    void launchPreview({ previewId, previewUrl });
+  }, [launchPreview, previewId, previewUrl]);
+
   return (
     <>
       <Button
@@ -187,15 +230,7 @@ export function OpenPreviewButton({
         {isOpening ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
         {isOpening ? "Opening..." : label}
       </Button>
-      {iframeSrc ? (
-        <iframe
-          ref={iframeRef}
-          src={iframeSrc}
-          title="Preview bootstrap"
-          className="sr-only"
-          aria-hidden="true"
-        />
-      ) : null}
+      {bootstrapFrame}
     </>
   );
 }
