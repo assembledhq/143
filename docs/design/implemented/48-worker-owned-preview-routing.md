@@ -108,9 +108,11 @@ Preview-capable workers publish the following metadata through `nodes.metadata`:
 
 `NODE_ID` must be stable in production so ownership written to the database remains routable across deploys and restarts.
 
-Workers only advertise `preview_capable = true` and `preview_rpc_auth_check = true` after boot-time local recovery work is complete and the HTTP listener is bound. This prevents app nodes from routing preview lifecycle calls to a worker that is registered in the cluster but not yet accepting internal preview RPC.
+Workers only advertise `preview_capable = true` and `preview_rpc_auth_check = true` after boot-time local recovery work is complete and the HTTP listener is bound. Cold-start selection requires both flags plus `preview_internal_base_url`, so a worker cannot receive new preview ownership until its advertised preview RPC endpoint has been verified. This prevents app nodes from routing preview lifecycle calls to a worker that is registered in the cluster but not yet accepting internal preview RPC.
 
 `preview_capable` gates cold-start worker selection. Existing previews and live session sandboxes remain pinned by `worker_node_id`; app nodes may resolve that owner with `preview_internal_base_url` even during the short interval before the worker re-advertises cold-start capability, so deployment readiness races do not orphan already-created preview rows.
+
+App nodes also treat gateway-to-worker reachability as part of the runtime health contract. The preview gateway marks the current active runtime unavailable with `unavailable_reason = endpoint_unreachable` when proxying to the runtime endpoint fails, and an app-side reachability monitor periodically dials active runtime endpoints to catch ready-but-undialable runtimes before a user opens the preview. Runtime loss is epoch-guarded so stale probes cannot tear down a newer replacement runtime. This keeps the durable preview URL restartable while avoiding stale `ready` rows whose worker heartbeat is fresh but whose endpoint cannot be reached from the app tier.
 
 Startup recovery is worker-scoped. A worker only rehydrates sandbox-auth sockets for preview-held sessions whose active `preview_instances.worker_node_id` matches its own `NODE_ID`; it must not scan or rebind sockets for containers owned by peer workers.
 
