@@ -181,7 +181,7 @@ describe("Account settings page", () => {
     expect(screen.getAllByText("Pi").length).toBeGreaterThan(0);
 
     await user.click(screen.getByLabelText("OpenCode"));
-    expect(screen.getByPlaceholderText("OpenCode or provider API key")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 
     await user.click(screen.getByLabelText("Amp"));
     expect(screen.getByPlaceholderText("amp_...")).toBeInTheDocument();

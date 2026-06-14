@@ -148,6 +148,81 @@ func TestPreviewStoppedReason_Validate(t *testing.T) {
 	}
 }
 
+func TestPreviewLaunchAction_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		action  PreviewLaunchAction
+		wantErr bool
+	}{
+		{name: "open is valid", action: PreviewLaunchActionOpen},
+		{name: "wait is valid", action: PreviewLaunchActionWait},
+		{name: "resume is valid", action: PreviewLaunchActionResume},
+		{name: "start is valid", action: PreviewLaunchActionStart},
+		{name: "start latest is valid", action: PreviewLaunchActionStartLatest},
+		{name: "retry is valid", action: PreviewLaunchActionRetry},
+		{name: "blocked is valid", action: PreviewLaunchActionBlocked},
+		{name: "closed is valid", action: PreviewLaunchActionClosed},
+		{name: "empty is invalid", action: "", wantErr: true},
+		{name: "bogus is invalid", action: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.action.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewLaunchAction should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewLaunchAction should accept known launch actions")
+		})
+	}
+}
+
+func TestPreviewLaunchReason_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		reason  PreviewLaunchReason
+		wantErr bool
+	}{
+		{name: "ready is valid", reason: PreviewLaunchReasonReady},
+		{name: "starting is valid", reason: PreviewLaunchReasonStarting},
+		{name: "resumable is valid", reason: PreviewLaunchReasonResumable},
+		{name: "no runtime is valid", reason: PreviewLaunchReasonNoRuntime},
+		{name: "stale is valid", reason: PreviewLaunchReasonStale},
+		{name: "failed is valid", reason: PreviewLaunchReasonFailed},
+		{name: "role forbidden is valid", reason: PreviewLaunchReasonRoleForbidden},
+		{name: "token forbidden is valid", reason: PreviewLaunchReasonTokenForbidden},
+		{name: "capacity is valid", reason: PreviewLaunchReasonCapacity},
+		{name: "config required is valid", reason: PreviewLaunchReasonConfigRequired},
+		{name: "config invalid is valid", reason: PreviewLaunchReasonConfigInvalid},
+		{name: "repository missing is valid", reason: PreviewLaunchReasonRepositoryMissing},
+		{name: "github unavailable is valid", reason: PreviewLaunchReasonGitHubUnavailable},
+		{name: "pull request closed is valid", reason: PreviewLaunchReasonPullRequestClosed},
+		{name: "preview unavailable is valid", reason: PreviewLaunchReasonPreviewUnavailable},
+		{name: "empty is invalid", reason: "", wantErr: true},
+		{name: "bogus is invalid", reason: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.reason.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewLaunchReason should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewLaunchReason should accept known launch reasons")
+		})
+	}
+}
+
 func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
 	t.Parallel()
 

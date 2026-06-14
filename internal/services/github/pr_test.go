@@ -2406,7 +2406,7 @@ func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 
 	url := svc.prPreviewURL(context.Background(), run, repo, "owner", "repo", 42, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42")
 
-	require.Equal(t, "https://"+targetID.String()+".preview.143.dev", url, "PR preview URL should point at the durable preview-origin target host")
+	require.Equal(t, "https://143.dev/previews/github/owner/repo/pull/42", url, "PR preview URL should point at the stable app launch route")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
