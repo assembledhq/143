@@ -224,6 +224,46 @@ export interface BranchPreviewResponse {
   services?: import('./preview-types').PreviewService[];
   infrastructure?: import('./preview-types').PreviewInfrastructure[];
   logs?: import('./preview-types').PreviewLog[];
+  launch?: PreviewLaunchDecision;
+}
+
+export type PreviewLaunchAction =
+  | "open"
+  | "wait"
+  | "resume"
+  | "start"
+  | "start_latest"
+  | "retry"
+  | "blocked"
+  | "closed";
+
+export type PreviewLaunchReason =
+  | "ready"
+  | "starting"
+  | "resumable"
+  | "no_runtime"
+  | "stale"
+  | "failed"
+  | "role_forbidden"
+  | "token_forbidden"
+  | "capacity"
+  | "config_required"
+  | "config_invalid"
+  | "repository_missing"
+  | "github_unavailable"
+  | "pull_request_closed"
+  | "preview_unavailable";
+
+export interface PreviewLaunchDecision {
+  action: PreviewLaunchAction;
+  reason: PreviewLaunchReason;
+  auto_open: boolean;
+  represents_latest: boolean;
+  requires_user_gesture?: boolean;
+  message?: string;
+  primary_label?: string;
+  secondary_label?: string;
+  stale_preview_url?: string;
 }
 
 export interface PreviewListMeta {
