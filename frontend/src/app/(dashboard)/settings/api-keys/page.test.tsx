@@ -181,8 +181,8 @@ describe("APIKeysSettingsPage", () => {
   it("renders token lifecycle metadata and confirms revocation", async () => {
     const tokens: APIToken[] = [
       token("active-token", "production", {}),
-      token("expired-token", "old deploy", { expires_at: "2020-01-01T00:00:00Z" }),
-      token("revoked-token", "leaked key", { revoked_at: "2026-02-01T00:00:00Z" }),
+      token("expired-token", "old deploy", { expires_at: "2020-01-01T12:00:00Z" }),
+      token("revoked-token", "leaked key", { revoked_at: "2026-02-01T12:00:00Z" }),
     ];
     let revokedTokenID = "";
     server.use(
