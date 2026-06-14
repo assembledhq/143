@@ -27,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -633,15 +634,7 @@ function DetailValue({ label, value }: { label: string; value: string }) {
 }
 
 function PreviewError({ title, message }: { title: string; message: string }) {
-  return (
-    <div className="flex items-start gap-3 rounded-md border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
-      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-      <div>
-        <p className="font-medium">{title}</p>
-        <p className="text-destructive/90">{message}</p>
-      </div>
-    </div>
-  );
+  return <ErrorNotice title={title} description={message} />;
 }
 
 function StatusIcon({ status, launchMode }: { status: string; launchMode: boolean }) {

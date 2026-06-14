@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import {
   ResponsiveModal,
   ResponsiveModalBody,
@@ -181,7 +182,7 @@ export function CodexDeviceCodeModal({
         {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-success">Connected successfully!</p></div>}
         {(status === "error" || status === "expired") && (
           <div className="mt-4">
-            <p className="text-sm text-destructive">{error}</p>
+            <ErrorText className="text-sm">{error}</ErrorText>
           </div>
         )}
       </ResponsiveModalBody>

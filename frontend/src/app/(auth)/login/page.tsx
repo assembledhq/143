@@ -5,6 +5,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -268,9 +269,9 @@ function LoginPageContent() {
           )}
 
           {error && (
-            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
+            <ErrorText className="rounded-md bg-destructive/10 px-3 py-2 text-sm" role="alert">
               {error}
-            </div>
+            </ErrorText>
           )}
 
           {!emailAuthReady && !emailAuthPending && (

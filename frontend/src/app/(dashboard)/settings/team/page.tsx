@@ -9,6 +9,7 @@ import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -295,9 +296,9 @@ export default function TeamSettingsPage() {
           description="Manage your team members and roles."
         />
       {actionError && (
-        <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
           {actionError}
-        </div>
+        </ErrorText>
       )}
 
       {!canManageTeam && (
@@ -810,7 +811,7 @@ export default function TeamSettingsPage() {
                 </Select>
               </div>
               {inviteError && (
-                <p className="text-xs text-destructive">{inviteError}</p>
+                <ErrorText>{inviteError}</ErrorText>
               )}
               <AlertDialogFooter>
                 <AlertDialogCancel type="button">Cancel</AlertDialogCancel>

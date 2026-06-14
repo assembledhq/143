@@ -10,6 +10,7 @@ import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
@@ -76,9 +77,9 @@ export function PullRequestPreviewContent({
             {previewQuery.isLoading ? (
               <p className="text-sm text-muted-foreground">Loading PR preview...</p>
             ) : previewQuery.isError ? (
-              <p className="text-sm text-destructive">
+              <ErrorText className="text-sm">
                 {previewQuery.error instanceof Error ? previewQuery.error.message : "Preview could not be loaded."}
-              </p>
+              </ErrorText>
             ) : preview ? (
               <>
                 {preview.new_commits_available ? (
@@ -123,7 +124,9 @@ export function PullRequestPreviewContent({
                 </div>
 
                 {preview.error ? (
-                  <p className="rounded-md border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">{preview.error}</p>
+                  <ErrorText className="rounded-md border border-destructive/20 bg-destructive/5 p-3 text-sm">
+                    {preview.error}
+                  </ErrorText>
                 ) : null}
 
                 {preview.phase_steps?.length ? (

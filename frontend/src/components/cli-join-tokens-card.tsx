@@ -8,6 +8,7 @@ import { captureError } from "@/lib/errors";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -103,9 +104,9 @@ export function CLIJoinTokensCard() {
         Slack; revoke it here any time.
       </p>
       {error && (
-        <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
           {error}
-        </div>
+        </ErrorText>
       )}
       <Card>
         <CardContent className="space-y-3 p-4">
