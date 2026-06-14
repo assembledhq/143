@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -103,8 +104,24 @@ func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.C
 }
 
 type previewAuthProbeNode struct {
-	ID      string
-	BaseURL string
+	ID              string
+	BaseURL         string
+	Status          models.NodeStatus
+	LastHeartbeatAt time.Time
+}
+
+type previewAuthUnreachableError struct {
+	err error
+}
+
+const previewAuthFreshHeartbeatWindow = 2 * time.Minute
+
+func (e previewAuthUnreachableError) Error() string {
+	return e.err.Error()
+}
+
+func (e previewAuthUnreachableError) Unwrap() error {
+	return e.err
 }
 
 func selectPreviewAuthProbeNodes(nodes []models.Node, nodeID string) ([]previewAuthProbeNode, error) {
@@ -122,8 +139,10 @@ func selectPreviewAuthProbeNodes(nodes []models.Node, nodeID string) ([]previewA
 			return nil, fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
 		}
 		probeNodes = append(probeNodes, previewAuthProbeNode{
-			ID:      node.ID,
-			BaseURL: baseURL,
+			ID:              node.ID,
+			BaseURL:         baseURL,
+			Status:          node.Status,
+			LastHeartbeatAt: node.LastHeartbeatAt,
 		})
 	}
 	if nodeID != "" && len(probeNodes) == 0 {
@@ -166,6 +185,13 @@ func probePreviewRPCAuthNodes(nodes []previewAuthProbeNode, keyring auth.Preview
 					continue
 				}
 				if err := probePreviewRPCAuthNode(ctx, client, keyring, nodes[idx], timeout); err != nil {
+					var unreachable previewAuthUnreachableError
+					if errors.As(err, &unreachable) {
+						if tolerateUnreachablePreviewAuthNode(nodes[idx], time.Now().UTC()) {
+							fmt.Fprintf(os.Stderr, "worker-deployctl: skipping unreachable stale/draining preview RPC auth-check node %s (%s): %v\n", nodes[idx].ID, nodes[idx].BaseURL, err)
+							continue
+						}
+					}
 					select {
 					case errCh <- err:
 						cancel()
@@ -204,6 +230,13 @@ sendJobs:
 	return checkedIDs, nil
 }
 
+func tolerateUnreachablePreviewAuthNode(node previewAuthProbeNode, now time.Time) bool {
+	if node.Status != models.NodeStatusActive {
+		return true
+	}
+	return now.Sub(node.LastHeartbeatAt) > previewAuthFreshHeartbeatWindow
+}
+
 func probePreviewRPCAuthNode(ctx context.Context, client *http.Client, keyring auth.PreviewTokenKeyring, node previewAuthProbeNode, timeout time.Duration) error {
 	baseURL := strings.TrimRight(node.BaseURL, "/")
 	if baseURL == "" {
@@ -228,7 +261,7 @@ func probePreviewRPCAuthNode(ctx context.Context, client *http.Client, keyring a
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("preview RPC auth-check failed for node %s (%s): %w", node.ID, baseURL, err)
+		return previewAuthUnreachableError{err: fmt.Errorf("preview RPC auth-check unreachable for node %s (%s): %w", node.ID, baseURL, err)}
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	closeErr := resp.Body.Close()
