@@ -68,7 +68,7 @@ func TestRemoveGeminiCLIMigrationKeepsHistoricalSessionsReadable(t *testing.T) {
 func TestUsersSecondaryEmailsMigrationIsExpandOnly(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000189_users_secondary_emails.up.sql")
+	body, err := os.ReadFile("../../migrations/000191_users_secondary_emails.up.sql")
 	require.NoError(t, err, "test should read the users secondary emails migration")
 
 	sql := string(body)
