@@ -350,7 +350,7 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
+export const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), []);

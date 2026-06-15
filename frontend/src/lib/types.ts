@@ -892,6 +892,63 @@ export interface HumanInputAnswerBody {
   answer_payload?: unknown;
 }
 
+export type SessionTranscriptEntryKind =
+  | 'message'
+  | 'tool_use'
+  | 'tool_result'
+  | 'log'
+  | 'human_input'
+  | 'milestone'
+  | 'checkpoint';
+
+export interface SessionTranscriptEntry {
+  id: string;
+  kind: SessionTranscriptEntryKind;
+  created_at: string;
+  message_id?: number;
+  log_id?: number;
+  request_id?: string;
+  role?: 'user' | 'assistant';
+  level?: string;
+  content?: string;
+  content_truncated?: boolean;
+  content_bytes?: number;
+  content_chars?: number;
+  summary?: string;
+  tool_name?: string;
+  collapsed?: boolean;
+  message?: SessionMessage;
+  log?: SessionLog;
+  human_input?: HumanInputRequest;
+}
+
+export interface SessionTranscriptTurn {
+  turn_number: number;
+  started_at: string;
+  ended_at?: string;
+  entries: SessionTranscriptEntry[];
+}
+
+export interface SessionTranscriptWindowMeta {
+  position: 'latest' | 'older' | 'newer' | 'around';
+  has_older: boolean;
+  next_older_cursor?: string;
+  has_newer: boolean;
+  next_newer_cursor?: string;
+  anchor_entry_id?: string;
+  anchor_found?: boolean;
+  latest_assistant_entry_id?: string;
+  latest_assistant_message_id?: number;
+  live_edge_entry_id?: string;
+  live_edge_message_id?: number;
+  thread_status: ThreadStatus;
+}
+
+export interface SessionTranscriptWindowResponse {
+  data: SessionTranscriptTurn[];
+  meta: SessionTranscriptWindowMeta;
+}
+
 export interface PullRequest {
   id: string;
   session_id: string;
