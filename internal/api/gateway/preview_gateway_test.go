@@ -1734,9 +1734,11 @@ func TestGateway_ProxyToWorker_LogsTranslatedWorkerFailureMessage(t *testing.T) 
 			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
 			now, nil, nil, "", "", now, now,
 		))
-	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// A token-level auth failure must NOT mark the runtime lost — there is no
+	// MarkPreviewRuntimeLost exec expectation, and runtime_marked_lost is
+	// asserted false below. Tearing down a healthy runtime on a transient
+	// "invalid preview token" (e.g. a token that expired mid-flight against a
+	// slow worker) would kill a working preview.
 
 	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
 	req.Host = previewID.String() + ".preview.143.dev"
@@ -1763,6 +1765,7 @@ func TestGateway_ProxyToWorker_LogsTranslatedWorkerFailureMessage(t *testing.T) 
 	require.Equal(t, runtimeID.String(), translated["runtime_id"], "gateway log should include runtime id")
 	require.Equal(t, "worker-runtime", translated["worker_node_id"], "gateway log should include runtime worker node")
 	require.Equal(t, workerServer.URL, translated["endpoint_url"], "gateway log should include runtime endpoint")
+	require.Equal(t, false, translated["runtime_marked_lost"], "token-level auth failures must not mark the runtime lost")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
