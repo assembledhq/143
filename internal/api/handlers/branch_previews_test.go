@@ -1771,3 +1771,212 @@ func TestBranchPreviewHandler_GetFollowsActiveSessionPreview(t *testing.T) {
 	require.Equal(t, string(models.PreviewStatusStarting), resp.Data.Status, "Get should surface the replacement's status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestBranchPreviewHandler_GetEnrichesSessionPreviewMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	expiresAt := now.Add(30 * time.Minute)
+	branch := "143/7c2ade9e/the-preview-failure-looks-like-dependency-installation-is"
+	commit := "99d637f392f9051fdb9d5b7d9304ce4fab607b79"
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			sessionPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusUnavailable, now, &now)...,
+		))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
+	mock.ExpectQuery("JOIN sessions sess ON sess\\.id = pi\\.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewSummaryTestCols()).AddRow(
+			previewID, &previewID, repoID, "assembledhq/assembled", branch, commit,
+			"", models.PreviewSourceTypeSession, sessionID.String(), "", "unavailable", now,
+			now, &expiresAt, &now, "", "unavailable", "preview runtime endpoint mismatch",
+			false, (*int)(nil),
+		))
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: "abc123"},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/"+previewID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("preview_id", previewID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.Get(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Get should succeed for a session preview")
+	var resp models.SingleResponse[branchPreviewResponse]
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "Get should return a preview response")
+	require.Equal(t, previewID, resp.Data.TargetID, "session preview detail should use the runtime preview ID as the target ID")
+	require.Equal(t, repoID, resp.Data.RepositoryID, "session preview detail should include the owning session repository ID")
+	require.Equal(t, "assembledhq/assembled", resp.Data.RepositoryFullName, "session preview detail should include the repository full name")
+	require.Equal(t, branch, resp.Data.Branch, "session preview detail should include the session branch")
+	require.Equal(t, commit, resp.Data.CommitSHA, "session preview detail should include the session base commit")
+	require.Equal(t, models.PreviewSourceTypeSession, resp.Data.SourceType, "session preview detail should identify the source as a session")
+	require.Equal(t, sessionID.String(), resp.Data.SourceID, "session preview detail should include the owning session ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_GetSessionPreviewRejectsTokenWithoutRepositoryAccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		withAuth func(context.Context, uuid.UUID, uuid.UUID) context.Context
+	}{
+		{
+			name: "preview API token",
+			withAuth: func(ctx context.Context, orgID, otherRepoID uuid.UUID) context.Context {
+				return middleware.WithPreviewAPIToken(ctx, &models.PreviewAPIToken{
+					OrgID:         orgID,
+					Scopes:        []string{"previews:read"},
+					RepositoryIDs: []uuid.UUID{otherRepoID},
+				})
+			},
+		},
+		{
+			name: "external API token",
+			withAuth: func(ctx context.Context, orgID, otherRepoID uuid.UUID) context.Context {
+				return middleware.WithAPIIdentity(ctx, &models.APIClient{ID: uuid.New(), OrgID: orgID}, &models.APIToken{
+					ID:            uuid.New(),
+					OrgID:         orgID,
+					Scopes:        []string{"previews:read"},
+					RepositoryIDs: []uuid.UUID{otherRepoID},
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			userID := uuid.New()
+			sessionID := uuid.New()
+			previewID := uuid.New()
+			repoID := uuid.New()
+			otherRepoID := uuid.New()
+			now := time.Now()
+			expiresAt := now.Add(30 * time.Minute)
+
+			mock.ExpectQuery("SELECT .+ FROM preview_instances").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+					sessionPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusUnavailable, now, &now)...,
+				))
+			mock.ExpectQuery("SELECT .+ FROM preview_instances").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
+			mock.ExpectQuery("JOIN sessions sess ON sess\\.id = pi\\.session_id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(branchPreviewSummaryTestCols()).AddRow(
+					previewID, &previewID, repoID, "assembledhq/assembled", "feature/session-preview", "abc123",
+					"", models.PreviewSourceTypeSession, sessionID.String(), "", "unavailable", now,
+					now, &expiresAt, &now, "", "unavailable", "preview runtime endpoint mismatch",
+					false, (*int)(nil),
+				))
+
+			handler := NewBranchPreviewHandler(
+				db.NewPreviewStore(mock),
+				db.NewRepositoryStore(mock),
+				fakeBranchPreviewGitHub{},
+				nil,
+				"https://app.143.dev",
+				"https://{id}.preview.143.dev",
+			)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/"+previewID.String(), nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("preview_id", previewID.String())
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			ctx = tt.withAuth(ctx, orgID, otherRepoID)
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			handler.Get(rr, req)
+
+			require.Equal(t, http.StatusForbidden, rr.Code, "Get should reject token access to session previews in another repository")
+			require.Contains(t, rr.Body.String(), "PREVIEW_TOKEN_FORBIDDEN", "session preview access failure should use the preview token forbidden code")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestBranchPreviewHandler_EnrichSessionPreviewResponseReturnsCopy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	expiresAt := now.Add(30 * time.Minute)
+	previewURL := "https://" + previewID.String() + ".preview.143.dev"
+	base := branchPreviewResponse{
+		PreviewID:  &previewID,
+		Status:     string(models.PreviewStatusUnavailable),
+		Error:      "preview runtime endpoint mismatch",
+		StableURL:  "https://app.143.dev/previews/" + previewID.String(),
+		PreviewURL: &previewURL,
+		ExpiresAt:  &expiresAt,
+		StoppedAt:  &now,
+	}
+	original := base
+
+	mock.ExpectQuery("JOIN sessions sess ON sess\\.id = pi\\.session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewSummaryTestCols()).AddRow(
+			previewID, &previewID, repoID, "assembledhq/assembled", "feature/session-preview", "abc123",
+			"", models.PreviewSourceTypeSession, sessionID.String(), "", "unavailable", now,
+			now, &expiresAt, &now, "", "unavailable", "preview runtime endpoint mismatch",
+			false, (*int)(nil),
+		))
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	enriched := handler.enrichSessionPreviewResponse(context.Background(), orgID, base)
+
+	require.Equal(t, original, base, "enrichSessionPreviewResponse should not mutate the input response")
+	require.Equal(t, previewID, enriched.TargetID, "enriched copy should use the runtime preview ID as the target ID")
+	require.Equal(t, repoID, enriched.RepositoryID, "enriched copy should include the owning session repository ID")
+	require.Equal(t, "assembledhq/assembled", enriched.RepositoryFullName, "enriched copy should include repository metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

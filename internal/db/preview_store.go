@@ -432,6 +432,41 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
 }
 
+// GetSessionPreviewSummary returns target-shaped metadata for a runtime-only
+// session preview. Session previews do not have preview_targets rows, so the
+// preview instance ID acts as the stable list/detail ID.
+func (s *PreviewStore) GetSessionPreviewSummary(ctx context.Context, orgID, previewID uuid.UUID) (*models.BranchPreviewSummary, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT pi.id AS target_id, pi.id AS preview_id,
+			sess.repository_id, repo.full_name AS repository_full_name,
+			COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+			COALESCE(NULLIF(pi.base_commit_sha, ''), sess.base_commit_sha, '') AS commit_sha,
+			'' AS preview_config_name,
+			'session' AS source_type, sess.id::text AS source_id, '' AS source_url,
+			pi.status AS status,
+			pi.created_at, pi.created_at AS sort_created_at,
+			pi.expires_at, pi.stopped_at, COALESCE(pi.stopped_reason, '') AS stopped_reason,
+			COALESCE(pi.current_phase, '') AS current_phase, COALESCE(pi.error, '') AS error,
+			false AS resumable, NULL::integer AS resume_estimate_seconds
+		FROM preview_instances pi
+		JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+		JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+		WHERE pi.id = @preview_id
+		  AND pi.org_id = @org_id
+		  AND pi.preview_target_id IS NULL
+		  AND pi.session_id IS NOT NULL`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query session preview summary: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
+	if err != nil {
+		return nil, fmt.Errorf("get session preview summary: %w", err)
+	}
+	return &row, nil
+}
+
 func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID uuid.UUID, filters BranchPreviewIndexFilters) (map[string]int, error) {
 	query := fmt.Sprintf(`WITH target_previews AS (
 			SELECT target.id AS target_id, target.org_id, target.repository_id, repo.full_name AS repository_full_name,
