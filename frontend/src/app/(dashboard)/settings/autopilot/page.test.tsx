@@ -60,7 +60,7 @@ describe("AutopilotSettingsPage", () => {
             agent_config: {
               codex: { OPENAI_API_KEY: "sk-***" },
               claude_code: { ANTHROPIC_API_KEY: "sk-ant-***" },
-              opencode: { OPENCODE_API_KEY: "sk-or-***", OPENCODE_MODEL: "openai/gpt-5.4-mini" },
+              opencode: { OPENCODE_API_KEY: "oc-***", OPENCODE_MODEL: "openai/gpt-5.4-mini" },
               amp: { AMP_API_KEY: "amp_***" },
               pi: { PI_API_KEY: "pi_***" },
             },
@@ -85,10 +85,11 @@ describe("AutopilotSettingsPage", () => {
     expect(screen.getByText("Amp modes")).toBeInTheDocument();
     expect(screen.getByText("Pi")).toBeInTheDocument();
 
-    // Spot-check a row from each kind: Codex model, Amp mode, Pi provider/model.
+    // Spot-check a row from each kind: Codex model, Amp mode, OpenCode model, Pi provider/model.
     expect(screen.getByRole("option", { name: "claude-opus-4-7" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "smart" })).toBeInTheDocument();
-    expect(screen.getAllByRole("option", { name: "anthropic/claude-opus-4-7" }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("option", { name: "openai/gpt-5.4-mini" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "google/gemini-2.5-pro" })).toBeInTheDocument();
   });
 
   it("includes unified org subscription credentials in PM model availability", async () => {
