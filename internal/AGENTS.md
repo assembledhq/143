@@ -35,6 +35,7 @@ The existing test `internal/db/tenancy_test.go` is a third layer of defense: it 
 **Default to immutability.** When transforming data, return a new struct value rather than mutating the input in place.
 
 - Return a new struct (or `*T` constructed with `&T{...}`) from transformation functions instead of taking a pointer and writing through it.
+- For response-building or enrichment helpers, prefer idempotent functions that accept the current response value and return an enriched copy. This keeps handler state flow explicit and makes repeated calls safe.
 - Build new slices with `append` onto a fresh slice rather than mutating an argument; same for maps — copy then write.
 - Avoid setter methods that mutate the receiver — prefer `WithFoo(v) T` style that returns a copy.
 - Don't expose mutable references across package boundaries. If you must return a slice/map, return a copy or document that the caller must not mutate it.
