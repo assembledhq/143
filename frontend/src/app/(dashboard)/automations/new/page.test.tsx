@@ -446,6 +446,70 @@ describe("NewAutomationPage", () => {
     });
   }, 20000);
 
+  it("submits selected GitHub event triggers", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | null = null;
+
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Test Org",
+          settings: { default_agent_type: "codex" },
+        },
+      })),
+      http.get("*/api/v1/settings/codex-auth/status", () => HttpResponse.json({
+        data: { status: "completed" },
+      })),
+      http.get("*/api/v1/coding-credentials*", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+      http.get("*/api/v1/repositories", () => HttpResponse.json({
+        data: [
+          {
+            id: "repo-1",
+            org_id: "org-1",
+            integration_id: "int-1",
+            github_id: 1,
+            full_name: "acme/repo",
+            default_branch: "main",
+            private: false,
+            clone_url: "https://github.com/acme/repo.git",
+            installation_id: 10,
+            status: "active",
+            settings: {},
+            created_at: "2026-03-05T12:00:00Z",
+            updated_at: "2026-03-05T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/automations", async ({ request }) => {
+        requestBody = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("checkbox", { name: "PR created" }));
+    await user.click(screen.getByRole("checkbox", { name: "PR comment added" }));
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({
+        github_event_triggers: [
+          "github.pull_request.opened",
+          "github.issue_comment.created",
+        ],
+      });
+    });
+  });
+
   it("submits pre-PR review disabled when the default agent does not support native review", async () => {
     const user = userEvent.setup();
     let requestBody: Record<string, unknown> | null = null;

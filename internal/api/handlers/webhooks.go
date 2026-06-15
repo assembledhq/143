@@ -71,6 +71,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handlePullRequestReview(w, r, body)
 	case "pull_request_review_comment":
 		h.handlePullRequestReviewComment(w, r, body)
+	case "issue_comment":
+		h.handleIssueComment(w, r, body)
 	case "check_suite":
 		h.handleCheckSuite(w, r, body)
 	case "check_run":
@@ -78,6 +80,33 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
+}
+
+func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.IssueCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse issue_comment event")
+		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+
+	if err := h.prService.HandleIssueCommentEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ISSUE_COMMENT_EVENT_FAILED", "failed to process issue_comment event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
 func (h *WebhookHandler) verifySignature(payload []byte, signature string) bool {

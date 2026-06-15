@@ -108,6 +108,7 @@ Under **Subscribe to events**, check:
 - [x] **Pull request** — track PR lifecycle (merge, close)
 - [x] **Pull request review** — capture review decisions (approved, changes requested)
 - [x] **Pull request review comment** — capture inline review comments
+- [x] **Issue comment** — trigger automations from PR conversation comments
 - [x] **Deployment status** — detect deploys after merge
 - [x] **Organization** — keep GitHub organization auto-join rosters current when members are added, removed, or the org is renamed
 
