@@ -732,11 +732,30 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
     },
     connectSlack: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/slack/connect'),
-    listSlackChannels: () => get<{ data: Array<{ id: string; name: string; selected: boolean }> }>('/api/v1/integrations/slack/channels'),
+    getSlackHealth: () => get<import('./types').SingleResponse<import('./types').SlackInstallationHealth>>('/api/v1/integrations/slack/health'),
+    getSlackSettings: () => get<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings'),
+    updateSlackSettings: (settings: import('./types').SlackBotSettingsUpdate) =>
+      request<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
+    listSlackUserLinks: () => get<import('./types').ListResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links'),
+    upsertSlackUserLink: (link: import('./types').SlackUserLinkUpsert) =>
+      request<import('./types').SingleResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links', {
+        method: 'POST',
+        body: JSON.stringify(link),
+      }),
+    deleteSlackUserLink: (id: string) => del<void>(`/api/v1/integrations/slack/user-links/${encodeURIComponent(id)}`),
+    listSlackChannels: () => get<{ data: import('./types').SlackChannel[] }>('/api/v1/integrations/slack/channels'),
     updateSlackChannels: (channelIds: string[]) => request('/api/v1/integrations/slack/channels', {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    updateSlackChannelSettings: (channelId: string, settings: import('./types').SlackChannelSettingsUpdate) =>
+      request<import('./types').SingleResponse<unknown>>(`/api/v1/integrations/slack/channels/${encodeURIComponent(channelId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
     connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
     connectCircleCI: (authToken: string, projectSlug: string) =>
       post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {

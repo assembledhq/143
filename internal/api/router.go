@@ -88,6 +88,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
 	sessionAttributionStore := db.NewSessionAttributionStore(pool)
 	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
+	slackBotSettingsStore := db.NewSlackBotSettingsStore(pool)
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
@@ -214,6 +215,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 		handlers.WithSlackInstallationStore(slackInstallationStore),
+		handlers.WithSlackBotSettingsStore(slackBotSettingsStore),
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
 	}
@@ -1466,6 +1468,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
 				r.Get("/api/v1/integrations/slack/bot", integrationHandler.GetSlackBot)
 				r.Post("/api/v1/integrations/slack/bot/reinstall", integrationHandler.ReinstallSlackBot)
+				r.Get("/api/v1/integrations/slack/health", integrationHandler.GetSlackHealth)
+				r.Get("/api/v1/integrations/slack/settings", integrationHandler.GetSlackSettings)
+				r.Patch("/api/v1/integrations/slack/settings", integrationHandler.PatchSlackSettings)
 				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels/{slack_channel_id}", integrationHandler.PatchSlackChannelSettings)
