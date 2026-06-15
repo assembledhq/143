@@ -19,8 +19,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
-	"github.com/assembledhq/143/internal/services/ingestion"
 	ghapp "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -113,6 +113,18 @@ func (f fakeSlackUserInfoClient) FetchUserInfo(context.Context, string, string) 
 	return f.user, nil
 }
 
+type fakeSlackAuthTestClient struct {
+	info ingestion.SlackAuthInfo
+	err  error
+}
+
+func (f fakeSlackAuthTestClient) AuthTest(context.Context, string) (ingestion.SlackAuthInfo, error) {
+	if f.err != nil {
+		return ingestion.SlackAuthInfo{}, f.err
+	}
+	return f.info, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ──────────────────────────────────────────────────────────────────────────────
@@ -127,6 +139,100 @@ func TestNewIntegrationHandler(t *testing.T) {
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	require.NotNil(t, handler, "handler should not be nil")
+}
+
+func TestIntegrationHandler_GetSlackHealthReportsMissingScopes(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM slack_installations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", []string{"chat:write"}, models.SlackInstallationStatusActive, nil, now,
+			nil, now, now,
+		))
+
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test"}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackInstallationStore(db.NewSlackInstallationStore(mock)),
+	)
+	handler.slackAuthTestClient = fakeSlackAuthTestClient{info: ingestion.SlackAuthInfo{TeamID: "T123", UserID: "U143"}}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/health", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlackHealth(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "GetSlackHealth should return health for connected Slack")
+	var resp models.SingleResponse[models.SlackInstallationHealth]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "GetSlackHealth response should decode")
+	require.False(t, resp.Data.AuthOK, "missing scopes should mark Slack health unhealthy")
+	require.Contains(t, resp.Data.MissingScopes, "app_mentions:read", "health should include missing required scopes")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetSlackHealth should satisfy expected SQL")
+}
+
+func TestIntegrationHandler_ListSlackChannelsReturnsBotManagementFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test", ChannelIDs: []string{"C123"}}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, slackAPIURL+"/conversations.list", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path, "ListSlackChannels should call Slack conversations.list")
+		require.Equal(t, "Bearer xoxb-test", req.Header.Get("Authorization"), "ListSlackChannels should use the Slack bot token")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"channels":[{"id":"C123","name":"engineering","is_channel":true},{"id":"G123","name":"leadership","is_group":true}]}`)),
+			Request:    req,
+		}, nil
+	})}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/channels", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlackChannels(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "ListSlackChannels should return Slack channel data")
+	var resp struct {
+		Data []struct {
+			ID                string `json:"id"`
+			Name              string `json:"name"`
+			Type              string `json:"type"`
+			Selected          bool   `json:"selected"`
+			MonitoringEnabled bool   `json:"monitoring_enabled"`
+			BotConfigured     bool   `json:"bot_configured"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "ListSlackChannels response should decode")
+	require.Equal(t, 2, len(resp.Data), "ListSlackChannels should return every Slack channel from Slack")
+	require.Equal(t, "channel", resp.Data[0].Type, "public Slack channels should be typed for the settings UI")
+	require.True(t, resp.Data[0].Selected, "legacy selected channels should remain selected")
+	require.True(t, resp.Data[0].MonitoringEnabled, "monitoring_enabled should mirror the legacy selected state")
+	require.Equal(t, "private_channel", resp.Data[1].Type, "private Slack channels should be typed for channel settings")
+	require.False(t, resp.Data[1].BotConfigured, "channels without explicit settings should not report channel overrides")
 }
 
 func TestNewIntegrationHandler_WithOptions(t *testing.T) {
