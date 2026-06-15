@@ -1107,8 +1107,19 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   preview_rpc_auth_preflight() {
     local cid="$1"
+    # The app-side probe signs with the candidate's secret and validates against
+    # every active preview worker — the only place a worker with a divergent
+    # secret (stale bundle / incomplete rotation) is caught. Fail the deploy on
+    # any unverified *active* worker rather than silently tolerating it; set
+    # PREVIEW_RPC_AUTH_STRICT=0 to fall back to best-effort in an emergency.
+    local strict_flag="--fail-on-skipped"
+    if [ "${PREVIEW_RPC_AUTH_STRICT:-1}" != "1" ]; then
+      strict_flag=""
+      echo "PREVIEW_RPC_AUTH_STRICT=0: preview RPC auth-check will not fail on unverified active workers."
+    fi
     echo "Running preview RPC auth compatibility check from candidate api container ${cid:0:12}..."
-    docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json
+    # shellcheck disable=SC2086 # $strict_flag is an optional single flag or empty
+    docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json $strict_flag
   }
 
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
