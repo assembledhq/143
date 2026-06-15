@@ -42,6 +42,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api } from "@/lib/api";
 import { pollMs } from "@/lib/poll-intervals";
+import { formatPreviewStatus } from "@/lib/preview-types";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   BranchPreviewResponse,
@@ -112,8 +113,8 @@ function stoppedReasonLabel(
 }
 
 function statusLabel(preview: BranchPreviewResponse): string {
-  if (preview.status === "target_created") return "not started";
-  return preview.status.replaceAll("_", " ");
+  if (preview.status === "target_created") return "Not started";
+  return formatPreviewStatus(preview.status);
 }
 
 function relativeTime(value?: string): string {
