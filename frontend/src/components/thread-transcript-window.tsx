@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArrowDown,
@@ -9,10 +9,13 @@ import {
   ChevronUp,
   Loader2,
   RefreshCw,
+  Search,
   Terminal,
   Wrench,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { HumanInputRequestCard } from "@/components/human-input-request-card";
 import { AttachmentGrid } from "@/components/chat-timeline";
@@ -20,6 +23,8 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   SessionMessage,
+  SessionLog,
+  SessionTranscriptSearchMatch,
   SessionTranscriptEntry,
   SessionTranscriptTurn,
   SessionTranscriptWindowResponse,
@@ -118,6 +123,7 @@ interface ThreadTranscriptWindowProps {
   initialAnchorMessageId?: number;
   initialAnchorTurnNumber?: number;
   optimisticMessages?: SessionMessage[];
+  liveLogs?: SessionLog[];
   refetchIntervalMs?: number | false;
   className?: string;
 }
@@ -131,6 +137,7 @@ export function ThreadTranscriptWindow({
   initialAnchorMessageId,
   initialAnchorTurnNumber,
   optimisticMessages = [],
+  liveLogs = [],
   refetchIntervalMs = false,
   className,
 }: ThreadTranscriptWindowProps) {
@@ -163,8 +170,9 @@ export function ThreadTranscriptWindow({
     }
     return { position: "latest" };
   });
+  const [openAnchor, setOpenAnchor] = useState<TranscriptPageParam | null>(null);
 
-  const hasAnchor = initialPageParam.position === "around";
+  const hasAnchor = (openAnchor ?? initialPageParam).position === "around";
 
   // forceLatestKey increments when the user explicitly jumps to latest while
   // newer pages exist. It changes the query key, causing TanStack Query to
@@ -172,12 +180,12 @@ export function ThreadTranscriptWindow({
   // the current anchor-rooted pages.
   const [forceLatestKey, setForceLatestKey] = useState(0);
   const effectiveInitialPageParam: TranscriptPageParam =
-    forceLatestKey > 0 ? { position: "latest" } : initialPageParam;
+    forceLatestKey > 0 ? { position: "latest" } : openAnchor ?? initialPageParam;
   const effectiveAnchorKey =
     forceLatestKey > 0
       ? `latest:v${forceLatestKey}`
       : hasAnchor
-        ? `around:${initialPageParam.anchorEntryId ?? ""}:${initialPageParam.anchorMessageId ?? ""}:${initialPageParam.anchorTurnNumber ?? ""}`
+        ? `around:${effectiveInitialPageParam.anchorEntryId ?? ""}:${effectiveInitialPageParam.anchorMessageId ?? ""}:${effectiveInitialPageParam.anchorTurnNumber ?? ""}`
         : "latest";
   const isAnchorMode = effectiveInitialPageParam.position === "around";
 
@@ -192,6 +200,8 @@ export function ThreadTranscriptWindow({
   const [isNearBottom, setIsNearBottom] = useState(!hasAnchor);
   const [olderError, setOlderError] = useState<Error | null>(null);
   const [newerError, setNewerError] = useState<Error | null>(null);
+  const [searchText, setSearchText] = useState("");
+  const [submittedSearch, setSubmittedSearch] = useState("");
 
   // --- Infinite query ---
   const {
@@ -227,10 +237,36 @@ export function ThreadTranscriptWindow({
     refetchInterval: refetchIntervalMs,
   });
 
-  const persistedTurns: SessionTranscriptTurn[] = data?.pages.flatMap((p) => p.data) ?? [];
-  const allTurns = appendOptimisticMessagesToTurns(persistedTurns, optimisticMessages);
+  const persistedTurns = useMemo<SessionTranscriptTurn[]>(
+    () => data?.pages.flatMap((p) => p.data) ?? [],
+    [data?.pages],
+  );
+  const persistedEntryIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const turn of persistedTurns) {
+      for (const entry of turn.entries) ids.add(entry.id);
+    }
+    return ids;
+  }, [persistedTurns]);
+  const allTurns = appendLiveLogsToTurns(
+    appendOptimisticMessagesToTurns(persistedTurns, optimisticMessages),
+    isNearBottom ? liveLogs : [],
+    persistedEntryIds,
+  );
   const resolvedAnchorEntryId = data?.pages[0]?.meta?.anchor_entry_id;
   const anchorFound = data?.pages[0]?.meta?.anchor_found ?? false;
+  const latestAssistantEntryId = data?.pages[0]?.meta?.latest_assistant_entry_id;
+  const liveEdgeEntryId = data?.pages[0]?.meta?.live_edge_entry_id;
+  const shouldAnnounceLive = isNearBottom && liveEdgeEntryId === latestRenderedEntryId(allTurns);
+  const searchQuery = useQuery({
+    queryKey: [...queryKeys.sessions.threadTranscript(sessionId, threadId), "search", submittedSearch],
+    queryFn: () => api.sessions.searchThreadTranscript(sessionId, threadId, {
+      q: submittedSearch,
+      limit: 8,
+      include: ["messages", "tools", "human_inputs", "system"],
+    }),
+    enabled: submittedSearch.trim().length > 0,
+  });
   const virtualizer = useVirtualizer({
     count: allTurns.length,
     getScrollElement: () => scrollRef.current,
@@ -335,6 +371,7 @@ export function ThreadTranscriptWindow({
   // --- Jump to latest ---
   const jumpToLatest = useCallback(() => {
     if (canPersist) clearPosition(orgId!, userId!, sessionId, threadId);
+    setOpenAnchor(null);
     if (!hasNextPage) {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
     } else {
@@ -345,6 +382,51 @@ export function ThreadTranscriptWindow({
       setForceLatestKey((k) => k + 1);
     }
   }, [hasNextPage, canPersist, orgId, userId, sessionId, threadId]);
+
+  const jumpToEntry = useCallback((entryId: string, turnNumber?: number) => {
+    if (canPersist) clearPosition(orgId!, userId!, sessionId, threadId);
+    const loaded = document.querySelector(`[data-entry-id="${CSS.escape(entryId)}"]`);
+    if (loaded instanceof HTMLElement) {
+      loaded.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+    initialScrollDone.current = false;
+    setIsNearBottom(false);
+    setForceLatestKey(0);
+    setOpenAnchor({
+      position: "around",
+      anchorEntryId: entryId,
+      anchorTurnNumber: turnNumber,
+    });
+  }, [canPersist, orgId, userId, sessionId, threadId]);
+
+  const jumpToLatestAssistant = useCallback(() => {
+    if (!latestAssistantEntryId) return;
+    jumpToEntry(latestAssistantEntryId);
+  }, [jumpToEntry, latestAssistantEntryId]);
+
+  const handleSearchSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmittedSearch(searchText.trim());
+  }, [searchText]);
+
+  const handleSearchResult = useCallback((match: SessionTranscriptSearchMatch) => {
+    jumpToEntry(match.entry_id, match.turn_number);
+  }, [jumpToEntry]);
+
+  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target instanceof HTMLInputElement) return;
+    if (event.key !== "j" && event.key !== "k" && event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+      return;
+    }
+    if (allTurns.length === 0) return;
+    event.preventDefault();
+    const virtualItems = virtualizer.getVirtualItems();
+    const firstVisibleIndex = virtualItems[0]?.index ?? 0;
+    const delta = event.key === "j" || event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex = Math.min(Math.max(firstVisibleIndex + delta, 0), allTurns.length - 1);
+    virtualizer.scrollToIndex(nextIndex, { align: "start" });
+  }, [allTurns.length, virtualizer]);
 
   const showJumpToLatest = hasNextPage || !isNearBottom;
 
@@ -376,13 +458,89 @@ export function ThreadTranscriptWindow({
 
   return (
     <div className={cn("relative flex flex-col overflow-hidden", className)}>
+      <div className="flex shrink-0 items-start gap-2 border-b border-border px-3 py-2">
+        <form className="relative flex min-w-0 flex-1" onSubmit={handleSearchSubmit}>
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchText}
+            onChange={(event) => setSearchText(event.target.value)}
+            placeholder="Search transcript"
+            className="h-8 pl-8 pr-8 text-xs"
+            aria-label="Search transcript"
+          />
+          {searchText ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="absolute right-0 top-0 h-8 w-8"
+              aria-label="Clear transcript search"
+              onClick={() => {
+                setSearchText("");
+                setSubmittedSearch("");
+              }}
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
+        </form>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0"
+          disabled={!latestAssistantEntryId}
+          onClick={jumpToLatestAssistant}
+        >
+          Latest response
+        </Button>
+      </div>
+      {submittedSearch ? (
+        <div className="shrink-0 border-b border-border bg-muted/20 px-3 py-2">
+          {searchQuery.isLoading ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Searching...
+            </div>
+          ) : searchQuery.isError ? (
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs text-destructive">Could not search transcript.</p>
+              <Button size="sm" variant="ghost" onClick={() => void searchQuery.refetch()}>
+                Retry
+              </Button>
+            </div>
+          ) : (searchQuery.data?.data.length ?? 0) === 0 ? (
+            <p className="text-xs text-muted-foreground">No matches</p>
+          ) : (
+            <div className="flex gap-2 overflow-x-auto">
+              {searchQuery.data?.data.map((match) => (
+                <Button
+                  key={match.entry_id}
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="h-auto max-w-80 shrink-0 justify-start px-2 py-1 text-left"
+                  onClick={() => handleSearchResult(match)}
+                >
+                  <span className="min-w-0">
+                    <span className="block text-xs text-muted-foreground">Turn {match.turn_number}</span>
+                    <span className="block truncate text-xs">{match.snippet}</span>
+                  </span>
+                </Button>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : null}
       <div
         ref={scrollRef}
         className="flex flex-col flex-1 overflow-y-auto"
         onScroll={handleScroll}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
         role="log"
         aria-label="Thread transcript"
-        aria-live="off"
+        aria-live={shouldAnnounceLive ? "polite" : "off"}
       >
         {/* Older page boundary */}
         {hasPreviousPage && (
@@ -441,6 +599,7 @@ export function ThreadTranscriptWindow({
                 >
                   <TranscriptTurnBlock
                     turn={turn}
+                    sessionId={sessionId}
                     anchorEntryId={resolvedAnchorEntryId}
                     anchorElementRef={anchorElementRef}
                   />
@@ -500,10 +659,12 @@ export function ThreadTranscriptWindow({
 
 function TranscriptTurnBlock({
   turn,
+  sessionId,
   anchorEntryId,
   anchorElementRef,
 }: {
   turn: SessionTranscriptTurn;
+  sessionId: string;
   anchorEntryId: string | undefined;
   anchorElementRef: React.MutableRefObject<HTMLDivElement | null>;
 }) {
@@ -518,6 +679,7 @@ function TranscriptTurnBlock({
         <TranscriptEntryRow
           key={entry.id}
           entry={entry}
+          sessionId={sessionId}
           isAnchor={entry.id === anchorEntryId}
           anchorElementRef={anchorElementRef}
         />
@@ -556,12 +718,84 @@ function appendOptimisticMessagesToTurns(
   return next.sort((a, b) => a.turn_number - b.turn_number);
 }
 
+function appendLiveLogsToTurns(
+  turns: SessionTranscriptTurn[],
+  liveLogs: SessionLog[],
+  persistedEntryIds: Set<string>,
+): SessionTranscriptTurn[] {
+  if (liveLogs.length === 0) return turns;
+  const next = turns.map((turn) => ({ ...turn, entries: [...turn.entries] }));
+  for (const log of liveLogs) {
+    const kind = transcriptKindForLog(log);
+    const id = transcriptLogEntryId(log, kind);
+    if (persistedEntryIds.has(id)) continue;
+    const entry: SessionTranscriptEntry = {
+      id,
+      kind,
+      created_at: log.created_at,
+      log_id: log.id,
+      level: log.level,
+      content: kind === "log" ? log.message : undefined,
+      summary: kind === "tool_use" || kind === "tool_result" ? oneLineClientSummary(log.message) : undefined,
+      tool_name: typeof log.metadata?.tool_name === "string"
+        ? log.metadata.tool_name
+        : typeof log.metadata?.tool === "string"
+          ? log.metadata.tool
+          : undefined,
+      content_truncated: log.message_truncated,
+      content_bytes: log.message_bytes,
+      content_chars: log.message_chars,
+      log,
+    };
+    const existing = next.find((turn) => turn.turn_number === log.turn_number);
+    if (existing) {
+      existing.entries.push(entry);
+      continue;
+    }
+    next.push({
+      turn_number: log.turn_number,
+      started_at: log.created_at,
+      entries: [entry],
+    });
+  }
+  return next
+    .map((turn) => ({
+      ...turn,
+      entries: turn.entries.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()),
+    }))
+    .sort((a, b) => a.turn_number - b.turn_number);
+}
+
+function transcriptKindForLog(log: SessionLog): SessionTranscriptEntry["kind"] {
+  if (log.level === "tool_use") return "tool_use";
+  if (log.metadata?.type === "tool_result") return "tool_result";
+  return "log";
+}
+
+function transcriptLogEntryId(log: SessionLog, kind: SessionTranscriptEntry["kind"]): string {
+  if (kind === "tool_use") return `tuse_${log.id}`;
+  if (kind === "tool_result") return `tres_${log.id}`;
+  return `log_${log.id}`;
+}
+
+function latestRenderedEntryId(turns: SessionTranscriptTurn[]): string | undefined {
+  const latestTurn = turns.at(-1);
+  return latestTurn?.entries.at(-1)?.id;
+}
+
+function oneLineClientSummary(message: string): string {
+  const firstLine = message.replaceAll("\r\n", "\n").split("\n")[0]?.trim() ?? "";
+  return firstLine.length > 160 ? `${firstLine.slice(0, 160)}...` : firstLine;
+}
+
 function TranscriptEntryRow({
   entry,
+  sessionId,
   isAnchor,
   anchorElementRef,
 }: {
   entry: SessionTranscriptEntry;
+  sessionId: string;
   isAnchor: boolean;
   anchorElementRef: React.MutableRefObject<HTMLDivElement | null>;
 }) {
@@ -574,21 +808,21 @@ function TranscriptEntryRow({
 
   return (
     <div ref={setRef} data-entry-id={entry.id} className={cn(isAnchor && "scroll-mt-4")}>
-      <TranscriptEntryContent entry={entry} />
+      <TranscriptEntryContent entry={entry} sessionId={sessionId} />
     </div>
   );
 }
 
-function TranscriptEntryContent({ entry }: { entry: SessionTranscriptEntry }) {
+function TranscriptEntryContent({ entry, sessionId }: { entry: SessionTranscriptEntry; sessionId: string }) {
   switch (entry.kind) {
     case "message":
       return <TranscriptMessageEntry entry={entry} />;
     case "tool_use":
-      return <TranscriptToolEntry entry={entry} variant="use" />;
+      return <TranscriptToolEntry entry={entry} sessionId={sessionId} variant="use" />;
     case "tool_result":
-      return <TranscriptToolEntry entry={entry} variant="result" />;
+      return <TranscriptToolEntry entry={entry} sessionId={sessionId} variant="result" />;
     case "log":
-      return <TranscriptLogEntry entry={entry} />;
+      return <TranscriptLogEntry entry={entry} sessionId={sessionId} />;
     case "human_input":
       return entry.human_input ? (
         <HumanInputRequestCard request={entry.human_input} answerable={false} onAnswer={() => {}} />
@@ -634,12 +868,15 @@ function TranscriptMessageEntry({ entry }: { entry: SessionTranscriptEntry }) {
 
 function TranscriptToolEntry({
   entry,
+  sessionId,
   variant,
 }: {
   entry: SessionTranscriptEntry;
+  sessionId: string;
   variant: "use" | "result";
 }) {
   const label = entry.tool_name ?? (variant === "use" ? "tool call" : "tool result");
+  const expanded = useExpandableLogContent(sessionId, entry);
 
   return (
     <div className="flex items-start gap-2 text-xs text-muted-foreground">
@@ -647,17 +884,21 @@ function TranscriptToolEntry({
       <div className="min-w-0">
         <span className="font-mono font-medium text-foreground/70">{label}</span>
         {entry.summary && <span className="ml-2">{entry.summary}</span>}
-        {entry.content_truncated && (
-          <span className="ml-1 text-muted-foreground/60">(truncated)</span>
-        )}
+        <ExpandableLogToggle expanded={expanded} />
+        {expanded.expanded && expanded.content ? (
+          <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded border border-border bg-muted/30 p-2 text-xs text-foreground">
+            {expanded.content}
+          </pre>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function TranscriptLogEntry({ entry }: { entry: SessionTranscriptEntry }) {
+function TranscriptLogEntry({ entry, sessionId }: { entry: SessionTranscriptEntry; sessionId: string }) {
   const level = entry.level ?? entry.log?.level ?? "info";
-  const content = entry.content ?? entry.log?.message ?? "";
+  const expanded = useExpandableLogContent(sessionId, entry);
+  const content = expanded.content ?? entry.content ?? entry.log?.message ?? "";
 
   const levelClass =
     level === "error"
@@ -671,13 +912,53 @@ function TranscriptLogEntry({ entry }: { entry: SessionTranscriptEntry }) {
   return (
     <div className={cn("flex items-start gap-2 text-xs font-mono", levelClass)}>
       <Terminal className="h-3 w-3 mt-0.5 shrink-0" aria-hidden="true" />
-      <pre className="whitespace-pre-wrap break-all min-w-0">
-        {content}
-        {entry.content_truncated && (
-          <span className="text-muted-foreground/60"> (truncated)</span>
-        )}
-      </pre>
+      <div className="min-w-0">
+        <pre className="whitespace-pre-wrap break-all">
+          {content}
+        </pre>
+        <ExpandableLogToggle expanded={expanded} />
+      </div>
     </div>
+  );
+}
+
+function useExpandableLogContent(sessionId: string, entry: SessionTranscriptEntry) {
+  const [expanded, setExpanded] = useState(false);
+  const logId = entry.log_id;
+  const detailQuery = useQuery({
+    queryKey: logId ? queryKeys.sessions.logDetail(sessionId, logId) : ["session", sessionId, "logs", "none"],
+    queryFn: () => api.sessions.getLogDetail(sessionId, logId!),
+    enabled: expanded && Boolean(logId) && Boolean(entry.content_truncated),
+  });
+  return {
+    expanded,
+    setExpanded,
+    canExpand: Boolean(entry.content_truncated && logId),
+    isLoading: detailQuery.isFetching,
+    isError: detailQuery.isError,
+    content: expanded
+      ? detailQuery.data?.data.message ?? entry.content ?? entry.log?.message
+      : entry.content ?? entry.log?.message,
+  };
+}
+
+function ExpandableLogToggle({
+  expanded,
+}: {
+  expanded: ReturnType<typeof useExpandableLogContent>;
+}) {
+  if (!expanded.canExpand) return null;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className="ml-1 h-6 px-1.5 text-xs"
+      onClick={() => expanded.setExpanded(!expanded.expanded)}
+      aria-expanded={expanded.expanded}
+    >
+      {expanded.isLoading ? "Loading..." : expanded.expanded ? "Collapse" : "Expand"}
+    </Button>
   );
 }
 

@@ -44,6 +44,7 @@ type ThreadService interface {
 	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
 	RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (thread.ForkResult, error)
 	GetTranscriptWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (thread.TranscriptWindowResult, error)
+	SearchTranscript(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) (thread.TranscriptSearchResult, error)
 }
 
 type SessionThreadHandler struct {
@@ -971,6 +972,72 @@ func (h *SessionThreadHandler) GetThreadTranscript(w http.ResponseWriter, r *htt
 
 	resp := buildTranscriptWindowResponse(result, orgID, threadID)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// SearchThreadTranscript handles GET /sessions/{id}/threads/{tid}/transcript/search
+func (h *SessionThreadHandler) SearchThreadTranscript(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	query := r.URL.Query()
+	searchQuery := strings.TrimSpace(query.Get("q"))
+	if searchQuery == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "q is required")
+		return
+	}
+
+	opts := db.SessionTranscriptSearchOptions{Query: searchQuery}
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		limit, err := parsePositiveInt(rawLimit)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "invalid limit")
+			return
+		}
+		opts.Limit = limit
+	}
+	if rawInclude := strings.TrimSpace(query.Get("include")); rawInclude != "" {
+		include, err := db.ParseTranscriptInclude(rawInclude)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_INCLUDE", "invalid include")
+			return
+		}
+		opts.Include = include
+	}
+
+	result, err := h.svc.SearchTranscript(r.Context(), orgID, sessionID, threadID, opts)
+	if err != nil {
+		if errors.Is(err, thread.ErrThreadNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "TRANSCRIPT_SEARCH_FAILED", "failed to search transcript", err)
+		return
+	}
+
+	responseLimit := opts.Limit
+	if responseLimit <= 0 {
+		responseLimit = db.DefaultTranscriptSearchLimit
+	}
+	if responseLimit > db.MaxTranscriptSearchLimit {
+		responseLimit = db.MaxTranscriptSearchLimit
+	}
+
+	writeJSON(w, http.StatusOK, models.SessionTranscriptSearchResponse{
+		Data: result.Matches,
+		Meta: models.SessionTranscriptSearchMeta{
+			Query: searchQuery,
+			Limit: responseLimit,
+		},
+	})
 }
 
 // buildTranscriptEntry converts a raw store row to a SessionTranscriptEntry.

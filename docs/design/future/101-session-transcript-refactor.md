@@ -1,6 +1,6 @@
 # Design: Session Transcript Refactor
 
-> **Status:** Future | **Last reviewed:** 2026-06-14
+> **Status:** Implemented | **Last reviewed:** 2026-06-15
 
 ## Summary
 

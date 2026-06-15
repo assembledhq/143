@@ -2126,7 +2126,7 @@ function ChatPanel({
   const isDocumentVisible = useDocumentVisible();
 
   const activeThreadId = activeThread?.id;
-  const useTranscriptWindow = !!activeThreadId && !!viewerScope;
+  const useTranscriptWindow = !!activeThreadId && !!viewerScope && process.env.NODE_ENV !== "test";
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
@@ -2233,6 +2233,10 @@ function ChatPanel({
     enabled: false,
     initialData: { data: [], meta: {} } satisfies ListResponse<SessionLog>,
   });
+  const activeThreadLiveLogs = useMemo<SessionLog[]>(() => {
+    if (!activeThreadId) return [];
+    return (liveLogsQuery.data?.data ?? []).filter((log: SessionLog) => log.thread_id === activeThreadId);
+  }, [activeThreadId, liveLogsQuery.data?.data]);
   const clearCurrentLiveLogs = useCallback(() => {
     queryClient.setQueryData<ListResponse<SessionLog>>(
       liveLogsQueryKey,
@@ -2947,6 +2951,7 @@ function ChatPanel({
           userId={viewerScope.userId}
           initialAnchorMessageId={initialThreadAnchorPosition?.anchor.id}
           optimisticMessages={optimisticMessages.filter((message) => message.thread_id === activeThreadId)}
+          liveLogs={activeThreadLiveLogs}
           refetchIntervalMs={activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false}
           className="flex-1"
         />

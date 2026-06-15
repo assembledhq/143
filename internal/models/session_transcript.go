@@ -161,3 +161,27 @@ type SessionTranscriptWindowResponse struct {
 	Data []SessionTranscriptTurn     `json:"data"`
 	Meta SessionTranscriptWindowMeta `json:"meta"`
 }
+
+type SessionTranscriptSearchResponse struct {
+	Data []SessionTranscriptSearchMatch `json:"data"`
+	Meta SessionTranscriptSearchMeta    `json:"meta"`
+}
+
+type SessionTranscriptSearchMeta struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+type SessionTranscriptSearchMatch struct {
+	EntryID    string              `json:"entry_id"`
+	Kind       TranscriptEntryKind `json:"kind"`
+	TurnNumber int                 `json:"turn_number"`
+	CreatedAt  time.Time           `json:"created_at"`
+	Snippet    string              `json:"snippet"`
+	MessageID  int64               `json:"message_id,omitempty"`
+	LogID      int64               `json:"log_id,omitempty"`
+	RequestID  *uuid.UUID          `json:"request_id,omitempty"`
+	Role       MessageRole         `json:"role,omitempty"`
+	Level      SessionLogLevel     `json:"level,omitempty"`
+	ToolName   string              `json:"tool_name,omitempty"`
+}

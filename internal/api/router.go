@@ -1067,6 +1067,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/transcript", sessionThreadHandler.GetThreadTranscript)
+				r.Get("/api/v1/sessions/{id}/threads/{tid}/transcript/search", sessionThreadHandler.SearchThreadTranscript)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/inbox/recoverable", sessionThreadHandler.ListRecoverableInboxEntries)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)

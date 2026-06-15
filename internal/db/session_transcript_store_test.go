@@ -1,6 +1,7 @@
 package db
 
 import (
+	"math"
 	"sort"
 	"strings"
 	"testing"
@@ -120,6 +121,58 @@ func TestReversedInts_DoesNotMutateInput(t *testing.T) {
 	result := reversedInts(input)
 	require.Equal(t, []int{1, 2, 3, 4, 5}, result, "result should be reversed")
 	require.Equal(t, snapshot, input, "original slice must not be mutated")
+}
+
+func TestInt32TurnNumbers(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		input   []int
+		want    []int32
+		wantErr bool
+	}{
+		{
+			name:  "empty slice returns empty slice",
+			input: []int{},
+			want:  []int32{},
+		},
+		{
+			name:  "valid turn numbers are converted",
+			input: []int{1, 2, 42},
+			want:  []int32{1, 2, 42},
+		},
+		{
+			name:  "int32 bounds are accepted",
+			input: []int{math.MinInt32, math.MaxInt32},
+			want:  []int32{math.MinInt32, math.MaxInt32},
+		},
+		{
+			name:    "below int32 minimum returns error",
+			input:   []int{math.MinInt32 - 1},
+			wantErr: true,
+		},
+		{
+			name:    "above int32 maximum returns error",
+			input:   []int{math.MaxInt32 + 1},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := int32TurnNumbers(tc.input)
+			if tc.wantErr {
+				require.Error(t, err, "out-of-range turn numbers should return an error")
+				return
+			}
+			require.NoError(t, err, "valid turn numbers should not return an error")
+			require.Equal(t, tc.want, got, "turn numbers should convert to the expected int32 values")
+		})
+	}
 }
 
 func TestNewSessionTranscriptStore_NilDB(t *testing.T) {

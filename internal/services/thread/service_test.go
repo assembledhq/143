@@ -3340,6 +3340,7 @@ func TestService_GetLogs(t *testing.T) {
 
 type mockTranscriptStore struct {
 	listWindowFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
+	searchFn     func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error)
 }
 
 func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
@@ -3347,6 +3348,13 @@ func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threa
 		return m.listWindowFn(ctx, orgID, threadID, opts)
 	}
 	return db.SessionTranscriptWindow{}, nil
+}
+
+func (m *mockTranscriptStore) SearchThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error) {
+	if m.searchFn != nil {
+		return m.searchFn(ctx, orgID, threadID, opts)
+	}
+	return []db.SessionTranscriptSearchMatch{}, nil
 }
 
 // newServiceWithTranscript builds a Service with all default mocks and wires
@@ -3490,4 +3498,40 @@ func TestService_GetTranscriptWindow(t *testing.T) {
 			require.Equal(t, tt.wantStatus, result.ThreadStatus, "ThreadStatus should match")
 		})
 	}
+}
+
+func TestService_SearchTranscript(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	transcriptStore := &mockTranscriptStore{}
+	svc, threadStore := newServiceWithTranscript(t, transcriptStore)
+	threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "SearchTranscript should scope the thread lookup by org")
+		require.Equal(t, threadID, gotThreadID, "SearchTranscript should load the requested thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	transcriptStore.searchFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error) {
+		require.Equal(t, orgID, gotOrgID, "SearchTranscript should pass org scope to the store")
+		require.Equal(t, threadID, gotThreadID, "SearchTranscript should pass thread scope to the store")
+		require.Equal(t, "tests", opts.Query, "SearchTranscript should pass the query")
+		return []db.SessionTranscriptSearchMatch{
+			{EntryID: "msg_1", Kind: models.TranscriptEntryKindMessage, TurnNumber: 1},
+		}, nil
+	}
+
+	result, err := svc.SearchTranscript(context.Background(), orgID, sessionID, threadID, db.SessionTranscriptSearchOptions{Query: "tests"})
+	require.NoError(t, err, "SearchTranscript should return matches for a visible thread")
+	require.Equal(t, models.ThreadStatusIdle, result.ThreadStatus, "SearchTranscript should return the thread status")
+	require.Equal(t, []db.SessionTranscriptSearchMatch{
+		{EntryID: "msg_1", Kind: models.TranscriptEntryKindMessage, TurnNumber: 1},
+	}, result.Matches, "SearchTranscript should return store matches")
 }

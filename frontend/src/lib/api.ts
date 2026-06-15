@@ -561,6 +561,13 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SessionTranscriptWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript${qs ? `?${qs}` : ''}`);
     },
+    searchThreadTranscript: (sessionId: string, threadId: string, params: { q: string; limit?: number; include?: Array<'messages' | 'tools' | 'human_inputs' | 'system'> }) => {
+      const searchParams = new URLSearchParams();
+      searchParams.set('q', params.q);
+      if (params.limit != null) searchParams.set('limit', String(params.limit));
+      if (params.include?.length) searchParams.set('include', params.include.join(','));
+      return get<import('./types').SessionTranscriptSearchResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript/search?${searchParams.toString()}`);
+    },
     getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[]; latestTurns?: number } = {}) => {
       const searchParams = new URLSearchParams();
       const turnNumbers = Array.from(new Set((params.turnNumbers ?? []).filter((turn) => Number.isInteger(turn) && turn >= 0))).sort((a, b) => a - b);

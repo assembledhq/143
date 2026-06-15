@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { APIClient, APIToken, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
+import type { APIClient, APIToken, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptSearchResponse, SessionTranscriptWindowResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -572,6 +572,44 @@ export const handlers = [
       data: [] as SessionLog[],
       meta: {},
     } satisfies ListResponse<SessionLog>);
+  }),
+
+  http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {
+        position: 'latest',
+        has_older: false,
+        has_newer: false,
+        anchor_found: false,
+        thread_status: 'idle',
+      },
+    } satisfies SessionTranscriptWindowResponse);
+  }),
+
+  http.get('/api/v1/sessions/:id/threads/:threadId/transcript/search', ({ request }) => {
+    const url = new URL(request.url);
+    return HttpResponse.json({
+      data: [],
+      meta: {
+        query: url.searchParams.get('q') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 20),
+      },
+    } satisfies SessionTranscriptSearchResponse);
+  }),
+
+  http.get('/api/v1/session-composer/files', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/sessions/:id/composer/files', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
   }),
 
   http.get('/api/v1/sessions/:id/thread-file-events', () => {

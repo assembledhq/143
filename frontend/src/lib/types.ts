@@ -949,6 +949,28 @@ export interface SessionTranscriptWindowResponse {
   meta: SessionTranscriptWindowMeta;
 }
 
+export interface SessionTranscriptSearchMatch {
+  entry_id: string;
+  kind: SessionTranscriptEntryKind;
+  turn_number: number;
+  created_at: string;
+  snippet: string;
+  message_id?: number;
+  log_id?: number;
+  request_id?: string;
+  role?: 'user' | 'assistant';
+  level?: string;
+  tool_name?: string;
+}
+
+export interface SessionTranscriptSearchResponse {
+  data: SessionTranscriptSearchMatch[];
+  meta: {
+    query: string;
+    limit: number;
+  };
+}
+
 export interface PullRequest {
   id: string;
   session_id: string;

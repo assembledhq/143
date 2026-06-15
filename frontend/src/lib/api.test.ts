@@ -2033,4 +2033,28 @@ describe('api client', () => {
       expect(url.searchParams.get('limit_turns')).toBeNull();
     });
   });
+
+  describe('sessions.searchThreadTranscript', () => {
+    it('sends query, limit, and include filters', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript/search', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { query: 'focused tests', limit: 5 } });
+        }),
+      );
+
+      await api.sessions.searchThreadTranscript('sess-1', 'thread-1', {
+        q: 'focused tests',
+        limit: 5,
+        include: ['messages', 'tools'],
+      });
+
+      const url = new URL(capturedUrl!);
+      expect(url.pathname).toBe('/api/v1/sessions/sess-1/threads/thread-1/transcript/search');
+      expect(url.searchParams.get('q')).toBe('focused tests');
+      expect(url.searchParams.get('limit')).toBe('5');
+      expect(url.searchParams.get('include')).toBe('messages,tools');
+    });
+  });
 });
