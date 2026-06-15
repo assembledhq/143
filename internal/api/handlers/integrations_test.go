@@ -4035,6 +4035,7 @@ func TestSlackSettingsPatchRequestApply(t *testing.T) {
 	tests := []struct {
 		name      string
 		req       slackSettingsPatchRequest
+		initial   models.SlackBotSettings
 		expected  models.SlackBotSettings
 		expectErr bool
 	}{
@@ -4060,6 +4061,28 @@ func TestSlackSettingsPatchRequestApply(t *testing.T) {
 			},
 		},
 		{
+			name: "preserves omitted fields",
+			req:  slackSettingsPatchRequest{NotificationPreset: "quiet"},
+			initial: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetCustom,
+				NotificationSubscriptions: json.RawMessage(`{"events":["session.completed"]}`),
+			},
+			expected: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetQuiet,
+				NotificationSubscriptions: json.RawMessage(`{"events":["session.completed"]}`),
+			},
+		},
+		{
 			name: "rejects invalid enum values",
 			req: slackSettingsPatchRequest{
 				RoutingMode: "ship_it",
@@ -4072,12 +4095,15 @@ func TestSlackSettingsPatchRequestApply(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			settings := models.SlackBotSettings{
-				RoutingMode:               models.SlackRoutingModeAuto,
-				ResponseVisibility:        models.SlackResponseVisibilityThread,
-				AllowedActions:            []string{"session"},
-				NotificationPreset:        models.SlackNotificationPresetBalanced,
-				NotificationSubscriptions: json.RawMessage(`{}`),
+			settings := tt.initial
+			if settings.NotificationPreset == "" {
+				settings = models.SlackBotSettings{
+					RoutingMode:               models.SlackRoutingModeAuto,
+					ResponseVisibility:        models.SlackResponseVisibilityThread,
+					AllowedActions:            []string{"session"},
+					NotificationPreset:        models.SlackNotificationPresetBalanced,
+					NotificationSubscriptions: json.RawMessage(`{}`),
+				}
 			}
 
 			err := tt.req.Apply(&settings)
@@ -4160,4 +4186,48 @@ func TestSlackChannelSettingsPatchRequestToSettings(t *testing.T) {
 	require.Equal(t, models.SlackResponseVisibilityThread, *settings.ResponseVisibility, "ToSettings should convert response visibility")
 	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "ToSettings should convert notification preset")
 	require.JSONEq(t, `{"preview.ready":{"channel":true}}`, string(settings.NotificationSubscriptions), "ToSettings should preserve notification subscriptions")
+}
+
+func TestSlackChannelSettingsPatchRequestApplyPreservesOmittedFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	branch := "main"
+	routing := models.SlackRoutingModeStartWork
+	visibility := models.SlackResponseVisibilityDM
+	preset := models.SlackNotificationPresetCustom
+	settings := models.SlackChannelSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installationID,
+		SlackTeamID:               "T123",
+		SlackChannelID:            "C123",
+		SlackChannelName:          "eng",
+		ChannelType:               "channel",
+		DefaultRepositoryID:       &repoID,
+		DefaultBranch:             &branch,
+		RoutingMode:               &routing,
+		ResponseVisibility:        &visibility,
+		AllowedActions:            []string{"session", "preview"},
+		NotificationPreset:        &preset,
+		NotificationSubscriptions: json.RawMessage(`{"events":["preview.ready"]}`),
+		Active:                    true,
+	}
+	nextPreset := "quiet"
+	req := slackChannelSettingsPatchRequest{NotificationPreset: &nextPreset}
+
+	err := req.Apply(&settings)
+
+	require.NoError(t, err, "Apply should accept a partial channel settings patch")
+	require.Equal(t, "eng", settings.SlackChannelName, "Apply should preserve omitted channel name")
+	require.Equal(t, "channel", settings.ChannelType, "Apply should preserve omitted channel type")
+	require.Equal(t, &repoID, settings.DefaultRepositoryID, "Apply should preserve omitted default repository")
+	require.Equal(t, &branch, settings.DefaultBranch, "Apply should preserve omitted default branch")
+	require.Equal(t, &routing, settings.RoutingMode, "Apply should preserve omitted routing mode")
+	require.Equal(t, &visibility, settings.ResponseVisibility, "Apply should preserve omitted response visibility")
+	require.Equal(t, []string{"session", "preview"}, settings.AllowedActions, "Apply should preserve omitted allowed actions")
+	require.NotNil(t, settings.NotificationPreset, "Apply should keep notification preset pointer")
+	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "Apply should update provided notification preset")
+	require.JSONEq(t, `{"events":["preview.ready"]}`, string(settings.NotificationSubscriptions), "Apply should preserve omitted notification subscriptions")
 }

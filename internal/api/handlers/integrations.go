@@ -2432,7 +2432,17 @@ func (h *IntegrationHandler) PatchSlackSettings(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	settings := defaultSlackBotSettings(orgID, installation.ID)
+	settings, err := h.slackBotSettingsStore.GetByOrg(r.Context(), orgID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "SLACK_SETTINGS_LOOKUP_FAILED", "failed to load slack settings", err)
+			return
+		}
+		settings = defaultSlackBotSettings(orgID, installation.ID)
+	}
+	settings.OrgID = orgID
+	settings.SlackInstallationID = installation.ID
+	settings.Active = true
 	if err := body.Apply(&settings); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SLACK_SETTINGS", err.Error())
 		return
@@ -2483,24 +2493,71 @@ type slackSettingsPatchRequest struct {
 	AllowedActions            []string        `json:"allowed_actions"`
 	NotificationPreset        string          `json:"notification_preset"`
 	NotificationSubscriptions json.RawMessage `json:"notification_subscriptions"`
+
+	defaultRepositoryIDSet       bool
+	defaultBranchSet             bool
+	routingModeSet               bool
+	responseVisibilitySet        bool
+	allowedActionsSet            bool
+	notificationPresetSet        bool
+	notificationSubscriptionsSet bool
+}
+
+func (r *slackSettingsPatchRequest) UnmarshalJSON(data []byte) error {
+	type slackSettingsPatchRequestJSON struct {
+		DefaultRepositoryID       *uuid.UUID      `json:"default_repository_id"`
+		DefaultBranch             *string         `json:"default_branch"`
+		RoutingMode               string          `json:"routing_mode"`
+		ResponseVisibility        string          `json:"response_visibility"`
+		AllowedActions            []string        `json:"allowed_actions"`
+		NotificationPreset        string          `json:"notification_preset"`
+		NotificationSubscriptions json.RawMessage `json:"notification_subscriptions"`
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var decoded slackSettingsPatchRequestJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	r.DefaultRepositoryID = decoded.DefaultRepositoryID
+	r.DefaultBranch = decoded.DefaultBranch
+	r.RoutingMode = decoded.RoutingMode
+	r.ResponseVisibility = decoded.ResponseVisibility
+	r.AllowedActions = decoded.AllowedActions
+	r.NotificationPreset = decoded.NotificationPreset
+	r.NotificationSubscriptions = decoded.NotificationSubscriptions
+	_, r.defaultRepositoryIDSet = raw["default_repository_id"]
+	_, r.defaultBranchSet = raw["default_branch"]
+	_, r.routingModeSet = raw["routing_mode"]
+	_, r.responseVisibilitySet = raw["response_visibility"]
+	_, r.allowedActionsSet = raw["allowed_actions"]
+	_, r.notificationPresetSet = raw["notification_preset"]
+	_, r.notificationSubscriptionsSet = raw["notification_subscriptions"]
+	return nil
 }
 
 func (r slackSettingsPatchRequest) Apply(settings *models.SlackBotSettings) error {
-	settings.DefaultRepositoryID = r.DefaultRepositoryID
-	settings.DefaultBranch = r.DefaultBranch
-	if strings.TrimSpace(r.RoutingMode) != "" {
+	if r.defaultRepositoryIDSet || r.DefaultRepositoryID != nil {
+		settings.DefaultRepositoryID = r.DefaultRepositoryID
+	}
+	if r.defaultBranchSet || r.DefaultBranch != nil {
+		settings.DefaultBranch = r.DefaultBranch
+	}
+	if (r.routingModeSet || strings.TrimSpace(r.RoutingMode) != "") && strings.TrimSpace(r.RoutingMode) != "" {
 		settings.RoutingMode = models.SlackRoutingMode(strings.TrimSpace(r.RoutingMode))
 	}
-	if strings.TrimSpace(r.ResponseVisibility) != "" {
+	if (r.responseVisibilitySet || strings.TrimSpace(r.ResponseVisibility) != "") && strings.TrimSpace(r.ResponseVisibility) != "" {
 		settings.ResponseVisibility = models.SlackResponseVisibility(strings.TrimSpace(r.ResponseVisibility))
 	}
-	if len(r.AllowedActions) > 0 {
+	if r.allowedActionsSet || len(r.AllowedActions) > 0 {
 		settings.AllowedActions = r.AllowedActions
 	}
-	if strings.TrimSpace(r.NotificationPreset) != "" {
+	if (r.notificationPresetSet || strings.TrimSpace(r.NotificationPreset) != "") && strings.TrimSpace(r.NotificationPreset) != "" {
 		settings.NotificationPreset = models.SlackNotificationPreset(strings.TrimSpace(r.NotificationPreset))
 	}
-	if len(r.NotificationSubscriptions) > 0 {
+	if r.notificationSubscriptionsSet || len(r.NotificationSubscriptions) > 0 {
 		settings.NotificationSubscriptions = r.NotificationSubscriptions
 	}
 	return validateSlackBotSettings(*settings)
@@ -2757,7 +2814,27 @@ func (h *IntegrationHandler) PatchSlackChannelSettings(w http.ResponseWriter, r 
 			return
 		}
 	}
-	settings, err := body.ToSettings(orgID, installation.ID, installation.TeamID, channelID)
+	settings, err := h.slackChannelStore.GetByChannel(r.Context(), orgID, installation.TeamID, channelID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "SLACK_CHANNEL_LOOKUP_FAILED", "failed to load slack channel settings", err)
+			return
+		}
+		settings = models.SlackChannelSettings{
+			OrgID:               orgID,
+			SlackInstallationID: installation.ID,
+			SlackTeamID:         installation.TeamID,
+			SlackChannelID:      channelID,
+			ChannelType:         "channel",
+			Active:              true,
+		}
+	}
+	settings.OrgID = orgID
+	settings.SlackInstallationID = installation.ID
+	settings.SlackTeamID = installation.TeamID
+	settings.SlackChannelID = channelID
+	settings.Active = true
+	err = body.Apply(&settings)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SLACK_CHANNEL_SETTINGS", err.Error())
 		return
@@ -2779,48 +2856,121 @@ type slackChannelSettingsPatchRequest struct {
 	AllowedActions            []string        `json:"allowed_actions"`
 	NotificationPreset        *string         `json:"notification_preset"`
 	NotificationSubscriptions json.RawMessage `json:"notification_subscriptions"`
+
+	slackChannelNameSet          bool
+	channelTypeSet               bool
+	defaultRepositoryIDSet       bool
+	defaultBranchSet             bool
+	routingModeSet               bool
+	responseVisibilitySet        bool
+	allowedActionsSet            bool
+	notificationPresetSet        bool
+	notificationSubscriptionsSet bool
+}
+
+func (r *slackChannelSettingsPatchRequest) UnmarshalJSON(data []byte) error {
+	type slackChannelSettingsPatchRequestJSON struct {
+		SlackChannelName          string          `json:"slack_channel_name"`
+		ChannelType               string          `json:"channel_type"`
+		DefaultRepositoryID       *uuid.UUID      `json:"default_repository_id"`
+		DefaultBranch             *string         `json:"default_branch"`
+		RoutingMode               *string         `json:"routing_mode"`
+		ResponseVisibility        *string         `json:"response_visibility"`
+		AllowedActions            []string        `json:"allowed_actions"`
+		NotificationPreset        *string         `json:"notification_preset"`
+		NotificationSubscriptions json.RawMessage `json:"notification_subscriptions"`
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var decoded slackChannelSettingsPatchRequestJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	r.SlackChannelName = decoded.SlackChannelName
+	r.ChannelType = decoded.ChannelType
+	r.DefaultRepositoryID = decoded.DefaultRepositoryID
+	r.DefaultBranch = decoded.DefaultBranch
+	r.RoutingMode = decoded.RoutingMode
+	r.ResponseVisibility = decoded.ResponseVisibility
+	r.AllowedActions = decoded.AllowedActions
+	r.NotificationPreset = decoded.NotificationPreset
+	r.NotificationSubscriptions = decoded.NotificationSubscriptions
+	_, r.slackChannelNameSet = raw["slack_channel_name"]
+	_, r.channelTypeSet = raw["channel_type"]
+	_, r.defaultRepositoryIDSet = raw["default_repository_id"]
+	_, r.defaultBranchSet = raw["default_branch"]
+	_, r.routingModeSet = raw["routing_mode"]
+	_, r.responseVisibilitySet = raw["response_visibility"]
+	_, r.allowedActionsSet = raw["allowed_actions"]
+	_, r.notificationPresetSet = raw["notification_preset"]
+	_, r.notificationSubscriptionsSet = raw["notification_subscriptions"]
+	return nil
 }
 
 func (r slackChannelSettingsPatchRequest) ToSettings(orgID, installationID uuid.UUID, teamID, channelID string) (models.SlackChannelSettings, error) {
-	channelType := strings.TrimSpace(r.ChannelType)
-	if channelType == "" {
-		channelType = "channel"
+	settings := models.SlackChannelSettings{
+		OrgID:               orgID,
+		SlackInstallationID: installationID,
+		SlackTeamID:         teamID,
+		SlackChannelID:      channelID,
+		ChannelType:         "channel",
+		Active:              true,
+	}
+	if err := r.Apply(&settings); err != nil {
+		return models.SlackChannelSettings{}, err
+	}
+	return settings, nil
+}
+
+func (r slackChannelSettingsPatchRequest) Apply(settings *models.SlackChannelSettings) error {
+	if r.slackChannelNameSet || strings.TrimSpace(r.SlackChannelName) != "" {
+		settings.SlackChannelName = strings.TrimSpace(r.SlackChannelName)
+	}
+	if r.channelTypeSet || strings.TrimSpace(r.ChannelType) != "" {
+		settings.ChannelType = strings.TrimSpace(r.ChannelType)
+	}
+	if strings.TrimSpace(settings.ChannelType) == "" {
+		settings.ChannelType = "channel"
+	}
+	if r.defaultRepositoryIDSet || r.DefaultRepositoryID != nil {
+		settings.DefaultRepositoryID = r.DefaultRepositoryID
+	}
+	if r.defaultBranchSet || r.DefaultBranch != nil {
+		settings.DefaultBranch = r.DefaultBranch
 	}
 	var routingMode *models.SlackRoutingMode
 	if r.RoutingMode != nil && strings.TrimSpace(*r.RoutingMode) != "" {
 		value := models.SlackRoutingMode(strings.TrimSpace(*r.RoutingMode))
 		routingMode = &value
 	}
+	if r.routingModeSet || r.RoutingMode != nil {
+		settings.RoutingMode = routingMode
+	}
 	var responseVisibility *models.SlackResponseVisibility
 	if r.ResponseVisibility != nil && strings.TrimSpace(*r.ResponseVisibility) != "" {
 		value := models.SlackResponseVisibility(strings.TrimSpace(*r.ResponseVisibility))
 		responseVisibility = &value
+	}
+	if r.responseVisibilitySet || r.ResponseVisibility != nil {
+		settings.ResponseVisibility = responseVisibility
 	}
 	var notificationPreset *models.SlackNotificationPreset
 	if r.NotificationPreset != nil && strings.TrimSpace(*r.NotificationPreset) != "" {
 		value := models.SlackNotificationPreset(strings.TrimSpace(*r.NotificationPreset))
 		notificationPreset = &value
 	}
-	settings := models.SlackChannelSettings{
-		OrgID:                     orgID,
-		SlackInstallationID:       installationID,
-		SlackTeamID:               teamID,
-		SlackChannelID:            channelID,
-		SlackChannelName:          strings.TrimSpace(r.SlackChannelName),
-		ChannelType:               channelType,
-		DefaultRepositoryID:       r.DefaultRepositoryID,
-		DefaultBranch:             r.DefaultBranch,
-		RoutingMode:               routingMode,
-		ResponseVisibility:        responseVisibility,
-		AllowedActions:            r.AllowedActions,
-		NotificationPreset:        notificationPreset,
-		NotificationSubscriptions: r.NotificationSubscriptions,
-		Active:                    true,
+	if r.allowedActionsSet || len(r.AllowedActions) > 0 {
+		settings.AllowedActions = r.AllowedActions
 	}
-	if err := validateSlackChannelSettings(settings); err != nil {
-		return models.SlackChannelSettings{}, err
+	if r.notificationPresetSet || r.NotificationPreset != nil {
+		settings.NotificationPreset = notificationPreset
 	}
-	return settings, nil
+	if r.notificationSubscriptionsSet || len(r.NotificationSubscriptions) > 0 {
+		settings.NotificationSubscriptions = r.NotificationSubscriptions
+	}
+	return validateSlackChannelSettings(*settings)
 }
 
 func validateSlackChannelSettings(settings models.SlackChannelSettings) error {
