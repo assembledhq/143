@@ -70,10 +70,8 @@ func seedWorkerNode(t *testing.T, pool *pgxpool.Pool, nodeID string) {
 	}
 }
 
-// setNodeStatus forces a seeded node into a specific lifecycle status (e.g.
-// 'draining', 'dead') while leaving its heartbeat fresh — reproducing the
-// state a rolling deploy leaves behind: a node that has stopped claiming new
-// work but is still heartbeating to keep its previews alive.
+// setNodeStatus forces a seeded node into a status (e.g. 'draining') while
+// leaving its heartbeat fresh — the state a rolling deploy leaves behind.
 func setNodeStatus(t *testing.T, pool *pgxpool.Pool, nodeID, status string) {
 	t.Helper()
 	tag, err := pool.Exec(context.Background(),

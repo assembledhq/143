@@ -146,11 +146,9 @@ type EnqueueOpts struct {
 	// TargetNodeID, when set, restricts the job to be claimed by this
 	// specific worker node. Used for sandbox-bound jobs (continue_session,
 	// open_pr, run_agent for resume) where the work must execute on the
-	// same docker daemon as the session's recorded container_id. NULL
-	// means any worker can claim. The claim path falls back to "any worker"
-	// if the target node is unavailable in the `nodes` table — dead
-	// (permanently lost) or draining (rolling over, no longer claiming) —
-	// so a pinned job cannot starve when its node can no longer run it.
+	// same docker daemon as the session's recorded container_id. NULL means
+	// any worker can claim. See ClaimNextRunnable for the unavailable-node
+	// fallback that keeps a pinned job from starving.
 	TargetNodeID *string
 }
 
@@ -500,21 +498,11 @@ type jobExecer interface {
 // running with a renewable lease and fencing token. Returns nil, nil when no
 // runnable job exists.
 //
-// Node-affinity filter: jobs with target_node_id NULL can be claimed by any
-// worker (the common case). Jobs with target_node_id set can only be claimed
-// by the matching node OR if the target node is unavailable — dead
-// (status='dead' or stale heartbeat) or draining (status='draining'). The
-// fallback prevents starvation when a pinned worker can no longer run the job:
-//   - dead: the worker is permanently lost.
-//   - draining: the worker is rolling over and has stopped claiming new work,
-//     but keeps heartbeating to preserve healthy previews (see #1146/#1193).
-//     Without this, a turn pinned to a draining-but-heartbeating node sits
-//     pending until the node fully dies — minutes of dead air during every
-//     routine rollout. The claiming worker hydrates from the session snapshot,
-//     so releasing the pin is safe.
-//
-// The freshness threshold matches ReclaimLostRunningJobs's dead-node detection
-// so the two paths agree on what "dead" means.
+// Node-affinity filter: a job with target_node_id set is claimable only by
+// that node, or by any active worker once the target is unavailable — dead
+// (status='dead' or stale heartbeat) or draining. A draining node keeps
+// heartbeating to hold its previews, so without the draining case a pinned
+// turn starves until the node dies; the claimer hydrates from the snapshot.
 // lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
 func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
 	query := fmt.Sprintf(`
@@ -1051,7 +1039,9 @@ func (s *JobStore) DeadLetterWithLease(ctx context.Context, jobID, lockToken uui
 }
 
 // ReclaimLostRunningJobs requeues jobs whose lease expired or whose owner node
-// is considered dead.
+// is considered dead. Draining is intentionally not treated as dead here: a
+// running job on a draining node is reclaimed via lease expiry (or requeued by
+// the executor's own drain handler), so it never needs the node-status path.
 // lint:allow-no-orgid reason="recovery loop scans cross-org jobs by design"
 func (s *JobStore) ReclaimLostRunningJobs(ctx context.Context, staleBefore time.Time, limit int) (int64, error) {
 	query := `

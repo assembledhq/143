@@ -157,25 +157,16 @@ func TestIntegration_WorkerDispatch_UnknownJobTypeDeadLetters(t *testing.T) {
 	}, 5*time.Second, 25*time.Millisecond, "unknown job type must fail fast with an explanatory last_error — silent swallow is the worst outcome")
 }
 
-// TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob is the
-// regression for the rollout-starvation incident: a continue_session turn was
-// pinned (target_node_id) to a worker generation that a routine rollout had put
-// into 'draining'. A draining node keeps heartbeating to preserve its previews,
-// so it never tripped the dead-node fallback — and because it had stopped
-// claiming new work, the turn sat 'pending' for many minutes until the node
-// finally died. The claim path must treat a draining target node as
-// unavailable and let a healthy worker hydrate the session from its snapshot.
-//
-// pgxmock can't catch this — it only matches the query string, not the SQL's
-// node-status semantics — so this has to run against real Postgres.
+// Regression for the rollout-starvation incident: a continue_session turn
+// pinned to a draining (but still heartbeating) node must fall through to an
+// active worker instead of sitting pending until the node dies. pgxmock can't
+// see node-status semantics, so this runs against real Postgres.
 func TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob(t *testing.T) {
 	pool := setup(t)
 	orgID := seedOrg(t, pool)
 	session := seedSession(t, pool, orgID, sessionOpts{Status: "idle"})
 	store := db.NewJobStore(pool)
 
-	// Pin the job to a worker that is draining but still heartbeating —
-	// exactly the state a graceful rollover leaves behind.
 	drainingNode := "drain-node-" + session.ID.String()[:8]
 	seedWorkerNode(t, pool, drainingNode)
 	setNodeStatus(t, pool, drainingNode, "draining")
@@ -190,7 +181,6 @@ func TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob(t *te
 	})
 	require.NoError(t, err)
 
-	// A different, healthy worker must be able to claim it.
 	claimer := "active-node-" + session.ID.String()[:8]
 	seedWorkerNode(t, pool, claimer)
 
@@ -198,13 +188,13 @@ func TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob(t *te
 	require.NoError(t, err)
 	require.NotNil(t, job, "a job pinned to a draining node must fall through to an active worker, not starve until the node dies")
 	require.Equal(t, jobID, job.ID, "the claimed job should be the one pinned to the draining node")
+	require.NotNil(t, job.LockedByNodeID)
+	require.Equal(t, claimer, *job.LockedByNodeID, "the claim should be locked by the active worker that took it over")
 }
 
-// TestIntegration_ClaimNextRunnable_HealthyTargetNodePinHoldsJob is the guard
-// rail for the fix above: a job pinned to a *healthy, active* worker must stay
-// pinned. Only the owning node can claim it — a sibling worker must not steal
-// sandbox-bound work off a live node (the original #811 cross-host bug). This
-// proves the draining release didn't widen into "any pin is claimable."
+// Guard rail: a job pinned to a healthy active node stays pinned to its owner
+// (a sibling can't steal it), so the draining release didn't widen into "any
+// pin is claimable" (the #811 cross-host bug).
 func TestIntegration_ClaimNextRunnable_HealthyTargetNodePinHoldsJob(t *testing.T) {
 	pool := setup(t)
 	orgID := seedOrg(t, pool)
