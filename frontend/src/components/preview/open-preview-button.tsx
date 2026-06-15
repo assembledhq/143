@@ -14,7 +14,7 @@ import {
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
 } from "@/lib/preview-bootstrap";
 
-const BOOTSTRAP_TIMEOUT_MS = 15_000;
+const BOOTSTRAP_TIMEOUT_MS = 5_000;
 
 type BootstrapToken = {
   token: string;

@@ -150,6 +150,41 @@ describe("PreviewLandingPage launch mode", () => {
     }
   });
 
+  it("stops showing opening state when preview bootstrap does not respond", async () => {
+    server.use(
+      http.get("*/api/v1/previews/target-1", () =>
+        HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "pull_request",
+            status: "ready",
+            current_phase: "ready",
+            stable_url: "https://143.dev/previews/target-1",
+            preview_url: "https://target-1.preview.143.dev",
+          },
+        }),
+      ),
+    );
+
+    renderLaunchPage();
+
+    expect(await screen.findByText("Opening preview")).toBeInTheDocument();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 5_100));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Preview could not open")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Preview bootstrap timed out. Try opening it again.")).toBeInTheDocument();
+  }, 10_000);
+
   it("notifies the opener and closes in popup mode instead of navigating", async () => {
     searchParams = new URLSearchParams("launch=1&popup=1");
 
