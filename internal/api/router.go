@@ -31,6 +31,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/domains"
@@ -552,6 +553,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
+		prService.SetAutomationEventTriggerer(automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger))
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
