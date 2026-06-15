@@ -3,6 +3,7 @@ package automations
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -80,6 +81,10 @@ func (f *fakeGitHubAutomationJobStore) Notify(_ context.Context, jobID uuid.UUID
 	f.notified = append(f.notified, jobID)
 }
 
+func newTestService(store *fakeGitHubAutomationStore, runs *fakeGitHubAutomationRunStore, jobs *fakeGitHubAutomationJobStore) *GitHubEventTriggerService {
+	return NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+}
+
 func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
 	t.Parallel()
 
@@ -117,4 +122,65 @@ func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
 	require.NoError(t, json.Unmarshal(runs.runs[0].ConfigSnapshot, &config), "config snapshot should be valid JSON")
 	require.Equal(t, string(models.AutomationIdentityScopeOrg), config["identity_scope"], "config snapshot should preserve automation identity scope")
 	require.Equal(t, string(models.AutomationGitHubEventPullRequestOpened), config["github_event"], "config snapshot should include the GitHub event")
+}
+
+func TestGitHubEventTriggerService_NoMatchingAutomations(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeGitHubAutomationStore{automations: nil}
+	runs := &fakeGitHubAutomationRunStore{}
+	jobs := &fakeGitHubAutomationJobStore{}
+	service := newTestService(store, runs, jobs)
+
+	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+		OrgID: uuid.New(), RepositoryID: uuid.New(),
+		Event: models.AutomationGitHubEventPullRequestOpened,
+	})
+	require.NoError(t, err, "no matching automations should not be an error")
+	require.Empty(t, runs.runs, "no runs should be created when no automations match")
+	require.Empty(t, jobs.jobs, "no jobs should be enqueued when no automations match")
+}
+
+func TestGitHubEventTriggerService_InvalidEvent(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeGitHubAutomationStore{}
+	runs := &fakeGitHubAutomationRunStore{}
+	jobs := &fakeGitHubAutomationJobStore{}
+	service := newTestService(store, runs, jobs)
+
+	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+		OrgID: uuid.New(), RepositoryID: uuid.New(),
+		Event: models.AutomationGitHubEvent("github.unknown.event"),
+	})
+	require.Error(t, err, "invalid GitHub event should return an error before any store calls")
+	require.Empty(t, store.calls, "store should not be consulted when the event is invalid")
+}
+
+func TestGitHubEventTriggerService_StoreErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	storeErr := errors.New("db unavailable")
+	store := &fakeGitHubAutomationStore{err: storeErr}
+	runs := &fakeGitHubAutomationRunStore{}
+	jobs := &fakeGitHubAutomationJobStore{}
+	service := newTestService(store, runs, jobs)
+
+	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+		OrgID: uuid.New(), RepositoryID: uuid.New(),
+		Event: models.AutomationGitHubEventIssueCommentCreated,
+	})
+	require.Error(t, err, "store error should propagate from TriggerGitHubEvent")
+	require.ErrorContains(t, err, "list github event automations", "error should wrap the store failure with context")
+}
+
+func TestGitHubEventTriggerService_NilServiceIsNoop(t *testing.T) {
+	t.Parallel()
+
+	var service *GitHubEventTriggerService
+	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+		OrgID: uuid.New(), RepositoryID: uuid.New(),
+		Event: models.AutomationGitHubEventPullRequestOpened,
+	})
+	require.NoError(t, err, "nil service should be a no-op and not panic")
 }
