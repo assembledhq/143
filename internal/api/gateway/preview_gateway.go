@@ -1180,6 +1180,14 @@ func shouldMarkRuntimeLostOnProxyError(err error) bool {
 		"i/o timeout",
 		"no such host",
 		"eof",
+		// The Go transport surfaces these when the worker tears down the
+		// connection without sending a response: a pooled keep-alive
+		// connection to a dead worker ("server closed idle connection") or a
+		// write that races the worker's close ("broken pipe"). Both mean the
+		// endpoint is gone, so the cached runtime should be marked lost and
+		// re-resolved on the next request.
+		"server closed idle connection",
+		"broken pipe",
 	} {
 		if strings.Contains(lower, marker) {
 			return true
