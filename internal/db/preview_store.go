@@ -432,6 +432,41 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
 }
 
+// GetSessionPreviewSummary returns target-shaped metadata for a runtime-only
+// session preview. Session previews do not have preview_targets rows, so the
+// preview instance ID acts as the stable list/detail ID.
+func (s *PreviewStore) GetSessionPreviewSummary(ctx context.Context, orgID, previewID uuid.UUID) (*models.BranchPreviewSummary, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT pi.id AS target_id, pi.id AS preview_id,
+			sess.repository_id, repo.full_name AS repository_full_name,
+			COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+			COALESCE(NULLIF(pi.base_commit_sha, ''), sess.base_commit_sha, '') AS commit_sha,
+			'' AS preview_config_name,
+			'session' AS source_type, sess.id::text AS source_id, '' AS source_url,
+			pi.status AS status,
+			pi.created_at, pi.created_at AS sort_created_at,
+			pi.expires_at, pi.stopped_at, COALESCE(pi.stopped_reason, '') AS stopped_reason,
+			COALESCE(pi.current_phase, '') AS current_phase, COALESCE(pi.error, '') AS error,
+			false AS resumable, NULL::integer AS resume_estimate_seconds
+		FROM preview_instances pi
+		JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+		JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+		WHERE pi.id = @preview_id
+		  AND pi.org_id = @org_id
+		  AND pi.preview_target_id IS NULL
+		  AND pi.session_id IS NOT NULL`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query session preview summary: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
+	if err != nil {
+		return nil, fmt.Errorf("get session preview summary: %w", err)
+	}
+	return &row, nil
+}
+
 func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID uuid.UUID, filters BranchPreviewIndexFilters) (map[string]int, error) {
 	query := fmt.Sprintf(`WITH target_previews AS (
 			SELECT target.id AS target_id, target.org_id, target.repository_id, repo.full_name AS repository_full_name,
@@ -957,6 +992,30 @@ func (s *PreviewStore) GetActivePreviewRuntime(ctx context.Context, orgID, previ
 		return nil, fmt.Errorf("get active preview runtime: %w", err)
 	}
 	return &row, nil
+}
+
+// ListActivePreviewRuntimesForReachability returns active runtime endpoints for app-side probes.
+// lint:allow-no-orgid reason="cross-org app-side reachability sweep probes active preview runtime endpoints"
+func (s *PreviewStore) ListActivePreviewRuntimesForReachability(ctx context.Context, limit int) ([]models.PreviewRuntime, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM preview_runtimes
+		WHERE status IN %s
+		  AND lease_expires_at > now()
+		ORDER BY last_heartbeat_at ASC, updated_at ASC
+		LIMIT @limit`, previewRuntimeColumns, activeRuntimeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview runtimes for reachability: %w", err)
+	}
+	runtimes, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewRuntime])
+	if err != nil {
+		return nil, fmt.Errorf("scan active preview runtimes for reachability: %w", err)
+	}
+	return runtimes, nil
 }
 
 // MarkPreviewRuntimeReady marks a runtime ready and mirrors routing fields onto

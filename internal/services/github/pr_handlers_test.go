@@ -19,6 +19,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	automationevents "github.com/assembledhq/143/internal/services/automations"
 )
 
 // handlerPRColumns matches the SELECT columns from PullRequestStore.GetByRepoAndNumber
@@ -32,6 +33,25 @@ var handlerPRColumns = []string{
 	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
 	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+}
+
+var handlerPreviewTargetColumns = []string{
+	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
+	"resolved_config_digest", "source_type", "source_id", "source_url",
+	"created_by_user_id", "request_id", "created_at",
+}
+
+var handlerPreviewLinkColumns = []string{
+	"id", "org_id", "preview_target_id", "link_type", "slug", "repository_id",
+	"pr_number", "created_at", "updated_at",
+}
+
+var handlerPreviewInstanceColumns = []string{
+	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
 // sessionColumns matches the SELECT columns from SessionStore queries
@@ -84,6 +104,57 @@ func TestNewPRService(t *testing.T) {
 	require.Equal(t, defaultGitHubAPI, svc.baseURL, "NewPRService should set the default GitHub API base URL")
 	require.Equal(t, defaultAppBaseURL, svc.appBaseURL, "NewPRService should set the default app base URL for session deep-links")
 	require.NotNil(t, svc.httpClient, "NewPRService should initialize an HTTP client")
+}
+
+func TestPRService_PRPreviewURLReturnsStableAppRouteAfterCreatingPreviewMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockPool(t)
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	targetID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+
+	mock.ExpectQuery("INSERT INTO preview_targets").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewTargetColumns).
+			AddRow(targetID, orgID, repoID, "feature/preview", headSHA, "", "", string(models.PreviewSourceTypePullRequest), "acme/web#42@"+headSHA, "https://github.com/acme/web/pull/42", userID, nil, now))
+	mock.ExpectQuery("INSERT INTO preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewLinkColumns).
+			AddRow(linkID, orgID, targetID, string(models.PreviewLinkTypePullRequest), "github/acme/web/pull/42", &repoID, ptrToIntValue(42), now, now))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewInstanceColumns))
+
+	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	svc.SetAppBaseURL("https://app.143.dev")
+	svc.SetPreviewOriginTemplate("https://{id}.preview.143.dev")
+	svc.SetPreviewTeardown(db.NewPreviewStore(mock), nil)
+
+	run := &models.Session{
+		ID:                sessionID,
+		OrgID:             orgID,
+		TriggeredByUserID: &userID,
+	}
+	repo := &models.Repository{
+		ID:       repoID,
+		OrgID:    orgID,
+		FullName: "acme/web",
+	}
+
+	url := svc.prPreviewURL(context.Background(), run, repo, "acme", "web", 42, "feature/preview", headSHA, "https://github.com/acme/web/pull/42")
+
+	require.Equal(t, "https://app.143.dev/previews/github/acme/web/pull/42", url, "PR preview URL should use the stable app route even when preview target metadata is created")
+	require.NoError(t, mock.ExpectationsWereMet(), "all preview metadata expectations should be met")
+}
+
+func ptrToIntValue(value int) *int {
+	return &value
 }
 
 func TestHandleAutoPreviewEvent_StartsForPolicyEnabledPullRequest(t *testing.T) {
@@ -310,6 +381,152 @@ func githubRepositoryTestCols() []string {
 	return []string{
 		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description",
 		"clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	}
+}
+
+type recordingAutomationEventTriggerer struct {
+	calls []automationevents.GitHubEventTriggerRequest
+}
+
+func (r *recordingAutomationEventTriggerer) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
+	r.calls = append(r.calls, req)
+	return nil
+}
+
+func expectGitHubAutomationRepositoryLookup(mock pgxmock.PgxPoolIface, orgID, repoID uuid.UUID, githubRepoID int64, fullName string) {
+	now := time.Now()
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": fullName}).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), githubRepoID, fullName, "main", false, strPtr("go"), strPtr(""),
+				"https://github.com/"+fullName+".git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+}
+
+func expectUnknownPullRequestLookup(mock pgxmock.PgxPoolIface, orgID uuid.UUID, fullName string, number int) {
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": fullName, "github_pr_number": number}).
+		WillReturnError(pgx.ErrNoRows)
+}
+
+func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		event     models.AutomationGitHubEvent
+		withPR    bool
+		run       func(*testing.T, *PRService, uuid.UUID, int64, string)
+		wantActor string
+		wantBody  string
+	}{
+		{
+			name:   "pull request opened",
+			event:  models.AutomationGitHubEventPullRequestOpened,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestEvent{Action: "opened", Number: 42, OwnerOrgID: &orgID}
+				event.Sender.Login = "octocat"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PR.Title = "Add checkout"
+				event.PR.Body = "Please review"
+				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "opened PR webhook should not fail")
+			},
+			wantActor: "octocat",
+			wantBody:  "Add checkout\n\nPlease review",
+		},
+		{
+			name:  "issue comment on pull request",
+			event: models.AutomationGitHubEventIssueCommentCreated,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := IssueCommentEvent{Action: "created", OwnerOrgID: &orgID}
+				event.Sender.Login = "commenter"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.Issue.Number = 42
+				event.Issue.PullRequest = &struct{}{}
+				event.Comment.Body = "Can you handle this?"
+				require.NoError(t, svc.HandleIssueCommentEvent(context.Background(), event), "PR issue_comment webhook should not fail")
+			},
+			wantActor: "commenter",
+			wantBody:  "Can you handle this?",
+		},
+		{
+			name:   "pull request review submitted",
+			event:  models.AutomationGitHubEventPullRequestReviewSubmitted,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestReviewEvent{Action: "submitted", OwnerOrgID: &orgID}
+				event.Sender.Login = "reviewer"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PullRequest.Number = 42
+				event.Review.State = "commented"
+				event.Review.Body = "Looks close"
+				require.NoError(t, svc.HandlePullRequestReviewEvent(context.Background(), event), "review webhook should not fail")
+			},
+			wantActor: "reviewer",
+			wantBody:  "Looks close",
+		},
+		{
+			name:   "inline pull request review comment",
+			event:  models.AutomationGitHubEventPullRequestReviewCommentCreated,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestReviewCommentEvent{Action: "created", OwnerOrgID: &orgID}
+				event.Sender.Login = "inline-reviewer"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PullRequest.Number = 42
+				event.Comment.Body = "Please adjust this line"
+				require.NoError(t, svc.HandlePullRequestReviewCommentEvent(context.Background(), event), "review comment webhook should not fail")
+			},
+			wantActor: "inline-reviewer",
+			wantBody:  "Please adjust this line",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			repoID := uuid.New()
+			githubRepoID := int64(123)
+			fullName := "acme/app"
+			repoMock := newMockPool(t)
+			prMock := newMockPool(t)
+			triggerer := &recordingAutomationEventTriggerer{}
+			expectGitHubAutomationRepositoryLookup(repoMock, orgID, repoID, githubRepoID, fullName)
+			if tt.withPR {
+				expectUnknownPullRequestLookup(prMock, orgID, fullName, 42)
+			}
+
+			svc := &PRService{
+				repos:                   db.NewRepositoryStore(repoMock),
+				pullRequests:            db.NewPullRequestStore(prMock),
+				automationEventTriggers: triggerer,
+				logger:                  zerolog.Nop(),
+			}
+
+			tt.run(t, svc, orgID, githubRepoID, fullName)
+
+			require.Len(t, triggerer.calls, 1, "webhook should trigger exactly one automation event")
+			require.Equal(t, tt.event, triggerer.calls[0].Event, "webhook should map to the expected automation event")
+			require.Equal(t, orgID, triggerer.calls[0].OrgID, "automation trigger should use the resolved repository org")
+			require.Equal(t, repoID, triggerer.calls[0].RepositoryID, "automation trigger should use the resolved repository id")
+			require.Equal(t, fullName, triggerer.calls[0].Repository, "automation trigger should include repository name")
+			require.Equal(t, 42, triggerer.calls[0].PullRequestNumber, "automation trigger should include PR number")
+			require.Equal(t, tt.wantActor, triggerer.calls[0].Actor, "automation trigger should include GitHub actor")
+			require.Equal(t, tt.wantBody, triggerer.calls[0].Body, "automation trigger should include event text")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+			require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
+		})
 	}
 }
 

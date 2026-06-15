@@ -18,7 +18,7 @@
                           │
           ┌───────────────┼───────────────┐
           ▼               ▼               ▼
-   Claude Code         Codex         Gemini CLI
+   Claude Code         Codex         OpenCode
    (mcp.json)    (config.toml)    (prompt inject)
           │               │               │
           └───────┬───────┘               │
@@ -108,5 +108,5 @@ The orchestrator already handles CLI injection: `buildIntegrationSkills()` gener
 1. **STDIO over HTTP**: No network policy changes needed. Each agent gets isolated MCP process.
 2. **Binary in container image**: MCP binary pre-installed in `143-sandbox:latest` Docker image — no runtime copying needed.
 3. **Env var credentials**: Follow existing pattern (resolveAgentEnv). MCP binary reads from env, not files.
-4. **Gemini fallback**: Since Gemini CLI MCP is undocumented, inject integration data as static context in the prompt instead of MCP.
+4. **Gemini fallback**: Since OpenCode MCP is undocumented, inject integration data as static context in the prompt instead of MCP.
 5. **Non-fatal injection**: If MCP setup fails, agent still runs — just without integration tools.

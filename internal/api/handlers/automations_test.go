@@ -49,6 +49,7 @@ func automationTestColumns() []string {
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
+		"github_event_triggers",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
@@ -81,6 +82,7 @@ func newAutomationRow(mock pgxmock.PgxPoolIface, a models.Automation) *pgxmock.R
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
 		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
+		automationGitHubEventStrings(a.GitHubEventTriggers),
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
 	)
@@ -315,7 +317,7 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
+		WithArgs(testAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -348,67 +350,6 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAutomationHandler_Create_RejectsPrePRReviewForUnsupportedAgent(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{
-		"name":                "my automation",
-		"goal":                "poke at things",
-		"agent_type":          "gemini_cli",
-		"interval_value":      2,
-		"interval_unit":       "days",
-		"pre_pr_review_loops": 1,
-	}
-	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
-	rr := httptest.NewRecorder()
-
-	h.Create(rr, req)
-
-	require.Equal(t, http.StatusBadRequest, rr.Code, "unsupported review agent should be rejected at create time")
-	require.Contains(t, rr.Body.String(), "INVALID_PRE_PR_REVIEW_LOOPS", "response should identify the invalid pre-PR review setting")
-	require.NoError(t, mock.ExpectationsWereMet(), "no database write should be attempted")
-}
-
-func TestAutomationHandler_Create_DefaultsPrePRReviewOffForUnsupportedAgent(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	newID := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
-		)
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{
-		"name":           "my automation",
-		"goal":           "poke at things",
-		"agent_type":     "gemini_cli",
-		"interval_value": 2,
-		"interval_unit":  "days",
-	}
-	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
-	rr := httptest.NewRecorder()
-
-	h.Create(rr, req)
-
-	require.Equal(t, http.StatusCreated, rr.Code, "unsupported agents should still be creatable when pre-PR review is omitted")
-	var resp models.SingleResponse[models.Automation]
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response body should decode as an automation")
-	require.Equal(t, 0, resp.Data.PrePRReviewLoops, "unsupported agents should default pre-PR review loops to disabled")
-	require.NoError(t, mock.ExpectationsWereMet(), "automation insert should be attempted once")
-}
-
 func TestAutomationHandler_Create_PersonalIdentityScope(t *testing.T) {
 	t.Parallel()
 
@@ -419,7 +360,7 @@ func TestAutomationHandler_Create_PersonalIdentityScope(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
+		WithArgs(testAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -453,7 +394,7 @@ func TestAutomationHandler_Create_ModelInfersAgentType(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
+		WithArgs(testAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -515,7 +456,7 @@ func TestAutomationHandler_Create_AllowsAvailableValidModel(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
+		WithArgs(testAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -551,7 +492,7 @@ func TestAutomationHandler_Create_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
+		WithArgs(testAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -588,7 +529,7 @@ func TestAutomationHandler_Create_IntervalNonUTCTimezone(t *testing.T) {
 	newID := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(26)...).
+		WithArgs(testAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
 		)
@@ -788,7 +729,7 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(28)...).
+		WithArgs(testAnyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -818,44 +759,6 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAutomationHandler_Update_RejectsPrePRReviewForUnsupportedAgent(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	id := uuid.New()
-	now := time.Now()
-	iv := 1
-	unit := models.ScheduleUnitDays
-	agentType := "gemini_cli"
-	a := models.Automation{
-		ID: id, OrgID: orgID, Name: "a", Goal: "g",
-		AgentType: &agentType, ExecutionMode: "sequential", BaseBranch: "main",
-		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
-		IntervalValue: &iv, IntervalUnit: &unit, CreatedAt: now, UpdatedAt: now,
-	}
-
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{
-		"pre_pr_review_loops": 1,
-	}
-	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
-	rr := httptest.NewRecorder()
-
-	h.Update(rr, req)
-
-	require.Equal(t, http.StatusBadRequest, rr.Code, "unsupported review agent should be rejected at update time")
-	require.Contains(t, rr.Body.String(), "INVALID_PRE_PR_REVIEW_LOOPS", "response should identify the invalid pre-PR review setting")
-	require.NoError(t, mock.ExpectationsWereMet(), "no update should be attempted")
-}
-
 func TestAutomationHandler_Update_ReasoningFallsBackWhenOrgSettingsMalformed(t *testing.T) {
 	t.Parallel()
 
@@ -879,7 +782,7 @@ func TestAutomationHandler_Update_ReasoningFallsBackWhenOrgSettingsMalformed(t *
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(28)...).
+		WithArgs(testAnyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -921,7 +824,7 @@ func TestAutomationHandler_Update_BlankModelPreservesExplicitAgentType(t *testin
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(28)...).
+		WithArgs(testAnyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -975,7 +878,7 @@ func TestAutomationHandler_Update_TimezoneOnlyRecomputesNextRunAt(t *testing.T) 
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(28)...).
+		WithArgs(testAnyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1029,7 +932,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(28)...).
+			WithArgs(testAnyArgs(29)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1065,7 +968,7 @@ func TestAutomationHandler_Update_SwitchScheduleType_OK(t *testing.T) {
 			WithArgs(testAnyArgs(2)...).
 			WillReturnRows(newAutomationRow(mock, a))
 		mock.ExpectExec("UPDATE automations SET").
-			WithArgs(testAnyArgs(28)...).
+			WithArgs(testAnyArgs(29)...).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 		h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1236,7 +1139,7 @@ func TestAutomationHandler_Pause_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(28)...).
+		WithArgs(testAnyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1294,7 +1197,7 @@ func TestAutomationHandler_Resume_OK(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(newAutomationRow(mock, a))
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(testAnyArgs(28)...).
+		WithArgs(testAnyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
@@ -1932,6 +1835,183 @@ func TestAutomationHandler_Stats_InvalidWindow(t *testing.T) {
 	require.Contains(t, rr4.Body.String(), "INVALID_UNTIL")
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// --- GitHub event triggers ---
+
+func TestAutomationHandler_Create_WithGitHubEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(27)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":                  "PR review automation",
+		"goal":                  "Review every PR",
+		"interval_value":        1,
+		"interval_unit":         "days",
+		"github_event_triggers": []string{"github.pull_request.opened", "github.issue_comment.created"},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "should create automation with valid github_event_triggers")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, []models.AutomationGitHubEvent{
+		models.AutomationGitHubEventPullRequestOpened,
+		models.AutomationGitHubEventIssueCommentCreated,
+	}, resp.Data.GitHubEventTriggers, "response should echo back the github_event_triggers")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Create_RejectsInvalidGitHubEventTrigger(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(nil, nil)
+	body := map[string]any{
+		"name":                  "bad trigger",
+		"goal":                  "do something",
+		"interval_value":        1,
+		"interval_unit":         "days",
+		"github_event_triggers": []string{"github.unknown.event"},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "invalid github_event_triggers should be rejected")
+	require.Contains(t, rr.Body.String(), "INVALID_GITHUB_EVENT_TRIGGERS", "error code should identify the invalid trigger")
+	// No DB expectations: reject before touching the store.
+}
+
+func TestAutomationHandler_Create_DeduplicatesGitHubEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(27)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"name":           "dedup automation",
+		"goal":           "review prs",
+		"interval_value": 1,
+		"interval_unit":  "days",
+		"github_event_triggers": []string{
+			"github.pull_request.opened",
+			"github.pull_request.opened",
+			"github.issue_comment.created",
+		},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
+	rr := httptest.NewRecorder()
+	h.Create(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "duplicate github_event_triggers should be accepted (deduplicated)")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, []models.AutomationGitHubEvent{
+		models.AutomationGitHubEventPullRequestOpened,
+		models.AutomationGitHubEventIssueCommentCreated,
+	}, resp.Data.GitHubEventTriggers, "duplicate events should be deduplicated while preserving order")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Update_WithGitHubEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := models.ScheduleUnitDays
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(testAnyArgs(29)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"github_event_triggers": []string{"github.pull_request_review.submitted"},
+	}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "should update automation with valid github_event_triggers")
+
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, []models.AutomationGitHubEvent{
+		models.AutomationGitHubEventPullRequestReviewSubmitted,
+	}, resp.Data.GitHubEventTriggers, "updated github_event_triggers should be reflected in response")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_Update_RejectsInvalidGitHubEventTrigger(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	now := time.Now()
+	iv := 1
+	unit := models.ScheduleUnitDays
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "interval",
+		Timezone: "UTC", Enabled: true, IntervalValue: &iv, IntervalUnit: &unit,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	body := map[string]any{
+		"github_event_triggers": []string{"not.a.valid.event"},
+	}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+	h.Update(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "invalid github_event_triggers in Update should be rejected")
+	require.Contains(t, rr.Body.String(), "INVALID_GITHUB_EVENT_TRIGGERS", "error code should identify the invalid trigger")
+	require.NoError(t, mock.ExpectationsWereMet(), "no UPDATE should be attempted after trigger validation fails")
 }
 
 // --- Setters ---

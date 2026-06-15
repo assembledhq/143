@@ -235,6 +235,43 @@ describe("ContextExpander", () => {
     });
   });
 
+  it("uses edge-specific boundaries when a middle gap is revealed from both sides", async () => {
+    const onExpand = vi.fn();
+    vi.mocked(api.sessions.getFileContext).mockResolvedValue({
+      data: {
+        lines: [{ number: 6, content: "x" }],
+        start_line: 6,
+        end_line: 6,
+        has_more_above: true,
+        has_more_below: true,
+        total_lines: 20,
+      },
+    } as ReturnType<typeof api.sessions.getFileContext> extends Promise<infer T> ? T : never);
+
+    const user = userEvent.setup();
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={3}
+        sessionId="s1"
+        filePath="f.ts"
+        hiddenStart={3}
+        hiddenEnd={7}
+        visibleStart={3}
+        visibleEnd={7}
+        aboveVisibleStart={7}
+        belowVisibleEnd={3}
+        onExpand={onExpand}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
+    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 3, 0, 3);
+
+    await user.click(screen.getByRole("button", { name: "Reveal context below" }));
+    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 4, 0, 3);
+  });
+
   it("does not call onExpand on API error", async () => {
     const onExpand = vi.fn();
     vi.mocked(api.sessions.getFileContext).mockRejectedValue(new Error("fail"));

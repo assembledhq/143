@@ -98,6 +98,80 @@ func (r PreviewStoppedReason) Validate() error {
 	}
 }
 
+// PreviewLaunchAction describes the next product action for a PR preview launch.
+type PreviewLaunchAction string
+
+const (
+	PreviewLaunchActionOpen        PreviewLaunchAction = "open"
+	PreviewLaunchActionWait        PreviewLaunchAction = "wait"
+	PreviewLaunchActionResume      PreviewLaunchAction = "resume"
+	PreviewLaunchActionStart       PreviewLaunchAction = "start"
+	PreviewLaunchActionStartLatest PreviewLaunchAction = "start_latest"
+	PreviewLaunchActionRetry       PreviewLaunchAction = "retry"
+	PreviewLaunchActionBlocked     PreviewLaunchAction = "blocked"
+	PreviewLaunchActionClosed      PreviewLaunchAction = "closed"
+)
+
+func (a PreviewLaunchAction) Validate() error {
+	switch a {
+	case PreviewLaunchActionOpen,
+		PreviewLaunchActionWait,
+		PreviewLaunchActionResume,
+		PreviewLaunchActionStart,
+		PreviewLaunchActionStartLatest,
+		PreviewLaunchActionRetry,
+		PreviewLaunchActionBlocked,
+		PreviewLaunchActionClosed:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewLaunchAction: %q", a)
+	}
+}
+
+// PreviewLaunchReason explains why a PR preview launch action was chosen.
+type PreviewLaunchReason string
+
+const (
+	PreviewLaunchReasonReady              PreviewLaunchReason = "ready"
+	PreviewLaunchReasonStarting           PreviewLaunchReason = "starting"
+	PreviewLaunchReasonResumable          PreviewLaunchReason = "resumable"
+	PreviewLaunchReasonNoRuntime          PreviewLaunchReason = "no_runtime"
+	PreviewLaunchReasonStale              PreviewLaunchReason = "stale"
+	PreviewLaunchReasonFailed             PreviewLaunchReason = "failed"
+	PreviewLaunchReasonRoleForbidden      PreviewLaunchReason = "role_forbidden"
+	PreviewLaunchReasonTokenForbidden     PreviewLaunchReason = "token_forbidden"
+	PreviewLaunchReasonCapacity           PreviewLaunchReason = "capacity"
+	PreviewLaunchReasonConfigRequired     PreviewLaunchReason = "config_required"
+	PreviewLaunchReasonConfigInvalid      PreviewLaunchReason = "config_invalid"
+	PreviewLaunchReasonRepositoryMissing  PreviewLaunchReason = "repository_missing"
+	PreviewLaunchReasonGitHubUnavailable  PreviewLaunchReason = "github_unavailable"
+	PreviewLaunchReasonPullRequestClosed  PreviewLaunchReason = "pull_request_closed"
+	PreviewLaunchReasonPreviewUnavailable PreviewLaunchReason = "preview_unavailable"
+)
+
+func (r PreviewLaunchReason) Validate() error {
+	switch r {
+	case PreviewLaunchReasonReady,
+		PreviewLaunchReasonStarting,
+		PreviewLaunchReasonResumable,
+		PreviewLaunchReasonNoRuntime,
+		PreviewLaunchReasonStale,
+		PreviewLaunchReasonFailed,
+		PreviewLaunchReasonRoleForbidden,
+		PreviewLaunchReasonTokenForbidden,
+		PreviewLaunchReasonCapacity,
+		PreviewLaunchReasonConfigRequired,
+		PreviewLaunchReasonConfigInvalid,
+		PreviewLaunchReasonRepositoryMissing,
+		PreviewLaunchReasonGitHubUnavailable,
+		PreviewLaunchReasonPullRequestClosed,
+		PreviewLaunchReasonPreviewUnavailable:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewLaunchReason: %q", r)
+	}
+}
+
 // PreviewFreshnessState describes whether a session preview was launched from
 // the latest durable workspace revision.
 type PreviewFreshnessState string

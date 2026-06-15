@@ -31,6 +31,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/domains"
@@ -55,6 +56,18 @@ const (
 	uploadMaxRequestBodyBytes = uploadMaxRequestBodyMiB << 20
 )
 
+func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
+	if shutdownCh == nil {
+		return context.Background()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-shutdownCh
+		cancel()
+	}()
+	return ctx
+}
+
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
@@ -76,6 +89,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
 	sessionAttributionStore := db.NewSessionAttributionStore(pool)
 	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
+	slackBotSettingsStore := db.NewSlackBotSettingsStore(pool)
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
@@ -202,6 +216,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 		handlers.WithSlackInstallationStore(slackInstallationStore),
+		handlers.WithSlackBotSettingsStore(slackBotSettingsStore),
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
 	}
@@ -540,6 +555,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
+		prService.SetAutomationEventTriggerer(automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger))
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
@@ -755,6 +771,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}
 		}()
+		reachabilityMonitor := preview.NewReachabilityMonitor(preview.ReachabilityMonitorConfig{
+			Store:  previewStore,
+			Logger: logger,
+		})
+		go reachabilityMonitor.Start(contextFromShutdown(shutdownCh))
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
@@ -1453,6 +1474,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
 				r.Get("/api/v1/integrations/slack/bot", integrationHandler.GetSlackBot)
 				r.Post("/api/v1/integrations/slack/bot/reinstall", integrationHandler.ReinstallSlackBot)
+				r.Get("/api/v1/integrations/slack/health", integrationHandler.GetSlackHealth)
+				r.Get("/api/v1/integrations/slack/settings", integrationHandler.GetSlackSettings)
+				r.Patch("/api/v1/integrations/slack/settings", integrationHandler.PatchSlackSettings)
 				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels/{slack_channel_id}", integrationHandler.PatchSlackChannelSettings)

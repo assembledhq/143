@@ -1,0 +1,4 @@
+{"type":"session","sessionID":"ses_fixture_shell"}
+{"type":"tool_call","name":"bash","input":{"command":"pwd"}}
+{"type":"tool_result","name":"bash","output":"/workspace"}
+{"type":"message","role":"assistant","content":"The current directory is /workspace."}

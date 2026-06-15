@@ -104,6 +104,18 @@ function get<T>(path: string, options?: RequestInit): Promise<T> {
   return request<T>(path, options);
 }
 
+function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  parent?.addEventListener('abort', abort, { once: true });
+  controller.signal.addEventListener('abort', () => {
+    globalThis.clearTimeout(timeout);
+    parent?.removeEventListener('abort', abort);
+  }, { once: true });
+  return controller.signal;
+}
+
 function post<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, {
     method: 'POST',
@@ -282,8 +294,12 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
     get: (id: string) =>
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
-    getPullRequest: (owner: string, repo: string, number: string | number) =>
-      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}`),
+    getPullRequest: (owner: string, repo: string, number: string | number, params?: { intent?: 'open' | 'status' | 'diagnose' }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.intent) searchParams.set('intent', params.intent);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}${qs ? `?${qs}` : ''}`);
+    },
     restart: (id: string, body?: { start_latest?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
     startLatest: (id: string) =>
@@ -355,7 +371,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Issue>>(`/api/v1/issues${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Issue>>(`/api/v1/issues/${id}`),
-    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string; message?: string; force?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
   autopilot: {
@@ -654,8 +670,11 @@ export const api = {
         return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
           .then(r => r.data ?? []);
       },
-      console: (sessionId: string) =>
-        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+      console: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(
+          `/api/v1/sessions/${sessionId}/preview/console`,
+          { signal: timeoutSignal(opts?.timeoutMs ?? 5000, opts?.signal) },
+        )
           .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
@@ -733,11 +752,30 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
     },
     connectSlack: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/slack/connect'),
-    listSlackChannels: () => get<{ data: Array<{ id: string; name: string; selected: boolean }> }>('/api/v1/integrations/slack/channels'),
+    getSlackHealth: () => get<import('./types').SingleResponse<import('./types').SlackInstallationHealth>>('/api/v1/integrations/slack/health'),
+    getSlackSettings: () => get<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings'),
+    updateSlackSettings: (settings: import('./types').SlackBotSettingsUpdate) =>
+      request<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
+    listSlackUserLinks: () => get<import('./types').ListResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links'),
+    upsertSlackUserLink: (link: import('./types').SlackUserLinkUpsert) =>
+      request<import('./types').SingleResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links', {
+        method: 'POST',
+        body: JSON.stringify(link),
+      }),
+    deleteSlackUserLink: (id: string) => del<void>(`/api/v1/integrations/slack/user-links/${encodeURIComponent(id)}`),
+    listSlackChannels: () => get<{ data: import('./types').SlackChannel[] }>('/api/v1/integrations/slack/channels'),
     updateSlackChannels: (channelIds: string[]) => request('/api/v1/integrations/slack/channels', {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    updateSlackChannelSettings: (channelId: string, settings: import('./types').SlackChannelSettingsUpdate) =>
+      request<import('./types').SingleResponse<unknown>>(`/api/v1/integrations/slack/channels/${encodeURIComponent(channelId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
     connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
     connectCircleCI: (authToken: string, projectSlug: string) =>
       post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {

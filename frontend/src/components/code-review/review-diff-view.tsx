@@ -66,6 +66,9 @@ export const ReviewDiffView = memo(function ReviewDiffView({
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
   const skipNextScrollToFileRef = useRef(false);
+  const previousActiveFileIndexRef = useRef(activeFileIndex);
+  const pendingScrollTargetIndexRef = useRef<number | null>(null);
+  const pendingScrollTargetTimeoutRef = useRef<number | null>(null);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [explorerMode, setExplorerMode] = useState(false);
   const [explorerInitialPath, setExplorerInitialPath] = useState<string | undefined>(undefined);
@@ -135,19 +138,57 @@ export const ReviewDiffView = memo(function ReviewDiffView({
 
   // activeFileIndex can change from outside (sidebar file-tree click), so scroll via effect rather than only inside handleFileSelect.
   useEffect(() => {
+    const previousActiveFileIndex = previousActiveFileIndexRef.current;
+    previousActiveFileIndexRef.current = activeFileIndex;
+
     if (skipNextScrollToFileRef.current) {
       skipNextScrollToFileRef.current = false;
       return;
     }
+
+    if (previousActiveFileIndex !== activeFileIndex) {
+      pendingScrollTargetIndexRef.current = activeFileIndex;
+      if (pendingScrollTargetTimeoutRef.current != null) {
+        window.clearTimeout(pendingScrollTargetTimeoutRef.current);
+      }
+      pendingScrollTargetTimeoutRef.current = window.setTimeout(() => {
+        pendingScrollTargetIndexRef.current = null;
+        pendingScrollTargetTimeoutRef.current = null;
+      }, 2000);
+    }
+
     diffPaneRef.current?.scrollToFile(activeFileIndex);
   }, [activeFileIndex]);
 
+  useEffect(() => {
+    return () => {
+      if (pendingScrollTargetTimeoutRef.current != null) {
+        window.clearTimeout(pendingScrollTargetTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const handleVisibleFileChange = useCallback(
     (index: number) => {
+      const pendingTargetIndex = pendingScrollTargetIndexRef.current;
+      if (pendingTargetIndex != null) {
+        if (index !== pendingTargetIndex) {
+          return;
+        }
+        pendingScrollTargetIndexRef.current = null;
+        if (pendingScrollTargetTimeoutRef.current != null) {
+          window.clearTimeout(pendingScrollTargetTimeoutRef.current);
+          pendingScrollTargetTimeoutRef.current = null;
+        }
+        // Skip: onFileChange would be a no-op, so no effect run to clear skipNextScrollToFileRef.
+        if (index === activeFileIndex) {
+          return;
+        }
+      }
       skipNextScrollToFileRef.current = true;
       onFileChange(index);
     },
-    [onFileChange]
+    [onFileChange, activeFileIndex]
   );
 
   const toggleViewMode = useCallback(() => {

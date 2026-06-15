@@ -1,0 +1,4 @@
+{"type":"session","sessionID":"ses_fixture_file_edit"}
+{"type":"tool_call","name":"edit","input":{"path":".opencode-fixture.tmp"}}
+{"type":"tool_result","name":"edit","output":"wrote .opencode-fixture.tmp"}
+{"type":"message","role":"assistant","content":"Created .opencode-fixture.tmp."}

@@ -6,6 +6,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { ChevronDown, Loader2, Minus, Plus, Settings2, Sparkles } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Command,
   CommandEmpty,
@@ -55,12 +56,20 @@ import {
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
+import type { AutomationGitHubEvent } from "@/lib/types";
 import {
   browserTimezone,
   hourOptions,
   minuteOptions,
 } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+
+const githubTriggerOptions: { value: AutomationGitHubEvent; label: string }[] = [
+  { value: "github.pull_request.opened", label: "PR created" },
+  { value: "github.issue_comment.created", label: "PR comment added" },
+  { value: "github.pull_request_review.submitted", label: "PR review completed" },
+  { value: "github.pull_request_review_comment.created", label: "PR review comment added" },
+];
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -89,6 +98,7 @@ export default function NewAutomationPage() {
   const [intervalRunMinute, setIntervalRunMinute] = useState("00");
   const [detectedTimezone] = useState<string>(() => browserTimezone());
   const [timezone, setTimezone] = useState<string>(detectedTimezone);
+  const [githubEventTriggers, setGitHubEventTriggers] = useState<AutomationGitHubEvent[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
@@ -118,7 +128,7 @@ export default function NewAutomationPage() {
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
-  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi"].includes(effectiveAgentType);
+  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi", "opencode"].includes(effectiveAgentType);
   const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
   const prePRReviewDescription = supportsNativeReviewLoop
     ? effectivePrePRReviewLoops === 0
@@ -139,6 +149,15 @@ export default function NewAutomationPage() {
     });
   };
 
+  const toggleGitHubEventTrigger = (event: AutomationGitHubEvent, checked: boolean) => {
+    setGitHubEventTriggers((current) => {
+      if (checked) {
+        return current.includes(event) ? current : [...current, event];
+      }
+      return current.filter((item) => item !== event);
+    });
+  };
+
   const createMutation = useMutation({
     mutationFn: () =>
       api.automations.create({
@@ -152,6 +171,7 @@ export default function NewAutomationPage() {
         interval_unit: intervalUnit,
         interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
         timezone,
+        github_event_triggers: githubEventTriggers,
         model,
         identity_scope: identityScope,
         pre_pr_review_loops: effectivePrePRReviewLoops,
@@ -285,6 +305,25 @@ export default function NewAutomationPage() {
                     detected={detectedTimezone}
                     className="w-full sm:w-auto"
                   />
+                </div>
+
+                <div className="flex w-full flex-col gap-2 rounded-md border border-border bg-background px-3 py-2 sm:w-auto">
+                  <span className="text-sm font-medium leading-none text-muted-foreground">Also trigger on</span>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {githubTriggerOptions.map((option) => (
+                      <Label
+                        key={option.value}
+                        className="flex min-h-7 cursor-pointer items-center gap-2 text-sm font-normal"
+                      >
+                        <Checkbox
+                          checked={githubEventTriggers.includes(option.value)}
+                          onCheckedChange={(checked) => toggleGitHubEventTrigger(option.value, checked === true)}
+                          aria-label={option.label}
+                        />
+                        <span>{option.label}</span>
+                      </Label>
+                    ))}
+                  </div>
                 </div>
 
               </>

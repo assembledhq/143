@@ -87,6 +87,25 @@ function installPreviewHandlers(
       requests.push(url.search);
       return HttpResponse.json({ data: byScope[scope] ?? [], meta });
     }),
+    http.get("*/api/v1/repositories/:id/branches", () =>
+      HttpResponse.json({
+        data: [
+          { name: "main", protected: true },
+          { name: "feature/session-input-branch", protected: false },
+        ],
+        meta: {},
+      }),
+    ),
+    http.get("*/api/v1/previews/configs", () =>
+      HttpResponse.json({
+        data: {
+          names: [],
+          default_name: "",
+          selected_name: "",
+          requires_selection: false,
+        },
+      }),
+    ),
   );
 }
 
@@ -161,6 +180,9 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Pool: 3 of 10 previews")).toBeInTheDocument();
     expect(screen.getAllByText("feature/warm-link")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Ready")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Failed")[0]).toBeInTheDocument();
     expect(screen.getByText("resumes in ~30s")).toBeInTheDocument();
     expect(screen.getByText("stopped after error")).toBeInTheDocument();
     expect(screen.getAllByText("assembledhq/docs · PR #17")[0]).toBeInTheDocument();
@@ -263,15 +285,65 @@ describe("PreviewsPage", () => {
     expect(screen.queryByRole("button", { name: /start latest/i })).not.toBeInTheDocument();
   });
 
-  it("renders the empty state with the create action when every scope is empty", async () => {
+  it("opens the create preview dialog from the empty state action", async () => {
     installPreviewHandlers({ running: [], resumable: [], recent: [] });
 
     renderWithProviders(<PreviewsPage />);
 
     expect(await screen.findByText("No previews yet")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /create preview/i }));
     expect(
-      screen.getByRole("link", { name: /create preview/i }),
-    ).toHaveAttribute("href", "/previews/new");
+      await screen.findByRole("dialog", { name: "Create preview" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens create preview in a modal and submits the preselected repo and branch", async () => {
+    const createRequests: unknown[] = [];
+    installPreviewHandlers({ running: [], resumable: [], recent: [] });
+    server.use(
+      http.post("*/api/v1/previews", async ({ request }) => {
+        createRequests.push(await request.json());
+        return HttpResponse.json({
+          data: preview({
+            target_id: "target-created",
+            preview_id: "preview-created",
+            repository_id: "repo-1",
+            branch: "feature/session-input-branch",
+          }),
+        });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />, {
+      searchParams: {
+        repo: "repo-1",
+        branch: "feature/session-input-branch",
+      },
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: /new preview/i }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Create preview" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Repository" })).toHaveTextContent(
+      "assembledhq/143",
+    );
+    expect(screen.getByRole("button", { name: "Target branch" })).toHaveTextContent(
+      "feature/session-input-branch",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Start preview" }));
+
+    await waitFor(() => {
+      expect(createRequests).toEqual([
+        expect.objectContaining({
+          repository_id: "repo-1",
+          branch: "feature/session-input-branch",
+          source: { type: "manual" },
+        }),
+      ]);
+    });
   });
 
   it("keeps the initial preview content quiet until all sections resolve empty", async () => {

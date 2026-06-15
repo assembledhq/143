@@ -177,28 +177,29 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Name             string                          `json:"name"`
-		Goal             string                          `json:"goal"`
-		IconType         models.AutomationIconType       `json:"icon_type"`
-		IconValue        string                          `json:"icon_value"`
-		RepositoryID     string                          `json:"repository_id"`
-		Scope            *string                         `json:"scope"`
-		AgentType        *models.AgentType               `json:"agent_type"`
-		Model            *string                         `json:"model"`
-		ReasoningEffort  models.ReasoningEffort          `json:"reasoning_effort"`
-		ExecutionMode    *models.ProjectExecMode         `json:"execution_mode"`
-		MaxConcurrent    *int                            `json:"max_concurrent"`
-		BaseBranch       *string                         `json:"base_branch"`
-		IdentityScope    *models.AutomationIdentityScope `json:"identity_scope"`
-		ScheduleType     *models.AutomationScheduleType  `json:"schedule_type"`
-		IntervalValue    *int                            `json:"interval_value"`
-		IntervalUnit     *models.ScheduleUnit            `json:"interval_unit"`
-		IntervalRunAt    *string                         `json:"interval_run_at"`
-		CronExpression   *string                         `json:"cron_expression"`
-		Timezone         *string                         `json:"timezone"`
-		Metadata         json.RawMessage                 `json:"metadata"`
-		Priority         *int                            `json:"priority"`
-		PrePRReviewLoops *int                            `json:"pre_pr_review_loops"`
+		Name                string                          `json:"name"`
+		Goal                string                          `json:"goal"`
+		IconType            models.AutomationIconType       `json:"icon_type"`
+		IconValue           string                          `json:"icon_value"`
+		RepositoryID        string                          `json:"repository_id"`
+		Scope               *string                         `json:"scope"`
+		AgentType           *models.AgentType               `json:"agent_type"`
+		Model               *string                         `json:"model"`
+		ReasoningEffort     models.ReasoningEffort          `json:"reasoning_effort"`
+		ExecutionMode       *models.ProjectExecMode         `json:"execution_mode"`
+		MaxConcurrent       *int                            `json:"max_concurrent"`
+		BaseBranch          *string                         `json:"base_branch"`
+		IdentityScope       *models.AutomationIdentityScope `json:"identity_scope"`
+		ScheduleType        *models.AutomationScheduleType  `json:"schedule_type"`
+		IntervalValue       *int                            `json:"interval_value"`
+		IntervalUnit        *models.ScheduleUnit            `json:"interval_unit"`
+		IntervalRunAt       *string                         `json:"interval_run_at"`
+		CronExpression      *string                         `json:"cron_expression"`
+		Timezone            *string                         `json:"timezone"`
+		GitHubEventTriggers []models.AutomationGitHubEvent  `json:"github_event_triggers"`
+		Metadata            json.RawMessage                 `json:"metadata"`
+		Priority            *int                            `json:"priority"`
+		PrePRReviewLoops    *int                            `json:"pre_pr_review_loops"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -404,32 +405,38 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", err.Error())
 		return
 	}
+	githubEventTriggers, err := validateAutomationGitHubEventTriggers(req.GitHubEventTriggers)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_TRIGGERS", err.Error())
+		return
+	}
 
 	automation := models.Automation{
-		OrgID:            orgID,
-		RepositoryID:     repoID,
-		Name:             name,
-		Goal:             goal,
-		IconType:         iconType,
-		IconValue:        iconValue,
-		Scope:            req.Scope,
-		AgentType:        agentType,
-		ModelOverride:    modelOverride,
-		ReasoningEffort:  reasoningOverride,
-		ExecutionMode:    execMode,
-		MaxConcurrent:    maxConcurrent,
-		BaseBranch:       baseBranch,
-		IdentityScope:    identityScope,
-		PrePRReviewLoops: prePRReviewLoops,
-		ScheduleType:     scheduleType,
-		IntervalValue:    intervalValuePtr,
-		IntervalUnit:     intervalUnitPtr,
-		IntervalRunAt:    intervalRunAtPtr,
-		CronExpression:   cronExpressionPtr,
-		Timezone:         timezone,
-		Enabled:          true,
-		Priority:         priority,
-		ExternalMetadata: req.Metadata,
+		OrgID:               orgID,
+		RepositoryID:        repoID,
+		Name:                name,
+		Goal:                goal,
+		IconType:            iconType,
+		IconValue:           iconValue,
+		Scope:               req.Scope,
+		AgentType:           agentType,
+		ModelOverride:       modelOverride,
+		ReasoningEffort:     reasoningOverride,
+		ExecutionMode:       execMode,
+		MaxConcurrent:       maxConcurrent,
+		BaseBranch:          baseBranch,
+		IdentityScope:       identityScope,
+		PrePRReviewLoops:    prePRReviewLoops,
+		ScheduleType:        scheduleType,
+		IntervalValue:       intervalValuePtr,
+		IntervalUnit:        intervalUnitPtr,
+		IntervalRunAt:       intervalRunAtPtr,
+		CronExpression:      cronExpressionPtr,
+		Timezone:            timezone,
+		GitHubEventTriggers: githubEventTriggers,
+		Enabled:             true,
+		Priority:            priority,
+		ExternalMetadata:    req.Metadata,
 	}
 	if user != nil {
 		automation.CreatedBy = &user.ID
@@ -478,6 +485,7 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 			RunAt         *string                       `json:"run_at"`
 			Timezone      *string                       `json:"timezone"`
 		} `json:"schedule"`
+		Triggers  []models.AutomationGitHubEvent `json:"triggers"`
 		Execution struct {
 			Mode          *models.ProjectExecMode `json:"mode"`
 			MaxConcurrent *int                    `json:"max_concurrent"`
@@ -514,21 +522,22 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 		scheduleType = models.AutomationScheduleInterval
 	}
 	flat := map[string]any{
-		"name":                req.Name,
-		"goal":                req.Goal,
-		"repository_id":       req.RepositoryID,
-		"scope":               req.Scope,
-		"schedule_type":       scheduleType,
-		"execution_mode":      req.Execution.Mode,
-		"max_concurrent":      req.Execution.MaxConcurrent,
-		"agent_type":          req.Agent.Type,
-		"model":               req.Agent.Model,
-		"reasoning_effort":    req.Agent.ReasoningEffort,
-		"base_branch":         req.PullRequest.BaseBranch,
-		"identity_scope":      identityScope,
-		"pre_pr_review_loops": req.PullRequest.PrePRReviewLoops,
-		"timezone":            req.Schedule.Timezone,
-		"metadata":            req.Metadata,
+		"name":                  req.Name,
+		"goal":                  req.Goal,
+		"repository_id":         req.RepositoryID,
+		"scope":                 req.Scope,
+		"schedule_type":         scheduleType,
+		"execution_mode":        req.Execution.Mode,
+		"max_concurrent":        req.Execution.MaxConcurrent,
+		"agent_type":            req.Agent.Type,
+		"model":                 req.Agent.Model,
+		"reasoning_effort":      req.Agent.ReasoningEffort,
+		"base_branch":           req.PullRequest.BaseBranch,
+		"identity_scope":        identityScope,
+		"pre_pr_review_loops":   req.PullRequest.PrePRReviewLoops,
+		"timezone":              req.Schedule.Timezone,
+		"metadata":              req.Metadata,
+		"github_event_triggers": req.Triggers,
 	}
 	if scheduleType == models.AutomationScheduleCron {
 		flat["cron_expression"] = req.Schedule.Cron
@@ -559,6 +568,25 @@ func resolveAutomationIcon(iconType models.AutomationIconType, iconValue string)
 	return resolvedType, resolvedValue, nil
 }
 
+func validateAutomationGitHubEventTriggers(events []models.AutomationGitHubEvent) ([]models.AutomationGitHubEvent, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	seen := make(map[models.AutomationGitHubEvent]struct{}, len(events))
+	out := make([]models.AutomationGitHubEvent, 0, len(events))
+	for _, event := range events {
+		if err := event.Validate(); err != nil {
+			return nil, err
+		}
+		if _, ok := seen[event]; ok {
+			continue
+		}
+		seen[event] = struct{}{}
+		out = append(out, event)
+	}
+	return out, nil
+}
+
 func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -578,27 +606,28 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	before := automation
 
 	var req struct {
-		Name             *string                         `json:"name"`
-		Goal             *string                         `json:"goal"`
-		IconType         *models.AutomationIconType      `json:"icon_type"`
-		IconValue        *string                         `json:"icon_value"`
-		Scope            *string                         `json:"scope"`
-		RepositoryID     *string                         `json:"repository_id"`
-		AgentType        *models.AgentType               `json:"agent_type"`
-		Model            *string                         `json:"model"`
-		ReasoningEffort  *models.ReasoningEffort         `json:"reasoning_effort"`
-		ExecutionMode    *models.ProjectExecMode         `json:"execution_mode"`
-		MaxConcurrent    *int                            `json:"max_concurrent"`
-		BaseBranch       *string                         `json:"base_branch"`
-		IdentityScope    *models.AutomationIdentityScope `json:"identity_scope"`
-		ScheduleType     *models.AutomationScheduleType  `json:"schedule_type"`
-		IntervalValue    *int                            `json:"interval_value"`
-		IntervalUnit     *models.ScheduleUnit            `json:"interval_unit"`
-		IntervalRunAt    *string                         `json:"interval_run_at"`
-		CronExpression   *string                         `json:"cron_expression"`
-		Timezone         *string                         `json:"timezone"`
-		Priority         *int                            `json:"priority"`
-		PrePRReviewLoops *int                            `json:"pre_pr_review_loops"`
+		Name                *string                         `json:"name"`
+		Goal                *string                         `json:"goal"`
+		IconType            *models.AutomationIconType      `json:"icon_type"`
+		IconValue           *string                         `json:"icon_value"`
+		Scope               *string                         `json:"scope"`
+		RepositoryID        *string                         `json:"repository_id"`
+		AgentType           *models.AgentType               `json:"agent_type"`
+		Model               *string                         `json:"model"`
+		ReasoningEffort     *models.ReasoningEffort         `json:"reasoning_effort"`
+		ExecutionMode       *models.ProjectExecMode         `json:"execution_mode"`
+		MaxConcurrent       *int                            `json:"max_concurrent"`
+		BaseBranch          *string                         `json:"base_branch"`
+		IdentityScope       *models.AutomationIdentityScope `json:"identity_scope"`
+		ScheduleType        *models.AutomationScheduleType  `json:"schedule_type"`
+		IntervalValue       *int                            `json:"interval_value"`
+		IntervalUnit        *models.ScheduleUnit            `json:"interval_unit"`
+		IntervalRunAt       *string                         `json:"interval_run_at"`
+		CronExpression      *string                         `json:"cron_expression"`
+		Timezone            *string                         `json:"timezone"`
+		GitHubEventTriggers *[]models.AutomationGitHubEvent `json:"github_event_triggers"`
+		Priority            *int                            `json:"priority"`
+		PrePRReviewLoops    *int                            `json:"pre_pr_review_loops"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -762,6 +791,14 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		automation.Timezone = *req.Timezone
+	}
+	if req.GitHubEventTriggers != nil {
+		githubEventTriggers, err := validateAutomationGitHubEventTriggers(*req.GitHubEventTriggers)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_TRIGGERS", err.Error())
+			return
+		}
+		automation.GitHubEventTriggers = githubEventTriggers
 	}
 	if req.Priority != nil {
 		if *req.Priority < 0 || *req.Priority > 100 {

@@ -771,6 +771,56 @@ func TestPreviewStore_ListBranchPreviewIndex_IncludesRuntimeOnlySessionPreview(t
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_GetSessionPreviewSummary(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	expiresAt := now.Add(30 * time.Minute)
+
+	rows := pgxmock.NewRows(branchPreviewSummaryTestCols()).AddRow(
+		previewID, &previewID, repoID, "acme/app", "feature/session-preview", "abc123", "",
+		models.PreviewSourceTypeSession, sessionID.String(), "",
+		string(models.PreviewStatusUnavailable), now, now, &expiresAt, &now, "",
+		"unavailable", "preview runtime endpoint mismatch", false, (*int)(nil),
+	)
+
+	mock.ExpectQuery("JOIN sessions sess ON sess\\.id = pi\\.session_id").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(rows)
+
+	summary, err := store.GetSessionPreviewSummary(context.Background(), orgID, previewID)
+
+	require.NoError(t, err, "GetSessionPreviewSummary should return runtime-only session preview metadata")
+	require.Equal(t, &models.BranchPreviewSummary{
+		TargetID:           previewID,
+		PreviewID:          &previewID,
+		RepositoryID:       repoID,
+		RepositoryFullName: "acme/app",
+		Branch:             "feature/session-preview",
+		CommitSHA:          "abc123",
+		SourceType:         models.PreviewSourceTypeSession,
+		SourceID:           sessionID.String(),
+		Status:             string(models.PreviewStatusUnavailable),
+		CreatedAt:          now,
+		SortCreatedAt:      now,
+		ExpiresAt:          &expiresAt,
+		StoppedAt:          &now,
+		CurrentPhase:       "unavailable",
+		Error:              "preview runtime endpoint mismatch",
+		Resumable:          false,
+	}, summary, "GetSessionPreviewSummary should project session preview rows into branch preview summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_CountBranchPreviewIndexScopes_ResumableUsesWarmCachePredicate(t *testing.T) {
 	t.Parallel()
 
@@ -2691,6 +2741,44 @@ func TestPreviewStore_GetActivePreviewRuntimeScopesByOrgAndLease(t *testing.T) {
 	require.NoError(t, err, "GetActivePreviewRuntime should return the live runtime")
 	require.Equal(t, runtimeID, runtime.ID, "GetActivePreviewRuntime should return the matching runtime")
 	require.Equal(t, "http://worker-runtime:8080", runtime.EndpointURL, "GetActivePreviewRuntime should return the endpoint from the runtime row")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_ListActivePreviewRuntimesForReachability(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now().UTC()
+	runtimeID := uuid.New()
+	orgID := uuid.New()
+	previewID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows(previewRuntimeTestCols).AddRow(newPreviewRuntimeRow(runtimeID, orgID, previewID, now)...))
+
+	runtimes, err := store.ListActivePreviewRuntimesForReachability(context.Background(), 100)
+	require.NoError(t, err, "ListActivePreviewRuntimesForReachability should return live runtimes")
+	require.Equal(t, []models.PreviewRuntime{{
+		ID:                runtimeID,
+		OrgID:             orgID,
+		PreviewInstanceID: previewID,
+		RuntimeEpoch:      1,
+		WorkerNodeID:      "worker-1",
+		EndpointURL:       "http://worker-runtime:8080",
+		PreviewHandle:     "handle-1",
+		PrimaryPort:       3000,
+		Status:            models.PreviewRuntimeStatusReady,
+		LeaseExpiresAt:    now.Add(45 * time.Second),
+		LastHeartbeatAt:   now,
+		Error:             "",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}}, runtimes, "ListActivePreviewRuntimesForReachability should scan the runtime rows")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

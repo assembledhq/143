@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ func automationColumnSlice() []string {
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
+		"github_event_triggers",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
@@ -36,6 +38,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
 		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
+		automationGitHubEventsToStrings(a.GitHubEventTriggers),
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
 	)
@@ -79,7 +82,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(26)...).
+		WithArgs(anyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -141,6 +144,41 @@ func TestAutomationStore_GetByID_NotFound(t *testing.T) {
 	_, err = store.GetByID(context.Background(), uuid.New(), uuid.New())
 	require.Error(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationStore_ListEnabledByGitHubEvent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	store := NewAutomationStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	want := models.Automation{
+		ID: orgID, OrgID: orgID, RepositoryID: &repoID, Name: "Review PR", Goal: "Review every PR",
+		IconType: models.AutomationIconTypeEmoji, IconValue: "🔁",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		IdentityScope: models.AutomationIdentityScopeOrg,
+		ScheduleType:  models.AutomationScheduleInterval, Timezone: "UTC",
+		GitHubEventTriggers: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
+		Enabled:             true, Priority: 50, ExternalMetadata: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE org_id = @org_id").
+		WithArgs(pgx.NamedArgs{
+			"org_id":        orgID,
+			"repository_id": repoID,
+			"event":         models.AutomationGitHubEventPullRequestOpened,
+		}).
+		WillReturnRows(addAutomationRow(pgxmock.NewRows(automationColumnSlice()), want))
+
+	got, err := store.ListEnabledByGitHubEvent(context.Background(), orgID, repoID, models.AutomationGitHubEventPullRequestOpened)
+	require.NoError(t, err, "listing enabled GitHub-event automations should not fail")
+	require.Equal(t, []models.Automation{want}, got, "store should return matching enabled automations for the org and repository")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestAutomationStore_ListByOrg(t *testing.T) {
@@ -208,7 +246,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(28)...).
+		WithArgs(anyArgs(29)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))

@@ -12,7 +12,7 @@ const MAX_PATTERN_LEN = 40;
 
 /**
  * Canonicalizes agent-specific tool names into a common vocabulary so the
- * same template can serve Claude Code, Codex, Gemini CLI, and future agents.
+ * same template can serve Claude Code, Codex, OpenCode, and future agents.
  */
 const TOOL_ALIAS: Record<string, string> = {
   // shell / command execution

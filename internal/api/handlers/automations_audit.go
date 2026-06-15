@@ -22,6 +22,9 @@ func automationAuditSnapshot(a *models.Automation) map[string]any {
 		"identity_scope": a.IdentityScope.OrDefault(),
 		"schedule_type":  a.ScheduleType,
 	}
+	if len(a.GitHubEventTriggers) > 0 {
+		snap["github_event_triggers"] = automationGitHubEventStrings(a.GitHubEventTriggers)
+	}
 	switch a.ScheduleType {
 	case models.AutomationScheduleInterval:
 		if a.IntervalValue != nil {
@@ -78,10 +81,22 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("interval_run_at", optString(old.IntervalRunAt), optString(new_.IntervalRunAt))
 	track("cron_expression", optString(old.CronExpression), optString(new_.CronExpression))
 	track("timezone", old.Timezone, new_.Timezone)
+	track("github_event_triggers", automationGitHubEventStrings(old.GitHubEventTriggers), automationGitHubEventStrings(new_.GitHubEventTriggers))
 	track("priority", old.Priority, new_.Priority)
 	track("repository_id", optUUIDString(old.RepositoryID), optUUIDString(new_.RepositoryID))
 
 	return changes
+}
+
+func automationGitHubEventStrings(events []models.AutomationGitHubEvent) []string {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		out = append(out, string(event))
+	}
+	return out
 }
 
 // marshalAuditDetails JSON-encodes a details map. Returns nil (which the audit

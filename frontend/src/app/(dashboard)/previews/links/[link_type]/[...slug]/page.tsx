@@ -10,6 +10,7 @@ import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
@@ -40,9 +41,9 @@ export default function PreviewStableLinkPage({
             {previewQuery.isLoading ? (
               <p className="text-sm text-muted-foreground">Loading preview link...</p>
             ) : previewQuery.isError ? (
-              <p className="text-sm text-destructive">
+              <ErrorText className="text-sm">
                 {previewQuery.error instanceof Error ? previewQuery.error.message : "Preview link could not be loaded."}
-              </p>
+              </ErrorText>
             ) : preview ? (
               <>
                 <div className="grid gap-3 text-sm md:grid-cols-2">

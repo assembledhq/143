@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseAsString, useQueryState } from "nuqs";
 import {
   ExternalLink,
   GitBranch,
@@ -17,6 +18,7 @@ import {
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { CreatePreviewDialog } from "@/components/preview/create-preview-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -40,6 +42,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api } from "@/lib/api";
 import { pollMs } from "@/lib/poll-intervals";
+import { formatPreviewStatus } from "@/lib/preview-types";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   BranchPreviewResponse,
@@ -110,8 +113,8 @@ function stoppedReasonLabel(
 }
 
 function statusLabel(preview: BranchPreviewResponse): string {
-  if (preview.status === "target_created") return "not started";
-  return preview.status.replaceAll("_", " ");
+  if (preview.status === "target_created") return "Not started";
+  return formatPreviewStatus(preview.status);
 }
 
 function relativeTime(value?: string): string {
@@ -395,7 +398,9 @@ export default function PreviewsPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const [query, setQuery] = useState("");
-  const [repositoryId, setRepositoryId] = useState("all");
+  const [repositoryId, setRepositoryId] = useQueryState("repo", parseAsString.withDefault("all"));
+  const [branchParam] = useQueryState("branch", parseAsString);
+  const [createOpen, setCreateOpen] = useState(false);
   const canMutate = user?.role !== "viewer";
   const isAdmin = user?.role === "admin";
 
@@ -506,11 +511,9 @@ export default function PreviewsPage() {
           description="See running previews, resume warm ones, and review recent activity."
           action={
             canMutate ? (
-              <Button asChild>
-                <Link href="/previews/new">
-                  <MonitorPlay className="h-4 w-4" />
-                  New preview
-                </Link>
+              <Button type="button" onClick={() => setCreateOpen(true)}>
+                <MonitorPlay className="h-4 w-4" />
+                New preview
               </Button>
             ) : null
           }
@@ -554,7 +557,7 @@ export default function PreviewsPage() {
                     label: isAdmin
                       ? "Create your first preview"
                       : "Create preview",
-                    href: "/previews/new",
+                    onClick: () => setCreateOpen(true),
                   }
                 : undefined
             }
@@ -625,6 +628,17 @@ export default function PreviewsPage() {
             })}
           </div>
         )}
+        {canMutate ? (
+          <CreatePreviewDialog
+            open={createOpen}
+            onOpenChange={setCreateOpen}
+            initialRepositoryId={repositoryFilter}
+            initialBranch={branchParam ?? undefined}
+            onCreated={() => {
+              void queryClient.invalidateQueries({ queryKey: ["previews"] });
+            }}
+          />
+        ) : null}
       </div>
     </PageContainer>
   );

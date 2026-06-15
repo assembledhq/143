@@ -11,8 +11,16 @@ const {
   linearAgentMappingsMock,
   updateLinearAgentMock,
   upsertLinearAgentMappingMock,
+  getSlackHealthMock,
+  getSlackSettingsMock,
+  updateSlackSettingsMock,
+  listSlackUserLinksMock,
+  upsertSlackUserLinkMock,
+  deleteSlackUserLinkMock,
   listSlackChannelsMock,
   updateSlackChannelsMock,
+  updateSlackChannelSettingsMock,
+  teamListMembersMock,
   githubConnectMock,
   currentUserMock,
   ApiErrorMock,
@@ -33,8 +41,16 @@ const {
     linearAgentMappingsMock: vi.fn(),
     updateLinearAgentMock: vi.fn(),
     upsertLinearAgentMappingMock: vi.fn(),
+    getSlackHealthMock: vi.fn(),
+    getSlackSettingsMock: vi.fn(),
+    updateSlackSettingsMock: vi.fn(),
+    listSlackUserLinksMock: vi.fn(),
+    upsertSlackUserLinkMock: vi.fn(),
+    deleteSlackUserLinkMock: vi.fn(),
     listSlackChannelsMock: vi.fn(),
     updateSlackChannelsMock: vi.fn(),
+    updateSlackChannelSettingsMock: vi.fn(),
+    teamListMembersMock: vi.fn(),
     githubConnectMock: vi.fn(),
     currentUserMock: {
       id: "user-1",
@@ -66,8 +82,15 @@ vi.mock("@/lib/api", () => ({
       listLinearAgentMappings: linearAgentMappingsMock,
       updateLinearAgentSettings: updateLinearAgentMock,
       upsertLinearAgentMapping: upsertLinearAgentMappingMock,
+      getSlackHealth: getSlackHealthMock,
+      getSlackSettings: getSlackSettingsMock,
+      updateSlackSettings: updateSlackSettingsMock,
+      listSlackUserLinks: listSlackUserLinksMock,
+      upsertSlackUserLink: upsertSlackUserLinkMock,
+      deleteSlackUserLink: deleteSlackUserLinkMock,
       listSlackChannels: listSlackChannelsMock,
       updateSlackChannels: updateSlackChannelsMock,
+      updateSlackChannelSettings: updateSlackChannelSettingsMock,
     },
     repositories: {
       list: repositoriesListMock,
@@ -75,6 +98,9 @@ vi.mock("@/lib/api", () => ({
     },
     githubStatus: {
       connect: githubConnectMock,
+    },
+    team: {
+      listMembers: teamListMembersMock,
     },
   },
 }));
@@ -134,8 +160,56 @@ describe("IntegrationsPage", () => {
     linearAgentMappingsMock.mockResolvedValue({ data: [], meta: {} });
     updateLinearAgentMock.mockResolvedValue(undefined);
     upsertLinearAgentMappingMock.mockResolvedValue({ data: {}, meta: {} });
+    getSlackHealthMock.mockResolvedValue({
+      data: {
+        installation: {
+          id: "slack-install-1",
+          org_id: "org-1",
+          team_id: "T123",
+          team_name: "Acme",
+          bot_user_id: "U143",
+          scope: ["chat:write"],
+          status: "active",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        required_scopes: ["chat:write"],
+        missing_scopes: [],
+        auth_ok: true,
+      },
+    });
+    getSlackSettingsMock.mockResolvedValue({
+      data: {
+        org_id: "org-1",
+        slack_installation_id: "slack-install-1",
+        default_repository_id: "repo-1",
+        default_branch: "main",
+        routing_mode: "auto",
+        response_visibility: "thread",
+        allowed_actions: ["session", "preview"],
+        notification_preset: "balanced",
+        active: true,
+      },
+    });
+    updateSlackSettingsMock.mockResolvedValue({ data: {} });
+    listSlackUserLinksMock.mockResolvedValue({ data: [], meta: {} });
+    upsertSlackUserLinkMock.mockResolvedValue({ data: {}, meta: {} });
+    deleteSlackUserLinkMock.mockResolvedValue(undefined);
+    teamListMembersMock.mockResolvedValue({
+      data: [
+        {
+          id: "user-1",
+          org_id: "org-1",
+          email: "admin@example.com",
+          name: "Admin User",
+          role: "admin",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
     listSlackChannelsMock.mockResolvedValue({ data: [] });
     updateSlackChannelsMock.mockResolvedValue(undefined);
+    updateSlackChannelSettingsMock.mockResolvedValue({ data: {} });
     claimGitHubRepositoriesMock.mockRejectedValue(
       new ApiErrorMock("GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories"),
     );
@@ -439,18 +513,207 @@ describe("IntegrationsPage", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
     const sheet = await screen.findByRole("dialog", { name: "Slack" });
-    await within(sheet).findByText("#engineering");
+    await within(sheet).findByRole("option", { name: "Monitor #engineering" });
 
     await user.type(within(sheet).getByPlaceholderText("Search channels..."), "customer");
 
-    expect(within(sheet).getByText("#customer-success")).toBeInTheDocument();
-    expect(within(sheet).queryByText("#engineering")).not.toBeInTheDocument();
-    expect(within(sheet).queryByText("#random")).not.toBeInTheDocument();
+    expect(within(sheet).getByRole("option", { name: "Monitor #customer-success" })).toBeInTheDocument();
+    expect(within(sheet).queryByRole("option", { name: "Monitor #engineering" })).not.toBeInTheDocument();
+    expect(within(sheet).queryByRole("option", { name: "Monitor #random" })).not.toBeInTheDocument();
 
     await user.click(within(sheet).getByRole("option", { name: "Monitor #customer-success" }));
 
     await waitFor(() => {
       expect(updateSlackChannelsMock).toHaveBeenCalledWith(["chan-1", "chan-2"]);
+    });
+  });
+
+  it("shows Slackbot defaults before channel rows in the Slack manage sidesheet", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "repo-1",
+          org_id: "org-1",
+          integration_id: "github-1",
+          github_id: 123,
+          full_name: "acme/api",
+          default_branch: "main",
+          private: true,
+          clone_url: "https://github.com/acme/api.git",
+          installation_id: 12345,
+          status: "active",
+          settings: {},
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    listSlackChannelsMock.mockResolvedValue({
+      data: [
+        {
+          id: "chan-1",
+          name: "engineering",
+          selected: true,
+          effective_settings: {
+            slack_channel_id: "chan-1",
+            default_repository_id: "repo-1",
+            default_branch: "main",
+            routing_mode: "auto",
+            response_visibility: "thread",
+            allowed_actions: ["session", "preview"],
+            notification_preset: "balanced",
+            has_channel_override: false,
+          },
+        },
+      ],
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+
+    expect(await within(sheet).findByText("Slackbot defaults")).toBeInTheDocument();
+    expect(within(sheet).getByText("PM/context monitoring")).toBeInTheDocument();
+    expect(within(sheet).getByText("Interactive bot channel overrides")).toBeInTheDocument();
+    expect(within(sheet).getByText("User linking")).toBeInTheDocument();
+    expect(within(sheet).getByLabelText("Slack default repository")).toHaveTextContent("acme/api");
+    expect(within(sheet).getByText("Auto · Balanced")).toBeInTheDocument();
+
+    await user.click(within(sheet).getByLabelText("Slack routing mode"));
+    await user.click(await screen.findByRole("option", { name: "Start work" }));
+
+    await waitFor(() => {
+      expect(updateSlackSettingsMock).toHaveBeenCalledWith({ routing_mode: "start_work" });
+    });
+
+    await user.click(within(sheet).getByLabelText("Notifications for #engineering"));
+    await user.click(await screen.findByRole("option", { name: "Quiet" }));
+
+    await waitFor(() => {
+      expect(updateSlackChannelSettingsMock).toHaveBeenCalledWith("chan-1", {
+        slack_channel_name: "engineering",
+        channel_type: "channel",
+        notification_preset: "quiet",
+      });
+    });
+  });
+
+  it("lets admins manage Slack user links in the Slack manage sidesheet", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    listSlackUserLinksMock.mockResolvedValue({
+      data: [
+        {
+          id: "link-1",
+          org_id: "org-1",
+          slack_installation_id: "slack-install-1",
+          slack_team_id: "T123",
+          slack_user_id: "U123",
+          slack_email: "admin@example.com",
+          slack_display_name: "Admin Slack",
+          user_id: "user-1",
+          source: "admin_linked",
+          active: true,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+
+    expect(await within(sheet).findByText("Admin Slack")).toBeInTheDocument();
+    await user.click(within(sheet).getByLabelText("143 user"));
+    await user.click(await screen.findByRole("option", { name: "Admin User" }));
+    await user.type(within(sheet).getByLabelText("Slack user ID"), "U999");
+    await user.type(within(sheet).getByLabelText("Slack email"), "new@example.com");
+    await user.type(within(sheet).getByLabelText("Slack display name"), "New Slack");
+    await user.click(within(sheet).getByRole("button", { name: "Add link" }));
+
+    await waitFor(() => {
+      expect(upsertSlackUserLinkMock).toHaveBeenCalledWith({
+        user_id: "user-1",
+        slack_user_id: "U999",
+        slack_email: "new@example.com",
+        slack_display_name: "New Slack",
+      });
+    });
+
+    await user.click(within(sheet).getByRole("button", { name: "Delete Slack link for Admin Slack" }));
+    await waitFor(() => {
+      expect(deleteSlackUserLinkMock).toHaveBeenCalledWith("link-1");
+    });
+  });
+
+  it("lets admins edit custom Slack notification event subscriptions", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    getSlackSettingsMock.mockResolvedValueOnce({
+      data: {
+        org_id: "org-1",
+        slack_installation_id: "slack-install-1",
+        routing_mode: "auto",
+        response_visibility: "thread",
+        allowed_actions: ["session", "preview"],
+        notification_preset: "custom",
+        notification_subscriptions: { events: ["session.completed"] },
+        active: true,
+      },
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+
+    await user.click(await within(sheet).findByLabelText("Session failed"));
+
+    await waitFor(() => {
+      expect(updateSlackSettingsMock).toHaveBeenCalledWith({
+        notification_preset: "custom",
+        notification_subscriptions: { events: ["session.completed", "session.failed"] },
+      });
     });
   });
 
@@ -479,7 +742,7 @@ describe("IntegrationsPage", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
     const sheet = await screen.findByRole("dialog", { name: "Slack" });
-    await within(sheet).findByText("#engineering");
+    await within(sheet).findByRole("option", { name: "Monitor #engineering" });
 
     await user.click(within(sheet).getByRole("option", { name: "Monitor #engineering" }));
 
@@ -513,12 +776,12 @@ describe("IntegrationsPage", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
     const sheet = await screen.findByRole("dialog", { name: "Slack" });
-    await within(sheet).findByText("#engineering");
+    await within(sheet).findByRole("option", { name: "Monitor #engineering" });
 
     await user.type(within(sheet).getByPlaceholderText("Search channels..."), "zzznomatch");
 
-    expect(within(sheet).queryByText("#engineering")).not.toBeInTheDocument();
-    expect(within(sheet).queryByText("#customer-success")).not.toBeInTheDocument();
+    expect(within(sheet).queryByRole("option", { name: "Monitor #engineering" })).not.toBeInTheDocument();
+    expect(within(sheet).queryByRole("option", { name: "Monitor #customer-success" })).not.toBeInTheDocument();
     expect(within(sheet).getByText("No channels found.")).toBeInTheDocument();
   });
 
