@@ -487,6 +487,7 @@ func main() {
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
 			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
@@ -532,6 +533,7 @@ func main() {
 						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					var slackBranchPreviewHandler *handlers.BranchPreviewHandler
 					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
 						autoPreviewNodeStore := db.NewNodeStore(pool)
 						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
@@ -541,7 +543,24 @@ func main() {
 						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
 						services.AutoPreviewStarter = branchPreviewHandler
+						slackBranchPreviewHandler = branchPreviewHandler
 					}
+					slackPreviewNodeStore := db.NewNodeStore(pool)
+					slackPreviewSelector := preview.NewWorkerSelectorWithOptions(slackPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+						PreferredRegion:      cfg.NodeRegion,
+					})
+					previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+					if keyringErr != nil {
+						logger.Warn().Err(keyringErr).Msg("failed to initialize preview RPC keyring for Slack preview control; worker RPC auth disabled")
+						previewRPCKeyring = auth.PreviewTokenKeyring{}
+					}
+					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
+					slackPreviewHandler.SetJobStore(jobStore)
+					slackPreviewHandler.SetWorkerRuntime(slackPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID)
+					slackPreviewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
+					slackPreviewHandler.SetSandboxCapacityGate(sandboxCapacity)
+					services.SlackPreviewControl = handlers.NewSlackPreviewControl(slackPreviewHandler, slackBranchPreviewHandler, pullRequestStore, repoStore, cfg.FrontendURL)
 					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
 					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
 				}
@@ -565,9 +584,11 @@ func main() {
 					"Fix the missing dependencies, or set MODE=api to disable the in-process worker.")
 		}
 		retentionCfg := worker.DataRetentionConfig{
-			WebhookDays: cfg.DataRetentionWebhookDays,
-			LogsDays:    cfg.DataRetentionLogsDays,
-			JobsDays:    cfg.DataRetentionJobsDays,
+			WebhookDays:              cfg.DataRetentionWebhookDays,
+			LogsDays:                 cfg.DataRetentionLogsDays,
+			JobsDays:                 cfg.DataRetentionJobsDays,
+			SlackInboundPayloadDays:  cfg.DataRetentionSlackInboundPayloadDays,
+			SlackInboundPayloadBatch: cfg.DataRetentionSlackInboundPayloadBatch,
 		}
 
 		if sandboxCapacity != nil && services.SandboxGC != nil {

@@ -72,6 +72,10 @@ func (h *SlackbotHandler) SetMetrics(metrics *metrics.SlackbotMetrics) {
 }
 
 func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
+	started := h.now()
+	defer func() {
+		h.metrics.RecordCallbackLatency(r.Context(), "events_api", "handled", float64(h.now().Sub(started).Milliseconds()))
+	}()
 	body, ok := h.readAndVerify(w, r)
 	if !ok {
 		return
@@ -136,6 +140,7 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 	}
 	if !inserted {
 		h.metrics.RecordInboundEvent(r.Context(), eventType, "duplicate")
+		h.metrics.RecordDedupeHit(r.Context(), "events_api")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "duplicate"})
 		return
 	}
@@ -219,6 +224,10 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
+	started := h.now()
+	defer func() {
+		h.metrics.RecordCallbackLatency(r.Context(), "slash_command", "handled", float64(h.now().Sub(started).Milliseconds()))
+	}()
 	body, ok := h.readAndVerify(w, r)
 	if !ok {
 		return
@@ -258,7 +267,9 @@ func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack command", err)
 		return
 	}
-	if inserted {
+	if !inserted {
+		h.metrics.RecordDedupeHit(r.Context(), "slash_command")
+	} else {
 		payload := models.SlackStartSessionJobPayload{
 			OrgID:               install.OrgID.String(),
 			SlackInboundEventID: inbound.ID.String(),
@@ -285,6 +296,10 @@ func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
+	started := h.now()
+	defer func() {
+		h.metrics.RecordCallbackLatency(r.Context(), "interaction", "handled", float64(h.now().Sub(started).Milliseconds()))
+	}()
 	body, ok := h.readAndVerify(w, r)
 	if !ok {
 		return
@@ -334,7 +349,9 @@ func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack interaction", err)
 		return
 	}
-	if inserted {
+	if !inserted {
+		h.metrics.RecordDedupeHit(r.Context(), "interaction")
+	} else {
 		jobPayload := models.SlackInteractionJobPayload{
 			OrgID:               install.OrgID.String(),
 			SlackInboundEventID: inbound.ID.String(),
@@ -370,6 +387,7 @@ func (h *SlackbotHandler) readAndVerify(w http.ResponseWriter, r *http.Request) 
 		return nil, false
 	}
 	if !h.verifySignature(r, body) {
+		h.metrics.RecordSignatureFailure(r.Context(), "invalid")
 		writeError(w, r, http.StatusUnauthorized, "INVALID_SIGNATURE", "Slack signature verification failed")
 		return nil, false
 	}
@@ -423,20 +441,34 @@ func sanitizeSlackStoredPayload(raw []byte) json.RawMessage {
 	if len(raw) == 0 {
 		return nil
 	}
-	values, err := url.ParseQuery(string(raw))
-	if err == nil && len(values) > 0 {
+	rawString := string(raw)
+	values, err := url.ParseQuery(rawString)
+	if err == nil && len(values) > 0 && strings.Contains(rawString, "=") {
 		for key := range slackStoredPayloadSecretKeys {
 			if _, ok := values[key]; ok {
 				values.Set(key, "[redacted]")
 			}
 		}
-		return json.RawMessage(values.Encode())
+		encoded := make(map[string]any, len(values))
+		for key, vals := range values {
+			if len(vals) == 1 {
+				encoded[key] = vals[0]
+				continue
+			}
+			encoded[key] = vals
+		}
+		sanitized, marshalErr := json.Marshal(encoded)
+		if marshalErr != nil {
+			return json.RawMessage(`{}`)
+		}
+		return sanitized
 	}
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return json.RawMessage(raw)
 	}
 	sanitizeSlackJSONValue(decoded)
+	redactSlackDMEventText(decoded)
 	sanitized, err := json.Marshal(decoded)
 	if err != nil {
 		return json.RawMessage(raw)
@@ -445,9 +477,11 @@ func sanitizeSlackStoredPayload(raw []byte) json.RawMessage {
 }
 
 var slackStoredPayloadSecretKeys = map[string]struct{}{
-	"response_url": {},
-	"trigger_id":   {},
-	"token":        {},
+	"response_url":   {},
+	"trigger_id":     {},
+	"token":          {},
+	"authed_users":   {},
+	"authorizations": {},
 }
 
 func sanitizeSlackJSONValue(value any) {
@@ -464,6 +498,25 @@ func sanitizeSlackJSONValue(value any) {
 		for _, child := range v {
 			sanitizeSlackJSONValue(child)
 		}
+	}
+}
+
+func redactSlackDMEventText(value any) {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	event, ok := root["event"].(map[string]any)
+	if !ok {
+		return
+	}
+	channelType, _ := event["channel_type"].(string)
+	channelID, _ := event["channel"].(string)
+	if channelType != "im" && channelType != "mpim" && !strings.HasPrefix(channelID, "D") {
+		return
+	}
+	if _, ok := event["text"]; ok {
+		event["text"] = "[redacted]"
 	}
 }
 

@@ -272,6 +272,34 @@ func (s *SlackInboundEventStore) MarkFailed(ctx context.Context, orgID, eventID 
 	return err
 }
 
+func (s *SlackInboundEventStore) RedactPayloadsOlderThan(ctx context.Context, orgID uuid.UUID, cutoff time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE slack_inbound_events
+		SET payload = '{}'::jsonb
+		WHERE id IN (
+			SELECT id
+			FROM slack_inbound_events
+			WHERE org_id = @org_id
+			  AND received_at < @cutoff
+			  AND payload <> '{}'::jsonb
+			ORDER BY received_at ASC
+			LIMIT @limit
+		)`,
+		pgx.NamedArgs{
+			"org_id": orgID,
+			"cutoff": cutoff,
+			"limit":  limit,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("redact old Slack inbound payloads: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 type SlackUserLinkStore struct {
 	db DBTX
 }
@@ -291,6 +319,23 @@ func (s *SlackUserLinkStore) GetBySlackUser(ctx context.Context, orgID uuid.UUID
 		pgx.NamedArgs{"org_id": orgID, "slack_team_id": teamID, "slack_user_id": slackUserID})
 	if err != nil {
 		return models.SlackUserLink{}, fmt.Errorf("query slack user link: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackUserLink])
+}
+
+func (s *SlackUserLinkStore) GetByUser(ctx context.Context, orgID, userID uuid.UUID, teamID string) (models.SlackUserLink, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, slack_installation_id, user_id, slack_team_id, slack_user_id,
+			slack_email, slack_display_name, source, linked_at, created_at, updated_at
+		FROM slack_user_links
+		WHERE org_id = @org_id
+		  AND user_id = @user_id
+		  AND slack_team_id = @slack_team_id
+		ORDER BY linked_at DESC, updated_at DESC
+		LIMIT 1`,
+		pgx.NamedArgs{"org_id": orgID, "user_id": userID, "slack_team_id": teamID})
+	if err != nil {
+		return models.SlackUserLink{}, fmt.Errorf("query slack user link by user: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackUserLink])
 }
@@ -581,7 +626,10 @@ func (s *SlackChannelSettingsStore) ListNotificationSubscriptions(ctx context.Co
 		FROM slack_channel_settings
 		WHERE org_id = @org_id
 		  AND active = true
-		  AND notification_subscriptions <> '{}'::jsonb
+		  AND (
+		      notification_subscriptions <> '{}'::jsonb
+		      OR (notification_preset IS NOT NULL AND notification_preset <> 'custom')
+		  )
 		ORDER BY updated_at DESC`,
 		pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
@@ -710,6 +758,48 @@ func (s *SlackSessionLinkStore) Upsert(ctx context.Context, link *models.SlackSe
 	}
 	*link = updated
 	return nil
+}
+
+func (s *SlackSessionLinkStore) ClaimTeamSession(ctx context.Context, orgID, linkID, claimedByUserID uuid.UUID, claimedBySlackUserID string) (models.SlackSessionClaim, error) {
+	rows, err := s.db.Query(ctx, `
+		WITH claim AS (
+			INSERT INTO slack_session_claims (
+				org_id, slack_session_link_id, claimed_by_user_id, claimed_by_slack_user_id
+			)
+			VALUES (
+				@org_id, @slack_session_link_id, @claimed_by_user_id, @claimed_by_slack_user_id
+			)
+			ON CONFLICT (org_id, slack_session_link_id)
+			DO UPDATE SET
+				claimed_by_user_id = EXCLUDED.claimed_by_user_id,
+				claimed_by_slack_user_id = EXCLUDED.claimed_by_slack_user_id,
+				claimed_at = now()
+			RETURNING id, org_id, slack_session_link_id, claimed_by_user_id, claimed_by_slack_user_id, claimed_at
+		),
+		updated_link AS (
+			UPDATE slack_session_links
+			SET mapped_user_id = @claimed_by_user_id,
+			    slack_user_id = @claimed_by_slack_user_id,
+			    team_session = false,
+			    updated_at = now()
+			WHERE org_id = @org_id
+			  AND id = @slack_session_link_id
+			RETURNING id
+		)
+		SELECT claim.id, claim.org_id, claim.slack_session_link_id, claim.claimed_by_user_id,
+			claim.claimed_by_slack_user_id, claim.claimed_at
+		FROM claim
+		JOIN updated_link ON true`,
+		pgx.NamedArgs{
+			"org_id":                   orgID,
+			"slack_session_link_id":    linkID,
+			"claimed_by_user_id":       claimedByUserID,
+			"claimed_by_slack_user_id": claimedBySlackUserID,
+		})
+	if err != nil {
+		return models.SlackSessionClaim{}, fmt.Errorf("claim slack team session: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackSessionClaim])
 }
 
 func (s *SlackSessionLinkStore) ListRecentSessionsForSlackUser(ctx context.Context, orgID uuid.UUID, teamID, slackUserID string, limit int) ([]SlackHomeSessionSummary, error) {

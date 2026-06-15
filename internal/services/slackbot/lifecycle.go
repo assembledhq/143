@@ -73,6 +73,14 @@ type SlackAction struct {
 	URL      string
 	ActionID string
 	Value    string
+	Confirm  *SlackActionConfirm
+}
+
+type SlackActionConfirm struct {
+	Title       string
+	Text        string
+	ConfirmText string
+	DenyText    string
 }
 
 type SlackRenderedMessage struct {
@@ -275,6 +283,22 @@ func renderBlocks(text string, actions []SlackAction) []ingestion.SlackBlock {
 		}
 		if action.Value != "" {
 			element["value"] = action.Value
+		}
+		if action.Confirm != nil {
+			confirmText := strings.TrimSpace(action.Confirm.ConfirmText)
+			if confirmText == "" {
+				confirmText = "Confirm"
+			}
+			denyText := strings.TrimSpace(action.Confirm.DenyText)
+			if denyText == "" {
+				denyText = "Cancel"
+			}
+			element["confirm"] = map[string]any{
+				"title":   map[string]string{"type": "plain_text", "text": action.Confirm.Title},
+				"text":    map[string]string{"type": "mrkdwn", "text": action.Confirm.Text},
+				"confirm": map[string]string{"type": "plain_text", "text": confirmText},
+				"deny":    map[string]string{"type": "plain_text", "text": denyText},
+			}
 		}
 		elements = append(elements, element)
 	}

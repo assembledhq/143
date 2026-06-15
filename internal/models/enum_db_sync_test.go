@@ -103,6 +103,12 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			HumanInputRequestStatusCancelled, HumanInputRequestStatusExpired,
 			HumanInputRequestStatusSuperseded,
 		),
+		"session_human_input_requests_sensitivity": toStrings(
+			HumanInputSensitivityTeam, HumanInputSensitivityPersonal, HumanInputSensitivitySensitive,
+		),
+		"session_human_input_requests_preferred_channel": toStrings(
+			HumanInputPreferredChannelSlackThread, HumanInputPreferredChannelSlackDM, HumanInputPreferredChannelWeb,
+		),
 		"session_executors_status": toStrings(
 			SessionExecutorStatusStarting, SessionExecutorStatusRunning,
 			SessionExecutorStatusDraining, SessionExecutorStatusRequeued,

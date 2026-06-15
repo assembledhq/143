@@ -155,6 +155,16 @@ type branchPreviewStartOptions struct {
 	StopAfterReady bool
 }
 
+type SlackBranchPreviewTarget struct {
+	RepositoryID      uuid.UUID
+	Branch            string
+	CommitSHA         string
+	PreviewConfigName string
+	SourceType        models.PreviewSourceType
+	SourceID          string
+	SourceURL         string
+}
+
 type branchPreviewResponse struct {
 	TargetID              uuid.UUID                      `json:"target_id"`
 	PreviewID             *uuid.UUID                     `json:"preview_id"`
@@ -882,6 +892,105 @@ func (h *BranchPreviewHandler) ResolveLink(w http.ResponseWriter, r *http.Reques
 // the worker will fall back to reading it from the checked-out sandbox.
 func (h *BranchPreviewHandler) startTargetRuntime(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, target *models.PreviewTarget, ttlSeconds *int64, restart bool, cfg *models.PreviewConfig) (branchPreviewResponse, *previewHTTPError) {
 	return h.startTargetRuntimeWithOptions(ctx, orgID, userID, repo, target, ttlSeconds, restart, cfg, branchPreviewStartOptions{})
+}
+
+func (h *BranchPreviewHandler) StartPreviewForSlack(ctx context.Context, orgID, userID uuid.UUID, input SlackBranchPreviewTarget) (*models.PreviewInstance, error) {
+	if h == nil || h.previews == nil || h.repos == nil {
+		return nil, fmt.Errorf("branch preview handler is not configured")
+	}
+	repo, err := h.repos.GetByID(ctx, orgID, input.RepositoryID)
+	if err != nil {
+		return nil, fmt.Errorf("load preview repository: %w", err)
+	}
+	if !repo.IsActive() {
+		return nil, fmt.Errorf("repository is disconnected")
+	}
+	owner, name, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || name == "" {
+		return nil, fmt.Errorf("repository full name is invalid")
+	}
+	if h.github == nil {
+		return nil, fmt.Errorf("GitHub is not configured")
+	}
+	branch := strings.TrimSpace(input.Branch)
+	if branch == "" {
+		branch = repo.DefaultBranch
+	}
+	if branch == "" {
+		return nil, fmt.Errorf("preview branch is required")
+	}
+	token, tokenErr := h.github.GetInstallationToken(ctx, repo.InstallationID)
+	if tokenErr != nil {
+		return nil, fmt.Errorf("get GitHub token: %w", tokenErr)
+	}
+	commitSHA := strings.TrimSpace(input.CommitSHA)
+	if commitSHA == "" {
+		head, headErr := h.github.ResolveBranchHead(ctx, token, owner, name, branch)
+		if headErr != nil {
+			return nil, fmt.Errorf("resolve branch head: %w", headErr)
+		}
+		commitSHA = head
+	} else if err := h.github.CommitExists(ctx, token, owner, name, commitSHA); err != nil {
+		return nil, fmt.Errorf("verify commit SHA: %w", err)
+	}
+	configContent, contentErr := h.github.GetFileContent(ctx, token, owner, name, commitSHA, ".143/config.json")
+	if contentErr != nil {
+		return nil, fmt.Errorf("read preview config: %w", contentErr)
+	}
+	configName, parsedConfig, configErr := validatePreviewConfigContent([]byte(configContent), strings.TrimSpace(input.PreviewConfigName))
+	if configErr != nil {
+		return nil, fmt.Errorf("%s: %s", configErr.code, configErr.message)
+	}
+	sourceType := input.SourceType
+	if sourceType == "" {
+		sourceType = models.PreviewSourceTypeManual
+	}
+	if err := sourceType.Validate(); err != nil {
+		return nil, err
+	}
+	if input.SourceID != "" {
+		existing, sourceErr := h.previews.GetPreviewTargetBySource(ctx, orgID, sourceType, input.SourceID)
+		if sourceErr == nil && existing != nil {
+			resp, startErr := h.startTargetRuntime(ctx, orgID, userID, repo, existing, nil, false, parsedConfig)
+			if startErr != nil {
+				return nil, fmt.Errorf("%s: %s", startErr.code, startErr.message)
+			}
+			return h.previewInstanceFromBranchResponse(ctx, orgID, resp)
+		}
+		if sourceErr != nil && !errors.Is(sourceErr, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("load preview source: %w", sourceErr)
+		}
+	}
+	target := &models.PreviewTarget{
+		OrgID:             orgID,
+		RepositoryID:      repo.ID,
+		Branch:            branch,
+		CommitSHA:         commitSHA,
+		PreviewConfigName: configName,
+		SourceType:        sourceType,
+		SourceID:          strings.TrimSpace(input.SourceID),
+		SourceURL:         strings.TrimSpace(input.SourceURL),
+		CreatedByUserID:   userID,
+	}
+	if err := h.previews.CreatePreviewTarget(ctx, target); err != nil {
+		return nil, fmt.Errorf("create preview target: %w", err)
+	}
+	resp, startErr := h.startTargetRuntime(ctx, orgID, userID, repo, target, nil, false, parsedConfig)
+	if startErr != nil {
+		return nil, fmt.Errorf("%s: %s", startErr.code, startErr.message)
+	}
+	return h.previewInstanceFromBranchResponse(ctx, orgID, resp)
+}
+
+func (h *BranchPreviewHandler) previewInstanceFromBranchResponse(ctx context.Context, orgID uuid.UUID, resp branchPreviewResponse) (*models.PreviewInstance, error) {
+	if resp.PreviewID == nil {
+		return &models.PreviewInstance{PreviewTargetID: &resp.TargetID, OrgID: orgID, Status: models.PreviewStatusStarting}, nil
+	}
+	instance, err := h.previews.GetPreviewInstance(ctx, orgID, *resp.PreviewID)
+	if err != nil {
+		return nil, fmt.Errorf("load Slack-created preview: %w", err)
+	}
+	return instance, nil
 }
 
 func (h *BranchPreviewHandler) startTargetRuntimeWithOptions(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, target *models.PreviewTarget, ttlSeconds *int64, restart bool, cfg *models.PreviewConfig, opts branchPreviewStartOptions) (branchPreviewResponse, *previewHTTPError) {

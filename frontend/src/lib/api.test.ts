@@ -95,6 +95,156 @@ describe('api client', () => {
     });
   });
 
+  describe('Slack integrations', () => {
+    it('fetches Slack health', async () => {
+      const health = {
+        data: {
+          installation: {
+            id: 'install-1',
+            org_id: 'org-1',
+            integration_id: 'integration-1',
+            team_id: 'T123',
+            team_name: 'Acme',
+            api_app_id: 'A123',
+            bot_user_id: 'U143',
+            bot_id: 'B143',
+            scope: ['chat:write'],
+            status: 'active',
+            installed_at: '2026-06-01T00:00:00Z',
+            created_at: '2026-06-01T00:00:00Z',
+            updated_at: '2026-06-01T00:00:00Z',
+          },
+          required_scopes: ['chat:write'],
+          missing_scopes: [],
+          auth_ok: true,
+          symptoms: [],
+        },
+      };
+
+      server.use(http.get('/api/v1/integrations/slack/health', () => HttpResponse.json(health)));
+
+      const result = await api.integrations.getSlackHealth();
+
+      expect(result.data.installation.team_id).toBe('T123');
+      expect(result.data.auth_ok).toBe(true);
+    });
+
+    it('patches Slack settings', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.patch('/api/v1/integrations/slack/settings', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'settings-1',
+              org_id: 'org-1',
+              slack_installation_id: 'install-1',
+              default_repository_id: null,
+              default_branch: 'main',
+              routing_mode: 'start_work',
+              response_visibility: 'thread',
+              allowed_actions: ['session'],
+              notification_preset: 'balanced',
+              notification_subscriptions: {},
+              active: true,
+              created_at: '2026-06-01T00:00:00Z',
+              updated_at: '2026-06-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      const result = await api.integrations.updateSlackSettings({ routing_mode: 'start_work', default_branch: 'main' });
+
+      expect(capturedBody).toEqual({ routing_mode: 'start_work', default_branch: 'main' });
+      expect(result.data.routing_mode).toBe('start_work');
+    });
+
+    it('lists and patches Slack channels', async () => {
+      let capturedChannelPatch: unknown;
+      server.use(
+        http.get('/api/v1/integrations/slack/channels', () =>
+          HttpResponse.json({
+            data: [
+              {
+                id: 'C123',
+                name: 'eng',
+                is_member: true,
+                is_private: false,
+                effective_settings: {
+                  org_id: 'org-1',
+                  slack_installation_id: 'install-1',
+                  slack_team_id: 'T123',
+                  slack_channel_id: 'C123',
+                  default_repository_id: null,
+                  default_branch: null,
+                  routing_mode: 'auto',
+                  response_visibility: 'thread',
+                  allowed_actions: ['session'],
+                  notification_preset: 'balanced',
+                  notification_subscriptions: {},
+                  has_channel_override: false,
+                },
+              },
+            ],
+          }),
+        ),
+        http.patch('/api/v1/integrations/slack/channels/:channelId', async ({ params, request }) => {
+          capturedChannelPatch = { channelId: params.channelId, body: await request.json() };
+          return HttpResponse.json({ data: { ok: true } });
+        }),
+      );
+
+      const channels = await api.integrations.listSlackChannels();
+      await api.integrations.updateSlackChannelSettings('C123', { routing_mode: 'answer_only' });
+
+      expect(channels.data[0].id).toBe('C123');
+      expect(capturedChannelPatch).toEqual({ channelId: 'C123', body: { routing_mode: 'answer_only' } });
+    });
+
+    it('lists upserts and deletes Slack user links', async () => {
+      let capturedUpsert: unknown;
+      let deletedID: string | undefined;
+      server.use(
+        http.get('/api/v1/integrations/slack/user-links', () =>
+          HttpResponse.json({
+            data: [
+              {
+                id: 'link-1',
+                org_id: 'org-1',
+                slack_installation_id: 'install-1',
+                user_id: 'user-1',
+                slack_team_id: 'T123',
+                slack_user_id: 'U123',
+                slack_display_name: 'Ada',
+                source: 'admin_linked',
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          }),
+        ),
+        http.post('/api/v1/integrations/slack/user-links', async ({ request }) => {
+          capturedUpsert = await request.json();
+          return HttpResponse.json({ data: { id: 'link-2', slack_user_id: 'U456' } });
+        }),
+        http.delete('/api/v1/integrations/slack/user-links/:id', ({ params }) => {
+          deletedID = String(params.id);
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      const links = await api.integrations.listSlackUserLinks();
+      await api.integrations.upsertSlackUserLink({ user_id: 'user-2', slack_user_id: 'U456' });
+      await api.integrations.deleteSlackUserLink('link-1');
+
+      expect(links.data[0].slack_user_id).toBe('U123');
+      expect(capturedUpsert).toEqual({ user_id: 'user-2', slack_user_id: 'U456' });
+      expect(deletedID).toBe('link-1');
+    });
+  });
+
   describe('sessions', () => {
     it('fetches sessions list', async () => {
       const mockData = {

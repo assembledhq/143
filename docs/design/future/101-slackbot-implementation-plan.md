@@ -1,7 +1,9 @@
 # 101 - Slackbot Implementation Plan
 
-> **Status:** Phases 1-4 implemented; phases 5+ remain planned
-> **Last reviewed:** 2026-06-14
+> **Status:** Phases 1-8 implemented; remaining follow-up is enterprise
+> multi-org retargeting beyond the current single-active-org Slack install
+> model
+> **Last reviewed:** 2026-06-15
 >
 > **Builds on:** [92-slackbot-product-surface.md](92-slackbot-product-surface.md)
 
@@ -112,6 +114,10 @@ surface. It should focus on:
 - recent results
 - personal defaults
 
+Implemented note: App Home now includes personal defaults from Slackbot settings
+alongside pending responses, recent Slack-started work, active previews,
+subscribed automation runs, and explicit org selection.
+
 Deep installation, channel, notification, and user-link management belongs in
 the web settings UI, with Slack modals reserved for quick channel setup and
 missing-context collection.
@@ -162,14 +168,17 @@ The backend already provides the first interactive Slackbot surface:
 - Shared Slack authorization checks channel capabilities, mapped-user roles, and
   originating team-session allowances.
 
-Phases 1-4 of this plan are implemented: Slack lifecycle rendering is
+Phases 1-8 of this plan are implemented: Slack lifecycle rendering is
 centralized, progress updates are normalized and de-duplicated, settings expose
 Slackbot defaults with per-channel overrides, and Slack starts resolve default
 context with routing overrides, missing-context prompts, and correction
-actions. The larger future work is still deeper product control paths and
-operational polish: preview creation often falls back to agent prompts,
-human-input semantics beyond Slack delivery are generic, and privacy/multi-org
-behavior needs a deliberate model.
+actions. Human-input delivery now carries sensitivity and preferred-channel
+metadata, Slack approval actions are rendered and answered as approvals rather
+than generic text, notification kinds are typed with template defaults, and raw
+Slack inbound payloads have redaction plus a bounded retention cleanup path.
+Known preview targets use direct preview control-plane paths, PR merge/create
+actions use durable product jobs and services, and Slack health/metrics expose
+operator-facing install and delivery signals.
 
 ## Target Architecture
 
@@ -327,10 +336,10 @@ const (
 )
 ```
 
-Settings APIs should accept typed request structs rather than raw anonymous
-handler structs so validation can be tested directly. The UI should present
-Slackbot defaults first, then show channel rows as "inheriting defaults" unless
-an override exists.
+Settings APIs use typed request structs rather than raw anonymous handler
+structs so validation can be tested directly. The UI presents Slackbot defaults
+first, then shows channel rows as "inheriting defaults" unless an override
+exists.
 
 ### Slack Session Link
 
@@ -383,9 +392,10 @@ const (
 )
 ```
 
-Short term, serialize these into the session prompt and attribution metadata.
-Long term, persist them as first-class session references shared by web,
-external API, and Slack starts.
+Slack starts serialize these into the session prompt and persist them as
+first-class `SessionInputReference` records on the created or continued session
+message. That keeps Slack context shared with web, external API, and downstream
+agent paths without adding a Slack-only reference table.
 
 ## Implementation Phases
 
@@ -637,8 +647,9 @@ Implemented:
 - Slack acks show inferred repo, branch, PR, preview, and routing mode when
   known, with correction actions such as `Change repo`, `Start work`, `Choose
   preview target`, and `Choose PR`.
-- Missing-context modal submissions continue the original Slack-started session
-  with the selected structured context.
+- Missing-context modals use structured Slack selects for preview, PR, and
+  branch targets; submissions continue the original Slack-started session with
+  the selected context.
 
 Goal: the bot asks precise follow-up questions instead of starting vague work.
 
@@ -696,6 +707,24 @@ Acceptance criteria:
 
 ### Phase 5 - Direct Preview and PR Control Paths
 
+Status: implemented.
+
+Audit notes:
+
+- `SlackPreviewControl` now supports session, pull request, branch, commit, and
+  repository targets. Known branch-like targets route through the branch preview
+  control plane instead of asking the agent to infer the operation.
+- Slack preview creation action payloads can pass `session_id`,
+  `pull_request_id`, `repository_id`, `branch`, `commit_sha`, and
+  `config_name`; missing structured context still opens the context modal.
+- Slack PR actions merge through the PR service, request PR creation through
+  the durable `open_pr` job for authorized mapped users, and keep repair as a
+  continuation prompt only for agent-owned repair work.
+- Slack PR merge and create actions require Slack confirmation before mutating
+  repository state.
+- Team-session claiming is durable through `slack_session_claims` and updates
+  the session link to the claiming mapped user.
+
 Goal: Slack buttons use product control planes, not agent prompts, whenever the
 target is known.
 
@@ -737,6 +766,24 @@ Acceptance criteria:
 
 ### Phase 6 - Human Input and Approval Semantics
 
+Status: implemented.
+
+Audit notes:
+
+- Durable human-input requests include assigned user, sensitivity, and
+  preferred-channel metadata.
+- Personal and sensitive requests are delivered only by Slack DM when a Slack
+  user target is available; otherwise Slack channel delivery is skipped and the
+  canonical web/session path remains the fallback.
+- Slack approval and denial buttons are rendered with explicit action IDs and
+  answered as selected-choice payloads instead of generic text answers.
+- Multi-choice Slack answers use a Slack multi-select modal and persist all
+  selected choice IDs.
+- Continue, stop, and resume render as first-class Slack action IDs while still
+  persisting canonical human-input answers.
+- Team-session human-input answers continue to require a linked, authorized
+  user in the originating Slack channel.
+
 Goal: Slack becomes a safe delivery channel for agent questions and approvals.
 
 Extend durable human-input requests with delivery metadata if not already
@@ -773,6 +820,23 @@ Acceptance criteria:
 - Approval actions are not represented as generic text answers.
 
 ### Phase 7 - Notification Templates and Subscriptions
+
+Status: implemented.
+
+Audit notes:
+
+- Slack notification event kinds are typed in `internal/models`.
+- Notification rendering derives default titles and bodies from event kind and
+  adds session, preview, and PR actions when those IDs are available.
+- PR notifications carry the GitHub PR URL when available, so `Review PR`
+  opens the pull request directly instead of routing through the session page.
+- Subscriptions support event-family wildcards, per-automation filters, channel
+  destinations, and explicit user DM destinations.
+- The settings UI exposes notification presets first, then reveals custom event
+  subscriptions plus per-automation IDs and explicit Slack user DM destinations
+  only when Custom is selected.
+- Channel `response_visibility = dm` suppresses general channel fanout while
+  preserving configured DM subscribers.
 
 Goal: Slack notifications are actionable and low-noise.
 
@@ -826,6 +890,35 @@ Acceptance criteria:
 
 ### Phase 8 - Privacy, Retention, Multi-Org, and Operations
 
+Status: implemented.
+
+Audit notes:
+
+- Stored Slack callback payloads redact transient Slack fields such as
+  `trigger_id`, `response_url`, legacy tokens, authed users, and authorization
+  envelopes.
+- Raw DM event text is redacted from stored inbound payloads; the session
+  prompt and attribution metadata remain the durable product record.
+- `SlackInboundEventStore.RedactPayloadsOlderThan` provides a bounded,
+  org-scoped retention cleanup path for raw payload JSON.
+- The active Slack installation lookup continues to enforce one active
+  team/app installation globally; Slack App Home org selection explains that
+  retargeting is not automatic.
+- Slackbot metrics cover inbound events, session starts, outbound messages,
+  Slack API failures, interaction actions, rate limits, callback latency,
+  dropped updates, dedupe hits, install health, missing scopes, signature
+  failures, and message-update latency. Slack delivery paths include
+  org/team/channel/action/session fields in operational logs where available.
+- Slack install health reports missing scopes, token auth failures, event
+  delivery state, and UI-visible symptom hints for installed workspaces that
+  have not delivered events, which is the common signing-secret/event-
+  subscription mismatch symptom.
+- Slack settings, channel settings, and user-link handlers decode into typed
+  request structs with directly tested validation/conversion helpers.
+- Slack-detected context references are persisted into session message
+  `references` as first-class session input references, while still being
+  rendered in the Slack-origin prompt for agent readability.
+
 Goal: Slackbot is supportable and trustworthy in production.
 
 Privacy:
@@ -875,6 +968,8 @@ Authenticated settings APIs:
 GET    /api/v1/integrations/slack/health
 GET    /api/v1/integrations/slack/bot
 POST   /api/v1/integrations/slack/bot/reinstall
+GET    /api/v1/integrations/slack/settings
+PATCH  /api/v1/integrations/slack/settings
 GET    /api/v1/integrations/slack/channels
 PATCH  /api/v1/integrations/slack/channels/{slack_channel_id}
 GET    /api/v1/integrations/slack/user-links
@@ -896,13 +991,19 @@ slack_send_notification
 slack_handle_interaction
 ```
 
-Potential new jobs:
+Slack action IDs handled by `slack_handle_interaction`:
 
 ```text
-slack_resolve_missing_context
 slack_create_preview
 slack_claim_team_session
-slack_refresh_install_health
+slack_create_pr
+slack_merge_pr
+slack_repair_pr
+slack_answer_human_input
+slack_answer_human_input_multi
+slack_continue_human_input
+slack_resume_human_input
+slack_stop_human_input
 ```
 
 ## Testing Strategy
@@ -917,7 +1018,8 @@ Backend:
 - Renderer golden/table tests for lifecycle, final, failure, notification, and
   human-input Block Kit payloads.
 - Worker tests for context resolution, missing-context modal routing, preview
-  direct control, notification fanout, and progress debounce behavior.
+  direct control, notification fanout, progress debounce behavior, App Home
+  personal defaults, and structured Slack context reference persistence.
 
 Frontend:
 
@@ -943,8 +1045,8 @@ Operational:
 5. Move preview creation to direct control-plane calls.
 6. Add specialized human-input and approval rendering.
 7. Replace basic notification messages with typed templates.
-8. Add retention controls and multi-org design follow-up before expanding
-   enterprise workspace behavior.
+8. Add retention controls and keep multi-org retargeting as an explicit
+   follow-up before expanding enterprise workspace behavior.
 
 Each phase should update [92-slackbot-product-surface.md](92-slackbot-product-surface.md)
 when implementation status changes.
