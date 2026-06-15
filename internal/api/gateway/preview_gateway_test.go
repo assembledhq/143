@@ -1502,6 +1502,8 @@ func TestShouldMarkRuntimeLostOnProxyError(t *testing.T) {
 	}{
 		{name: "connection refused is endpoint loss", err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}, want: true},
 		{name: "connection reset is endpoint loss", err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("read: connection reset by peer")}, want: true},
+		{name: "server closed idle connection is endpoint loss", err: errors.New("http: server closed idle connection"), want: true},
+		{name: "broken pipe is endpoint loss", err: &net.OpError{Op: "write", Net: "tcp", Err: errors.New("write: broken pipe")}, want: true},
 		{name: "client cancellation is not endpoint loss", err: context.Canceled, want: false},
 		{name: "deadline cancellation is not endpoint loss", err: context.DeadlineExceeded, want: false},
 	}
