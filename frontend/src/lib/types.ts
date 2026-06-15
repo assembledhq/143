@@ -568,6 +568,23 @@ export interface AutopilotQueueRow {
     status: PullRequestStatus;
     merged_at?: string;
   };
+  latest_preview?: {
+    target_id: string;
+    preview_id?: string;
+    status:
+      | 'target_created'
+      | 'starting'
+      | 'ready'
+      | 'partially_ready'
+      | 'unhealthy'
+      | 'stopped'
+      | 'failed'
+      | 'expired'
+      | 'unavailable';
+    commit_sha: string;
+    latest_commit_sha?: string;
+    new_commits_available: boolean;
+  };
   available_action: AutopilotQueueAction;
   action_disabled_reason?: string | null;
 }
