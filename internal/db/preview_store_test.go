@@ -771,6 +771,56 @@ func TestPreviewStore_ListBranchPreviewIndex_IncludesRuntimeOnlySessionPreview(t
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_GetSessionPreviewSummary(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	expiresAt := now.Add(30 * time.Minute)
+
+	rows := pgxmock.NewRows(branchPreviewSummaryTestCols()).AddRow(
+		previewID, &previewID, repoID, "acme/app", "feature/session-preview", "abc123", "",
+		models.PreviewSourceTypeSession, sessionID.String(), "",
+		string(models.PreviewStatusUnavailable), now, now, &expiresAt, &now, "",
+		"unavailable", "preview runtime endpoint mismatch", false, (*int)(nil),
+	)
+
+	mock.ExpectQuery("JOIN sessions sess ON sess\\.id = pi\\.session_id").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(rows)
+
+	summary, err := store.GetSessionPreviewSummary(context.Background(), orgID, previewID)
+
+	require.NoError(t, err, "GetSessionPreviewSummary should return runtime-only session preview metadata")
+	require.Equal(t, &models.BranchPreviewSummary{
+		TargetID:           previewID,
+		PreviewID:          &previewID,
+		RepositoryID:       repoID,
+		RepositoryFullName: "acme/app",
+		Branch:             "feature/session-preview",
+		CommitSHA:          "abc123",
+		SourceType:         models.PreviewSourceTypeSession,
+		SourceID:           sessionID.String(),
+		Status:             string(models.PreviewStatusUnavailable),
+		CreatedAt:          now,
+		SortCreatedAt:      now,
+		ExpiresAt:          &expiresAt,
+		StoppedAt:          &now,
+		CurrentPhase:       "unavailable",
+		Error:              "preview runtime endpoint mismatch",
+		Resumable:          false,
+	}, summary, "GetSessionPreviewSummary should project session preview rows into branch preview summaries")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_CountBranchPreviewIndexScopes_ResumableUsesWarmCachePredicate(t *testing.T) {
 	t.Parallel()
 
