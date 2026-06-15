@@ -210,4 +210,145 @@ describe("AutopilotPageContent", () => {
     expect(await screen.findByRole("button", { name: "Blocked" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
   });
+
+  it("uses Open preview as the primary action for a current ready runtime", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Open preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open PR" })).not.toBeInTheDocument();
+  });
+
+  it("makes stale previews update-first while keeping stale open secondary", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "def456",
+          new_commits_available: true,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Update to latest" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open stale preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows Retry preview instead of generic Open for failed preview rows", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "failed",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows Start preview for preview targets without a runtime", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          status: "target_created",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Start preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows a disabled Starting button for in-progress preview launches", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "starting",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    const btn = await screen.findByRole("button", { name: "Starting..." });
+    expect(btn).toBeInTheDocument();
+    expect(btn).toBeDisabled();
+  });
+
+  it("does not let a preview target override view_run for an in-progress session", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "view_run",
+        display_run_state: "running",
+        latest_session: { id: "session-1", title: "Fix auth", updated_at: new Date().toISOString() },
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("link", { name: "View run" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
 });
