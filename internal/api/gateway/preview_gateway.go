@@ -77,6 +77,24 @@ const runtimeCacheTTL = 5 * time.Second
 // asset request issued an UPDATE on preview_instances.
 const accessRecordInterval = 15 * time.Second
 
+// previewProxyTokenTTL bounds the lifetime of the bearer token the gateway
+// mints for each proxied worker request. A fresh token is minted on every
+// request, so it only needs to outlive a single in-flight request — but we size
+// it to comfortably span an interactive preview's working window so that
+// long-lived connections (WebSocket/HMR, SSE) authorized once at handshake time
+// never trip on an expired token, even on a slow or busy worker.
+//
+// We deliberately keep it bounded rather than effectively infinite (e.g.
+// weeks): the token is a static, unrevocable bearer whose only early
+// invalidation is a runtime epoch bump on recycle, so a finite TTL caps the
+// replay window if a token ever leaks (logs, worker memory, a compromised hop).
+// 60 minutes is far longer than any single request or handshake yet still a
+// tight blast radius. Previously this was 30s, which let a slow worker response
+// outlive the token: the worker then rejected the in-flight request as "invalid
+// preview token", and the gateway mistook that auth failure for an unreachable
+// endpoint and tore down a perfectly healthy preview.
+const previewProxyTokenTTL = 60 * time.Minute
+
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
 // injects security headers. It does NOT use the main app session middleware.
@@ -88,7 +106,7 @@ type Gateway struct {
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
-	tokenSecret  string
+	tokenKeyring auth.PreviewTokenKeyring
 	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
 
@@ -121,6 +139,7 @@ type GatewayConfig struct {
 	AppOrigin             string // e.g. "https://app.143.dev"
 	CookieSecret          []byte // HMAC key for signing preview session cookies
 	PreviewTokenSecret    string
+	PreviewTokenKeyring   auth.PreviewTokenKeyring
 	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
 }
 
@@ -223,6 +242,12 @@ func (g *Gateway) recordAccessThrottled(ctx context.Context, orgID, previewID uu
 
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
+	tokenKeyring := cfg.PreviewTokenKeyring
+	if !tokenKeyring.Configured() && cfg.PreviewTokenSecret != "" {
+		if fallback, err := auth.NewPreviewTokenKeyring([]string{cfg.PreviewTokenSecret}); err == nil {
+			tokenKeyring = fallback
+		}
+	}
 	return &Gateway{
 		store:            cfg.Store,
 		manager:          cfg.Manager,
@@ -231,7 +256,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 		logger:           cfg.Logger,
 		appOrigin:        cfg.AppOrigin,
 		cookieSecret:     cfg.CookieSecret,
-		tokenSecret:      cfg.PreviewTokenSecret,
+		tokenKeyring:     tokenKeyring,
 		secureCookie:     strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
 		sessionCache:     make(map[uuid.UUID]*sessionCacheEntry),
 		runtimeCache:     make(map[uuid.UUID]*runtimeCacheEntry),
@@ -642,6 +667,32 @@ func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+func (g *Gateway) previewRuntimeUnavailableOverlayBody(previewID uuid.UUID) []byte {
+	controlURL := g.previewControlURL(previewID)
+	statusURL := g.previewStatusURL(previewID)
+	cfg, err := json.Marshal(map[string]any{
+		"appOrigin":     g.resolvedAppOrigin(),
+		"controlUrl":    controlURL,
+		"statusPath":    previewControlStatusPath,
+		"restartable":   true,
+		"initialStatus": string(models.PreviewStatusUnavailable),
+	})
+	if err != nil {
+		cfg = []byte("null")
+	}
+	return []byte(fmt.Sprintf(
+		previewControlOverlayHTML,
+		"Preview not connected",
+		"Preview not connected",
+		"Restart it from 143 to reconnect this preview.",
+		"Connection lost",
+		stdhtml.EscapeString(controlURL),
+		"Restart preview",
+		stdhtml.EscapeString(statusURL),
+		cfg,
+	))
+}
+
 type previewControlOverlayData struct {
 	Title       string
 	Description string
@@ -998,14 +1049,14 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		writeRuntimeUnavailable(w)
 		return
 	}
-	token, err := auth.GeneratePreviewToken(g.tokenSecret, auth.PreviewTokenClaims{
+	token, err := g.tokenKeyring.Generate(auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: runtime.WorkerNodeID,
 		RuntimeID:    &runtime.ID,
 		RuntimeEpoch: runtime.RuntimeEpoch,
 		PreviewID:    &previewID,
 		Action:       "proxy",
-		ExpiresAt:    time.Now().Add(30 * time.Second),
+		ExpiresAt:    time.Now().Add(previewProxyTokenTTL),
 	})
 	if err != nil {
 		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
@@ -1026,10 +1077,32 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 			req.Header.Set("Authorization", "Bearer "+token)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			if translateWorkerRuntimeMismatch(resp) {
-				// The worker no longer recognizes this runtime epoch; drop
-				// the cached runtime so the next request re-resolves.
+			if failure := g.translateWorkerPreviewFailure(resp, previewID, isNavigationRequest(originalReq)); failure.translated {
+				// Always drop the cached runtime so the next request
+				// re-resolves and re-mints a fresh token.
 				g.evictCachedRuntime(previewID)
+				// A routing mismatch (the worker recycled the epoch or no
+				// longer owns this runtime) is genuine evidence the cached
+				// runtime is stale, so mark it lost. A token-level auth
+				// failure ("invalid preview token") is NOT — an expired or
+				// mis-signed proxy token says nothing about runtime health,
+				// and marking it lost would kill a working preview. Evict and
+				// let the next request retry with a new token instead.
+				markedLost := previewWorkerFailureMarksRuntimeLost(failure.code)
+				if markedLost {
+					g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, previewWorkerFailureReason(failure.code, failure.message, failure.authDetail))
+				}
+				// worker_auth_detail carries the coarse token-failure class
+				// (bad_signature/expired/...) so an auth failure stays
+				// diagnosable from the app-side logs even when it is transient
+				// and the runtime is deliberately left healthy.
+				addPreviewProxyLogFields(g.logger.Warn(), originalReq, orgID, previewID, runtime, upstreamPath).
+					Str("worker_error_code", failure.code).
+					Str("worker_error_message", failure.message).
+					Str("worker_auth_detail", failure.authDetail).
+					Int("worker_status", failure.status).
+					Bool("runtime_marked_lost", markedLost).
+					Msg("translated preview worker auth/routing failure")
 				return nil
 			}
 
@@ -1053,12 +1126,96 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			g.evictCachedRuntime(previewID)
+			if shouldMarkRuntimeLostOnProxyError(err) {
+				g.markRuntimeEndpointUnreachable(originalReq.Context(), orgID, previewID, runtime, previewProxyErrorReason(err))
+			}
 			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
 				Msg("proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func (g *Gateway) markRuntimeEndpointUnreachable(ctx context.Context, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, reason string) {
+	if g.store == nil || runtime == nil {
+		return
+	}
+	updated, err := g.store.MarkPreviewRuntimeLostIfCurrent(ctx, orgID, previewID, runtime.ID, runtime.RuntimeEpoch, reason, models.PreviewUnavailableReasonEndpointUnreachable)
+	if err != nil {
+		g.logger.Warn().Err(err).
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Msg("failed to mark unreachable preview runtime lost")
+		return
+	}
+	if updated {
+		g.logger.Warn().
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Str("worker_node_id", runtime.WorkerNodeID).
+			Str("endpoint_url", runtime.EndpointURL).
+			Msg("marked preview runtime lost after endpoint became unreachable")
+	}
+}
+
+func shouldMarkRuntimeLostOnProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"connection reset by peer",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"no such host",
+		"eof",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// previewWorkerFailureMarksRuntimeLost reports whether a translated worker
+// failure code is evidence that the cached runtime is genuinely stale — a
+// recycled epoch or a worker that no longer owns it — and should be marked
+// lost. Token-level auth failures (UNAUTHORIZED / "invalid preview token") are
+// transient: an expired or mis-signed proxy token does not mean the runtime is
+// unreachable, so those only evict the cache and let the next request retry
+// with a freshly minted token rather than tearing down a healthy preview.
+func previewWorkerFailureMarksRuntimeLost(workerCode string) bool {
+	switch workerCode {
+	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
+		return true
+	default:
+		return false
+	}
+}
+
+func previewProxyErrorReason(err error) string {
+	msg := "unknown error"
+	if err != nil {
+		msg = strings.ReplaceAll(err.Error(), "\n", " ")
+		msg = strings.ReplaceAll(msg, "\r", " ")
+	}
+	const maxReasonLen = 320
+	reason := "preview runtime endpoint unreachable: " + msg
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func previewWorkerProxyPath(previewID uuid.UUID, requestPath string) string {
@@ -1108,43 +1265,115 @@ func addPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, prev
 		Str("runtime_unavailable_reason", string(runtime.UnavailableReason))
 }
 
-func translateWorkerRuntimeMismatch(resp *http.Response) bool {
-	if resp.StatusCode != http.StatusForbidden {
-		return false
+// workerPreviewFailure describes a worker-originated auth/routing rejection that
+// the gateway translated into a runtime-unavailable response.
+type workerPreviewFailure struct {
+	translated bool
+	code       string
+	message    string
+	authDetail string
+	status     int
+}
+
+func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID uuid.UUID, navigation bool) workerPreviewFailure {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+		return workerPreviewFailure{status: resp.StatusCode}
 	}
+	originalStatus := resp.StatusCode
 	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
 
 	var parsed models.ErrorResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
+	workerMarked := resp.Header.Get(auth.PreviewWorkerErrorHeader) == "1"
+	// Capture the worker's coarse auth-failure class before we replace the
+	// response headers below; the worker only sets it on token rejections.
+	authDetail := sanitizeWorkerPreviewFailureMessage(resp.Header.Get(auth.PreviewWorkerAuthDetailHeader))
+	workerCode := parsed.Error.Code
+	workerMessage := parsed.Error.Message
+	shouldTranslate := false
 	switch parsed.Error.Code {
 	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
-	default:
+		shouldTranslate = originalStatus == http.StatusForbidden && workerMarked
+	case "UNAUTHORIZED":
+		shouldTranslate = originalStatus == http.StatusUnauthorized &&
+			workerMarked &&
+			(workerMessage == "invalid preview token" || workerMessage == "missing authorization token")
+	}
+	if !shouldTranslate {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
 
-	replacement, _ := json.Marshal(models.ErrorResponse{
-		Error: models.ErrorDetail{
-			Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
-			Message: "preview runtime is unavailable; restart the preview",
-		},
-	})
-	resp.StatusCode = http.StatusServiceUnavailable
-	resp.Status = fmt.Sprintf("%d %s", http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+	var replacement []byte
+	statusCode := http.StatusServiceUnavailable
+	contentType := "application/json"
+	if navigation {
+		replacement = g.previewRuntimeUnavailableOverlayBody(previewID)
+		statusCode = http.StatusOK
+		contentType = "text/html; charset=utf-8"
+	} else {
+		var err error
+		replacement, err = json.Marshal(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
+				Message: "preview runtime is unavailable; restart the preview",
+			},
+		})
+		if err != nil {
+			replacement = []byte(`{"error":{"code":"PREVIEW_RUNTIME_UNAVAILABLE","message":"preview runtime is unavailable; restart the preview"}}`)
+		}
+	}
+
+	resp.StatusCode = statusCode
+	resp.Status = fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode))
 	resp.Header = make(http.Header)
-	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Set("Content-Type", contentType)
 	resp.Header.Set("Cache-Control", "no-store")
 	resp.ContentLength = int64(len(replacement))
 	resp.Body = io.NopCloser(bytes.NewReader(replacement))
-	return true
+	return workerPreviewFailure{
+		translated: true,
+		code:       workerCode,
+		message:    sanitizeWorkerPreviewFailureMessage(workerMessage),
+		authDetail: authDetail,
+		status:     originalStatus,
+	}
+}
+
+func sanitizeWorkerPreviewFailureMessage(message string) string {
+	message = strings.ReplaceAll(message, "\n", " ")
+	message = strings.ReplaceAll(message, "\r", " ")
+	message = strings.TrimSpace(message)
+	if len(message) > 240 {
+		return message[:240]
+	}
+	return message
+}
+
+func previewWorkerFailureReason(code, message, authDetail string) string {
+	reason := "preview worker auth/routing failure"
+	if code != "" {
+		reason += ": " + code
+	}
+	if message != "" {
+		reason += " " + sanitizeWorkerPreviewFailureMessage(message)
+	}
+	if authDetail != "" {
+		reason += " (" + sanitizeWorkerPreviewFailureMessage(authDetail) + ")"
+	}
+	const maxReasonLen = 320
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func writeRuntimeUnavailable(w http.ResponseWriter) {

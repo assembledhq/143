@@ -331,12 +331,16 @@ func TestSharedDependencyCache_SaveBatchesEffectivePathExistenceProbe(t *testing
 	require.NoError(t, err, "Save should upload dependency cache")
 
 	var existenceProbeCount int
+	var probeCmd string
 	for _, call := range exec.calls() {
 		if strings.Contains(call, "test -e ") || strings.Contains(call, "find ") {
 			existenceProbeCount++
+			probeCmd = call
 		}
 	}
 	require.Equal(t, 1, existenceProbeCount, "Save should batch effective-path existence checks into one sandbox exec")
+	require.NotContains(t, probeCmd, "fi if", "batched existence probe should separate shell if statements")
+	require.Contains(t, probeCmd, "fi; if", "batched existence probe should use shell statement separators")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -871,6 +875,64 @@ func TestSharedDependencyCache_SavePathCacheExcludesSubtrees(t *testing.T) {
 	calls := strings.Join(exec.calls(), "\n")
 	require.Contains(t, calls, "'--exclude=node_modules/.cache/turbo'", "archive command should exclude the build cache subtree")
 	require.Contains(t, calls, "'--exclude=.turbo/cache'", "archive command should exclude every requested subtree")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSharedDependencyCache_SavePathCacheSeparatesExistenceProbes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cacheKey := strings.Repeat("d", 64)
+	payload := makeDependencyCacheTarGz(t, map[string]string{
+		"node_modules/.bin/next": "next",
+		".turbo/cache/hash":      "artifact",
+	})
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("SELECT (.+) FROM preview_dependency_cache").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+		}))
+	mock.ExpectQuery("INSERT INTO preview_dependency_cache").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+		}).
+			AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "deps/"+cacheKey+".tar.gz", int64(len(payload)), []byte(`{}`), now, now))
+
+	exec := &dependencyCacheExec{payload: payload}
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:     db.NewPreviewStore(mock),
+		Executor:  exec,
+		BlobStore: newMemorySnapshotStore(),
+		Logger:    zerolog.Nop(),
+		Prefix:    "deps",
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	_, err = cache.SavePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, PreviewPathCacheSaveSpec{
+		Kind:     models.PreviewCacheKindBuildArtifact,
+		Root:     models.PreviewCacheRootWorkDir,
+		CacheKey: cacheKey,
+		Paths:    []string{"node_modules", ".turbo/cache"},
+		Metadata: DependencyCacheMetadata{
+			OrgID:        orgID,
+			RepoID:       repoID,
+			PlacementKey: "placement",
+		},
+	})
+	require.NoError(t, err, "SavePathCache should succeed when more than one effective path is probed")
+
+	calls := strings.Join(exec.calls(), "\n")
+	require.NotContains(t, calls, "fi if ", "existence probes should be separated by shell statement delimiters")
+	require.Contains(t, calls, "fi; if ", "existence probes should be joined as valid shell statements")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

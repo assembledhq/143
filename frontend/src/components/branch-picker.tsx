@@ -30,6 +30,7 @@ interface BranchPickerProps {
   defaultBranch?: string;
   onValueChange: (branch: string) => void;
   label: string;
+  id?: string;
   className?: string;
   buttonClassName?: string;
   contentClassName?: string;
@@ -42,6 +43,7 @@ export function BranchPicker({
   defaultBranch,
   onValueChange,
   label,
+  id,
   className,
   buttonClassName,
   contentClassName,
@@ -65,6 +67,7 @@ export function BranchPicker({
         <Button
           type="button"
           variant="outline"
+          id={id}
           aria-label={label}
           aria-expanded={open}
           disabled={disabled || !repositoryId}
@@ -77,7 +80,7 @@ export function BranchPicker({
           <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className={cn("p-0", contentClassName)}>
+      <PopoverContent className={cn("w-[var(--radix-popover-trigger-width)] p-0", contentClassName)}>
         <Command>
           <CommandInput placeholder="Search branches..." />
           <CommandList>

@@ -15,10 +15,10 @@ var AvailablePMModels []string
 
 func init() {
 	AvailablePMModels = append(AvailablePMModels, AvailableClaudeCodeModels...)
-	AvailablePMModels = append(AvailablePMModels, AvailableGeminiCLIModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableCodexModels...)
 	AvailablePMModels = append(AvailablePMModels, AvailableAmpModes...)
 	AvailablePMModels = append(AvailablePMModels, AvailablePiModels...)
+	AvailablePMModels = append(AvailablePMModels, AvailableOpenCodeModels...)
 }
 
 // Amp uses agent "modes" (not models) to select model + system prompt + tools.
@@ -67,20 +67,6 @@ const (
 var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
-	GeminiCLIModelGemini31ProPreview  = "gemini-3.1-pro-preview"
-	GeminiCLIModelGemini3FlashPreview = "gemini-3-flash-preview"
-	GeminiCLIModelGemini25Pro         = "gemini-2.5-pro"
-	GeminiCLIModelGemini25Flash       = "gemini-2.5-flash"
-)
-
-var AvailableGeminiCLIModels = []string{
-	GeminiCLIModelGemini31ProPreview,
-	GeminiCLIModelGemini3FlashPreview,
-	GeminiCLIModelGemini25Pro,
-	GeminiCLIModelGemini25Flash,
-}
-
-const (
 	CodexModelGPT55           = "gpt-5.5"
 	CodexModelGPT55Fast       = "gpt-5.5-fast"
 	CodexModelGPT54           = "gpt-5.4"
@@ -102,6 +88,48 @@ var AvailableCodexModels = []string{
 	CodexModelGPT52Codex,
 	CodexModelGPT5Codex,
 	CodexModelGPT53CodexSpark,
+}
+
+const (
+	OpenCodeModelGPT54Mini       = "openai/gpt-5.4-mini"
+	OpenCodeModelGPT53CodexSpark = "openai/gpt-5.3-codex-spark"
+	OpenCodeModelClaudeHaiku45   = "anthropic/claude-haiku-4-5"
+	OpenCodeModelGemini3Flash    = "google/gemini-3-flash"
+	OpenCodeModelGemini25Flash   = "google/gemini-2.5-flash"
+	OpenCodeModelMiniMaxM21      = "minimax/minimax-m2.1"
+	OpenCodeModelQwen3Coder      = "qwen/qwen3-coder"
+	OpenCodeModelDeepSeekChat    = "deepseek/deepseek-chat"
+	OpenCodeModelGPT54           = "openai/gpt-5.4"
+	OpenCodeModelGPT52Codex      = "openai/gpt-5.2-codex"
+	OpenCodeModelClaudeSonnet46  = "anthropic/claude-sonnet-4-6"
+	OpenCodeModelGemini3Pro      = "google/gemini-3-pro"
+	OpenCodeModelKimiK2          = "moonshot/kimi-k2"
+	OpenCodeModelGPT52           = "opencode/gpt-5.2"
+	OpenCodeModelGPT51Codex      = "opencode/gpt-5.1-codex"
+	OpenCodeModelClaudeOpus48    = "anthropic/claude-opus-4-8"
+	OpenCodeModelClaudeOpus47    = "anthropic/claude-opus-4-7"
+	OpenCodeModelGPT55           = "openai/gpt-5.5"
+)
+
+var AvailableOpenCodeModels = []string{
+	OpenCodeModelGPT54Mini,
+	OpenCodeModelGPT53CodexSpark,
+	OpenCodeModelClaudeHaiku45,
+	OpenCodeModelGemini3Flash,
+	OpenCodeModelGemini25Flash,
+	OpenCodeModelMiniMaxM21,
+	OpenCodeModelQwen3Coder,
+	OpenCodeModelDeepSeekChat,
+	OpenCodeModelGPT54,
+	OpenCodeModelGPT52Codex,
+	OpenCodeModelClaudeSonnet46,
+	OpenCodeModelGemini3Pro,
+	OpenCodeModelKimiK2,
+	OpenCodeModelGPT52,
+	OpenCodeModelGPT51Codex,
+	OpenCodeModelClaudeOpus48,
+	OpenCodeModelClaudeOpus47,
+	OpenCodeModelGPT55,
 }
 
 // CodexRuntimeSpec is the resolved execution spec for a Codex model alias.
@@ -126,12 +154,11 @@ func CodexRuntimeModel(model string) CodexRuntimeSpec {
 }
 
 // AgentTypeForModel returns the AgentType whose curated model list contains
-// the given model. The curated lookup runs first so an entry like
-// "openai/gpt-5.4" resolves to AgentTypePi (its native registry) rather than
-// being misread by the slash heuristic — only after every list misses do we
-// fall back to AgentTypePi for unknown "provider/model"-shaped strings, since
-// Pi accepts arbitrary provider/model overrides at run time. Returns an empty
-// AgentType when no agent owns the model.
+// the given model. OpenCode's curated provider/model IDs are checked before
+// Pi's flexible provider/model registry so explicit OpenCode options route to
+// OpenCode; only after every curated list misses do we fall back to AgentTypePi
+// for unknown "provider/model"-shaped strings. Returns an empty AgentType when
+// no agent owns the model.
 //
 // Mirrors the frontend agentTypeForModel helper in lib/agents.ts so PM and
 // session pickers route through the same agent-resolution rules.
@@ -149,14 +176,14 @@ func AgentTypeForModel(model string) AgentType {
 			return AgentTypeClaudeCode
 		}
 	}
-	for _, m := range AvailableGeminiCLIModels {
-		if m == model {
-			return AgentTypeGeminiCLI
-		}
-	}
 	for _, m := range AvailableAmpModes {
 		if m == model {
 			return AgentTypeAmp
+		}
+	}
+	for _, m := range AvailableOpenCodeModels {
+		if m == model {
+			return AgentTypeOpenCode
 		}
 	}
 	for _, m := range AvailablePiModels {
@@ -188,15 +215,6 @@ func ValidatePMModel(model string) error {
 
 func IsSupportedClaudeCodeModel(model string) bool {
 	for _, supportedModel := range AvailableClaudeCodeModels {
-		if model == supportedModel {
-			return true
-		}
-	}
-	return false
-}
-
-func IsSupportedGeminiCLIModel(model string) bool {
-	for _, supportedModel := range AvailableGeminiCLIModels {
 		if model == supportedModel {
 			return true
 		}
@@ -237,13 +255,22 @@ func IsSupportedPiModel(model string) bool {
 	return false
 }
 
+func IsSupportedOpenCodeModel(model string) bool {
+	for _, supportedModel := range AvailableOpenCodeModels {
+		if model == supportedModel {
+			return true
+		}
+	}
+	return false
+}
+
 // AllowedAgentConfigKeys lists the env-var keys that may be set in
 // settings.agent_config[<agent>] for agents whose non-secret defaults are
 // propagated directly into the sandbox env (Amp, Pi). Bounds the blast radius
 // of an org admin smuggling arbitrary vars (PATH, LD_PRELOAD, NODE_OPTIONS,
 // …) into the container by way of agent_config.
 //
-// Scoped to Amp and Pi today — those are the only agent types whose
+// Scoped to Amp, Pi, and OpenCode today — those are the only agent types whose
 // agent_config the orchestrator injects (see applyAgentConfigOverrides).
 // Other agents pull credentials from the encrypted credential store, so
 // unknown agent_config keys for them are stored-but-ignored rather than
@@ -255,6 +282,10 @@ var AllowedAgentConfigKeys = map[AgentType]map[string]struct{}{
 	AgentTypePi: {
 		"PI_MODEL":        {},
 		"PI_MODEL_CUSTOM": {},
+	},
+	AgentTypeOpenCode: {
+		"OPENCODE_MODEL":        {},
+		"OPENCODE_MODEL_CUSTOM": {},
 	},
 }
 
@@ -280,10 +311,6 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 		if !IsSupportedClaudeCodeModel(model) {
 			return fmt.Errorf("model must be one of: %v", AvailableClaudeCodeModels)
 		}
-	case AgentTypeGeminiCLI:
-		if !IsSupportedGeminiCLIModel(model) {
-			return fmt.Errorf("model must be one of: %v", AvailableGeminiCLIModels)
-		}
 	case AgentTypeAmp:
 		if !IsSupportedAmpMode(model) {
 			return fmt.Errorf("amp mode must be one of: %v", AvailableAmpModes)
@@ -301,6 +328,13 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 		if !strings.Contains(model, "/") {
 			return fmt.Errorf("pi model %q must be in the form \"provider/model\" (e.g. %s)", model, PiModelClaudeOpus48)
 		}
+	case AgentTypeOpenCode:
+		if model == "" {
+			return fmt.Errorf("model must be non-empty for agent type %s", AgentTypeOpenCode)
+		}
+		if !strings.Contains(model, "/") {
+			return fmt.Errorf("opencode model %q must be in the form \"provider/model\" (e.g. %s)", model, OpenCodeModelGPT54Mini)
+		}
 	default:
 		return fmt.Errorf("unknown agent type: %s", agentType)
 	}
@@ -315,12 +349,12 @@ func ModelEnvVarForAgentType(agentType AgentType) string {
 		return "OPENAI_MODEL"
 	case AgentTypeClaudeCode:
 		return "ANTHROPIC_MODEL"
-	case AgentTypeGeminiCLI:
-		return "GEMINI_MODEL"
 	case AgentTypeAmp:
 		return "AMP_MODE"
 	case AgentTypePi:
 		return "PI_MODEL"
+	case AgentTypeOpenCode:
+		return "OPENCODE_MODEL"
 	default:
 		return ""
 	}
@@ -525,11 +559,6 @@ func ValidateSettingsModels(settings OrgSettings) error {
 			if model != "" && !IsSupportedClaudeCodeModel(model) {
 				return fmt.Errorf("agent_config.claude_code.ANTHROPIC_MODEL must be one of: %v", AvailableClaudeCodeModels)
 			}
-		case AgentTypeGeminiCLI:
-			model := envVars["GEMINI_MODEL"]
-			if model != "" && !IsSupportedGeminiCLIModel(model) {
-				return fmt.Errorf("agent_config.gemini_cli.GEMINI_MODEL must be one of: %v", AvailableGeminiCLIModels)
-			}
 		case AgentTypeAmp:
 			mode := envVars["AMP_MODE"]
 			if mode != "" && !IsSupportedAmpMode(mode) {
@@ -543,6 +572,17 @@ func ValidateSettingsModels(settings OrgSettings) error {
 			model := envVars["PI_MODEL"]
 			if model != "" && !IsSupportedPiModel(model) {
 				return fmt.Errorf("agent_config.pi.PI_MODEL must be one of: %v (or set PI_MODEL_CUSTOM)", AvailablePiModels)
+			}
+		case AgentTypeOpenCode:
+			if custom := envVars["OPENCODE_MODEL_CUSTOM"]; custom != "" {
+				if !strings.Contains(custom, "/") {
+					return fmt.Errorf("agent_config.opencode.OPENCODE_MODEL_CUSTOM must be in the form \"provider/model\"")
+				}
+				continue
+			}
+			model := envVars["OPENCODE_MODEL"]
+			if model != "" && !IsSupportedOpenCodeModel(model) {
+				return fmt.Errorf("agent_config.opencode.OPENCODE_MODEL must be one of: %v (or set OPENCODE_MODEL_CUSTOM)", AvailableOpenCodeModels)
 			}
 		}
 	}

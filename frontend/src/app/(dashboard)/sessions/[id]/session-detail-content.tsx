@@ -675,6 +675,10 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
   const isActive = !terminalSessionStatuses.has(session.status);
   const isDeployRecovery = session.runtime_stop_reason === "deploy_budget_expired";
   const originDisplay = getSessionOriginDisplay(session);
+  const branchLabel = session.working_branch || session.target_branch;
+  const repoBranchLabel = session.repository_full_name && branchLabel
+    ? `${session.repository_full_name} · ${branchLabel}`
+    : session.repository_full_name || branchLabel;
 
   const triggeredByMember = session.triggered_by_user_id
     ? members.find((m) => m.id === session.triggered_by_user_id)
@@ -872,6 +876,12 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
+          {repoBranchLabel && (
+            <>
+              <span>{repoBranchLabel}</span>
+              <span aria-hidden="true" className="text-muted-foreground/50">·</span>
+            </>
+          )}
           {terminalSessionStatuses.has(session.status) &&
             !((session.status === "failed" || session.status === "cancelled") &&
               !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
@@ -3913,16 +3923,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     prevBranchStateRef.current = current;
   }, [localBranchState, session?.branch_creation_state, session?.branch_creation_error, session?.branch_url]);
   const startRepairMutation = useMutation({
-    mutationFn: async (action: "fix_tests" | "resolve_conflicts") => {
+    mutationFn: async ({ action, pushChanges }: { action: "fix_tests" | "resolve_conflicts"; pushChanges: boolean }) => {
       if (!pullRequestId) {
         throw new Error("Pull request not found");
       }
-      const body = activeThread?.id ? { thread_id: activeThread.id } : undefined;
+      const body = activeThread?.id ? { thread_id: activeThread.id, push_changes: pushChanges } : { push_changes: pushChanges };
       return action === "fix_tests"
         ? api.pullRequests.fixTests(pullRequestId, body)
         : api.pullRequests.resolveConflicts(pullRequestId, body);
     },
-    onMutate: (action) => {
+    onMutate: ({ action }) => {
       setRepairActionError(null);
       setPendingPRAction(action);
     },
@@ -3956,8 +3966,15 @@ export function SessionDetailContent({ id }: { id: string }) {
         toast.info(label);
       }
     },
-    onError: (err) => {
+    onError: (err, { action }) => {
       setPendingPRAction(null);
+      if (err instanceof ApiError && err.code === "REPAIR_ALREADY_IN_PROGRESS") {
+        const label = action === "fix_tests"
+          ? "Fix tests session is already in progress"
+          : "Resolve conflicts session is already in progress";
+        toast.info(label);
+        return;
+      }
       setRepairActionError(err instanceof ApiError ? err.message : "Failed to open repair session");
     },
   });
@@ -5321,8 +5338,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
-      onFixTests: () => startRepairMutation.mutate("fix_tests"),
-      onResolveConflicts: () => startRepairMutation.mutate("resolve_conflicts"),
+      onFixTests: () => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true }),
+      onResolveConflicts: () => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true }),
       onMerge: handleMergeAction,
     },
   });
@@ -5735,8 +5752,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                 repairError={repairActionError}
                 mergeAuthRequired={ghBlocked}
                 mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate("fix_tests")}
-                onResolveConflicts={() => startRepairMutation.mutate("resolve_conflicts")}
+                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
                 onMerge={handleMergeAction}
                 onQueueMergeWhenReady={handleQueueMergeWhenReady}
                 onCancelMergeWhenReady={handleCancelMergeWhenReady}

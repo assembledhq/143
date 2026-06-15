@@ -105,31 +105,37 @@ DB_HOST="localhost"
 DB_PORT="5432"
 DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
 
+# Encrypted dev secrets live in a private sibling checkout, not this repo.
+# Resolved worktree-safely (respects a pre-set SECRETS_DIR); see
+# deploy/scripts/resolve-secrets-dir.sh and docs/secrets/README.md.
+SECRETS_DIR="$(./deploy/scripts/resolve-secrets-dir.sh . 2>/dev/null || echo "../143-infra")"
+ENC_FILE="$SECRETS_DIR/.env.enc"
+
 NEED_ENV=false
 if [ ! -f .env ]; then
   NEED_ENV=true
-elif [ -f .env.enc ] && [ .env.enc -nt .env ]; then
-  # Re-decrypt when .env.enc has been updated since .env was last written
-  info ".env.enc is newer than .env — re-decrypting..."
+elif [ -f "$ENC_FILE" ] && [ "$ENC_FILE" -nt .env ]; then
+  # Re-decrypt when the encrypted bundle has been updated since .env was last written
+  info "$ENC_FILE is newer than .env — re-decrypting..."
   NEED_ENV=true
 fi
 
 if [ "$NEED_ENV" = true ]; then
-  # If an encrypted .env.enc exists and the developer has sops+age, decrypt it.
+  # If an encrypted bundle exists and the developer has sops+age, decrypt it.
   # This gives returning devs (or anyone with the age key) a seamless setup.
-  if [ -f .env.enc ] && command -v sops >/dev/null 2>&1; then
+  if [ -f "$ENC_FILE" ] && command -v sops >/dev/null 2>&1; then
     SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
     if [ -f "$SOPS_AGE_KEY_FILE" ]; then
-      info "Found .env.enc and age key — decrypting..."
-      if SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --decrypt --input-type dotenv --output-type dotenv .env.enc > .env 2>/dev/null; then
-        info "Decrypted .env.enc → .env"
+      info "Found $ENC_FILE and age key — decrypting..."
+      if SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" > .env 2>/dev/null; then
+        info "Decrypted $ENC_FILE → .env"
       else
-        warn "Could not decrypt .env.enc (wrong key?). Falling back to .env.example."
+        warn "Could not decrypt $ENC_FILE (wrong key?). Falling back to .env.example."
         cp .env.example .env
         info "Created .env from .env.example — edit it to add your API keys."
       fi
     else
-      warn "Found .env.enc but no age key at $SOPS_AGE_KEY_FILE. Falling back to .env.example."
+      warn "Found $ENC_FILE but no age key at $SOPS_AGE_KEY_FILE. Falling back to .env.example."
       cp .env.example .env
       info "Created .env from .env.example — edit it to add your API keys."
     fi

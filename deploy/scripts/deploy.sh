@@ -378,7 +378,18 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
   fi
 fi
 
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+# The encrypted bundle lives in the private secrets checkout, not this
+# (public) repo. Resolved worktree-safely; see resolve-secrets-dir.sh.
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
+# Having the age key but no bundle means the private secrets checkout is
+# missing — deploying anyway would silently reuse stale /opt/143/.env and
+# skip the bundle scp. Fail loudly instead of degrading.
+if [ -n "${SOPS_AGE_KEY:-}" ] && [ ! -f "$ENC_FILE" ]; then
+  echo "ERROR: SOPS_AGE_KEY is set but $ENC_FILE does not exist." >&2
+  echo "Clone the private secrets repo next to the main checkout (see docs/secrets/README.md) or set SECRETS_DIR." >&2
+  exit 1
+fi
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Refreshing secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
@@ -1094,6 +1105,23 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  preview_rpc_auth_preflight() {
+    local cid="$1"
+    # The app-side probe signs with the candidate's secret and validates against
+    # every active preview worker — the only place a worker with a divergent
+    # secret (stale bundle / incomplete rotation) is caught. Fail the deploy on
+    # any unverified *active* worker rather than silently tolerating it; set
+    # PREVIEW_RPC_AUTH_STRICT=0 to fall back to best-effort in an emergency.
+    local strict_flag="--fail-on-skipped"
+    if [ "${PREVIEW_RPC_AUTH_STRICT:-1}" != "1" ]; then
+      strict_flag=""
+      echo "PREVIEW_RPC_AUTH_STRICT=0: preview RPC auth-check will not fail on unverified active workers."
+    fi
+    echo "Running preview RPC auth compatibility check from candidate api container ${cid:0:12}..."
+    # shellcheck disable=SC2086 # $strict_flag is an optional single flag or empty
+    docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json $strict_flag
+  }
+
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
   #   1. scale up by 1 alongside the existing container(s)
   #   2. wait for the new container's health check
@@ -1164,6 +1192,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ -n "$old_containers" ]; then
+      if [ "$service" = "api" ]; then
+        preview_rpc_auth_preflight "$new_container"
+      fi
       wait_caddy_upstream_discovery "$service" "$new_container"
       # Stop each old container with a long timeout so in-flight requests and
       # SSE streams have time to drain. Docker sends SIGTERM and only falls
@@ -1772,6 +1803,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     new_cid="$STARTED_WORKER_CID"
     if ! wait_worker_db_heartbeat "$node_id" "${WORKER_BLUE_GREEN_DB_HEARTBEAT_TIMEOUT_SECONDS:-120}"; then
       echo "Rolling back worker generation ${new_cid:0:12} after DB heartbeat readiness failure..."
+      docker stop "$new_cid" >/dev/null 2>&1 || true
+      docker rm "$new_cid" >/dev/null 2>&1 || true
+      return 1
+    fi
+    if ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
+      echo "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure..."
       docker stop "$new_cid" >/dev/null 2>&1 || true
       docker rm "$new_cid" >/dev/null 2>&1 || true
       return 1

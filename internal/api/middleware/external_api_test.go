@@ -62,6 +62,74 @@ func TestRequireAPIScope_ReturnsRequiredScopeDetail(t *testing.T) {
 	require.Equal(t, "sessions:create", body.Error.Details["required_scope"], "error details should name the missing scope")
 }
 
+func TestRequireAPIScope_AllowsFamilyScopes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		tokenScopes   []string
+		requiredScope string
+		expectedCode  int
+	}{
+		{name: "sessions all allows session create", tokenScopes: []string{"sessions:all"}, requiredScope: "sessions:create", expectedCode: http.StatusNoContent},
+		{name: "sessions all allows session publish", tokenScopes: []string{"sessions:all"}, requiredScope: "sessions:publish", expectedCode: http.StatusNoContent},
+		{name: "automations all allows automation run", tokenScopes: []string{"automations:all"}, requiredScope: "automations:run", expectedCode: http.StatusNoContent},
+		{name: "previews all allows preview stop", tokenScopes: []string{"previews:all"}, requiredScope: "previews:stop", expectedCode: http.StatusNoContent},
+		{name: "family scope does not cross resource families", tokenScopes: []string{"sessions:all"}, requiredScope: "automations:read", expectedCode: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+			req = req.WithContext(WithAPIIdentity(req.Context(), &models.APIClient{ID: uuid.New(), OrgID: uuid.New()}, &models.APIToken{
+				ID:     uuid.New(),
+				Scopes: tt.tokenScopes,
+			}))
+			rr := httptest.NewRecorder()
+
+			RequireAPIScope(tt.requiredScope)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			})).ServeHTTP(rr, req)
+
+			require.Equal(t, tt.expectedCode, rr.Code, "family scopes should satisfy only their documented resource family")
+		})
+	}
+}
+
+func TestAPITokenAllowsSourceIP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		token    models.APIToken
+		sourceIP string
+		expected bool
+	}{
+		{name: "empty allowlist allows any source", token: models.APIToken{}, sourceIP: "203.0.113.10", expected: true},
+		{name: "exact IP allows matching source", token: models.APIToken{AllowedIPCidrs: []string{"203.0.113.10"}}, sourceIP: "203.0.113.10", expected: true},
+		{name: "CIDR allows contained source", token: models.APIToken{AllowedIPCidrs: []string{"203.0.113.0/24"}}, sourceIP: "203.0.113.10", expected: true},
+		{name: "allowlist rejects outside source", token: models.APIToken{AllowedIPCidrs: []string{"203.0.113.0/24"}}, sourceIP: "198.51.100.7", expected: false},
+		{name: "invalid stored value fails closed", token: models.APIToken{AllowedIPCidrs: []string{"bad-value"}}, sourceIP: "203.0.113.10", expected: false},
+		{name: "invalid source fails closed", token: models.APIToken{AllowedIPCidrs: []string{"203.0.113.0/24"}}, sourceIP: "bad-source", expected: false},
+		{name: "empty stored entry is skipped and valid entry still allows", token: models.APIToken{AllowedIPCidrs: []string{"", "203.0.113.10"}}, sourceIP: "203.0.113.10", expected: true},
+		{name: "empty stored entry is skipped and still blocks unlisted source", token: models.APIToken{AllowedIPCidrs: []string{"", "203.0.113.0/24"}}, sourceIP: "198.51.100.7", expected: false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := apiTokenAllowsSourceIP(tt.token, tt.sourceIP)
+
+			require.Equal(t, tt.expected, actual, "source IP restrictions should be enforced exactly")
+		})
+	}
+}
+
 func TestExternalAPIRateLimit_PerTokenAndMutationBuckets(t *testing.T) {
 	t.Parallel()
 

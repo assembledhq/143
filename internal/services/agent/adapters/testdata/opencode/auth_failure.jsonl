@@ -1,0 +1,2 @@
+{"type":"session","sessionID":"ses_fixture_auth"}
+{"type":"error","error":"authentication failed: invalid API key"}

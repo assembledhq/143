@@ -65,6 +65,9 @@ export const queryKeys = {
     githubRepositories: (installationId?: number | null) => ["integrations", "github", "repositories", installationId ?? null] as const,
     linearAgentStatus: ["integrations", "linear", "agent"] as const,
     linearAgentMappings: ["integrations", "linear", "agent", "mappings"] as const,
+    slackHealth: ["integrations", "slack", "health"] as const,
+    slackSettings: ["integrations", "slack", "settings"] as const,
+    slackUserLinks: ["integrations", "slack", "user-links"] as const,
     slackChannels: ["slack-channels"] as const,
   },
   autopilot: {
@@ -107,7 +110,8 @@ export const queryKeys = {
     bootstrapCandidates: ["evals", "bootstrap", "candidates"] as const,
     bootstrapRun: (id: string) => ["evals", "bootstrap", "run", id] as const,
   },
-  previews: {
-    apiTokens: ["preview-api-tokens"] as const,
+  apiKeys: {
+    clients: ["api-keys", "clients"] as const,
+    tokens: (clientId: string) => ["api-keys", "clients", clientId, "tokens"] as const,
   },
 } as const;

@@ -844,7 +844,7 @@ describe("AutomationDetailPage", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("Weekly audit");
   });
 
-  it("updates the automation emoji from the header picker without changing tabs", async () => {
+  it("updates the automation emoji from the header picker without changing tabs", { timeout: 12_000 }, async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
 

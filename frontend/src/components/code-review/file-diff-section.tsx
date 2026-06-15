@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useMemo, useCallback, useState } from "react";
+import { forwardRef, useMemo, useCallback, useState, type ReactNode } from "react";
 import type { DiffFile, DiffLine } from "@/lib/diff-parser";
 import type { SessionReviewComment, FileLine } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
@@ -47,8 +47,6 @@ interface ContextGapState {
   hiddenStart: number;
   hiddenEnd?: number;
   lineDelta: number;
-  visibleStart?: number;
-  visibleEnd?: number;
   lines: DiffLine[];
 }
 
@@ -92,6 +90,102 @@ function toDiffLines(lines: FileLine[], lineDelta: number): DiffLine[] {
     oldLineNumber: line.number - lineDelta,
     newLineNumber: line.number,
   }));
+}
+
+function getDiffLineNumber(line: DiffLine): number {
+  return line.newLineNumber ?? line.oldLineNumber ?? 0;
+}
+
+function mergeContextLines(existingLines: DiffLine[], newLines: DiffLine[]): DiffLine[] {
+  const byLineNumber = new Map<number, DiffLine>();
+  for (const line of existingLines) {
+    byLineNumber.set(getDiffLineNumber(line), line);
+  }
+  for (const line of newLines) {
+    byLineNumber.set(getDiffLineNumber(line), line);
+  }
+  return Array.from(byLineNumber.values()).sort(
+    (a, b) => getDiffLineNumber(a) - getDiffLineNumber(b)
+  );
+}
+
+function makeContextHunk(lines: DiffLine[]): DiffFile["hunks"][number] | null {
+  if (lines.length === 0) return null;
+  return {
+    oldStart: lines[0].oldLineNumber ?? 0,
+    oldCount: lines.length,
+    newStart: lines[0].newLineNumber ?? 0,
+    newCount: lines.length,
+    header: "",
+    lines,
+  };
+}
+
+function splitExpandedGapLines(gap: ContextGapState): {
+  sortedLines: DiffLine[];
+  lowerLines: DiffLine[];
+  upperLines: DiffLine[];
+  lowerEnd?: number;
+  upperStart?: number;
+  visibleStart?: number;
+  visibleEnd?: number;
+  remainingLineCount: number;
+} {
+  const sortedLines = mergeContextLines([], gap.lines);
+  const visibleNumbers = sortedLines.map(getDiffLineNumber);
+  const visibleStart = visibleNumbers.length > 0 ? visibleNumbers[0] : undefined;
+  const visibleEnd = visibleNumbers.length > 0 ? visibleNumbers[visibleNumbers.length - 1] : undefined;
+
+  if (gap.hiddenEnd == null) {
+    return {
+      sortedLines,
+      lowerLines: sortedLines,
+      upperLines: [],
+      lowerEnd: visibleEnd,
+      visibleStart,
+      visibleEnd,
+      remainingLineCount: 1,
+    };
+  }
+
+  const linesByNumber = new Map(sortedLines.map((line) => [getDiffLineNumber(line), line]));
+  const lowerLines: DiffLine[] = [];
+  for (let lineNumber = gap.hiddenStart; lineNumber <= gap.hiddenEnd; lineNumber++) {
+    const line = linesByNumber.get(lineNumber);
+    if (!line) break;
+    lowerLines.push(line);
+  }
+
+  const lowerNumbers = new Set(lowerLines.map(getDiffLineNumber));
+  const upperLinesReversed: DiffLine[] = [];
+  for (let lineNumber = gap.hiddenEnd; lineNumber >= gap.hiddenStart; lineNumber--) {
+    if (lowerNumbers.has(lineNumber)) break;
+    const line = linesByNumber.get(lineNumber);
+    if (!line) break;
+    upperLinesReversed.push(line);
+  }
+  const upperLines = upperLinesReversed.reverse();
+
+  const lowerEnd = lowerLines.length > 0
+    ? getDiffLineNumber(lowerLines[lowerLines.length - 1])
+    : undefined;
+  const upperStart = upperLines.length > 0
+    ? getDiffLineNumber(upperLines[0])
+    : undefined;
+  const remainingStart = lowerEnd != null ? lowerEnd + 1 : gap.hiddenStart;
+  const remainingEnd = upperStart != null ? upperStart - 1 : gap.hiddenEnd;
+  const remainingLineCount = Math.max(0, remainingEnd - remainingStart + 1);
+
+  return {
+    sortedLines,
+    lowerLines,
+    upperLines,
+    lowerEnd,
+    upperStart,
+    visibleStart,
+    visibleEnd,
+    remainingLineCount,
+  };
 }
 
 function countRenderableLines(hunk: DiffFile["hunks"][number]): number {
@@ -151,14 +245,8 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
         setGapStates((prev) => {
           const next = new Map(prev);
           const existing = next.get(gap.key) ?? gap;
-          let mergedLines = existing.lines;
-          if (direction === "above") {
-            mergedLines = [...diffLines, ...existing.lines];
-          } else if (direction === "below") {
-            mergedLines = [...existing.lines, ...diffLines];
-          } else {
-            mergedLines = diffLines;
-          }
+          const mergedLines =
+            direction === "all" ? mergeContextLines([], diffLines) : mergeContextLines(existing.lines, diffLines);
 
           next.set(gap.key, {
             ...existing,
@@ -168,14 +256,6 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
               (meta.totalLines >= existing.hiddenStart
                 ? meta.totalLines
                 : existing.hiddenStart - 1),
-            visibleStart:
-              existing.visibleStart != null
-                ? Math.min(existing.visibleStart, meta.startLine)
-                : meta.startLine,
-            visibleEnd:
-              existing.visibleEnd != null
-                ? Math.max(existing.visibleEnd, meta.endLine)
-                : meta.endLine,
           });
           return next;
         });
@@ -206,43 +286,56 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
 
     const renderGap = useCallback((gap: ContextGapState) => {
       const gapState = gapStates.get(gap.key) ?? gap;
-      const hiddenLineCount = gapState.hiddenEnd == null
-        ? 1
-        : gapState.hiddenEnd - gapState.hiddenStart + 1;
-      if (hiddenLineCount <= 0) return null;
+      const expanded = splitExpandedGapLines(gapState);
+      const hiddenLineCount = expanded.remainingLineCount;
+      if (hiddenLineCount <= 0 && expanded.sortedLines.length === 0) return null;
 
-      const expandedHunk = gapState.lines.length > 0 ? {
-        oldStart: gapState.lines[0].oldLineNumber ?? 0,
-        oldCount: gapState.lines.length,
-        newStart: gapState.lines[0].newLineNumber ?? 0,
-        newCount: gapState.lines.length,
-        header: "",
-        lines: gapState.lines,
-      } : null;
+      const renderContextLines = (key: string, lines: DiffLine[]) => {
+        const expandedHunk = makeContextHunk(lines);
+        if (!expandedHunk) return null;
+        return viewMode === "split" ? (
+          <SplitDiffHunk key={key} hunk={expandedHunk} {...commonHunkProps} />
+        ) : (
+          <DiffHunk key={key} hunk={expandedHunk} {...commonHunkProps} />
+        );
+      };
+
+      const expander = hiddenLineCount > 0 ? (
+        <ContextExpander
+          key="expander"
+          kind={gap.kind}
+          viewMode={viewMode}
+          hiddenLineCount={hiddenLineCount}
+          sessionId={sessionId}
+          filePath={file.newPath}
+          hiddenStart={gap.hiddenStart}
+          hiddenEnd={gapState.hiddenEnd}
+          visibleStart={expanded.visibleStart}
+          visibleEnd={expanded.visibleEnd}
+          aboveVisibleStart={expanded.upperStart}
+          belowVisibleEnd={expanded.lowerEnd}
+          onExpand={makeHandleContextExpand(gapState)}
+          contextUnavailable={contextUnavailable}
+          onContextUnavailable={onContextUnavailable}
+        />
+      ) : null;
+
+      let children: ReactNode[];
+      if (gap.kind === "bottom") {
+        children = [renderContextLines("lower", expanded.sortedLines), expander];
+      } else if (gap.kind === "middle") {
+        children = [
+          renderContextLines("lower", expanded.lowerLines),
+          expander,
+          renderContextLines("upper", expanded.upperLines),
+        ];
+      } else {
+        children = [expander, renderContextLines("upper", expanded.sortedLines)];
+      }
 
       return (
         <div key={gap.key}>
-          <ContextExpander
-            kind={gap.kind}
-            viewMode={viewMode}
-            hiddenLineCount={hiddenLineCount}
-            sessionId={sessionId}
-            filePath={file.newPath}
-            hiddenStart={gap.hiddenStart}
-            hiddenEnd={gapState.hiddenEnd}
-            visibleStart={gapState.visibleStart}
-            visibleEnd={gapState.visibleEnd}
-            onExpand={makeHandleContextExpand(gapState)}
-            contextUnavailable={contextUnavailable}
-            onContextUnavailable={onContextUnavailable}
-          />
-          {expandedHunk ? (
-            viewMode === "split" ? (
-              <SplitDiffHunk hunk={expandedHunk} {...commonHunkProps} />
-            ) : (
-              <DiffHunk hunk={expandedHunk} {...commonHunkProps} />
-            )
-          ) : null}
+          {children}
         </div>
       );
     }, [commonHunkProps, file.newPath, gapStates, makeHandleContextExpand, sessionId, viewMode, contextUnavailable, onContextUnavailable]);

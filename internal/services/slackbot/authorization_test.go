@@ -30,11 +30,11 @@ func (s stubMembershipStore) Get(_ context.Context, _ uuid.UUID, _ uuid.UUID) (m
 }
 
 type stubChannelStore struct {
-	settings models.SlackChannelSettings
+	settings models.EffectiveSlackChannelSettings
 	err      error
 }
 
-func (s stubChannelStore) GetByChannel(_ context.Context, _ uuid.UUID, _, _ string) (models.SlackChannelSettings, error) {
+func (s stubChannelStore) GetEffectiveByChannel(_ context.Context, _ uuid.UUID, _, _ string) (models.EffectiveSlackChannelSettings, error) {
 	return s.settings, s.err
 }
 
@@ -70,7 +70,7 @@ func TestAuthorizerAuthorize(t *testing.T) {
 				OrgID:  orgID,
 				Role:   models.RoleMember,
 			}},
-			channels: stubChannelStore{settings: models.SlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
+			channels: stubChannelStore{settings: models.EffectiveSlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
 			expected: Decision{
 				MappedUserID: &userID,
 				Role:         models.RoleMember,
@@ -94,7 +94,7 @@ func TestAuthorizerAuthorize(t *testing.T) {
 				OrgID:  orgID,
 				Role:   models.RoleViewer,
 			}},
-			channels:  stubChannelStore{settings: models.SlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
+			channels:  stubChannelStore{settings: models.EffectiveSlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
 			expectErr: true,
 		},
 		{
@@ -109,7 +109,7 @@ func TestAuthorizerAuthorize(t *testing.T) {
 				IsOriginatingTeamSession: true,
 			},
 			links:    stubUserLinkStore{err: pgx.ErrNoRows},
-			channels: stubChannelStore{settings: models.SlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
+			channels: stubChannelStore{settings: models.EffectiveSlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
 			expected: Decision{
 				MappedUserID: nil,
 				Role:         "",
@@ -128,7 +128,7 @@ func TestAuthorizerAuthorize(t *testing.T) {
 				IsOriginatingTeamSession: false,
 			},
 			links:     stubUserLinkStore{err: pgx.ErrNoRows},
-			channels:  stubChannelStore{settings: models.SlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
+			channels:  stubChannelStore{settings: models.EffectiveSlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
 			expectErr: true,
 		},
 		{
@@ -148,7 +148,7 @@ func TestAuthorizerAuthorize(t *testing.T) {
 				OrgID:  orgID,
 				Role:   models.RoleAdmin,
 			}},
-			channels:  stubChannelStore{settings: models.SlackChannelSettings{AllowedActions: []string{string(CapabilitySession)}}},
+			channels:  stubChannelStore{settings: models.EffectiveSlackChannelSettings{AllowedActions: []string{string(CapabilitySession)}}},
 			expectErr: true,
 		},
 		{
@@ -161,7 +161,7 @@ func TestAuthorizerAuthorize(t *testing.T) {
 				Capability:  CapabilityPreview,
 			},
 			links:     stubUserLinkStore{err: errors.New("database unavailable")},
-			channels:  stubChannelStore{settings: models.SlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
+			channels:  stubChannelStore{settings: models.EffectiveSlackChannelSettings{AllowedActions: []string{string(CapabilityPreview)}}},
 			expectErr: true,
 		},
 	}

@@ -546,6 +546,17 @@ export function SessionSidebar() {
     extraPages: SessionListItem[][];
   };
 
+  type ArchiveMutationVariables = {
+    session: SessionListItem;
+    deferRemoval?: boolean;
+  };
+
+  // Coordination between the two async signals for deferred-removal archives:
+  // invalidateSessions() should fire once, after BOTH the server confirms AND the
+  // collapse animation completes — whichever happens last wins.
+  const archiveSucceededBeforeAnimation = useRef<Set<string>>(new Set());
+  const animationCompletedBeforeArchive = useRef<Set<string>>(new Set());
+
   const snapshotSessionCaches = (): ArchiveMutationContext => ({
     lists: queryClient.getQueriesData<ListResponse<SessionListItem>>({ queryKey: queryKeys.sessions.all })
       .filter(([, current]) => Array.isArray(current?.data)),
@@ -568,19 +579,35 @@ export function SessionSidebar() {
   };
 
   const archiveMutation = useMutation({
-    mutationFn: (session: SessionListItem) => api.sessions.archive(session.id),
-    onMutate: async (session) => {
+    mutationFn: ({ session }: ArchiveMutationVariables) => api.sessions.archive(session.id),
+    onMutate: async ({ session, deferRemoval }) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.sessions.all });
       const snapshot = snapshotSessionCaches();
-      removeSessionFromCachedLists(session.id);
-      removeSessionFromExtraPages(session.id);
+      if (!deferRemoval) {
+        removeSessionFromCachedLists(session.id);
+        removeSessionFromExtraPages(session.id);
+      }
       updateCachedSessionCounts(session, "archive");
+      toast.success("Session archived", { duration: 2500 });
       return snapshot;
     },
-    onSuccess: () => {
-      invalidateSessions();
+    onSuccess: (_data, { session, deferRemoval }) => {
+      if (!deferRemoval) {
+        invalidateSessions();
+        return;
+      }
+      if (animationCompletedBeforeArchive.current.has(session.id)) {
+        animationCompletedBeforeArchive.current.delete(session.id);
+        invalidateSessions();
+      } else {
+        archiveSucceededBeforeAnimation.current.add(session.id);
+      }
     },
-    onError: (_error, _session, snapshot) => {
+    onError: (_error, { session, deferRemoval }, snapshot) => {
+      if (deferRemoval) {
+        archiveSucceededBeforeAnimation.current.delete(session.id);
+        animationCompletedBeforeArchive.current.delete(session.id);
+      }
       restoreSessionCaches(snapshot);
       invalidateSessions();
       toast.error("Failed to archive session");
@@ -803,7 +830,7 @@ export function SessionSidebar() {
       unarchiveMutation.mutate(activeSession);
       return;
     }
-    archiveMutation.mutate(activeSession);
+    archiveMutation.mutate({ session: activeSession });
   }, [activeSession, archiveMutation, unarchiveMutation]);
 
   const handleListKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -906,13 +933,26 @@ export function SessionSidebar() {
         className="mb-0.5"
         actionLabel={isArchived ? "Unarchive session" : "Archive session"}
         actionText={isArchived ? "Restore" : "Archive"}
+        committedText={isArchived ? "Restored" : "Archived"}
         desktopActionVisibility="hover"
         actionIcon={isArchived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
-        onAction={() => {
+        onCommitAnimationComplete={() => {
+          if (!isArchived) {
+            removeSessionFromCachedLists(session.id);
+            removeSessionFromExtraPages(session.id);
+            if (archiveSucceededBeforeAnimation.current.has(session.id)) {
+              archiveSucceededBeforeAnimation.current.delete(session.id);
+              invalidateSessions();
+            } else {
+              animationCompletedBeforeArchive.current.add(session.id);
+            }
+          }
+        }}
+        onAction={(source) => {
           if (isArchived) {
             return unarchiveMutation.mutateAsync(session);
           } else {
-            return archiveMutation.mutateAsync(session);
+            return archiveMutation.mutateAsync({ session, deferRemoval: source === "mobile-commit" });
           }
         }}
       >

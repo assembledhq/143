@@ -350,67 +350,6 @@ func TestAutomationHandler_Create_OK(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestAutomationHandler_Create_RejectsPrePRReviewForUnsupportedAgent(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{
-		"name":                "my automation",
-		"goal":                "poke at things",
-		"agent_type":          "gemini_cli",
-		"interval_value":      2,
-		"interval_unit":       "days",
-		"pre_pr_review_loops": 1,
-	}
-	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
-	rr := httptest.NewRecorder()
-
-	h.Create(rr, req)
-
-	require.Equal(t, http.StatusBadRequest, rr.Code, "unsupported review agent should be rejected at create time")
-	require.Contains(t, rr.Body.String(), "INVALID_PRE_PR_REVIEW_LOOPS", "response should identify the invalid pre-PR review setting")
-	require.NoError(t, mock.ExpectationsWereMet(), "no database write should be attempted")
-}
-
-func TestAutomationHandler_Create_DefaultsPrePRReviewOffForUnsupportedAgent(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	newID := uuid.New()
-	now := time.Now()
-	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(testAnyArgs(27)...).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
-		)
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{
-		"name":           "my automation",
-		"goal":           "poke at things",
-		"agent_type":     "gemini_cli",
-		"interval_value": 2,
-		"interval_unit":  "days",
-	}
-	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, uuid.New(), uuid.New(), nil)
-	rr := httptest.NewRecorder()
-
-	h.Create(rr, req)
-
-	require.Equal(t, http.StatusCreated, rr.Code, "unsupported agents should still be creatable when pre-PR review is omitted")
-	var resp models.SingleResponse[models.Automation]
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "response body should decode as an automation")
-	require.Equal(t, 0, resp.Data.PrePRReviewLoops, "unsupported agents should default pre-PR review loops to disabled")
-	require.NoError(t, mock.ExpectationsWereMet(), "automation insert should be attempted once")
-}
-
 func TestAutomationHandler_Create_PersonalIdentityScope(t *testing.T) {
 	t.Parallel()
 
@@ -818,44 +757,6 @@ func TestAutomationHandler_Update_OK(t *testing.T) {
 	require.NotNil(t, resp.Data.ReasoningEffort)
 	require.Equal(t, models.ReasoningEffortHigh, *resp.Data.ReasoningEffort)
 	require.NoError(t, mock.ExpectationsWereMet())
-}
-
-func TestAutomationHandler_Update_RejectsPrePRReviewForUnsupportedAgent(t *testing.T) {
-	t.Parallel()
-
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock pool should be created")
-	defer mock.Close()
-
-	orgID := uuid.New()
-	id := uuid.New()
-	now := time.Now()
-	iv := 1
-	unit := models.ScheduleUnitDays
-	agentType := "gemini_cli"
-	a := models.Automation{
-		ID: id, OrgID: orgID, Name: "a", Goal: "g",
-		AgentType: &agentType, ExecutionMode: "sequential", BaseBranch: "main",
-		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
-		IntervalValue: &iv, IntervalUnit: &unit, CreatedAt: now, UpdatedAt: now,
-	}
-
-	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
-		WithArgs(testAnyArgs(2)...).
-		WillReturnRows(newAutomationRow(mock, a))
-
-	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
-	body := map[string]any{
-		"pre_pr_review_loops": 1,
-	}
-	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+id.String(), body, orgID, uuid.New(), map[string]string{"id": id.String()})
-	rr := httptest.NewRecorder()
-
-	h.Update(rr, req)
-
-	require.Equal(t, http.StatusBadRequest, rr.Code, "unsupported review agent should be rejected at update time")
-	require.Contains(t, rr.Body.String(), "INVALID_PRE_PR_REVIEW_LOOPS", "response should identify the invalid pre-PR review setting")
-	require.NoError(t, mock.ExpectationsWereMet(), "no update should be attempted")
 }
 
 func TestAutomationHandler_Update_ReasoningFallsBackWhenOrgSettingsMalformed(t *testing.T) {

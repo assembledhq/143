@@ -71,7 +71,8 @@ fi
 
 # Decrypt .env.production.enc to extract secrets locally.
 # Values set as env vars already will take precedence (eval won't overwrite).
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
 if [ -f "$ENC_FILE" ]; then
   echo "Reading secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")

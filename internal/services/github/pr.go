@@ -2513,7 +2513,7 @@ func (s *PRService) stablePRPreviewURL(owner, repo string, number int) string {
 
 func (s *PRService) prPreviewURL(ctx context.Context, run *models.Session, repo *models.Repository, owner, repoName string, number int, branchName, headSHA, prURL string) string {
 	stableURL := s.stablePRPreviewURL(owner, repoName, number)
-	if s.previews == nil || s.previewOriginTemplate == "" || run == nil || repo == nil || run.TriggeredByUserID == nil || repo.ID == uuid.Nil || headSHA == "" {
+	if s.previews == nil || run == nil || repo == nil || run.TriggeredByUserID == nil || repo.ID == uuid.Nil || headSHA == "" {
 		return stableURL
 	}
 
@@ -2555,7 +2555,7 @@ func (s *PRService) prPreviewURL(ctx context.Context, run *models.Session, repo 
 
 	s.attachMatchingSessionPreview(ctx, run, target, headSHA)
 
-	return strings.ReplaceAll(s.previewOriginTemplate, "{id}", target.ID.String())
+	return stableURL
 }
 
 func (s *PRService) attachMatchingSessionPreview(ctx context.Context, run *models.Session, target *models.PreviewTarget, headSHA string) {

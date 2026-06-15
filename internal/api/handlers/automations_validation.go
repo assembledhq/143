@@ -242,27 +242,31 @@ func hasAutomationAgentConfigKey(cfg models.AgentEnvConfig, agentType models.Age
 	if !ok {
 		return false
 	}
-	keyName := automationAgentConfigSecretKey(agentType)
-	if keyName == "" {
-		return false
+	for _, keyName := range automationAgentConfigSecretKeys(agentType) {
+		if strings.TrimSpace(keys[keyName]) != "" {
+			return true
+		}
 	}
-	return strings.TrimSpace(keys[keyName]) != ""
+	return false
 }
 
-func automationAgentConfigSecretKey(agentType models.AgentType) string {
+// automationAgentConfigSecretKeys returns the env var names that, when present
+// in agent_config for the given agent type, indicate a configured inline API
+// key. OpenCode credentials are stored in the credentials table rather than
+// agent_config (AllowedAgentConfigKeys only allows model overrides), so it
+// returns nil and availability falls through to the credentials table check.
+func automationAgentConfigSecretKeys(agentType models.AgentType) []string {
 	switch agentType {
 	case models.AgentTypeCodex:
-		return "OPENAI_API_KEY"
+		return []string{"OPENAI_API_KEY"}
 	case models.AgentTypeClaudeCode:
-		return "ANTHROPIC_API_KEY"
-	case models.AgentTypeGeminiCLI:
-		return "GEMINI_API_KEY"
+		return []string{"ANTHROPIC_API_KEY"}
 	case models.AgentTypeAmp:
-		return "AMP_API_KEY"
+		return []string{"AMP_API_KEY"}
 	case models.AgentTypePi:
-		return "PI_API_KEY"
+		return []string{"PI_API_KEY"}
 	default:
-		return ""
+		return nil
 	}
 }
 
@@ -272,12 +276,12 @@ func codingCredentialAgentType(provider models.ProviderName) models.AgentType {
 		return models.AgentTypeClaudeCode
 	case models.ProviderOpenAI, models.ProviderOpenAISubscription:
 		return models.AgentTypeCodex
-	case models.ProviderGemini:
-		return models.AgentTypeGeminiCLI
 	case models.ProviderAmp:
 		return models.AgentTypeAmp
 	case models.ProviderPi:
 		return models.AgentTypePi
+	case models.ProviderOpenCode:
+		return models.AgentTypeOpenCode
 	default:
 		return ""
 	}

@@ -87,7 +87,34 @@ function installPreviewHandlers(
       requests.push(url.search);
       return HttpResponse.json({ data: byScope[scope] ?? [], meta });
     }),
+    http.get("*/api/v1/repositories/:id/branches", () =>
+      HttpResponse.json({
+        data: [
+          { name: "main", protected: true },
+          { name: "feature/session-input-branch", protected: false },
+        ],
+        meta: {},
+      }),
+    ),
+    http.get("*/api/v1/previews/configs", () =>
+      HttpResponse.json({
+        data: {
+          names: [],
+          default_name: "",
+          selected_name: "",
+          requires_selection: false,
+        },
+      }),
+    ),
   );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 describe("PreviewsPage", () => {
@@ -255,15 +282,88 @@ describe("PreviewsPage", () => {
     expect(screen.queryByRole("button", { name: /start latest/i })).not.toBeInTheDocument();
   });
 
-  it("renders the empty state with the create action when every scope is empty", async () => {
+  it("opens the create preview dialog from the empty state action", async () => {
     installPreviewHandlers({ running: [], resumable: [], recent: [] });
 
     renderWithProviders(<PreviewsPage />);
 
     expect(await screen.findByText("No previews yet")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /create preview/i }));
     expect(
-      screen.getByRole("link", { name: /create preview/i }),
-    ).toHaveAttribute("href", "/previews/new");
+      await screen.findByRole("dialog", { name: "Create preview" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens create preview in a modal and submits the preselected repo and branch", async () => {
+    const createRequests: unknown[] = [];
+    installPreviewHandlers({ running: [], resumable: [], recent: [] });
+    server.use(
+      http.post("*/api/v1/previews", async ({ request }) => {
+        createRequests.push(await request.json());
+        return HttpResponse.json({
+          data: preview({
+            target_id: "target-created",
+            preview_id: "preview-created",
+            repository_id: "repo-1",
+            branch: "feature/session-input-branch",
+          }),
+        });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />, {
+      searchParams: {
+        repo: "repo-1",
+        branch: "feature/session-input-branch",
+      },
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: /new preview/i }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Create preview" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Repository" })).toHaveTextContent(
+      "assembledhq/143",
+    );
+    expect(screen.getByRole("button", { name: "Target branch" })).toHaveTextContent(
+      "feature/session-input-branch",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Start preview" }));
+
+    await waitFor(() => {
+      expect(createRequests).toEqual([
+        expect.objectContaining({
+          repository_id: "repo-1",
+          branch: "feature/session-input-branch",
+          source: { type: "manual" },
+        }),
+      ]);
+    });
+  });
+
+  it("keeps the initial preview content quiet until all sections resolve empty", async () => {
+    const previewsReleased = deferred<void>();
+    server.use(
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({ data: repositories, meta: {} }),
+      ),
+      http.get("*/api/v1/previews", async () => {
+        await previewsReleased.promise;
+        return HttpResponse.json({ data: [], meta });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+
+    expect(screen.queryByText("Loading previews...")).not.toBeInTheDocument();
+    expect(screen.queryByText("No previews are running.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No previews yet")).not.toBeInTheDocument();
+
+    previewsReleased.resolve();
+
+    expect(await screen.findByText("No previews yet")).toBeInTheDocument();
   });
 
   it("shows a stable per-section error state instead of the empty state when the list API fails", async () => {

@@ -39,6 +39,11 @@ type mockCredentialStore struct {
 	// default (false) keeps the legacy last_used_at LRU semantics the older
 	// tests were written against.
 	pickByPriority bool
+	// getByIDHook, when set, runs at the top of every GetByID. Tests use it to
+	// mutate the stored row between the service's reads — simulating another
+	// host rotating the token mid-flight — without racing the service
+	// goroutine (the hook runs synchronously inside the read).
+	getByIDHook func(id uuid.UUID)
 }
 
 func newMockCredentialStore() *mockCredentialStore {
@@ -190,6 +195,9 @@ func (m *mockCredentialStore) InsertPendingAuth(_ context.Context, scope models.
 }
 
 func (m *mockCredentialStore) GetByID(_ context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCredential, error) {
+	if m.getByIDHook != nil {
+		m.getByIDHook(id)
+	}
 	for _, cred := range m.creds {
 		if cred.ID == id && m.scopesMatch(cred.ID, scope) {
 			return cred, nil
@@ -2097,5 +2105,281 @@ func TestInitiateDeviceAuth_SameLabelAcrossScopes(t *testing.T) {
 	}
 	if orgRow.ID == personalRow.ID {
 		t.Error("org and personal rows must be distinct credentials despite sharing the label")
+	}
+}
+
+// lockTrackingStore wraps the mock store with a RefreshLocker implementation
+// so tests can assert the service serializes refreshes through the store's
+// cross-host lock when it is available. Mirrors claudecodeauth's test double.
+type lockTrackingStore struct {
+	*mockCredentialStore
+	lockCalls  int
+	lockedCred uuid.UUID
+}
+
+var _ RefreshLocker = (*lockTrackingStore)(nil)
+
+func (s *lockTrackingStore) WithRefreshLock(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error {
+	s.lockCalls++
+	s.lockedCred = credID
+	return fn(ctx)
+}
+
+// seedExpiredSub stores an org-scope subscription whose access token expired,
+// returning the credential row for ID access.
+func seedExpiredSub(t *testing.T, store *mockCredentialStore, orgID uuid.UUID, refreshToken string) *models.DecryptedCredential {
+	t.Helper()
+	scope := models.Scope{OrgID: orgID}
+	if err := store.Upsert(context.Background(), scope, models.OpenAISubscriptionConfig{
+		AccessToken:  "cha_expired",
+		RefreshToken: refreshToken,
+		ExpiresAt:    time.Now().Add(-1 * time.Minute),
+		AccountType:  "plus",
+	}); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	cred, err := store.Get(context.Background(), scope, models.ProviderOpenAISubscription)
+	if err != nil {
+		t.Fatalf("get seeded credential: %v", err)
+	}
+	return cred
+}
+
+func TestRefreshTokenByID_UsesStoreRefreshLock(t *testing.T) {
+	t.Parallel()
+	store := &lockTrackingStore{mockCredentialStore: newMockCredentialStore()}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"cha_refreshed","refresh_token":"chr_new","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	cred := seedExpiredSub(t, store.mockCredentialStore, orgID, "chr_old")
+
+	got, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
+	if err != nil {
+		t.Fatalf("refresh should succeed under the store lock: %v", err)
+	}
+	if got.AccessToken != "cha_refreshed" {
+		t.Errorf("expected refreshed token, got %q", got.AccessToken)
+	}
+	if store.lockCalls != 1 {
+		t.Errorf("expected the refresh to run inside the store's cross-host lock, got %d lock calls", store.lockCalls)
+	}
+	if store.lockedCred != cred.ID {
+		t.Errorf("expected lock on credential %s, got %s", cred.ID, store.lockedCred)
+	}
+}
+
+func TestRefreshTokenByID_RefreshLockErrorsPassThrough(t *testing.T) {
+	t.Parallel()
+	store := &lockTrackingStore{mockCredentialStore: newMockCredentialStore()}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer server.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	orgID := uuid.New()
+	cred := seedExpiredSub(t, store.mockCredentialStore, orgID, "chr_revoked")
+
+	_, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
+	if err == nil {
+		t.Fatal("a real revocation should still fail under the store lock")
+	}
+	if !strings.Contains(err.Error(), "refresh token revoked") {
+		t.Errorf("the revocation error must pass through the lock unwrapped, got %v", err)
+	}
+	// GetValidToken and the orchestrator key off the ErrAuthInvalid sentinel;
+	// the lock wrapper must not break the errors.Is chain.
+	if !svc.IsAuthInvalid(err) {
+		t.Errorf("expected ErrAuthInvalid in the chain, got %v", err)
+	}
+	if k := store.key(orgID, models.ProviderOpenAISubscription); store.status[k] != "invalid" {
+		t.Errorf("an unrotated rejected token should still mark the credential invalid, got status %q", store.status[k])
+	}
+}
+
+func TestRefreshTokenByID_StaleInvalidGrantRetriesWithRotatedToken(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	orgID := uuid.New()
+	cred := seedExpiredSub(t, store, orgID, "chr_stale")
+
+	// The post-rejection re-read (second GetByID) sees a rotated refresh
+	// token whose access token is also expired, so the retry has to do a
+	// real refresh rather than short-circuiting.
+	reads := 0
+	store.getByIDHook = func(uuid.UUID) {
+		reads++
+		if reads == 2 {
+			cred.Config = models.OpenAISubscriptionConfig{
+				AccessToken:  "cha_expired",
+				RefreshToken: "chr_rotated",
+				ExpiresAt:    time.Now().Add(-1 * time.Minute),
+				AccountType:  "plus",
+			}
+		}
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+		switch n {
+		case 1:
+			if req.RefreshToken != "chr_stale" {
+				t.Errorf("first attempt should send the originally stored token, got %q", req.RefreshToken)
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+		default:
+			if req.RefreshToken != "chr_rotated" {
+				t.Errorf("retry should send the rotated token, got %q", req.RefreshToken)
+			}
+			_, _ = w.Write([]byte(`{"access_token":"cha_fresh","refresh_token":"chr_fresh","expires_in":3600}`))
+		}
+	}))
+	defer server.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	got, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
+	if err != nil {
+		t.Fatalf("a stale rejection should retry with the rotated token instead of failing: %v", err)
+	}
+	if got.AccessToken != "cha_fresh" || got.RefreshToken != "chr_fresh" {
+		t.Errorf("expected refreshed tokens, got access=%q refresh=%q", got.AccessToken, got.RefreshToken)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Errorf("exactly one retry should happen, got %d requests", n)
+	}
+	if k := store.key(orgID, models.ProviderOpenAISubscription); store.status[k] == "invalid" {
+		t.Error("the credential must not be invalidated by a stale rejection")
+	}
+	stored, err := store.GetByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
+	if err != nil {
+		t.Fatalf("re-read credential: %v", err)
+	}
+	if cfg := stored.Config.(models.OpenAISubscriptionConfig); cfg.AccessToken != "cha_fresh" {
+		t.Errorf("expected refreshed token persisted, got %q", cfg.AccessToken)
+	}
+}
+
+func TestRefreshTokenByID_RotatedFreshTokenShortCircuits(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	orgID := uuid.New()
+	cred := seedExpiredSub(t, store, orgID, "chr_old")
+
+	// The rotation discovered by the post-rejection re-read carries a
+	// still-fresh access token, so the retry loop's top-of-loop re-read
+	// should return it without a second HTTP call.
+	reads := 0
+	store.getByIDHook = func(uuid.UUID) {
+		reads++
+		if reads == 2 {
+			cred.Config = models.OpenAISubscriptionConfig{
+				AccessToken:  "cha_rotated_fresh",
+				RefreshToken: "chr_rotated",
+				ExpiresAt:    time.Now().Add(1 * time.Hour),
+				AccountType:  "plus",
+			}
+		}
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer server.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	got, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
+	if err != nil {
+		t.Fatalf("a fresh rotated token should be returned without another refresh: %v", err)
+	}
+	if got.AccessToken != "cha_rotated_fresh" {
+		t.Errorf("expected the rotated fresh token, got %q", got.AccessToken)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("the fresh rotated token must short-circuit the retry's HTTP call, got %d requests", n)
+	}
+	if k := store.key(orgID, models.ProviderOpenAISubscription); store.status[k] == "invalid" {
+		t.Error("the credential must stay active")
+	}
+}
+
+func TestRefreshTokenByID_ReusedTokenRetriesWithRotatedToken(t *testing.T) {
+	t.Parallel()
+	store := newMockCredentialStore()
+
+	orgID := uuid.New()
+	cred := seedExpiredSub(t, store, orgID, "chr_stale")
+
+	reads := 0
+	store.getByIDHook = func(uuid.UUID) {
+		reads++
+		if reads == 2 {
+			cred.Config = models.OpenAISubscriptionConfig{
+				AccessToken:  "cha_expired",
+				RefreshToken: "chr_rotated",
+				ExpiresAt:    time.Now().Add(-1 * time.Minute),
+				AccountType:  "plus",
+			}
+		}
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"refresh_token_reused"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"access_token":"cha_fresh","refresh_token":"chr_fresh","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	svc := NewService(store, zerolog.Nop())
+	svc.SetHTTPClient(server.Client())
+	svc.SetIssuer(server.URL)
+
+	got, err := svc.RefreshTokenByID(context.Background(), models.Scope{OrgID: orgID}, cred.ID)
+	if err != nil {
+		t.Fatalf("a reuse rejection with a rotated stored token should retry instead of failing: %v", err)
+	}
+	if got.AccessToken != "cha_fresh" {
+		t.Errorf("expected refreshed token, got %q", got.AccessToken)
+	}
+	if n := requests.Load(); n != 2 {
+		t.Errorf("expected exactly 2 requests, got %d", n)
 	}
 }

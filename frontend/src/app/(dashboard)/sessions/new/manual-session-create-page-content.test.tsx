@@ -79,7 +79,7 @@ const mocks = vi.hoisted(() => ({
     data: [
       { agent: "codex", provider: "openai" },
       { agent: "claude_code", provider: "anthropic" },
-      { agent: "gemini_cli", provider: "gemini" },
+      { agent: "opencode", provider: "opencode" },
       { agent: "amp", provider: "amp" },
       { agent: "pi", provider: "pi" },
     ].map((row, index) => ({
@@ -833,7 +833,7 @@ describe("ManualSessionCreatePageContent", () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(await screen.findByRole("combobox", { name: /Model/i }));
-    await user.click(screen.getByRole("option", { name: "gemini-2.5-pro" }));
+    await user.click(screen.getByRole("option", { name: "openai/gpt-5.4-mini" }));
 
     const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
     await user.type(textarea, "Fix the login bug");
@@ -846,8 +846,8 @@ describe("ManualSessionCreatePageContent", () => {
     const requestBody = mocks.createSessionMock.mock.calls.at(-1)?.[0];
     expect(requestBody).toMatchObject({
       message: "Fix the login bug",
-      model: "gemini-2.5-pro",
-      agent_type: "gemini_cli",
+      model: "openai/gpt-5.4-mini",
+      agent_type: "opencode",
     });
     expect(requestBody).not.toHaveProperty("reasoning_effort");
   });

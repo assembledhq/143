@@ -35,6 +35,25 @@ var handlerPRColumns = []string{
 	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
 }
 
+var handlerPreviewTargetColumns = []string{
+	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
+	"resolved_config_digest", "source_type", "source_id", "source_url",
+	"created_by_user_id", "request_id", "created_at",
+}
+
+var handlerPreviewLinkColumns = []string{
+	"id", "org_id", "preview_target_id", "link_type", "slug", "repository_id",
+	"pr_number", "created_at", "updated_at",
+}
+
+var handlerPreviewInstanceColumns = []string{
+	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+}
+
 // sessionColumns matches the SELECT columns from SessionStore queries
 // (internal/db/session_store.go — sessionSelectColumns). pgx maps by name so
 // column order is not critical, but the set of names must match the query.
@@ -85,6 +104,57 @@ func TestNewPRService(t *testing.T) {
 	require.Equal(t, defaultGitHubAPI, svc.baseURL, "NewPRService should set the default GitHub API base URL")
 	require.Equal(t, defaultAppBaseURL, svc.appBaseURL, "NewPRService should set the default app base URL for session deep-links")
 	require.NotNil(t, svc.httpClient, "NewPRService should initialize an HTTP client")
+}
+
+func TestPRService_PRPreviewURLReturnsStableAppRouteAfterCreatingPreviewMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock := newMockPool(t)
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	targetID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+
+	mock.ExpectQuery("INSERT INTO preview_targets").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewTargetColumns).
+			AddRow(targetID, orgID, repoID, "feature/preview", headSHA, "", "", string(models.PreviewSourceTypePullRequest), "acme/web#42@"+headSHA, "https://github.com/acme/web/pull/42", userID, nil, now))
+	mock.ExpectQuery("INSERT INTO preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewLinkColumns).
+			AddRow(linkID, orgID, targetID, string(models.PreviewLinkTypePullRequest), "github/acme/web/pull/42", &repoID, ptrToIntValue(42), now, now))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewInstanceColumns))
+
+	svc := NewPRService(nil, nil, nil, nil, nil, nil, nil, zerolog.Nop())
+	svc.SetAppBaseURL("https://app.143.dev")
+	svc.SetPreviewOriginTemplate("https://{id}.preview.143.dev")
+	svc.SetPreviewTeardown(db.NewPreviewStore(mock), nil)
+
+	run := &models.Session{
+		ID:                sessionID,
+		OrgID:             orgID,
+		TriggeredByUserID: &userID,
+	}
+	repo := &models.Repository{
+		ID:       repoID,
+		OrgID:    orgID,
+		FullName: "acme/web",
+	}
+
+	url := svc.prPreviewURL(context.Background(), run, repo, "acme", "web", 42, "feature/preview", headSHA, "https://github.com/acme/web/pull/42")
+
+	require.Equal(t, "https://app.143.dev/previews/github/acme/web/pull/42", url, "PR preview URL should use the stable app route even when preview target metadata is created")
+	require.NoError(t, mock.ExpectationsWereMet(), "all preview metadata expectations should be met")
+}
+
+func ptrToIntValue(value int) *int {
+	return &value
 }
 
 func TestHandleAutoPreviewEvent_StartsForPolicyEnabledPullRequest(t *testing.T) {

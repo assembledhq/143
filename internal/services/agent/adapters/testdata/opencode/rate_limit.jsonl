@@ -1,0 +1,2 @@
+{"type":"session","sessionID":"ses_fixture_rate_limit"}
+{"type":"error","error":"rate limited: retry after 60s"}

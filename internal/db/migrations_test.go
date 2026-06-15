@@ -48,6 +48,23 @@ func TestMigrationsDeclareSessionsModelUsedColumn(t *testing.T) {
 	require.Fail(t, "schema must add sessions.model_used because SessionStore.UpdateResult writes it")
 }
 
+func TestRemoveGeminiCLIMigrationKeepsHistoricalSessionsReadable(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000186_remove_gemini_cli_agent_type.up.sql")
+	require.NoError(t, err, "test should read the Gemini CLI removal migration")
+
+	sql := string(body)
+	require.NotContains(t, sql, "VALIDATE CONSTRAINT chk_sessions_agent_type",
+		"session agent_type constraint should stay NOT VALID so historical gemini_cli sessions remain readable")
+	require.Contains(t, sql, "jsonb_set",
+		"migration should normalize saved org default_agent_type values away from gemini_cli")
+	require.Contains(t, sql, "agent_config,gemini_cli",
+		"migration should remove saved gemini_cli agent_config entries")
+	require.Contains(t, sql, "UPDATE automations",
+		"migration should normalize saved automation config away from gemini_cli")
+}
+
 func TestMigrationsAllowBuilderRole(t *testing.T) {
 	t.Parallel()
 
