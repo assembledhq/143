@@ -1688,6 +1688,84 @@ func TestGateway_ProxyToWorker_TranslatesMarkedWorkerAuthFailureAndEvictsRuntime
 	require.NoError(t, mock.ExpectationsWereMet(), "translated worker auth failures should evict the runtime cache")
 }
 
+func TestGateway_ProxyToWorker_LogsTranslatedWorkerFailureMessage(t *testing.T) {
+	t.Parallel()
+
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(auth.PreviewWorkerErrorHeader, "1")
+		w.WriteHeader(http.StatusUnauthorized)
+		err := json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "UNAUTHORIZED",
+				Message: "invalid preview token",
+			},
+		})
+		require.NoError(t, err, "worker auth failure response should encode")
+	}))
+	defer workerServer.Close()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now().UTC()
+	var logs bytes.Buffer
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		WorkerSelector:     preview.NewWorkerSelector(db.NewNodeStore(mock), store),
+		Logger:             zerolog.New(&logs),
+		AppOrigin:          "https://app.143.dev",
+		PreviewTokenSecret: "preview-secret",
+	})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 1, "worker-runtime",
+			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		))
+	mock.ExpectExec("WITH lost AS[\\s\\S]+unavailable_reason = @unavailable_reason[\\s\\S]+UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	req.Host = previewID.String() + ".preview.143.dev"
+	rr := httptest.NewRecorder()
+
+	gw.proxyToWorker(rr, req, orgID, previewID)
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "translated worker auth failures should be hidden from preview users")
+
+	lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
+	require.GreaterOrEqual(t, len(lines), 1, "translated worker failure should emit structured logs")
+	var translated map[string]any
+	for _, line := range lines {
+		var event map[string]any
+		require.NoError(t, json.Unmarshal(line, &event), "gateway log line should be valid JSON")
+		if event["message"] == "translated preview worker auth/routing failure" {
+			translated = event
+			break
+		}
+	}
+	require.NotNil(t, translated, "gateway should log translated worker auth/routing failures")
+	require.Equal(t, "UNAUTHORIZED", translated["worker_error_code"], "gateway log should include worker error code")
+	require.Equal(t, "invalid preview token", translated["worker_error_message"], "gateway log should include safe worker error message")
+	require.Equal(t, float64(http.StatusUnauthorized), translated["worker_status"], "gateway log should include original worker status")
+	require.Equal(t, runtimeID.String(), translated["runtime_id"], "gateway log should include runtime id")
+	require.Equal(t, "worker-runtime", translated["worker_node_id"], "gateway log should include runtime worker node")
+	require.Equal(t, workerServer.URL, translated["endpoint_url"], "gateway log should include runtime endpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestGateway_ProxyToWorker_PreservesUnmarkedAppUnauthorized(t *testing.T) {
 	t.Parallel()
 

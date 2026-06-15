@@ -149,6 +149,17 @@ func mustJSONBody(t *testing.T, v any) string {
 	return string(payload)
 }
 
+func decodeSingleLogEvent(t *testing.T, logs *bytes.Buffer) map[string]any {
+	t.Helper()
+
+	require.NotEmpty(t, logs.String(), "expected a structured log event")
+	lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
+	require.Len(t, lines, 1, "expected exactly one structured log event")
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(lines[0], &event), "structured log event should be valid JSON")
+	return event
+}
+
 func TestInternalPreviewHandler_AuthorizeFailures(t *testing.T) {
 	t.Parallel()
 
@@ -215,6 +226,122 @@ func TestInternalPreviewHandler_AuthorizeFailures(t *testing.T) {
 			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "authorize should return a JSON error")
 			require.Equal(t, tt.wantCode, resp.Error.Code, "authorize should return the expected error code")
 			require.Equal(t, "1", rr.Header().Get(auth.PreviewWorkerErrorHeader), "worker auth failures should be marked for the public gateway")
+		})
+	}
+}
+
+func TestInternalPreviewHandler_AuthorizeFailures_LogDiagnosticFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	sessionID := uuid.New()
+
+	tests := []struct {
+		name         string
+		header       string
+		wantFailure  string
+		wantFields   map[string]any
+		absentFields []string
+	}{
+		{
+			name:        "missing token",
+			wantFailure: "missing_token",
+			absentFields: []string{
+				"preview_token",
+				"token",
+				"authorization",
+			},
+		},
+		{
+			name:        "invalid token",
+			header:      "Bearer not-a-token",
+			wantFailure: "invalid_token",
+			wantFields: map[string]any{
+				"error": "preview token is not valid for any configured secret: invalid token format",
+			},
+			absentFields: []string{
+				"preview_token",
+				"token",
+				"authorization",
+			},
+		},
+		{
+			name: "wrong worker target",
+			header: internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+				OrgID:        orgID,
+				SessionID:    &sessionID,
+				PreviewID:    &previewID,
+				RuntimeID:    &runtimeID,
+				RuntimeEpoch: 3,
+				TargetNodeID: "worker-2",
+				Action:       "proxy",
+				ExpiresAt:    time.Now().Add(time.Minute),
+			}),
+			wantFailure: "wrong_worker",
+			wantFields: map[string]any{
+				"org_id":                   orgID.String(),
+				"session_id":               sessionID.String(),
+				"preview_id":               previewID.String(),
+				"claimed_runtime_id":       runtimeID.String(),
+				"claimed_runtime_epoch":    float64(3),
+				"local_worker_node_id":     "worker-1",
+				"target_worker_node_id":    "worker-2",
+				"token_action":             "proxy",
+				"requested_preview_action": "start",
+			},
+		},
+		{
+			name: "wrong action",
+			header: internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+				OrgID:        orgID,
+				SessionID:    &sessionID,
+				TargetNodeID: "worker-1",
+				Action:       "stop",
+				ExpiresAt:    time.Now().Add(time.Minute),
+			}),
+			wantFailure: "action_mismatch",
+			wantFields: map[string]any{
+				"org_id":                   orgID.String(),
+				"session_id":               sessionID.String(),
+				"local_worker_node_id":     "worker-1",
+				"target_worker_node_id":    "worker-1",
+				"token_action":             "stop",
+				"requested_preview_action": "start",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logs bytes.Buffer
+			handler := NewInternalPreviewHandler(&PreviewHandler{logger: zerolog.Nop()}, nil, "worker-1", "worker-secret", zerolog.New(&logs))
+			req := httptest.NewRequest(http.MethodPost, "/internal/preview/start", nil)
+			req.Host = "worker.internal"
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
+			}
+			rr := httptest.NewRecorder()
+
+			_, ok := handler.authorize(rr, req, "start")
+			require.False(t, ok, "authorize should reject invalid preview tokens")
+
+			event := decodeSingleLogEvent(t, &logs)
+			require.Equal(t, "internal preview authorization rejected", event["message"], "auth rejection log should use the expected event message")
+			require.Equal(t, tt.wantFailure, event["failure_kind"], "auth rejection log should classify the failure")
+			require.Equal(t, "POST", event["request_method"], "auth rejection log should include request method")
+			require.Equal(t, "/internal/preview/start", event["request_path"], "auth rejection log should include request path")
+			require.Equal(t, "worker.internal", event["request_host"], "auth rejection log should include request host")
+			for field, expected := range tt.wantFields {
+				require.Equal(t, expected, event[field], "auth rejection log should include "+field)
+			}
+			for _, field := range tt.absentFields {
+				require.NotContains(t, event, field, "auth rejection log must not include sensitive "+field)
+			}
 		})
 	}
 }
@@ -388,6 +515,69 @@ func TestInternalPreviewHandler_AuthorizePreviewActionRejectsStaleRuntime(t *tes
 	var resp models.ErrorResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "authorizePreviewAction should return a JSON error")
 	require.Equal(t, "PREVIEW_RUNTIME_MISMATCH", resp.Error.Code, "authorizePreviewAction should report runtime identity mismatch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestInternalPreviewHandler_AuthorizePreviewActionLogsStaleRuntimeDetails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	staleRuntimeID := uuid.New()
+	now := time.Now().UTC()
+
+	var logs bytes.Buffer
+	store := db.NewPreviewStore(mock)
+	handler := NewInternalPreviewHandler(&PreviewHandler{store: store, logger: zerolog.Nop()}, nil, "worker-1", "worker-secret", zerolog.New(&logs))
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 2, "worker-1",
+			"http://worker-1.internal", "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/internal/preview/"+previewID.String()+"/proxy", nil)
+	req = withPreviewRouteParam(req, previewID.String())
+	req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		PreviewID:    &previewID,
+		TargetNodeID: "worker-1",
+		RuntimeID:    &staleRuntimeID,
+		RuntimeEpoch: 1,
+		Action:       "proxy",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	}))
+	rr := httptest.NewRecorder()
+
+	_, _, ok := handler.authorizePreviewAction(rr, req, "proxy")
+	require.False(t, ok, "authorizePreviewAction should reject proxy tokens for stale runtimes")
+
+	event := decodeSingleLogEvent(t, &logs)
+	require.Equal(t, "internal preview runtime authorization rejected", event["message"], "runtime rejection log should use the expected event message")
+	require.Equal(t, "runtime_mismatch", event["failure_kind"], "runtime rejection log should classify stale runtime claims")
+	require.Equal(t, orgID.String(), event["org_id"], "runtime rejection log should include org id")
+	require.Equal(t, previewID.String(), event["preview_id"], "runtime rejection log should include preview id")
+	require.Equal(t, "proxy", event["requested_preview_action"], "runtime rejection log should include requested action")
+	require.Equal(t, "proxy", event["token_action"], "runtime rejection log should include token action")
+	require.Equal(t, staleRuntimeID.String(), event["claimed_runtime_id"], "runtime rejection log should include claimed runtime id")
+	require.Equal(t, float64(1), event["claimed_runtime_epoch"], "runtime rejection log should include claimed runtime epoch")
+	require.Equal(t, "worker-1", event["claimed_worker_node_id"], "runtime rejection log should include claimed worker")
+	require.Equal(t, runtimeID.String(), event["active_runtime_id"], "runtime rejection log should include active runtime id")
+	require.Equal(t, float64(2), event["active_runtime_epoch"], "runtime rejection log should include active runtime epoch")
+	require.Equal(t, "worker-1", event["active_worker_node_id"], "runtime rejection log should include active worker")
+	require.Equal(t, "http://worker-1.internal", event["active_endpoint_url"], "runtime rejection log should include active endpoint URL")
+	require.Equal(t, "ready", event["active_runtime_status"], "runtime rejection log should include active runtime status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
