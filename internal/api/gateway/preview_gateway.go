@@ -1059,13 +1059,14 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 			req.Header.Set("Authorization", "Bearer "+token)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			if translated, workerCode, workerStatus := g.translateWorkerPreviewFailure(resp, previewID, isNavigationRequest(originalReq)); translated {
+			if translated, workerCode, workerMessage, workerStatus := g.translateWorkerPreviewFailure(resp, previewID, isNavigationRequest(originalReq)); translated {
 				// The worker no longer recognizes this runtime epoch; drop
 				// the cached runtime so the next request re-resolves.
 				g.evictCachedRuntime(previewID)
-				g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, "preview runtime endpoint mismatch")
+				g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, previewWorkerFailureReason(workerCode, workerMessage))
 				addPreviewProxyLogFields(g.logger.Warn(), originalReq, orgID, previewID, runtime, upstreamPath).
 					Str("worker_error_code", workerCode).
+					Str("worker_error_message", workerMessage).
 					Int("worker_status", workerStatus).
 					Msg("translated preview worker auth/routing failure")
 				return nil
@@ -1214,22 +1215,22 @@ func addPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, prev
 		Str("runtime_unavailable_reason", string(runtime.UnavailableReason))
 }
 
-func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID uuid.UUID, navigation bool) (bool, string, int) {
+func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID uuid.UUID, navigation bool) (bool, string, string, int) {
 	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
-		return false, "", resp.StatusCode
+		return false, "", "", resp.StatusCode
 	}
 	originalStatus := resp.StatusCode
 	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false, "", originalStatus
+		return false, "", "", originalStatus
 	}
 
 	var parsed models.ErrorResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false, "", originalStatus
+		return false, "", "", originalStatus
 	}
 	workerMarked := resp.Header.Get(auth.PreviewWorkerErrorHeader) == "1"
 	workerCode := parsed.Error.Code
@@ -1245,7 +1246,7 @@ func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID u
 	}
 	if !shouldTranslate {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false, "", originalStatus
+		return false, "", "", originalStatus
 	}
 
 	var replacement []byte
@@ -1275,7 +1276,32 @@ func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID u
 	resp.Header.Set("Cache-Control", "no-store")
 	resp.ContentLength = int64(len(replacement))
 	resp.Body = io.NopCloser(bytes.NewReader(replacement))
-	return true, workerCode, originalStatus
+	return true, workerCode, sanitizeWorkerPreviewFailureMessage(workerMessage), originalStatus
+}
+
+func sanitizeWorkerPreviewFailureMessage(message string) string {
+	message = strings.ReplaceAll(message, "\n", " ")
+	message = strings.ReplaceAll(message, "\r", " ")
+	message = strings.TrimSpace(message)
+	if len(message) > 240 {
+		return message[:240]
+	}
+	return message
+}
+
+func previewWorkerFailureReason(code, message string) string {
+	reason := "preview worker auth/routing failure"
+	if code != "" {
+		reason += ": " + code
+	}
+	if message != "" {
+		reason += " " + sanitizeWorkerPreviewFailureMessage(message)
+	}
+	const maxReasonLen = 320
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func writeRuntimeUnavailable(w http.ResponseWriter) {
