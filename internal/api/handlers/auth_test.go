@@ -1702,6 +1702,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_ClaimFailureReturnsInvalid(t 
 			upsertCalled = true
 			return nil
 		},
+		nil,
 	)
 
 	require.Nil(t, createdUser, "should not create a user when invitation claim fails")
@@ -1782,6 +1783,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_Success(t *testing.T) {
 			upsertCalled = true
 			return store.UpsertFromGitHub(ctx, invitedUser)
 		},
+		nil,
 	)
 
 	require.NoError(t, createErr, "should not return an error when invitation claim and upsert both succeed")
@@ -3018,7 +3020,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_InputValidation(t *testing.T)
 	t.Run("nil pool", func(t *testing.T) {
 		t.Parallel()
 		h := &AuthHandler{}
-		_, _, _, err := h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err := h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil }, nil)
 		require.Error(t, err)
 	})
 
@@ -3028,7 +3030,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_InputValidation(t *testing.T)
 		require.NoError(t, err)
 		defer mock.Close()
 		h := &AuthHandler{pool: mock}
-		_, _, _, err = h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), nil, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err = h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), nil, func(context.Context, *db.UserStore, *models.User) error { return nil }, nil)
 		require.Error(t, err)
 	})
 
@@ -3038,7 +3040,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_InputValidation(t *testing.T)
 		require.NoError(t, err)
 		defer mock.Close()
 		h := &AuthHandler{pool: mock}
-		_, _, _, err = h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, nil)
+		_, _, _, err = h.acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, nil, nil)
 		require.Error(t, err)
 	})
 }
@@ -3059,7 +3061,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 		defer mock.Close()
 		mock.ExpectBegin().WillReturnError(errors.New("begin"))
 
-		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil }, nil)
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -3075,7 +3077,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 			WillReturnError(errors.New("accept"))
 		mock.ExpectRollback()
 
-		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{}, func(context.Context, *db.UserStore, *models.User) error { return nil }, nil)
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -3094,7 +3096,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 			WillReturnError(errors.New("upsert"))
 		mock.ExpectRollback()
 
-		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: uuid.New(), OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: uuid.New(), OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil }, nil)
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
@@ -3118,7 +3120,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_DBErrors(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
 		mock.ExpectCommit().WillReturnError(errors.New("commit"))
 
-		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: userID, OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil })
+		_, _, _, err = newHandler(mock).acceptInvitationAndUpsertUser(context.Background(), uuid.New(), &models.User{ID: userID, OrgID: uuid.New(), Role: "member"}, func(context.Context, *db.UserStore, *models.User) error { return nil }, nil)
 		require.Error(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
