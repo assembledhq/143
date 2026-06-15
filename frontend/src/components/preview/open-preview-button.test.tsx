@@ -45,9 +45,10 @@ describe("OpenPreviewButton", () => {
 
     await user.click(screen.getByRole("button", { name: "Open preview" }));
 
-    expect(documentWrite).toHaveBeenCalledWith(
-      "<!doctype html><title>Opening preview</title><p>Opening preview...</p>",
-    );
+    expect(documentWrite).toHaveBeenCalledTimes(1);
+    const writtenDoc = documentWrite.mock.calls[0][0] as string;
+    expect(writtenDoc).toContain("Opening preview");
+    expect(writtenDoc).toContain("class=\"spinner\"");
 
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 5_100));
