@@ -419,7 +419,7 @@ function PreviewCommandState({
       </div>
 
       <div className="flex gap-2 md:justify-end">
-        {isReady && previewUrl ? (
+        {isReady && previewUrl && !isFailed ? (
           launchMode ? (
             <Button type="button" disabled className="w-full sm:w-auto">
               <Loader2 className="h-4 w-4 animate-spin" />

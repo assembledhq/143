@@ -1,6 +1,7 @@
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
+import userEvent from "@testing-library/user-event";
 
 import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
@@ -151,6 +152,8 @@ describe("PreviewLandingPage launch mode", () => {
   });
 
   it("stops showing opening state when preview bootstrap does not respond", async () => {
+    const user = userEvent.setup();
+    let restartCalls = 0;
     server.use(
       http.get("*/api/v1/previews/target-1", () =>
         HttpResponse.json({
@@ -169,6 +172,24 @@ describe("PreviewLandingPage launch mode", () => {
           },
         }),
       ),
+      http.post("*/api/v1/previews/prev-1/start-latest", () => {
+        restartCalls += 1;
+        return HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-2",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "pull_request",
+            status: "starting",
+            current_phase: "start_services",
+            stable_url: "https://143.dev/previews/target-1",
+            preview_url: "https://target-1.preview.143.dev",
+          },
+        });
+      }),
     );
 
     renderLaunchPage();
@@ -183,6 +204,12 @@ describe("PreviewLandingPage launch mode", () => {
       expect(screen.getByText("Preview could not open")).toBeInTheDocument();
     });
     expect(screen.getByText("Preview bootstrap timed out. Try opening it again.")).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "Retry preview" });
+    expect(retry).toBeEnabled();
+
+    await user.click(retry);
+
+    expect(restartCalls).toBe(1);
   }, 10_000);
 
   it("notifies the opener and closes in popup mode instead of navigating", async () => {
