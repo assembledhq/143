@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ErrorNotice, ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -52,19 +53,81 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { GitHubRepositoryClaimCandidate, LinearTeamKey, LinearTeamRepoMapping, Repository } from "@/lib/types";
+import type {
+  GitHubRepositoryClaimCandidate,
+  LinearTeamKey,
+  LinearTeamRepoMapping,
+  Repository,
+  SlackBotSettingsUpdate,
+  SlackChannel,
+  SlackChannelAction,
+  SlackChannelSettingsUpdate,
+  SlackNotificationPreset,
+  SlackResponseVisibility,
+  SlackRoutingMode,
+  SlackUserLinkUpsert,
+  User,
+} from "@/lib/types";
 import { getIntegrationByKey, type IntegrationKey } from "@/lib/integrations";
 
-type SlackChannel = { id: string; name: string; selected: boolean };
 type SlackChannelsResp = { data: SlackChannel[] } | undefined;
 const NO_DEFAULT_REPO_VALUE = "__none__";
 const CARD_PILL_LIMIT = 3;
+const SLACK_ACTIONS: Array<{ value: SlackChannelAction; label: string }> = [
+  { value: "session", label: "Sessions" },
+  { value: "preview", label: "Previews" },
+  { value: "pr_request", label: "PRs" },
+  { value: "human_input", label: "Human input" },
+];
+const SLACK_NOTIFICATION_EVENTS = [
+  { value: "session.completed", label: "Session completed" },
+  { value: "session.failed", label: "Session failed" },
+  { value: "human_input.requested", label: "Human input requested" },
+  { value: "automation.run.failed", label: "Automation failed" },
+  { value: "automation.run.failure_streak", label: "Automation failure streak" },
+  { value: "preview.*", label: "All preview events" },
+] as const;
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
 // `useAutosave` caller sharing `queryKeys.integrations.slackChannels` passes
 // the same referential identity - `useAutosave` throws in dev when two
 // callers register different coalesce fns against the same queryKey.
 const coalesceSlackChannels = (_a: string[], b: string[]): string[] => b;
+
+function slackRoutingLabel(value?: SlackRoutingMode): string {
+  switch (value) {
+    case "answer_only":
+      return "Answer only";
+    case "start_work":
+      return "Start work";
+    case "auto":
+    default:
+      return "Auto";
+  }
+}
+
+function slackVisibilityLabel(value?: SlackResponseVisibility): string {
+  return value === "dm" ? "DM requester" : "Thread";
+}
+
+function slackPresetLabel(value?: SlackNotificationPreset): string {
+  switch (value) {
+    case "quiet":
+      return "Quiet";
+    case "verbose":
+      return "Verbose";
+    case "custom":
+      return "Custom";
+    case "balanced":
+    default:
+      return "Balanced";
+  }
+}
+
+function slackNotificationEvents(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
+  const events = settings?.notification_subscriptions?.events;
+  return Array.isArray(events) ? events.filter((event): event is string => typeof event === "string") : [];
+}
 
 function claimStatusLabel(repo: GitHubRepositoryClaimCandidate): string {
   switch (repo.status) {
@@ -335,7 +398,214 @@ function GitHubRepositoryClaims({
   );
 }
 
+function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
+  const queryClient = useQueryClient();
+  const { data: healthResp, isLoading: healthLoading } = useQuery({
+    queryKey: queryKeys.integrations.slackHealth,
+    queryFn: () => api.integrations.getSlackHealth(),
+    staleTime: 60_000,
+  });
+  const { data: settingsResp, isLoading: settingsLoading } = useQuery({
+    queryKey: queryKeys.integrations.slackSettings,
+    queryFn: () => api.integrations.getSlackSettings(),
+    staleTime: 60_000,
+  });
+  const updateSettings = useMutation({
+    mutationFn: (body: SlackBotSettingsUpdate) => api.integrations.updateSlackSettings(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.slackSettings });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.slackChannels });
+    },
+  });
+
+  const settings = settingsResp?.data;
+  const health = healthResp?.data;
+  const activeRepos = repositories.filter((repo) => repo.status === "active");
+  const repoValue = settings?.default_repository_id ?? NO_DEFAULT_REPO_VALUE;
+  const actions = settings?.allowed_actions ?? ["session", "preview"];
+  const selectedNotificationEvents = slackNotificationEvents(settings);
+
+  const patch = (body: SlackBotSettingsUpdate) => updateSettings.mutate(body);
+  const toggleAction = (action: SlackChannelAction) => {
+    const next = actions.includes(action) ? actions.filter((item) => item !== action) : [...actions, action];
+    patch({ allowed_actions: next.length > 0 ? next : ["session"] });
+  };
+  const toggleNotificationEvent = (eventName: string) => {
+    const next = selectedNotificationEvents.includes(eventName)
+      ? selectedNotificationEvents.filter((item) => item !== eventName)
+      : [...selectedNotificationEvents, eventName];
+    patch({ notification_preset: "custom", notification_subscriptions: { events: next } });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-border p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">Slackbot defaults</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              New channels inherit these defaults unless a channel override is configured.
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge variant={health?.auth_ok ? "secondary" : "outline"}>
+              {healthLoading ? "Checking" : health?.auth_ok ? "Healthy" : "Needs attention"}
+            </Badge>
+            {health && !health.auth_ok ? (
+              <Button size="sm" variant="outline" onClick={() => api.integrations.loginSlack()}>
+                Reinstall
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        {health && health.missing_scopes.length > 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Missing Slack scopes: {health.missing_scopes.join(", ")}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="space-y-4 rounded-md border border-border p-3">
+        {settingsLoading ? (
+          <p className="text-sm text-muted-foreground">Loading Slackbot defaults...</p>
+        ) : (
+          <>
+            <div className="grid gap-2">
+              <Label htmlFor="slack-default-repo">Default repository</Label>
+              <Select
+                value={repoValue}
+                onValueChange={(value) =>
+                  patch({ default_repository_id: value === NO_DEFAULT_REPO_VALUE ? null : value })
+                }
+                disabled={activeRepos.length === 0 || updateSettings.isPending}
+              >
+                <SelectTrigger id="slack-default-repo" aria-label="Slack default repository">
+                  <SelectValue placeholder="Choose a repository" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_DEFAULT_REPO_VALUE}>No default repository</SelectItem>
+                  {activeRepos.map((repo) => (
+                    <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="slack-default-branch">Default branch</Label>
+              <Input
+                key={settings?.default_branch ?? "unset"}
+                id="slack-default-branch"
+                defaultValue={settings?.default_branch ?? ""}
+                placeholder="main"
+                disabled={updateSettings.isPending}
+                onBlur={(event) => patch({ default_branch: event.target.value.trim() || null })}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    patch({ default_branch: event.currentTarget.value.trim() || null });
+                    event.currentTarget.blur();
+                  }
+                }}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid gap-2">
+                <Label>Routing</Label>
+                <Select
+                  value={settings?.routing_mode ?? "auto"}
+                  onValueChange={(value) => patch({ routing_mode: value as SlackRoutingMode })}
+                  disabled={updateSettings.isPending}
+                >
+                  <SelectTrigger aria-label="Slack routing mode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["auto", "answer_only", "start_work"] as SlackRoutingMode[]).map((value) => (
+                      <SelectItem key={value} value={value}>{slackRoutingLabel(value)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label>Visibility</Label>
+                <Select
+                  value={settings?.response_visibility ?? "thread"}
+                  onValueChange={(value) => patch({ response_visibility: value as SlackResponseVisibility })}
+                  disabled={updateSettings.isPending}
+                >
+                  <SelectTrigger aria-label="Slack response visibility">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["thread", "dm"] as SlackResponseVisibility[]).map((value) => (
+                      <SelectItem key={value} value={value}>{slackVisibilityLabel(value)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label>Notifications</Label>
+                <Select
+                  value={settings?.notification_preset ?? "balanced"}
+                  onValueChange={(value) => patch({ notification_preset: value as SlackNotificationPreset })}
+                  disabled={updateSettings.isPending}
+                >
+                  <SelectTrigger aria-label="Slack notification preset">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["quiet", "balanced", "verbose", "custom"] as SlackNotificationPreset[]).map((value) => (
+                      <SelectItem key={value} value={value}>{slackPresetLabel(value)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label>Allowed actions</Label>
+              <div className="flex flex-wrap gap-2">
+                {SLACK_ACTIONS.map((action) => (
+                  <Button
+                    key={action.value}
+                    type="button"
+                    size="sm"
+                    variant={actions.includes(action.value) ? "default" : "outline"}
+                    disabled={updateSettings.isPending}
+                    onClick={() => toggleAction(action.value)}
+                  >
+                    {action.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label>Custom notification events</Label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {SLACK_NOTIFICATION_EVENTS.map((event) => (
+                  <label key={event.value} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+                    <Checkbox
+                      aria-label={event.label}
+                      checked={selectedNotificationEvents.includes(event.value)}
+                      disabled={updateSettings.isPending}
+                      onCheckedChange={() => toggleNotificationEvent(event.value)}
+                    />
+                    <span>{event.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SlackChannelPicker() {
+  const queryClient = useQueryClient();
   const { data: channelsResp, isLoading } = useQuery<{ data: SlackChannel[] }>({
     queryKey: queryKeys.integrations.slackChannels,
     queryFn: () => api.integrations.listSlackChannels(),
@@ -355,10 +625,20 @@ function SlackChannelPicker() {
     },
     coalesce: coalesceSlackChannels,
   });
+  const updateChannelSettings = useMutation({
+    mutationFn: ({ channel, body }: { channel: SlackChannel; body: SlackChannelSettingsUpdate }) =>
+      api.integrations.updateSlackChannelSettings(channel.id, {
+        slack_channel_name: channel.name,
+        channel_type: channel.type ?? "channel",
+        ...body,
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.integrations.slackChannels }),
+  });
 
   const channels = channelsResp?.data ?? [];
   const selectedIds = channels.filter((ch) => ch.selected).map((ch) => ch.id);
   const selected = new Set(selectedIds);
+  const selectedChannels = channels.filter((ch) => ch.selected);
 
   if (isLoading) {
     return (
@@ -380,9 +660,9 @@ function SlackChannelPicker() {
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium">Monitored Slack channels</h3>
+          <h3 className="text-sm font-medium">PM/context monitoring</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            Select which channels the PM agent should monitor for actionable conversations.
+            Select notification channels. Interactive bot behavior inherits the Slackbot defaults unless overridden.
           </p>
         </div>
         <AutosaveIndicator status={status} />
@@ -404,7 +684,12 @@ function SlackChannelPicker() {
                     aria-label={`Monitor #${ch.name}`}
                     onSelect={() => toggle(ch.id)}
                   >
-                    <span className="truncate font-medium">#{ch.name}</span>
+                    <span className="min-w-0 flex-1 truncate font-medium">#{ch.name}</span>
+                    {ch.effective_settings ? (
+                      <span className="ml-auto hidden shrink-0 text-xs text-muted-foreground sm:inline">
+                        {slackRoutingLabel(ch.effective_settings.routing_mode)} · {slackPresetLabel(ch.effective_settings.notification_preset)}
+                      </span>
+                    ) : null}
                   </CommandCheckItem>
                 ))}
               </CommandGroup>
@@ -415,6 +700,175 @@ function SlackChannelPicker() {
           </p>
         </div>
       )}
+      {selectedChannels.length > 0 ? (
+        <div className="space-y-3">
+          <div>
+            <h4 className="text-sm font-medium">Interactive bot channel overrides</h4>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Leave channels inherited unless they need different routing or notifications.
+            </p>
+          </div>
+          <div className="space-y-2">
+            {selectedChannels.map((channel) => (
+              <div key={channel.id} className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[minmax(0,1fr)_10rem_10rem]">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">#{channel.name}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {channel.effective_settings?.has_channel_override ? "Overrides defaults" : "Inherits defaults"}
+                  </div>
+                </div>
+                <Select
+                  value={channel.effective_settings?.routing_mode ?? "auto"}
+                  disabled={updateChannelSettings.isPending}
+                  onValueChange={(value) =>
+                    updateChannelSettings.mutate({ channel, body: { routing_mode: value as SlackRoutingMode } })
+                  }
+                >
+                  <SelectTrigger aria-label={`Routing for #${channel.name}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["auto", "answer_only", "start_work"] as SlackRoutingMode[]).map((value) => (
+                      <SelectItem key={value} value={value}>{slackRoutingLabel(value)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={channel.effective_settings?.notification_preset ?? "balanced"}
+                  disabled={updateChannelSettings.isPending}
+                  onValueChange={(value) =>
+                    updateChannelSettings.mutate({ channel, body: { notification_preset: value as SlackNotificationPreset } })
+                  }
+                >
+                  <SelectTrigger aria-label={`Notifications for #${channel.name}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(["quiet", "balanced", "verbose", "custom"] as SlackNotificationPreset[]).map((value) => (
+                      <SelectItem key={value} value={value}>{slackPresetLabel(value)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SlackUserLinkingSection() {
+  const queryClient = useQueryClient();
+  const [selectedUserID, setSelectedUserID] = useState("");
+  const [slackUserID, setSlackUserID] = useState("");
+  const [slackEmail, setSlackEmail] = useState("");
+  const [slackDisplayName, setSlackDisplayName] = useState("");
+  const { data: membersResp } = useQuery({
+    queryKey: queryKeys.team.members,
+    queryFn: () => api.team.listMembers(),
+    staleTime: 60_000,
+  });
+  const { data: linksResp, isLoading } = useQuery({
+    queryKey: queryKeys.integrations.slackUserLinks,
+    queryFn: () => api.integrations.listSlackUserLinks(),
+    staleTime: 30_000,
+  });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.integrations.slackUserLinks });
+  };
+  const upsertLink = useMutation({
+    mutationFn: (body: SlackUserLinkUpsert) => api.integrations.upsertSlackUserLink(body),
+    onSuccess: () => {
+      invalidate();
+      setSlackUserID("");
+      setSlackEmail("");
+      setSlackDisplayName("");
+    },
+  });
+  const deleteLink = useMutation({
+    mutationFn: (id: string) => api.integrations.deleteSlackUserLink(id),
+    onSuccess: invalidate,
+  });
+  const members = membersResp?.data ?? [];
+  const links = linksResp?.data ?? [];
+  const selectedUser = members.find((member: User) => member.id === selectedUserID);
+  const canAdd = selectedUserID !== "" && slackUserID.trim() !== "" && !upsertLink.isPending;
+  const submit = () => {
+    if (!canAdd) return;
+    upsertLink.mutate({
+      user_id: selectedUserID,
+      slack_user_id: slackUserID.trim(),
+      slack_email: slackEmail.trim() || undefined,
+      slack_display_name: slackDisplayName.trim() || selectedUser?.name || undefined,
+    });
+  };
+
+  return (
+    <div className="space-y-3 rounded-md border border-border p-3">
+      <h3 className="text-sm font-medium">User linking</h3>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Slack users can link themselves from Slack App Home. Admins can also map Slack users to 143 members.
+      </p>
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="grid gap-2">
+          <Label>143 user</Label>
+          <Select value={selectedUserID} onValueChange={setSelectedUserID}>
+            <SelectTrigger aria-label="143 user">
+              <SelectValue placeholder="Choose a member" />
+            </SelectTrigger>
+            <SelectContent>
+              {members.map((member: User) => (
+                <SelectItem key={member.id} value={member.id}>{member.name || member.email}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="slack-user-id">Slack user ID</Label>
+          <Input id="slack-user-id" value={slackUserID} onChange={(event) => setSlackUserID(event.target.value)} placeholder="U123ABC" />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="slack-email">Slack email</Label>
+          <Input id="slack-email" value={slackEmail} onChange={(event) => setSlackEmail(event.target.value)} placeholder="person@example.com" />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="slack-display-name">Slack display name</Label>
+          <Input id="slack-display-name" value={slackDisplayName} onChange={(event) => setSlackDisplayName(event.target.value)} placeholder="Slack name" />
+        </div>
+      </div>
+      <Button size="sm" onClick={submit} disabled={!canAdd}>Add link</Button>
+      <div className="space-y-2">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading linked users...</p>
+        ) : links.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No Slack users are linked yet.</p>
+        ) : (
+          links.map((link) => {
+            const member = members.find((candidate: User) => candidate.id === link.user_id);
+            const label = link.slack_display_name || link.slack_email || link.slack_user_id;
+            return (
+              <div key={link.id} className="flex items-center justify-between gap-3 rounded-md border border-border p-2">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{label}</div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {member ? `${member.name || member.email} · ${link.slack_user_id}` : link.slack_user_id}
+                  </div>
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={`Delete Slack link for ${label}`}
+                  disabled={deleteLink.isPending}
+                  onClick={() => deleteLink.mutate(link.id)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }
@@ -799,7 +1253,13 @@ function IntegrationDetailSheet({
             </>
           ) : null}
           {provider === "linear" ? <LinearAgentRoutingSettings repositoriesOverride={repositories} /> : null}
-          {provider === "slack" ? <SlackChannelPicker /> : null}
+          {provider === "slack" ? (
+            <>
+              <SlackBotDefaults repositories={repositories} />
+              <SlackChannelPicker />
+              <SlackUserLinkingSection />
+            </>
+          ) : null}
           {provider === "sentry" ? (
             <div className="space-y-2">
               <h3 className="text-sm font-medium">Connection scope</h3>

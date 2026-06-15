@@ -145,6 +145,117 @@ func TestSlackUserLinkStore_DeleteByID_NotFound(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "DeleteByID not-found should satisfy expected SQL")
 }
 
+func TestSlackBotSettingsStore_Upsert(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	settingsID := uuid.New()
+	now := time.Now()
+	branch := "main"
+	store := NewSlackBotSettingsStore(mock)
+
+	mock.ExpectQuery(`INSERT INTO slack_bot_settings`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "default_repository_id", "default_branch", "routing_mode",
+			"response_visibility", "allowed_actions", "notification_preset", "notification_subscriptions", "active", "created_at", "updated_at",
+		}).AddRow(
+			settingsID, orgID, installationID, &repoID, &branch, models.SlackRoutingModeAuto,
+			models.SlackResponseVisibilityThread, []string{string(models.SlackChannelActionSession)}, models.SlackNotificationPresetBalanced,
+			json.RawMessage(`{"events":["session.failed"]}`), true, now, now,
+		))
+
+	settings := &models.SlackBotSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installationID,
+		DefaultRepositoryID:       &repoID,
+		DefaultBranch:             &branch,
+		RoutingMode:               models.SlackRoutingModeAuto,
+		ResponseVisibility:        models.SlackResponseVisibilityThread,
+		AllowedActions:            []string{string(models.SlackChannelActionSession)},
+		NotificationPreset:        models.SlackNotificationPresetBalanced,
+		NotificationSubscriptions: json.RawMessage(`{"events":["session.failed"]}`),
+		Active:                    true,
+	}
+
+	err = store.Upsert(context.Background(), settings)
+
+	require.NoError(t, err, "Upsert should persist org-scoped Slackbot defaults")
+	require.Equal(t, settingsID, settings.ID, "Upsert should scan the stored defaults")
+	require.NoError(t, mock.ExpectationsWereMet(), "Upsert should satisfy expected SQL")
+}
+
+func TestSlackChannelSettingsStore_GetEffectiveByChannelFallsBackToDefaults(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	branch := "main"
+	store := NewSlackChannelSettingsStore(mock)
+
+	mock.ExpectQuery(`FROM slack_installations si`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"org_id", "slack_installation_id", "slack_team_id", "slack_channel_id", "default_repository_id", "default_branch",
+			"routing_mode", "response_visibility", "allowed_actions", "notification_preset", "notification_subscriptions", "has_channel_override",
+		}).AddRow(
+			orgID, installationID, "T123", "C123", &repoID, &branch, models.SlackRoutingModeAuto,
+			models.SlackResponseVisibilityThread, []string{string(models.SlackChannelActionSession), string(models.SlackChannelActionPreview)},
+			models.SlackNotificationPresetBalanced, json.RawMessage(`{}`), false,
+		))
+
+	got, err := store.GetEffectiveByChannel(context.Background(), orgID, "T123", "C123")
+
+	require.NoError(t, err, "GetEffectiveByChannel should resolve inherited defaults")
+	require.Equal(t, models.EffectiveSlackChannelSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installationID,
+		SlackTeamID:               "T123",
+		SlackChannelID:            "C123",
+		DefaultRepositoryID:       &repoID,
+		DefaultBranch:             &branch,
+		RoutingMode:               models.SlackRoutingModeAuto,
+		ResponseVisibility:        models.SlackResponseVisibilityThread,
+		AllowedActions:            []string{string(models.SlackChannelActionSession), string(models.SlackChannelActionPreview)},
+		NotificationPreset:        models.SlackNotificationPresetBalanced,
+		NotificationSubscriptions: json.RawMessage(`{}`),
+		HasChannelOverride:        false,
+	}, got, "GetEffectiveByChannel should return the expected effective settings")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetEffectiveByChannel should satisfy expected SQL")
+}
+
+func TestSlackSessionLinkStore_SetLatestStatusProgress(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	store := NewSlackSessionLinkStore(mock)
+
+	mock.ExpectExec(`UPDATE slack_session_links`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.SetLatestStatusProgress(context.Background(), orgID, sessionID, "1720000000.0001", "running_tests")
+
+	require.NoError(t, err, "SetLatestStatusProgress should persist the status timestamp and kind")
+	require.NoError(t, mock.ExpectationsWereMet(), "SetLatestStatusProgress should satisfy expected SQL")
+}
+
 func TestSessionAttributionStore_Create(t *testing.T) {
 	t.Parallel()
 
