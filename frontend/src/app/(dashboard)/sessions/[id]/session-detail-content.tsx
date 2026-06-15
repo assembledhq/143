@@ -148,6 +148,7 @@ import { AgentBadge } from "@/components/agent-badge";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
 import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
+import { ThreadTranscriptWindow } from "@/components/thread-transcript-window";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -2135,6 +2136,7 @@ function ChatPanel({
   const isDocumentVisible = useDocumentVisible();
 
   const activeThreadId = activeThread?.id;
+  const useTranscriptWindow = !!activeThreadId && !!viewerScope && process.env.NODE_ENV !== "test";
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
@@ -2164,7 +2166,7 @@ function ChatPanel({
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
-    enabled: !!activeThreadId && !!viewerScope,
+    enabled: !!activeThreadId && !!viewerScope && !useTranscriptWindow,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
@@ -2220,7 +2222,7 @@ function ChatPanel({
         ? { latestTurns: THREAD_LOG_BOOTSTRAP_TURNS }
         : visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
     ),
-    enabled: !!activeThreadId,
+    enabled: !!activeThreadId && !useTranscriptWindow,
     // Carry the previous window across key changes within the same thread
     // (bootstrap → precise turns, or the visible turn set growing) so tool
     // entries don't blink out while the next window loads. Windows from a
@@ -2241,6 +2243,10 @@ function ChatPanel({
     enabled: false,
     initialData: { data: [], meta: {} } satisfies ListResponse<SessionLog>,
   });
+  const activeThreadLiveLogs = useMemo<SessionLog[]>(() => {
+    if (!activeThreadId) return [];
+    return (liveLogsQuery.data?.data ?? []).filter((log: SessionLog) => log.thread_id === activeThreadId);
+  }, [activeThreadId, liveLogsQuery.data?.data]);
   const clearCurrentLiveLogs = useCallback(() => {
     queryClient.setQueryData<ListResponse<SessionLog>>(
       liveLogsQueryKey,
@@ -2267,6 +2273,11 @@ function ChatPanel({
     ? pendingHumanInputs.find((request) => !dismissedHumanInputIds.has(request.id))?.id ?? null
     : null;
 
+  const invalidateActiveThreadTranscript = useCallback(() => {
+    if (!activeThreadId) return;
+    queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
+  }, [activeThreadId, queryClient, sessionId]);
+
   const invalidateHumanInput = useCallback(() => {
     invalidateSessionHumanInputRequests(queryClient, sessionId);
     queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
@@ -2274,6 +2285,7 @@ function ChatPanel({
     if (activeThreadId) {
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
     }
   }, [activeThreadId, queryClient, sessionId]);
 
@@ -2735,6 +2747,7 @@ function ChatPanel({
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_CREATED, () => {
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        invalidateActiveThreadTranscript();
       });
 
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_UPDATED, () => {
@@ -2743,6 +2756,7 @@ function ChatPanel({
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
       });
 
@@ -2761,6 +2775,7 @@ function ChatPanel({
           if (activeThreadId) {
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
           }
         }
       });
@@ -2779,6 +2794,7 @@ function ChatPanel({
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
       });
 
@@ -2788,6 +2804,7 @@ function ChatPanel({
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
 
         if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
@@ -2809,7 +2826,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId, clearCurrentLiveLogs]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId, clearCurrentLiveLogs, invalidateActiveThreadTranscript]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -2922,7 +2939,7 @@ function ChatPanel({
 
   return (
     <div className="relative flex flex-col h-full">
-      {showJumpToLatest && (
+      {!useTranscriptWindow && showJumpToLatest && (
         <div className="absolute bottom-4 right-4 z-20">
           <Button
             type="button"
@@ -2936,15 +2953,27 @@ function ChatPanel({
           </Button>
         </div>
       )}
-      {/* Unified timeline */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        tabIndex={0}
-        aria-label="Session conversation"
-        data-session-transcript-scroll="true"
-        className="flex-1 overflow-y-auto overscroll-contain space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-      >
+      {useTranscriptWindow ? (
+        <ThreadTranscriptWindow
+          sessionId={sessionId}
+          threadId={activeThreadId}
+          orgId={viewerScope.orgId ?? undefined}
+          userId={viewerScope.userId}
+          initialAnchorMessageId={initialThreadAnchorPosition?.anchor.id}
+          optimisticMessages={optimisticMessages.filter((message) => message.thread_id === activeThreadId)}
+          liveLogs={activeThreadLiveLogs}
+          refetchIntervalMs={activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false}
+          className="flex-1"
+        />
+      ) : (
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          tabIndex={0}
+          aria-label="Session conversation"
+          data-session-transcript-scroll="true"
+          className="flex-1 overflow-y-auto overscroll-contain space-y-2 p-4 outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        >
         {showLoadingSkeleton ? (
           <SessionTimelineSkeleton />
         ) : (
@@ -3026,7 +3055,8 @@ function ChatPanel({
             </div>
           </div>
         )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

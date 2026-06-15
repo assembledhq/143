@@ -564,6 +564,26 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
     },
+    getThreadTranscriptWindow: (sessionId: string, threadId: string, params: { position?: 'latest' | 'around'; before?: string; after?: string; anchorEntryId?: string; anchorMessageId?: number; anchorTurnNumber?: number; limitTurns?: number; include?: Array<'messages' | 'tools' | 'human_inputs' | 'system'> } = { position: 'latest' }) => {
+      const searchParams = new URLSearchParams();
+      if (params.position) searchParams.set('position', params.position);
+      if (params.before) searchParams.set('before', params.before);
+      if (params.after) searchParams.set('after', params.after);
+      if (params.anchorEntryId) searchParams.set('anchor_entry_id', params.anchorEntryId);
+      if (params.anchorMessageId != null) searchParams.set('anchor_message_id', String(params.anchorMessageId));
+      if (params.anchorTurnNumber != null) searchParams.set('anchor_turn_number', String(params.anchorTurnNumber));
+      if (params.limitTurns != null) searchParams.set('limit_turns', String(params.limitTurns));
+      if (params.include?.length) searchParams.set('include', params.include.join(','));
+      const qs = searchParams.toString();
+      return get<import('./types').SessionTranscriptWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript${qs ? `?${qs}` : ''}`);
+    },
+    searchThreadTranscript: (sessionId: string, threadId: string, params: { q: string; limit?: number; include?: Array<'messages' | 'tools' | 'human_inputs' | 'system'> }) => {
+      const searchParams = new URLSearchParams();
+      searchParams.set('q', params.q);
+      if (params.limit != null) searchParams.set('limit', String(params.limit));
+      if (params.include?.length) searchParams.set('include', params.include.join(','));
+      return get<import('./types').SessionTranscriptSearchResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript/search?${searchParams.toString()}`);
+    },
     getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[]; latestTurns?: number } = {}) => {
       const searchParams = new URLSearchParams();
       const turnNumbers = Array.from(new Set((params.turnNumbers ?? []).filter((turn) => Number.isInteger(turn) && turn >= 0))).sort((a, b) => a - b);
