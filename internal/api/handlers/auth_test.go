@@ -1794,6 +1794,86 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestAuthHandler_AcceptInvitationAndUpsertUser_RecordsDifferentInviteEmail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	invitationID := uuid.New()
+	orgID := uuid.New()
+	expectedUserID := uuid.New()
+	now := time.Now()
+	githubID := int64(42)
+	githubLogin := "octocat"
+	avatarURL := "https://example.com/avatar.png"
+	invitationEmail := "Invitee@Work.example"
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE invitations SET status = 'accepted', accepted_at = now\\(\\) WHERE id = @id AND status = 'pending'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO users").
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(expectedUserID, now))
+	mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	expectUserLastOrgLookup(mock, expectedUserID, nil)
+	mock.ExpectQuery("INSERT INTO auth_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(uuid.New(), time.Now()))
+	mock.ExpectCommit()
+
+	handler := NewAuthHandler(
+		&config.Config{},
+		mock,
+		db.NewUserStore(mock),
+		nil,
+		db.NewInvitationStore(mock),
+		db.NewOrganizationMembershipStore(mock),
+	)
+
+	user := &models.User{
+		OrgID:       orgID,
+		Email:       "personal@example.com",
+		Name:        "Invitee",
+		Role:        "member",
+		GitHubID:    &githubID,
+		GitHubLogin: &githubLogin,
+		AvatarURL:   &avatarURL,
+	}
+
+	createdUser, _, invErr, createErr := handler.acceptInvitationAndUpsertUser(
+		context.Background(),
+		invitationID,
+		user,
+		func(ctx context.Context, store *db.UserStore, invitedUser *models.User) error {
+			return store.UpsertFromGitHub(ctx, invitedUser)
+		},
+		&invitationEmail,
+	)
+
+	require.NoError(t, createErr, "different invite email should not fail invitation acceptance")
+	require.Nil(t, invErr, "different invite email should still accept the invitation")
+	require.NotNil(t, createdUser, "accepted invitation should return the created user")
+	require.Equal(t, expectedUserID, createdUser.ID, "accepted invitation should populate user ID before secondary email write")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 // --- Invitation-aware Register tests (#16) ---
 
 func TestAuthHandler_Register_WithInvitation_NotFound(t *testing.T) {

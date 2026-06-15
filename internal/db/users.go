@@ -34,7 +34,7 @@ func NewUserStore(db DBTX) *UserStore {
 	return &UserStore{db: db}
 }
 
-const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, secondary_emails, created_at`
+const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, created_at`
 const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, email_verified_at, created_at, settings`
 
 // UpsertFromGitHub creates or updates a user based on their GitHub ID.
@@ -475,7 +475,7 @@ func (s *UserStore) ListByOrgViaMemberships(
 	query := `
 		SELECT u.id, m.org_id, u.email, u.name, m.role,
 		       u.github_id, u.github_login, u.github_noreply_email, u.avatar_url,
-		       u.password_hash, u.google_id, u.secondary_emails, u.created_at,
+		       u.password_hash, u.google_id, u.created_at,
 		       captured.github_org_login AS captured_github_org_login,
 		       m.created_at AS membership_created_at
 		FROM users u
@@ -528,7 +528,7 @@ func (s *UserStore) ListByOrgViaMemberships(
 		if err := rows.Scan(
 			&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role,
 			&u.GitHubID, &u.GitHubLogin, &u.GitHubNoreplyEmail, &u.AvatarURL,
-			&u.PasswordHash, &u.GoogleID, &u.SecondaryEmails, &u.CreatedAt,
+			&u.PasswordHash, &u.GoogleID, &u.CreatedAt,
 			&capturedGitHubOrg,
 			&memTime,
 		); err != nil {
