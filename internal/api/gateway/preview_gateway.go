@@ -77,6 +77,24 @@ const runtimeCacheTTL = 5 * time.Second
 // asset request issued an UPDATE on preview_instances.
 const accessRecordInterval = 15 * time.Second
 
+// previewProxyTokenTTL bounds the lifetime of the bearer token the gateway
+// mints for each proxied worker request. A fresh token is minted on every
+// request, so it only needs to outlive a single in-flight request — but we size
+// it to comfortably span an interactive preview's working window so that
+// long-lived connections (WebSocket/HMR, SSE) authorized once at handshake time
+// never trip on an expired token, even on a slow or busy worker.
+//
+// We deliberately keep it bounded rather than effectively infinite (e.g.
+// weeks): the token is a static, unrevocable bearer whose only early
+// invalidation is a runtime epoch bump on recycle, so a finite TTL caps the
+// replay window if a token ever leaks (logs, worker memory, a compromised hop).
+// 60 minutes is far longer than any single request or handshake yet still a
+// tight blast radius. Previously this was 30s, which let a slow worker response
+// outlive the token: the worker then rejected the in-flight request as "invalid
+// preview token", and the gateway mistook that auth failure for an unreachable
+// endpoint and tore down a perfectly healthy preview.
+const previewProxyTokenTTL = 60 * time.Minute
+
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
 // injects security headers. It does NOT use the main app session middleware.
@@ -1038,7 +1056,7 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		RuntimeEpoch: runtime.RuntimeEpoch,
 		PreviewID:    &previewID,
 		Action:       "proxy",
-		ExpiresAt:    time.Now().Add(30 * time.Second),
+		ExpiresAt:    time.Now().Add(previewProxyTokenTTL),
 	})
 	if err != nil {
 		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
@@ -1060,15 +1078,30 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if failure := g.translateWorkerPreviewFailure(resp, previewID, isNavigationRequest(originalReq)); failure.translated {
-				// The worker no longer recognizes this runtime epoch; drop
-				// the cached runtime so the next request re-resolves.
+				// Always drop the cached runtime so the next request
+				// re-resolves and re-mints a fresh token.
 				g.evictCachedRuntime(previewID)
-				g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, previewWorkerFailureReason(failure.code, failure.message, failure.authDetail))
+				// A routing mismatch (the worker recycled the epoch or no
+				// longer owns this runtime) is genuine evidence the cached
+				// runtime is stale, so mark it lost. A token-level auth
+				// failure ("invalid preview token") is NOT — an expired or
+				// mis-signed proxy token says nothing about runtime health,
+				// and marking it lost would kill a working preview. Evict and
+				// let the next request retry with a new token instead.
+				markedLost := previewWorkerFailureMarksRuntimeLost(failure.code)
+				if markedLost {
+					g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, previewWorkerFailureReason(failure.code, failure.message, failure.authDetail))
+				}
+				// worker_auth_detail carries the coarse token-failure class
+				// (bad_signature/expired/...) so an auth failure stays
+				// diagnosable from the app-side logs even when it is transient
+				// and the runtime is deliberately left healthy.
 				addPreviewProxyLogFields(g.logger.Warn(), originalReq, orgID, previewID, runtime, upstreamPath).
 					Str("worker_error_code", failure.code).
 					Str("worker_error_message", failure.message).
 					Str("worker_auth_detail", failure.authDetail).
 					Int("worker_status", failure.status).
+					Bool("runtime_marked_lost", markedLost).
 					Msg("translated preview worker auth/routing failure")
 				return nil
 			}
@@ -1153,6 +1186,22 @@ func shouldMarkRuntimeLostOnProxyError(err error) bool {
 		}
 	}
 	return false
+}
+
+// previewWorkerFailureMarksRuntimeLost reports whether a translated worker
+// failure code is evidence that the cached runtime is genuinely stale — a
+// recycled epoch or a worker that no longer owns it — and should be marked
+// lost. Token-level auth failures (UNAUTHORIZED / "invalid preview token") are
+// transient: an expired or mis-signed proxy token does not mean the runtime is
+// unreachable, so those only evict the cache and let the next request retry
+// with a freshly minted token rather than tearing down a healthy preview.
+func previewWorkerFailureMarksRuntimeLost(workerCode string) bool {
+	switch workerCode {
+	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
+		return true
+	default:
+		return false
+	}
 }
 
 func previewProxyErrorReason(err error) string {
