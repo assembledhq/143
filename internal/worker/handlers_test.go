@@ -363,11 +363,11 @@ func TestDetectSlackContextReferencesClassifiesProductContext(t *testing.T) {
 	)
 
 	require.Equal(t, []slackContextReference{
-		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42"},
-		{Kind: slackReferenceKindIssue, Value: "ENG-123"},
-		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign"},
-		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123"},
-		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44"},
+		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42", Source: "message"},
+		{Kind: slackReferenceKindIssue, Value: "ENG-123", Source: "message"},
+		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign", Source: "message"},
+		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123", Source: "thread"},
+		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44", Source: "thread"},
 	}, refs, "Slack context detection should preserve ordered typed references")
 }
 

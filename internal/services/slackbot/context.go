@@ -35,9 +35,10 @@ type SlackContextOption struct {
 }
 
 type SlackContextResolveInput struct {
-	Settings   models.EffectiveSlackChannelSettings
-	Text       string
-	References []SlackContextReference
+	Settings              models.EffectiveSlackChannelSettings
+	Text                  string
+	References            []SlackContextReference
+	TriggeringSlackUserID string
 }
 
 type SlackContextResolveResult struct {

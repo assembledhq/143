@@ -1718,9 +1718,10 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					}
 				}
 				resolvedContext = slackbotsvc.ResolveSlackContext(slackbotsvc.SlackContextResolveInput{
-					Settings:   settings,
-					Text:       payload.Text,
-					References: slackContextReferencesForResolver(contextRefs),
+					Settings:              settings,
+					Text:                  payload.Text,
+					References:            slackContextReferencesForResolver(contextRefs),
+					TriggeringSlackUserID: payload.SlackUserID,
 				})
 				session.RepositoryID = resolvedContext.RepositoryID
 				if strings.TrimSpace(resolvedContext.Branch) != "" {
@@ -2705,6 +2706,7 @@ func renderSlackNotification(services *Services, input models.SlackSendNotificat
 func slackNotificationRenderInput(input models.SlackSendNotificationJobPayload) models.SlackNotificationRenderInput {
 	return models.SlackNotificationRenderInput{
 		Kind:            models.SlackNotificationKind(input.Kind),
+		Preset:          models.SlackNotificationPreset(input.NotificationPreset),
 		Title:           input.Title,
 		Body:            input.Body,
 		SessionID:       parseOptionalUUID(input.SessionID),
@@ -2862,6 +2864,7 @@ type slackNotificationFanoutInput struct {
 	PullRequestID  *uuid.UUID
 	PullRequestURL string
 	AutomationID   *uuid.UUID
+	AutomationRunID *uuid.UUID
 }
 
 type slackNotificationDestination struct {
@@ -2941,6 +2944,15 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 				payload.PullRequestID = input.PullRequestID.String()
 				payload.PullRequestURL = strings.TrimSpace(input.PullRequestURL)
 			}
+			if input.AutomationID != nil {
+				payload.AutomationID = input.AutomationID.String()
+			}
+			if input.AutomationRunID != nil {
+				payload.AutomationRunID = input.AutomationRunID.String()
+			}
+			if setting.NotificationPreset != nil {
+				payload.NotificationPreset = string(*setting.NotificationPreset)
+			}
 			destinationDedupeKey := dedupeKey
 			if destination.SlackUserID != "" {
 				destinationDedupeKey += ":dm:" + destination.SlackUserID
@@ -2995,11 +3007,12 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		automationKind = string(models.SlackNotificationAutomationFailed)
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-		EventKind:    automationKind,
-		Title:        title,
-		Body:         body,
-		SessionID:    &sessionID,
-		AutomationID: &run.AutomationID,
+		EventKind:       automationKind,
+		Title:           title,
+		Body:            body,
+		SessionID:       &sessionID,
+		AutomationID:    &run.AutomationID,
+		AutomationRunID: automationRunID,
 	})
 	if automationKind == string(models.SlackNotificationAutomationFailed) {
 		streak, streakErr := stores.AutomationRuns.CountConsecutiveFailures(ctx, orgID, run.AutomationID)
@@ -3009,11 +3022,12 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		}
 		if streak >= 3 {
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-				EventKind:    string(models.SlackNotificationAutomationFailureStreak),
-				Title:        "Automation failure streak",
-				Body:         fmt.Sprintf("%d consecutive automation runs failed.", streak),
-				SessionID:    &sessionID,
-				AutomationID: &run.AutomationID,
+				EventKind:       string(models.SlackNotificationAutomationFailureStreak),
+				Title:           "Automation failure streak",
+				Body:            fmt.Sprintf("%d consecutive automation runs failed.", streak),
+				SessionID:       &sessionID,
+				AutomationID:    &run.AutomationID,
+				AutomationRunID: automationRunID,
 			})
 		}
 	}
@@ -5213,8 +5227,9 @@ const (
 )
 
 type slackContextReference struct {
-	Kind  slackReferenceKind
-	Value string
+	Kind   slackReferenceKind
+	Value  string
+	Source string
 }
 
 var (
@@ -5228,38 +5243,38 @@ var (
 func detectSlackContextReferences(text string, threadMessages []ingestion.SlackMessage) []slackContextReference {
 	seen := map[string]bool{}
 	refs := []slackContextReference{}
-	addRef := func(kind slackReferenceKind, value string) {
+	addRef := func(kind slackReferenceKind, value, source string) {
 		value = strings.TrimRight(strings.TrimSpace(value), ".,)")
 		if value == "" || seen[string(kind)+":"+value] {
 			return
 		}
 		seen[string(kind)+":"+value] = true
-		refs = append(refs, slackContextReference{Kind: kind, Value: value})
+		refs = append(refs, slackContextReference{Kind: kind, Value: value, Source: source})
 	}
-	addRefs := func(input string) {
+	addRefs := func(input, source string) {
 		for _, rawURL := range slackURLReferencePattern.FindAllString(input, -1) {
 			urlRef := strings.TrimRight(rawURL, ".,)")
 			kind := classifySlackURLReference(urlRef)
-			addRef(kind, urlRef)
+			addRef(kind, urlRef, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, ref := range slackLinearIssuePattern.FindAllString(input, -1) {
-			addRef(slackReferenceKindIssue, ref)
+			addRef(slackReferenceKindIssue, ref, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, ref := range slackRepoIssuePattern.FindAllString(input, -1) {
-			addRef(slackReferenceKindIssue, ref)
+			addRef(slackReferenceKindIssue, ref, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, match := range slackBranchPattern.FindAllStringSubmatch(input, -1) {
 			if len(match) > 1 {
-				addRef(slackReferenceKindBranch, match[1])
+				addRef(slackReferenceKindBranch, match[1], source)
 			}
 			if len(refs) >= 20 {
 				return
@@ -5267,19 +5282,19 @@ func detectSlackContextReferences(text string, threadMessages []ingestion.SlackM
 		}
 		for _, match := range slackFilePathReferencePattern.FindAllStringSubmatch(input, -1) {
 			if len(match) > 1 {
-				addRef(slackReferenceKindFilePath, match[1])
+				addRef(slackReferenceKindFilePath, match[1], source)
 			}
 			if len(refs) >= 20 {
 				return
 			}
 		}
 	}
-	addRefs(text)
+	addRefs(text, "message")
 	for _, msg := range threadMessages {
 		if len(refs) >= 20 {
 			break
 		}
-		addRefs(msg.Text)
+		addRefs(msg.Text, "thread")
 	}
 	return refs
 }
@@ -5290,7 +5305,7 @@ func slackContextReferencesForResolver(refs []slackContextReference) []slackbots
 		converted = append(converted, slackbotsvc.SlackContextReference{
 			Kind:   slackbotsvc.SlackContextReferenceKind(ref.Kind),
 			Value:  ref.Value,
-			Source: "message",
+			Source: ref.Source,
 		})
 	}
 	return converted

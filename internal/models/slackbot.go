@@ -424,7 +424,8 @@ type SlackSendNotificationJobPayload struct {
 	PullRequestID   string `json:"pull_request_id,omitempty"`
 	PullRequestURL  string `json:"pull_request_url,omitempty"`
 	PreviewID       string `json:"preview_id,omitempty"`
-	ActorUserID     string `json:"actor_user_id,omitempty"`
+	ActorUserID        string `json:"actor_user_id,omitempty"`
+	NotificationPreset string `json:"notification_preset,omitempty"`
 }
 
 type SlackPreviewTargetKind string

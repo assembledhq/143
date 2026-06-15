@@ -620,17 +620,23 @@ func (s *SlackChannelSettingsStore) Upsert(ctx context.Context, settings *models
 
 func (s *SlackChannelSettingsStore) ListNotificationSubscriptions(ctx context.Context, orgID uuid.UUID) ([]models.SlackChannelSettings, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, org_id, slack_installation_id, slack_team_id, slack_channel_id, slack_channel_name,
-			channel_type, default_repository_id, default_branch, routing_mode, response_visibility, allowed_actions,
-			notification_preset, notification_subscriptions, active, created_at, updated_at
-		FROM slack_channel_settings
-		WHERE org_id = @org_id
-		  AND active = true
+		SELECT sc.id, sc.org_id, sc.slack_installation_id, sc.slack_team_id, sc.slack_channel_id,
+			sc.slack_channel_name, sc.channel_type, sc.default_repository_id, sc.default_branch,
+			sc.routing_mode,
+			COALESCE(sc.response_visibility, bs.response_visibility) AS response_visibility,
+			sc.allowed_actions,
+			COALESCE(sc.notification_preset, bs.notification_preset) AS notification_preset,
+			sc.notification_subscriptions, sc.active, sc.created_at, sc.updated_at
+		FROM slack_channel_settings sc
+		LEFT JOIN slack_bot_settings bs ON bs.org_id = sc.org_id AND bs.active = true
+		WHERE sc.org_id = @org_id
+		  AND sc.active = true
 		  AND (
-		      notification_subscriptions <> '{}'::jsonb
-		      OR (notification_preset IS NOT NULL AND notification_preset <> 'custom')
+		      sc.notification_subscriptions <> '{}'::jsonb
+		      OR (COALESCE(sc.notification_preset, bs.notification_preset) IS NOT NULL
+		          AND COALESCE(sc.notification_preset, bs.notification_preset) <> 'custom')
 		  )
-		ORDER BY updated_at DESC`,
+		ORDER BY sc.updated_at DESC`,
 		pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return nil, fmt.Errorf("query slack notification subscriptions: %w", err)

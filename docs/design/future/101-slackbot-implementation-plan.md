@@ -994,16 +994,35 @@ slack_handle_interaction
 Slack action IDs handled by `slack_handle_interaction`:
 
 ```text
+slack_open_session
+slack_start_from_home
+slack_link_account
+slack_select_org
+slack_select_repository
+slack_configure_channel
+slack_choose_preview_target
+slack_choose_pull_request
+slack_choose_branch
 slack_create_preview
+slack_open_preview
+slack_refresh_preview
+slack_restart_preview
+slack_stop_preview
+slack_extend_preview
 slack_claim_team_session
+slack_start_work
 slack_create_pr
 slack_merge_pr
 slack_repair_pr
 slack_answer_human_input
-slack_answer_human_input_multi
+slack_approve_human_input
+slack_deny_human_input
 slack_continue_human_input
 slack_resume_human_input
 slack_stop_human_input
+slack_answer_human_input_freeform
+slack_answer_human_input_multi
+slack_member_joined_channel
 ```
 
 ## Testing Strategy
