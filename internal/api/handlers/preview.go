@@ -358,10 +358,15 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	// fall through to hydrate/expired instead of attaching to a dead ID.
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
+		// HomeDir matches the orchestrator/hydrate path so the home-rooted
+		// package-manager cache (npm's ~/.npm, etc.) can restore. Without it,
+		// reused session sandboxes fail package-manager cache restore with
+		// "sandbox home dir is required" and re-download deps every launch.
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
 			WorkDir:   workDir,
+			HomeDir:   agent.DefaultSandboxConfig().HomeDir,
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 			Purpose:   "preview",

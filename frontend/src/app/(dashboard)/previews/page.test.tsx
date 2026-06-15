@@ -180,6 +180,9 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Pool: 3 of 10 previews")).toBeInTheDocument();
     expect(screen.getAllByText("feature/warm-link")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Ready")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Failed")[0]).toBeInTheDocument();
     expect(screen.getByText("resumes in ~30s")).toBeInTheDocument();
     expect(screen.getByText("stopped after error")).toBeInTheDocument();
     expect(screen.getAllByText("assembledhq/docs · PR #17")[0]).toBeInTheDocument();

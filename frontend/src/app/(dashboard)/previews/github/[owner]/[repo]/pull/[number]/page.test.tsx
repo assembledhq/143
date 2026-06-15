@@ -99,6 +99,61 @@ describe("PullRequestPreviewPage", () => {
     });
   });
 
+  it("capitalizes preview status badges and phase labels", async () => {
+    server.use(
+      http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
+        HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "pull_request",
+            status: "partially_ready",
+            current_phase: "start_services",
+            stable_url: "https://143.dev/previews/github/acme/web/pull/42",
+            preview_url: "https://prev-1.preview.143.dev",
+            services: [
+              {
+                id: "svc-1",
+                preview_instance_id: "prev-1",
+                service_name: "web",
+                role: "primary",
+                status: "starting",
+                command: ["npm", "run", "dev"],
+                cwd: ".",
+                port: 3000,
+                created_at: "2026-06-10T12:00:00Z",
+              },
+            ],
+            infrastructure: [
+              {
+                id: "infra-1",
+                preview_instance_id: "prev-1",
+                infra_name: "postgres",
+                template: "postgres",
+                container_id: "container-1",
+                status: "unhealthy",
+                host: "postgres",
+                port: 5432,
+                created_at: "2026-06-10T12:00:00Z",
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
+
+    expect(await screen.findByText("Partially Ready")).toBeInTheDocument();
+    expect(screen.getByText("Start Services")).toBeInTheDocument();
+    expect(screen.getByText("Starting")).toBeInTheDocument();
+    expect(screen.getByText("Unhealthy")).toBeInTheDocument();
+  });
+
   it("does not auto-open stale previews and makes Start latest primary", async () => {
     let startLatestCalled = false;
     server.use(

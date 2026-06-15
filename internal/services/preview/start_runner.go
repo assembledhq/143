@@ -1127,10 +1127,14 @@ func (r *StartRunner) acquireSandbox(ctx context.Context, orgID uuid.UUID, sessi
 		if ownerCheck := r.checkLiveContainerWorker(session.WorkerNodeID); ownerCheck.Err != nil {
 			return ownerCheck
 		}
+		// HomeDir is required for the home-rooted package-manager cache
+		// (npm's ~/.npm, etc.) to restore on reused session sandboxes;
+		// see the prewarm-source construction above which sets it too.
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
 			WorkDir:   workDir,
+			HomeDir:   agent.DefaultSandboxConfig().HomeDir,
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 			Purpose:   "preview",
