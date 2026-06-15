@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -154,4 +155,85 @@ func TestIntegration_WorkerDispatch_UnknownJobTypeDeadLetters(t *testing.T) {
 		}
 		return status == "failed" && lastError != nil && *lastError != ""
 	}, 5*time.Second, 25*time.Millisecond, "unknown job type must fail fast with an explanatory last_error — silent swallow is the worst outcome")
+}
+
+// TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob is the
+// regression for the rollout-starvation incident: a continue_session turn was
+// pinned (target_node_id) to a worker generation that a routine rollout had put
+// into 'draining'. A draining node keeps heartbeating to preserve its previews,
+// so it never tripped the dead-node fallback — and because it had stopped
+// claiming new work, the turn sat 'pending' for many minutes until the node
+// finally died. The claim path must treat a draining target node as
+// unavailable and let a healthy worker hydrate the session from its snapshot.
+//
+// pgxmock can't catch this — it only matches the query string, not the SQL's
+// node-status semantics — so this has to run against real Postgres.
+func TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob(t *testing.T) {
+	pool := setup(t)
+	orgID := seedOrg(t, pool)
+	session := seedSession(t, pool, orgID, sessionOpts{Status: "idle"})
+	store := db.NewJobStore(pool)
+
+	// Pin the job to a worker that is draining but still heartbeating —
+	// exactly the state a graceful rollover leaves behind.
+	drainingNode := "drain-node-" + session.ID.String()[:8]
+	seedWorkerNode(t, pool, drainingNode)
+	setNodeStatus(t, pool, drainingNode, "draining")
+
+	target := drainingNode
+	jobID, err := store.EnqueueWithOpts(context.Background(), orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:     5,
+		TargetNodeID: &target,
+	})
+	require.NoError(t, err)
+
+	// A different, healthy worker must be able to claim it.
+	claimer := "active-node-" + session.ID.String()[:8]
+	seedWorkerNode(t, pool, claimer)
+
+	job, err := store.ClaimNextRunnable(context.Background(), claimer, claimer, uuid.New(), 30*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, job, "a job pinned to a draining node must fall through to an active worker, not starve until the node dies")
+	require.Equal(t, jobID, job.ID, "the claimed job should be the one pinned to the draining node")
+}
+
+// TestIntegration_ClaimNextRunnable_HealthyTargetNodePinHoldsJob is the guard
+// rail for the fix above: a job pinned to a *healthy, active* worker must stay
+// pinned. Only the owning node can claim it — a sibling worker must not steal
+// sandbox-bound work off a live node (the original #811 cross-host bug). This
+// proves the draining release didn't widen into "any pin is claimable."
+func TestIntegration_ClaimNextRunnable_HealthyTargetNodePinHoldsJob(t *testing.T) {
+	pool := setup(t)
+	orgID := seedOrg(t, pool)
+	session := seedSession(t, pool, orgID, sessionOpts{Status: "idle"})
+	store := db.NewJobStore(pool)
+
+	ownerNode := "owner-node-" + session.ID.String()[:8]
+	seedWorkerNode(t, pool, ownerNode)
+
+	target := ownerNode
+	jobID, err := store.EnqueueWithOpts(context.Background(), orgID, db.EnqueueOpts{
+		Queue:        "agent",
+		JobType:      "continue_session",
+		Payload:      map[string]string{"session_id": session.ID.String(), "org_id": orgID.String()},
+		Priority:     5,
+		TargetNodeID: &target,
+	})
+	require.NoError(t, err)
+
+	// A sibling worker must NOT be able to claim the pinned job.
+	sibling := "sibling-node-" + session.ID.String()[:8]
+	seedWorkerNode(t, pool, sibling)
+	job, err := store.ClaimNextRunnable(context.Background(), sibling, sibling, uuid.New(), 30*time.Second)
+	require.NoError(t, err)
+	require.Nil(t, job, "a sibling worker must not claim a job pinned to a healthy owning node")
+
+	// The owning node still can.
+	owned, err := store.ClaimNextRunnable(context.Background(), ownerNode, ownerNode, uuid.New(), 30*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, owned, "the owning node must still be able to claim its pinned job")
+	require.Equal(t, jobID, owned.ID)
 }

@@ -148,8 +148,9 @@ type EnqueueOpts struct {
 	// open_pr, run_agent for resume) where the work must execute on the
 	// same docker daemon as the session's recorded container_id. NULL
 	// means any worker can claim. The claim path falls back to "any worker"
-	// if the target node is marked dead in the `nodes` table, so a pinned
-	// job cannot starve when its node is permanently lost.
+	// if the target node is unavailable in the `nodes` table — dead
+	// (permanently lost) or draining (rolling over, no longer claiming) —
+	// so a pinned job cannot starve when its node can no longer run it.
 	TargetNodeID *string
 }
 
@@ -501,18 +502,26 @@ type jobExecer interface {
 //
 // Node-affinity filter: jobs with target_node_id NULL can be claimed by any
 // worker (the common case). Jobs with target_node_id set can only be claimed
-// by the matching node OR if the target node is dead (status='dead' or stale
-// heartbeat). The dead-node fallback prevents starvation when a pinned worker
-// is permanently lost — the job becomes claimable by anyone instead of
-// sitting forever. The freshness threshold matches ReclaimLostRunningJobs's
-// dead-node detection so the two paths agree on what "dead" means.
+// by the matching node OR if the target node is unavailable — dead
+// (status='dead' or stale heartbeat) or draining (status='draining'). The
+// fallback prevents starvation when a pinned worker can no longer run the job:
+//   - dead: the worker is permanently lost.
+//   - draining: the worker is rolling over and has stopped claiming new work,
+//     but keeps heartbeating to preserve healthy previews (see #1146/#1193).
+//     Without this, a turn pinned to a draining-but-heartbeating node sits
+//     pending until the node fully dies — minutes of dead air during every
+//     routine rollout. The claiming worker hydrates from the session snapshot,
+//     so releasing the pin is safe.
+//
+// The freshness threshold matches ReclaimLostRunningJobs's dead-node detection
+// so the two paths agree on what "dead" means.
 // lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
 func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
 	query := fmt.Sprintf(`
-		WITH dead_target_nodes AS (
+		WITH unavailable_target_nodes AS (
 			SELECT id
 			FROM nodes
-			WHERE status = 'dead' OR last_heartbeat_at < @dead_before
+			WHERE status IN ('dead', 'draining') OR last_heartbeat_at < @dead_before
 		),
 		claiming_node AS (
 			SELECT id
@@ -524,7 +533,7 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 		next_job AS (
 			SELECT j.id
 			FROM jobs j
-			LEFT JOIN dead_target_nodes d ON d.id = j.target_node_id
+			LEFT JOIN unavailable_target_nodes d ON d.id = j.target_node_id
 			JOIN claiming_node cn ON TRUE
 			WHERE j.status = 'pending' AND j.run_at <= now()
 			  AND (

@@ -70,6 +70,22 @@ func seedWorkerNode(t *testing.T, pool *pgxpool.Pool, nodeID string) {
 	}
 }
 
+// setNodeStatus forces a seeded node into a specific lifecycle status (e.g.
+// 'draining', 'dead') while leaving its heartbeat fresh — reproducing the
+// state a rolling deploy leaves behind: a node that has stopped claiming new
+// work but is still heartbeating to keep its previews alive.
+func setNodeStatus(t *testing.T, pool *pgxpool.Pool, nodeID, status string) {
+	t.Helper()
+	tag, err := pool.Exec(context.Background(),
+		`UPDATE nodes SET status = $1 WHERE id = $2`, status, nodeID)
+	if err != nil {
+		t.Fatalf("set node %s status=%s: %v", nodeID, status, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("set node status: expected to update 1 row, updated %d (node %s seeded?)", tag.RowsAffected(), nodeID)
+	}
+}
+
 // sessionOpts tunes which fields seedSession overrides on the default session
 // row. Zero-valued fields fall back to sensible defaults that make the
 // resulting row a plausible target for the handlers under test (manual

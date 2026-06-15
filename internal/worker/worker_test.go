@@ -101,7 +101,7 @@ func TestWorker_Poll(t *testing.T) {
 			name: "no pending jobs returns cleanly",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
-				mock.ExpectQuery("WITH dead_target_nodes AS").
+				mock.ExpectQuery("WITH unavailable_target_nodes AS").
 					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
@@ -385,7 +385,7 @@ func TestWorker_Poll(t *testing.T) {
 				jobID := uuid.New()
 				orgID := uuid.New()
 				now := time.Now()
-				mock.ExpectQuery("WITH dead_target_nodes AS").
+				mock.ExpectQuery("WITH unavailable_target_nodes AS").
 					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
@@ -745,7 +745,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	w.pollInterval = 10 * time.Millisecond
 	mock.MatchExpectationsInOrder(false)
 	for range 5 {
-		mock.ExpectQuery("WITH dead_target_nodes AS").
+		mock.ExpectQuery("WITH unavailable_target_nodes AS").
 			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 			WillReturnError(pgx.ErrNoRows)
 	}
@@ -935,7 +935,7 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 	if targetNodeID != nil {
 		target = *targetNodeID
 	}
-	mock.ExpectQuery("WITH dead_target_nodes AS").
+	mock.ExpectQuery("WITH unavailable_target_nodes AS").
 		WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
