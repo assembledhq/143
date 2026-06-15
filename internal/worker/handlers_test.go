@@ -4662,6 +4662,7 @@ func automationRowColumns() []string {
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
+		"github_event_triggers",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
@@ -4749,6 +4750,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -4841,6 +4843,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -4977,6 +4980,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, false, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5031,6 +5035,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5104,6 +5109,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &clickerID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5183,6 +5189,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5254,6 +5261,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))

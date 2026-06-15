@@ -19,6 +19,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	automationevents "github.com/assembledhq/143/internal/services/automations"
 )
 
 // handlerPRColumns matches the SELECT columns from PullRequestStore.GetByRepoAndNumber
@@ -380,6 +381,152 @@ func githubRepositoryTestCols() []string {
 	return []string{
 		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description",
 		"clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	}
+}
+
+type recordingAutomationEventTriggerer struct {
+	calls []automationevents.GitHubEventTriggerRequest
+}
+
+func (r *recordingAutomationEventTriggerer) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
+	r.calls = append(r.calls, req)
+	return nil
+}
+
+func expectGitHubAutomationRepositoryLookup(mock pgxmock.PgxPoolIface, orgID, repoID uuid.UUID, githubRepoID int64, fullName string) {
+	now := time.Now()
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": fullName}).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), githubRepoID, fullName, "main", false, strPtr("go"), strPtr(""),
+				"https://github.com/"+fullName+".git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+}
+
+func expectUnknownPullRequestLookup(mock pgxmock.PgxPoolIface, orgID uuid.UUID, fullName string, number int) {
+	mock.ExpectQuery("SELECT .+ FROM pull_requests").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": fullName, "github_pr_number": number}).
+		WillReturnError(pgx.ErrNoRows)
+}
+
+func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		event     models.AutomationGitHubEvent
+		withPR    bool
+		run       func(*testing.T, *PRService, uuid.UUID, int64, string)
+		wantActor string
+		wantBody  string
+	}{
+		{
+			name:   "pull request opened",
+			event:  models.AutomationGitHubEventPullRequestOpened,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestEvent{Action: "opened", Number: 42, OwnerOrgID: &orgID}
+				event.Sender.Login = "octocat"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PR.Title = "Add checkout"
+				event.PR.Body = "Please review"
+				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "opened PR webhook should not fail")
+			},
+			wantActor: "octocat",
+			wantBody:  "Add checkout\n\nPlease review",
+		},
+		{
+			name:  "issue comment on pull request",
+			event: models.AutomationGitHubEventIssueCommentCreated,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := IssueCommentEvent{Action: "created", OwnerOrgID: &orgID}
+				event.Sender.Login = "commenter"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.Issue.Number = 42
+				event.Issue.PullRequest = &struct{}{}
+				event.Comment.Body = "Can you handle this?"
+				require.NoError(t, svc.HandleIssueCommentEvent(context.Background(), event), "PR issue_comment webhook should not fail")
+			},
+			wantActor: "commenter",
+			wantBody:  "Can you handle this?",
+		},
+		{
+			name:   "pull request review submitted",
+			event:  models.AutomationGitHubEventPullRequestReviewSubmitted,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestReviewEvent{Action: "submitted", OwnerOrgID: &orgID}
+				event.Sender.Login = "reviewer"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PullRequest.Number = 42
+				event.Review.State = "commented"
+				event.Review.Body = "Looks close"
+				require.NoError(t, svc.HandlePullRequestReviewEvent(context.Background(), event), "review webhook should not fail")
+			},
+			wantActor: "reviewer",
+			wantBody:  "Looks close",
+		},
+		{
+			name:   "inline pull request review comment",
+			event:  models.AutomationGitHubEventPullRequestReviewCommentCreated,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestReviewCommentEvent{Action: "created", OwnerOrgID: &orgID}
+				event.Sender.Login = "inline-reviewer"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PullRequest.Number = 42
+				event.Comment.Body = "Please adjust this line"
+				require.NoError(t, svc.HandlePullRequestReviewCommentEvent(context.Background(), event), "review comment webhook should not fail")
+			},
+			wantActor: "inline-reviewer",
+			wantBody:  "Please adjust this line",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			repoID := uuid.New()
+			githubRepoID := int64(123)
+			fullName := "acme/app"
+			repoMock := newMockPool(t)
+			prMock := newMockPool(t)
+			triggerer := &recordingAutomationEventTriggerer{}
+			expectGitHubAutomationRepositoryLookup(repoMock, orgID, repoID, githubRepoID, fullName)
+			if tt.withPR {
+				expectUnknownPullRequestLookup(prMock, orgID, fullName, 42)
+			}
+
+			svc := &PRService{
+				repos:                   db.NewRepositoryStore(repoMock),
+				pullRequests:            db.NewPullRequestStore(prMock),
+				automationEventTriggers: triggerer,
+				logger:                  zerolog.Nop(),
+			}
+
+			tt.run(t, svc, orgID, githubRepoID, fullName)
+
+			require.Len(t, triggerer.calls, 1, "webhook should trigger exactly one automation event")
+			require.Equal(t, tt.event, triggerer.calls[0].Event, "webhook should map to the expected automation event")
+			require.Equal(t, orgID, triggerer.calls[0].OrgID, "automation trigger should use the resolved repository org")
+			require.Equal(t, repoID, triggerer.calls[0].RepositoryID, "automation trigger should use the resolved repository id")
+			require.Equal(t, fullName, triggerer.calls[0].Repository, "automation trigger should include repository name")
+			require.Equal(t, 42, triggerer.calls[0].PullRequestNumber, "automation trigger should include PR number")
+			require.Equal(t, tt.wantActor, triggerer.calls[0].Actor, "automation trigger should include GitHub actor")
+			require.Equal(t, tt.wantBody, triggerer.calls[0].Body, "automation trigger should include event text")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+			require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
+		})
 	}
 }
 

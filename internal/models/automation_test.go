@@ -309,3 +309,33 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.Equal(t, float64(0), decoded["pre_pr_review_loops"], "config snapshot should include disabled pre-PR review by default")
 	require.Equal(t, "develop", decoded["base_branch"])
 }
+
+func TestAutomationGitHubEventValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		event   AutomationGitHubEvent
+		wantErr bool
+	}{
+		{name: "pull request opened", event: AutomationGitHubEventPullRequestOpened},
+		{name: "issue comment created", event: AutomationGitHubEventIssueCommentCreated},
+		{name: "pull request review submitted", event: AutomationGitHubEventPullRequestReviewSubmitted},
+		{name: "pull request review comment created", event: AutomationGitHubEventPullRequestReviewCommentCreated},
+		{name: "empty", event: AutomationGitHubEvent(""), wantErr: true},
+		{name: "unknown", event: AutomationGitHubEvent("github.unknown"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.event.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "invalid GitHub automation event should fail validation")
+				return
+			}
+			require.NoError(t, err, "supported GitHub automation event should validate")
+		})
+	}
+}
