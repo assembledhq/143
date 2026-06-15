@@ -2458,7 +2458,7 @@ func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *model
 		SessionID:     instance.SessionID,
 		OrgID:         instance.OrgID,
 		UserID:        instance.UserID,
-		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace"},
+		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace", HomeDir: agent.DefaultSandboxConfig().HomeDir},
 		Config:        cfg,
 		RepositoryID:  uuidPointerValue(session.RepositoryID),
 		BaseCommitSHA: instance.BaseCommitSHA,
