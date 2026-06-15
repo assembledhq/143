@@ -516,14 +516,10 @@ func (h *InternalPreviewHandler) authorizePreviewAction(w http.ResponseWriter, r
 	return previewID, claims, true
 }
 
-// runtimeClaimsValid checks proxy token claims against the active runtime
+// runtimeClaimsValidation checks proxy token claims against the active runtime
 // through a short TTL cache. A cached match is trusted; a miss or mismatch
 // always re-resolves from the DB before rejecting, so a freshly recycled
 // preview (new runtime epoch) is never penalized by a stale cache entry.
-func (h *InternalPreviewHandler) runtimeClaimsValid(ctx context.Context, claims *auth.PreviewTokenClaims, previewID uuid.UUID) bool {
-	return h.runtimeClaimsValidation(ctx, claims, previewID).valid
-}
-
 type runtimeClaimsValidationResult struct {
 	valid       bool
 	failureKind string
