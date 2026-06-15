@@ -1826,7 +1826,7 @@ func TestAuthHandler_AcceptInvitationAndUpsertUser_RecordsDifferentInviteEmail(t
 			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(expectedUserID, now))
-	mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append`).
+	mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO organization_memberships").

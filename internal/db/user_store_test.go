@@ -200,7 +200,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			name:        "returns org user when primary email matches case insensitively",
 			lookupEmail: "Creator@Example.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -213,7 +213,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			lookupEmail: "12345+alice@users.noreply.github.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
 				noreply := "12345+alice@users.noreply.github.com"
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -225,7 +225,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			name:        "returns org user when secondary email matches",
 			lookupEmail: "alice@company.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -237,7 +237,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			name:        "returns error when no org user matches either email column",
 			lookupEmail: "unknown@example.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+github_noreply_email`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(userColumns))
 			},
@@ -283,7 +283,7 @@ func TestUserStore_AddSecondaryEmail(t *testing.T) {
 		{
 			name: "appends new lowercase email when not already present",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
-				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append`).
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
@@ -291,7 +291,7 @@ func TestUserStore_AddSecondaryEmail(t *testing.T) {
 		{
 			name: "returns error when database exec fails",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
-				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append`).
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(errors.New("connection refused"))
 			},

@@ -65,7 +65,7 @@ func TestRemoveGeminiCLIMigrationKeepsHistoricalSessionsReadable(t *testing.T) {
 		"migration should normalize saved automation config away from gemini_cli")
 }
 
-func TestUsersSecondaryEmailsMigrationBackfillsBeforeNotNull(t *testing.T) {
+func TestUsersSecondaryEmailsMigrationIsExpandOnly(t *testing.T) {
 	t.Parallel()
 
 	body, err := os.ReadFile("../../migrations/000189_users_secondary_emails.up.sql")
@@ -73,13 +73,13 @@ func TestUsersSecondaryEmailsMigrationBackfillsBeforeNotNull(t *testing.T) {
 
 	sql := string(body)
 	require.Contains(t, sql, "ALTER TABLE users ADD COLUMN secondary_emails text[];",
-		"migration should add secondary_emails nullable first to avoid a lock-heavy defaulted not-null add")
-	require.Contains(t, sql, "UPDATE users\nSET secondary_emails = '{}'\nWHERE secondary_emails IS NULL;",
-		"migration should backfill existing users before adding the not-null constraint")
-	require.Contains(t, sql, "ALTER TABLE users ALTER COLUMN secondary_emails SET DEFAULT '{}';",
-		"migration should set the default after the column exists")
-	require.Contains(t, sql, "ALTER TABLE users ALTER COLUMN secondary_emails SET NOT NULL;",
-		"migration should constrain secondary_emails after existing rows are backfilled")
+		"migration should add secondary_emails as a nullable expand-only column")
+	require.NotContains(t, sql, "UPDATE users",
+		"migration should not backfill users in the schema migration")
+	require.NotContains(t, sql, "SET DEFAULT",
+		"migration should not set a default that can require table-wide validation")
+	require.NotContains(t, sql, "SET NOT NULL",
+		"migration should leave secondary_emails nullable and let queries coalesce null arrays")
 }
 
 func TestMigrationsAllowBuilderRole(t *testing.T) {

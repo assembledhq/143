@@ -252,7 +252,7 @@ func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email
 		WHERE org_id = @org_id
 		  AND (LOWER(email) = LOWER(@email)
 		       OR LOWER(github_noreply_email) = LOWER(@email)
-		       OR LOWER(@email) = ANY(secondary_emails))`, userSelectColumns)
+		       OR LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))`, userSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
 	if err != nil {
@@ -268,10 +268,10 @@ func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email
 func (s *UserStore) AddSecondaryEmail(ctx context.Context, orgID, userID uuid.UUID, email string) error {
 	query := `
 		UPDATE users
-		SET secondary_emails = array_append(secondary_emails, LOWER(@email))
+		SET secondary_emails = array_append(COALESCE(secondary_emails, '{}'::text[]), LOWER(@email))
 		WHERE id = @id
 		  AND org_id = @org_id
-		  AND NOT (LOWER(@email) = ANY(secondary_emails))`
+		  AND NOT (LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))`
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":     userID,
