@@ -149,7 +149,24 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
-	// 4. Build failure
+	// 4. Upstream transport failure reaching the agent's model backend. These
+	// are connection-level failures sending the request (DNS, TLS, egress, or a
+	// dropped response stream) rather than HTTP error responses, so they surface
+	// as "error sending request for url", a dropped responses stream, or the
+	// codex rmcp transport worker quitting ("transport channel closed"). They're
+	// transient network/egress blips — often hit when resuming a stale session —
+	// so advise a retry instead of falling through to the unhelpful default.
+	if IsUpstreamTransportError(errorMsg) {
+		return &FailureSummary{
+			Explanation:  "The agent lost its network connection to the model backend before finishing. This is a transient infrastructure issue (sandbox egress or an upstream blip), not a problem with the fix.",
+			Category:     FailureCategoryTooling,
+			SubType:      "upstream_transport",
+			NextSteps:    []string{"Retry the run — transport drops are usually transient", "Check the model provider's status page if it keeps happening", "If it persists, verify the sandbox's network egress to the model backend"},
+			RetryAdvised: true,
+		}
+	}
+
+	// 5. Build failure
 	if containsAny(errorMsg, "build failed", "compilation error", "syntax error") {
 		return &FailureSummary{
 			Explanation:  "The agent's changes caused a build failure. The generated code had compilation or syntax errors that prevented a successful build.",
@@ -160,7 +177,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
-	// 5. Empty diff with no error — agent couldn't figure out what to change
+	// 6. Empty diff with no error — agent couldn't figure out what to change
 	if diff == "" && errorMsg == "" {
 		return &FailureSummary{
 			Explanation:  "The agent was unable to produce a code change. It could not identify the right files to modify or determine a clear fix for this issue.",
@@ -171,7 +188,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
-	// 6. Test regression (check result_summary and error for test failure signals)
+	// 7. Test regression (check result_summary and error for test failure signals)
 	if containsAny(errorMsg, "test failed", "test regression", "tests failed") ||
 		containsAny(resultSummary, "test failed", "test regression", "tests failed") {
 		return &FailureSummary{
@@ -183,7 +200,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
-	// 7. Security violation
+	// 8. Security violation
 	if containsAny(errorMsg, "security violation", "security scan", "vulnerability") ||
 		containsAny(resultSummary, "security violation", "security scan", "vulnerability") {
 		return &FailureSummary{
@@ -195,7 +212,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
-	// 8. Large diff — likely too complex
+	// 9. Large diff — likely too complex
 	if diff != "" && countLines(diff) > 500 {
 		return &FailureSummary{
 			Explanation:  "The agent produced a very large change spanning many lines. Changes of this size are often unreliable and may indicate the issue requires a more targeted approach.",
@@ -206,7 +223,7 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
-	// 9. Default — not enough signal to classify specifically
+	// 10. Default — not enough signal to classify specifically
 	return &FailureSummary{
 		Explanation:  "The agent was unable to produce a successful fix. There wasn't enough context to determine a clear solution for this issue.",
 		Category:     "context",
@@ -228,6 +245,18 @@ func (s *FailureService) UpdateRunWithFailure(ctx context.Context, orgID, runID 
 		Msg("updated agent run with failure analysis")
 
 	return nil
+}
+
+// IsUpstreamTransportError reports whether an error string describes a
+// connection-level failure reaching the agent's model backend (DNS, TLS,
+// egress, or a dropped response stream) rather than an HTTP error response.
+// Shared by classifyFailure and the codex adapter's abnormal-exit logging so
+// both recognize the same transport-blip shape from a single source of truth.
+func IsUpstreamTransportError(errorMsg string) bool {
+	return containsAny(strings.ToLower(errorMsg),
+		"error sending request for url",
+		"stream disconnected before completion",
+		"transport channel closed")
 }
 
 // containsAny checks if s contains any of the given substrings.

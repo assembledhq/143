@@ -105,6 +105,24 @@ func TestClassifyFailure(t *testing.T) {
 			wantRetryAdvised: true,
 		},
 		{
+			name: "codex responses stream disconnected",
+			run: models.Session{
+				Error: strPtr(`{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"}}`),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "upstream_transport",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "codex rmcp transport channel closed on resume",
+			run: models.Session{
+				Error: strPtr(`restored-workspace fallback after stale agent resume failed: codex CLI exited with code 1: 2026-06-15T09:17:28Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest("http/request failed: error sending request for url (https://chatgpt.com/backend-api/wham/apps)")))`),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "upstream_transport",
+			wantRetryAdvised: true,
+		},
+		{
 			name: "build failure",
 			run: models.Session{
 				Error: strPtr("build failed: exit code 1"),
