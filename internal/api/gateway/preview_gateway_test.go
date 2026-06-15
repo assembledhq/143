@@ -2329,3 +2329,18 @@ func TestGateway_ProxyToWorker_NavigationToStoppedPreviewShowsOverlay(t *testing
 	require.Contains(t, rr.Body.String(), "Restart preview", "the overlay should expose the restart action")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestPreviewWorkerFailureReasonIncludesAuthDetail(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t,
+		"preview worker auth/routing failure: UNAUTHORIZED invalid preview token (bad_signature)",
+		previewWorkerFailureReason("UNAUTHORIZED", "invalid preview token", "bad_signature"),
+		"the stored runtime reason should carry the coarse auth-failure class for app-side diagnosis",
+	)
+	require.Equal(t,
+		"preview worker auth/routing failure: UNAUTHORIZED invalid preview token",
+		previewWorkerFailureReason("UNAUTHORIZED", "invalid preview token", ""),
+		"an absent auth detail should leave the reason unchanged for backward compatibility",
+	)
+}

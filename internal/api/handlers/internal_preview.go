@@ -85,6 +85,7 @@ func (h *InternalPreviewHandler) authorize(w http.ResponseWriter, r *http.Reques
 	tokenStr := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	if tokenStr == "" {
 		markPreviewWorkerError(w)
+		w.Header().Set(auth.PreviewWorkerAuthDetailHeader, "missing")
 		h.logPreviewAuthorizationRejected(r, "missing_token", action, nil, nil)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing authorization token")
 		return nil, false
@@ -92,6 +93,11 @@ func (h *InternalPreviewHandler) authorize(w http.ResponseWriter, r *http.Reques
 	claims, err := h.keyring.Validate(tokenStr)
 	if err != nil {
 		markPreviewWorkerError(w)
+		// Surface a coarse, non-sensitive failure class on the trusted
+		// worker→gateway hop so the app-side logs (which ship reliably) can
+		// distinguish a divergent secret (bad_signature) from clock skew
+		// (expired) without leaking crypto detail to the browser.
+		w.Header().Set(auth.PreviewWorkerAuthDetailHeader, auth.ClassifyPreviewTokenError(err))
 		h.logPreviewAuthorizationRejected(r, "invalid_token", action, nil, err)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid preview token", err)
 		return nil, false
@@ -679,7 +685,10 @@ func (h *InternalPreviewHandler) handleHTTPProxy(w http.ResponseWriter, r *http.
 		},
 		Transport: h.previewTransport(orgID, previewID),
 		ModifyResponse: func(resp *http.Response) error {
+			// Strip control-plane markers a previewed app might set so it can't
+			// spoof a worker auth/routing failure to the public gateway.
 			resp.Header.Del(auth.PreviewWorkerErrorHeader)
+			resp.Header.Del(auth.PreviewWorkerAuthDetailHeader)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
