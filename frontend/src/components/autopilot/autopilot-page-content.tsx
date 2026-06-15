@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { parseAsString, useQueryState } from "nuqs";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
+import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Loader2, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { AutopilotConfigFooter } from "./autopilot-config-footer";
@@ -14,6 +14,7 @@ import { useAnalyze } from "@/hooks/use-analyze";
 import { AutopilotSteeringSheet } from "./autopilot-steering-sheet";
 import { AutopilotDocumentsSheet } from "./autopilot-documents-sheet";
 import { AutopilotProposalCard } from "@/components/autopilot-proposal-card";
+import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { SessionLinearBadge } from "@/components/session-linear-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,6 +68,10 @@ const SORT_OPTIONS = [
   { value: "freshness", label: "Freshness" },
   { value: "run_state", label: "Run state" },
 ];
+
+const PREVIEW_ORIGIN_TEMPLATE =
+  process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
+  "http://{id}.preview.localhost:9090";
 
 export function AutopilotPageContent() {
   const router = useRouter();
@@ -471,6 +476,10 @@ function RunState({ row }: { row: AutopilotQueueRow }) {
 }
 
 function RowAction({ row, onStartRun, canOverrideBlocked }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void; canOverrideBlocked: boolean }) {
+  if (hasPreviewAction(row)) {
+    return <PreviewRowAction row={row} />;
+  }
+
   if (canStartSession(row, canOverrideBlocked)) {
     return <Button size="sm" onClick={() => onStartRun(row)}><Play className="h-3.5 w-3.5" />Start run</Button>;
   }
@@ -491,6 +500,108 @@ function RowAction({ row, onStartRun, canOverrideBlocked }: { row: AutopilotQueu
       <TooltipContent>{row.action_disabled_reason ?? "This issue cannot be started yet."}</TooltipContent>
     </Tooltip>
   );
+}
+
+function PreviewRowAction({ row }: { row: AutopilotQueueRow }) {
+  const queryClient = useQueryClient();
+  const preview = row.latest_preview;
+  const refreshQueue = () => {
+    void queryClient.invalidateQueries({ queryKey: ["autopilot", "queue"] });
+  };
+  const startLatest = useMutation({
+    mutationFn: () => api.previews.startLatest(preview?.target_id ?? ""),
+    onSuccess: refreshQueue,
+    onError: (error) => {
+      console.error("Failed to start latest preview", error);
+    },
+  });
+  const retry = useMutation({
+    mutationFn: () => preview?.preview_id
+      ? api.previews.restart(preview.preview_id, { start_latest: true })
+      : api.previews.startLatest(preview?.target_id ?? ""),
+    onSuccess: refreshQueue,
+    onError: (error) => {
+      console.error("Failed to retry preview", error);
+    },
+  });
+
+  if (!preview) {
+    return null;
+  }
+
+  const previewUrl = previewURLForID(preview.preview_id);
+  const canOpen = Boolean(preview.preview_id && previewUrl);
+  const isCurrent = !preview.new_commits_available;
+  const isOpenable = preview.status === "ready" || preview.status === "partially_ready" || preview.status === "unhealthy";
+
+  if (preview.new_commits_available) {
+    return (
+      <div className="flex justify-end gap-2">
+        {canOpen && isOpenable ? (
+          <OpenPreviewButton
+            previewId={preview.preview_id}
+            previewUrl={previewUrl}
+            label="Open stale preview"
+            variant="outline"
+            size="sm"
+          />
+        ) : null}
+        <Button size="sm" onClick={() => startLatest.mutate()} disabled={startLatest.isPending}>
+          <Play className="h-3.5 w-3.5" />
+          {startLatest.isPending ? "Updating..." : "Update to latest"}
+        </Button>
+      </div>
+    );
+  }
+
+  if (isCurrent && isOpenable && canOpen) {
+    return (
+      <OpenPreviewButton
+        previewId={preview.preview_id}
+        previewUrl={previewUrl}
+        label="Open preview"
+        size="sm"
+      />
+    );
+  }
+
+  if (preview.status === "failed" || preview.status === "unavailable") {
+    return (
+      <Button size="sm" onClick={() => retry.mutate()} disabled={retry.isPending}>
+        <RotateCcw className="h-3.5 w-3.5" />
+        {retry.isPending ? "Retrying..." : "Retry preview"}
+      </Button>
+    );
+  }
+
+  if (preview.status === "stopped" || preview.status === "expired" || preview.status === "target_created") {
+    return (
+      <Button size="sm" onClick={() => startLatest.mutate()} disabled={startLatest.isPending}>
+        <Play className="h-3.5 w-3.5" />
+        {startLatest.isPending ? "Starting..." : "Start preview"}
+      </Button>
+    );
+  }
+
+  if (preview.status === "starting") {
+    return (
+      <Button size="sm" disabled>
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Starting...
+      </Button>
+    );
+  }
+
+  return null;
+}
+
+function hasPreviewAction(row: AutopilotQueueRow) {
+  return Boolean(row.available_action === "open_pr" && row.latest_preview && row.latest_pr?.status === "open");
+}
+
+function previewURLForID(previewID?: string) {
+  if (!previewID) return undefined;
+  return PREVIEW_ORIGIN_TEMPLATE.replace("{id}", previewID);
 }
 
 function canStartSession(row: AutopilotQueueRow, canOverrideBlocked: boolean) {
