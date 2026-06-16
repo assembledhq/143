@@ -122,7 +122,71 @@ type PreviewTarget struct {
 	SourceURL            string            `db:"source_url" json:"source_url,omitempty"`
 	CreatedByUserID      uuid.UUID         `db:"created_by_user_id" json:"created_by_user_id"`
 	RequestID            *string           `db:"request_id" json:"request_id,omitempty"`
+	PreviewGroupID       *uuid.UUID        `db:"preview_group_id" json:"preview_group_id,omitempty"`
 	CreatedAt            time.Time         `db:"created_at" json:"created_at"`
+}
+
+// PreviewGroup is the current user-facing preview surface for a branch, PR,
+// source, session, or explicitly pinned commit.
+type PreviewGroup struct {
+	ID                uuid.UUID         `db:"id" json:"preview_group_id"`
+	OrgID             uuid.UUID         `db:"org_id" json:"org_id"`
+	RepositoryID      uuid.UUID         `db:"repository_id" json:"repository_id"`
+	GroupKind         PreviewGroupKind  `db:"group_kind" json:"group_kind"`
+	Branch            string            `db:"branch" json:"branch"`
+	PreviewConfigName string            `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	PullRequestNumber *int              `db:"pull_request_number" json:"pull_request_number,omitempty"`
+	SourceType        PreviewSourceType `db:"source_type" json:"source_type"`
+	SourceID          string            `db:"source_id" json:"source_id,omitempty"`
+	SourceURL         string            `db:"source_url" json:"source_url,omitempty"`
+	CurrentTargetID   *uuid.UUID        `db:"current_target_id" json:"current_target_id,omitempty"`
+	LatestCommitSHA   string            `db:"latest_commit_sha" json:"latest_commit_sha,omitempty"`
+	CurrentStatus     string            `db:"current_status" json:"current_status"`
+	Pinned            bool              `db:"pinned" json:"pinned"`
+	CreatedByUserID   *uuid.UUID        `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt         time.Time         `db:"created_at" json:"created_at"`
+	LastActivityAt    time.Time         `db:"last_activity_at" json:"last_activity_at"`
+}
+
+// PreviewLaunchRecommendation is a compact product recommendation for grouped
+// preview rows. It keeps the frontend from re-encoding backend lifecycle rules.
+type PreviewLaunchRecommendation struct {
+	Action         PreviewLaunchAction `json:"action"`
+	PrimaryLabel   string              `json:"primary_label"`
+	SecondaryLabel string              `json:"secondary_label,omitempty"`
+	Message        string              `json:"message,omitempty"`
+}
+
+// PreviewCurrentSummary is the API/list shape for the grouped current preview index.
+type PreviewCurrentSummary struct {
+	PreviewGroup
+	RepositoryFullName    string                      `db:"repository_full_name" json:"repository_full_name"`
+	Status                PreviewStatus               `db:"status" json:"status"`
+	Freshness             PreviewCurrentFreshness     `db:"freshness" json:"freshness"`
+	RunningCommitSHA      string                      `db:"running_commit_sha" json:"running_commit_sha,omitempty"`
+	CurrentPreviewID      *uuid.UUID                  `db:"current_preview_id" json:"current_preview_id,omitempty"`
+	PreviewURL            *string                     `db:"-" json:"preview_url,omitempty"`
+	StableURL             string                      `db:"-" json:"stable_url"`
+	ExpiresAt             *time.Time                  `db:"expires_at" json:"expires_at,omitempty"`
+	StoppedAt             *time.Time                  `db:"stopped_at" json:"stopped_at,omitempty"`
+	StoppedReason         PreviewStoppedReason        `db:"stopped_reason" json:"stopped_reason,omitempty"`
+	Error                 string                      `db:"error" json:"error,omitempty"`
+	CurrentPhase          string                      `db:"current_phase" json:"current_phase,omitempty"`
+	AttemptCount          int                         `db:"attempt_count" json:"attempt_count"`
+	TargetCount           int                         `db:"target_count" json:"target_count"`
+	Resumable             bool                        `db:"resumable" json:"resumable"`
+	ResumeEstimateSeconds *int                        `db:"resume_estimate_seconds" json:"resume_estimate_seconds,omitempty"`
+	Launch                PreviewLaunchRecommendation `db:"-" json:"launch"`
+}
+
+type PreviewTargetHistory struct {
+	TargetID          uuid.UUID         `db:"target_id" json:"target_id"`
+	CommitSHA         string            `db:"commit_sha" json:"commit_sha"`
+	PreviewConfigName string            `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	SourceType        PreviewSourceType `db:"source_type" json:"source_type"`
+	SourceID          string            `db:"source_id" json:"source_id,omitempty"`
+	CreatedAt         time.Time         `db:"created_at" json:"created_at"`
+	IsLatestHead      bool              `db:"is_latest_head" json:"is_latest_head"`
 }
 
 // RepositoryPreviewPolicy stores the per-repository auto-preview mode.

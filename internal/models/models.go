@@ -967,16 +967,17 @@ type LatestJobError struct {
 
 // Job type constants for async work queue items.
 const (
-	JobTypePMAnalyze           = "pm_analyze"
-	JobTypePMBootstrap         = "pm_bootstrap"
-	JobTypePMContextRefresh    = "pm_context_refresh"
-	JobTypeProjectCycle        = "project_cycle"
-	JobTypeAutomationRun       = "automation_run"
-	JobTypeStartPreview        = "start_preview"
-	JobTypeStartBranchPreview  = "start_branch_preview"
-	JobTypeAutoPreviewDeferred = "auto_preview_deferred"
-	JobTypeSyncGitHubOrgRoster = "sync_github_org_roster"
-	JobTypePreviewCachePrewarm = "preview_cache_prewarm"
+	JobTypePMAnalyze             = "pm_analyze"
+	JobTypePMBootstrap           = "pm_bootstrap"
+	JobTypePMContextRefresh      = "pm_context_refresh"
+	JobTypeProjectCycle          = "project_cycle"
+	JobTypeAutomationRun         = "automation_run"
+	JobTypeStartPreview          = "start_preview"
+	JobTypeStartBranchPreview    = "start_branch_preview"
+	JobTypeAutoPreviewDeferred   = "auto_preview_deferred"
+	JobTypeSyncGitHubOrgRoster   = "sync_github_org_roster"
+	JobTypePreviewCachePrewarm   = "preview_cache_prewarm"
+	JobTypeBackfillPreviewGroups = "backfill_preview_groups"
 )
 
 // Job represents an async work queue item.

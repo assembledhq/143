@@ -161,9 +161,12 @@ func TestPreviewLaunchAction_Validate(t *testing.T) {
 		{name: "resume is valid", action: PreviewLaunchActionResume},
 		{name: "start is valid", action: PreviewLaunchActionStart},
 		{name: "start latest is valid", action: PreviewLaunchActionStartLatest},
+		{name: "restart is valid", action: PreviewLaunchActionRestart},
 		{name: "retry is valid", action: PreviewLaunchActionRetry},
+		{name: "cancel is valid", action: PreviewLaunchActionCancel},
 		{name: "blocked is valid", action: PreviewLaunchActionBlocked},
 		{name: "closed is valid", action: PreviewLaunchActionClosed},
+		{name: "none is valid", action: PreviewLaunchActionNone},
 		{name: "empty is invalid", action: "", wantErr: true},
 		{name: "bogus is invalid", action: "bogus", wantErr: true},
 	}
@@ -178,6 +181,67 @@ func TestPreviewLaunchAction_Validate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "PreviewLaunchAction should accept known launch actions")
+		})
+	}
+}
+
+func TestPreviewGroupKind_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		kind    PreviewGroupKind
+		wantErr bool
+	}{
+		{name: "pull request is valid", kind: PreviewGroupKindPullRequest},
+		{name: "branch is valid", kind: PreviewGroupKindBranch},
+		{name: "source is valid", kind: PreviewGroupKindSource},
+		{name: "session is valid", kind: PreviewGroupKindSession},
+		{name: "pinned is valid", kind: PreviewGroupKindPinned},
+		{name: "empty is invalid", kind: "", wantErr: true},
+		{name: "bogus is invalid", kind: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.kind.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewGroupKind should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewGroupKind should accept known values")
+		})
+	}
+}
+
+func TestPreviewCurrentFreshness_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		freshness PreviewCurrentFreshness
+		wantErr   bool
+	}{
+		{name: "current is valid", freshness: PreviewCurrentFreshnessCurrent},
+		{name: "outdated is valid", freshness: PreviewCurrentFreshnessOutdated},
+		{name: "unknown is valid", freshness: PreviewCurrentFreshnessUnknown},
+		{name: "pinned is valid", freshness: PreviewCurrentFreshnessPinned},
+		{name: "empty is invalid", freshness: "", wantErr: true},
+		{name: "bogus is invalid", freshness: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.freshness.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewCurrentFreshness should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewCurrentFreshness should accept known values")
 		})
 	}
 }

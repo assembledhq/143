@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -24,7 +25,8 @@ import (
 // It uses TxStarter because stop operations need transactional consistency
 // (stop preview + revoke all access sessions atomically).
 type PreviewStore struct {
-	db TxStarter
+	db     TxStarter
+	logger zerolog.Logger
 }
 
 // PreviewHealthSample is a platform-wide preview lifecycle snapshot for ops
@@ -40,7 +42,12 @@ type PreviewHealthSample struct {
 
 // NewPreviewStore creates a new PreviewStore.
 func NewPreviewStore(db TxStarter) *PreviewStore {
-	return &PreviewStore{db: db}
+	return &PreviewStore{db: db, logger: zerolog.Nop()}
+}
+
+// SetLogger replaces the store logger. lint:allow-no-orgid reason="logger configuration helper reads no tenant data"
+func (s *PreviewStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 // Configured reports whether the store has a backing database handle.
@@ -58,7 +65,7 @@ func (s *PreviewStore) Begin(ctx context.Context) (pgx.Tx, error) {
 // WithTx returns a new PreviewStore that uses the given transaction.
 // lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
-	return &PreviewStore{db: tx}
+	return &PreviewStore{db: tx, logger: s.logger}
 }
 
 // activeStatusFilter is the SQL IN clause for active preview statuses.
@@ -91,7 +98,7 @@ const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, w
 
 const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
 	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
-	created_by_user_id, request_id, created_at`
+	created_by_user_id, request_id, preview_group_id, created_at`
 
 const previewLinkColumns = `id, org_id, preview_target_id, link_type, slug,
 	repository_id, pr_number, created_at, updated_at`
@@ -228,6 +235,9 @@ func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.P
 		return fmt.Errorf("scan preview target: %w", scanErr)
 	}
 	*target = row
+	if _, err := s.UpsertPreviewGroupForTarget(ctx, target.OrgID, *target, target.CommitSHA); err != nil {
+		return fmt.Errorf("upsert preview group for target: %w", err)
+	}
 	return nil
 }
 
@@ -1356,7 +1366,17 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	if err != nil {
 		return 0, fmt.Errorf("update preview status: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	rows := tag.RowsAffected()
+	if rows > 0 {
+		if err := s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("preview_id", id.String()).
+				Str("status", string(status)).
+				Msg("failed to sync preview group status")
+		}
+	}
+	return rows, nil
 }
 
 // UpdatePreviewStatusIfActive atomically transitions a preview to the given
@@ -1419,7 +1439,17 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	if err != nil {
 		return 0, fmt.Errorf("conditional update preview status: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	rows := tag.RowsAffected()
+	if rows > 0 {
+		if err := s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("preview_id", id.String()).
+				Str("status", string(status)).
+				Msg("failed to sync preview group status")
+		}
+	}
+	return rows, nil
 }
 
 func (s *PreviewStore) UpdatePreviewSourceWorkspaceRevision(ctx context.Context, orgID, id uuid.UUID, revision int64, revisionUpdatedAt time.Time) error {

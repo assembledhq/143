@@ -1,9 +1,8 @@
 # 101 - Slackbot Implementation Plan
 
-> **Status:** Phases 1-8 implemented; remaining follow-up is enterprise
-> multi-org retargeting beyond the current single-active-org Slack install
-> model
-> **Last reviewed:** 2026-06-15
+> **Status:** Phases 1-8 implemented, including per-Slack-user org
+> retargeting for multi-org Slack workspaces.
+> **Last reviewed:** 2026-06-16
 >
 > **Builds on:** [../future/92-slackbot-product-surface.md](../future/92-slackbot-product-surface.md)
 
@@ -178,7 +177,10 @@ than generic text, notification kinds are typed with template defaults, and raw
 Slack inbound payloads have redaction plus a bounded retention cleanup path.
 Known preview targets use direct preview control-plane paths, PR merge/create
 actions use durable product jobs and services, and Slack health/metrics expose
-operator-facing install and delivery signals.
+operator-facing install and delivery signals. Slack App Home org selection now
+persists a per-Slack-user selected org so future signed callbacks in
+multi-org workspaces route to the chosen active installation instead of the
+global team/app fallback.
 
 ## Target Architecture
 
@@ -649,7 +651,8 @@ Implemented:
   preview target`, and `Choose PR`.
 - Missing-context modals use structured Slack selects for preview, PR, and
   branch targets; submissions continue the original Slack-started session with
-  the selected context.
+  the selected context, and structured preview-target selections create
+  previews directly when the target is known.
 
 Goal: the bot asks precise follow-up questions instead of starting vague work.
 
@@ -717,6 +720,9 @@ Audit notes:
 - Slack preview creation action payloads can pass `session_id`,
   `pull_request_id`, `repository_id`, `branch`, `commit_sha`, and
   `config_name`; missing structured context still opens the context modal.
+- Missing-context preview-target modal submissions pass known session, PR,
+  repository, and branch targets directly into `SlackPreviewControl` rather
+  than asking the agent to infer the preview operation.
 - Slack PR actions merge through the PR service, request PR creation through
   the durable `open_pr` job for authorized mapped users, and keep repair as a
   continuation prompt only for agent-owned repair work.
@@ -837,6 +843,8 @@ Audit notes:
   only when Custom is selected.
 - Channel `response_visibility = dm` suppresses general channel fanout while
   preserving configured DM subscribers.
+- Quiet and Balanced notification presets include preview failures; Balanced
+  still excludes preview-stale noise.
 
 Goal: Slack notifications are actionable and low-noise.
 
@@ -901,9 +909,10 @@ Audit notes:
   prompt and attribution metadata remain the durable product record.
 - `SlackInboundEventStore.RedactPayloadsOlderThan` provides a bounded,
   org-scoped retention cleanup path for raw payload JSON.
-- The active Slack installation lookup continues to enforce one active
-  team/app installation globally; Slack App Home org selection explains that
-  retargeting is not automatic.
+- The active Slack installation lookup supports multiple active org installs
+  for the same Slack team/app. A per-Slack-user `slack_org_selections` row,
+  set from App Home, retargets future Events API, slash command, and
+  interaction callbacks to the selected org installation.
 - Slackbot metrics cover inbound events, session starts, outbound messages,
   Slack API failures, interaction actions, rate limits, callback latency,
   dropped updates, dedupe hits, install health, missing scopes, signature
@@ -931,11 +940,10 @@ Privacy:
 
 Multi-org:
 
-- Keep the current single active org per Slack team/app behavior until a full
-  retargeting model exists.
+- Allow multiple active org installs for one Slack team/app.
+- Retarget callbacks only through explicit per-Slack-user org selections set
+  from Slack App Home.
 - Do not silently switch orgs based on Slack user mapping alone.
-- Add explicit org selection only when the installation and authorization model
-  can safely target another org.
 
 Operations:
 
@@ -1064,8 +1072,8 @@ Operational:
 5. Move preview creation to direct control-plane calls.
 6. Add specialized human-input and approval rendering.
 7. Replace basic notification messages with typed templates.
-8. Add retention controls and keep multi-org retargeting as an explicit
-   follow-up before expanding enterprise workspace behavior.
+8. Add retention controls and explicit per-user multi-org retargeting for
+   enterprise Slack workspace behavior.
 
 Each phase should update [../future/92-slackbot-product-surface.md](../future/92-slackbot-product-surface.md)
 when implementation status changes.
