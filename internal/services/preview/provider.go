@@ -150,6 +150,8 @@ type CacheObserver interface {
 	OnDependencyCacheSave(status string, cacheKey string, sizeBytes int64, err error)
 	OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
 	OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error)
+	OnBuildCacheRestore(status string, cacheKey string, sizeBytes int64, err error)
+	OnBuildCacheSave(status string, cacheKey string, sizeBytes int64, err error)
 }
 
 // InfraSnapshot is the current state of a platform infrastructure container.
