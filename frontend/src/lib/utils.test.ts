@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { capitalizeWords, formatTimeAgo, isImageURL, fileNameFromURL } from "./utils";
+import {
+  capitalizeWords,
+  fileNameFromURL,
+  formatTimeAgo,
+  isImageURL,
+  safeExternalUrl,
+} from "./utils";
 
 describe("capitalizeWords", () => {
   it("capitalizes each word in a space-delimited string", () => {
@@ -126,5 +132,23 @@ describe("fileNameFromURL", () => {
 
   it("returns 'file' for empty paths", () => {
     expect(fileNameFromURL("")).toBe("file");
+  });
+});
+
+describe("safeExternalUrl", () => {
+  it("allows http and https absolute URLs", () => {
+    expect(safeExternalUrl("https://preview.143.dev")).toBe(
+      "https://preview.143.dev",
+    );
+    expect(safeExternalUrl("http://abc.preview.localhost:9090")).toBe(
+      "http://abc.preview.localhost:9090",
+    );
+  });
+
+  it("blocks javascript, data, relative, and empty URLs", () => {
+    expect(safeExternalUrl("javascript:alert(1)")).toBeUndefined();
+    expect(safeExternalUrl("data:text/html,hello")).toBeUndefined();
+    expect(safeExternalUrl("/previews/target-1")).toBeUndefined();
+    expect(safeExternalUrl("")).toBeUndefined();
   });
 });

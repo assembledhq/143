@@ -84,7 +84,22 @@ var prPreviewStateTestCols = []string{
 var previewTargetTestCols = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
 	"resolved_config_digest", "source_type", "source_id", "source_url",
-	"created_by_user_id", "request_id", "created_at",
+	"created_by_user_id", "request_id", "preview_group_id", "created_at",
+}
+
+var previewGroupTestCols = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
+}
+
+var previewCurrentSummaryTestCols = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
+	"repository_full_name", "status", "freshness", "running_commit_sha", "current_preview_id",
+	"expires_at", "stopped_at", "stopped_reason", "error", "current_phase", "attempt_count", "target_count",
+	"resumable", "resume_estimate_seconds",
 }
 
 var previewLinkTestCols = []string{
@@ -109,7 +124,7 @@ func newPreviewTargetRow(id, orgID, repoID, userID uuid.UUID, now time.Time) []a
 	return []any{
 		id, orgID, repoID, "feature/previews", "0123456789abcdef0123456789abcdef01234567", "default",
 		"sha256:config", "manual", "source-1", "https://example.com/source",
-		userID, previewStringPtr("req-1"), now,
+		userID, previewStringPtr("req-1"), (*uuid.UUID)(nil), now,
 	}
 }
 
@@ -162,6 +177,20 @@ func TestPreviewStore_CreatePreviewTarget(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO preview_targets").
 		WithArgs(previewAnyArgs(11)...).
 		WillReturnRows(pgxmock.NewRows(previewTargetTestCols).AddRow(newPreviewTargetRow(targetID, orgID, repoID, userID, now)...))
+	groupID := uuid.New()
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	mock.ExpectQuery("INSERT INTO preview_groups").
+		WithArgs(previewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindSource, "feature/previews", "default",
+			(*int)(nil), models.PreviewSourceTypeManual, "source-1", "https://example.com/source", &targetID,
+			"0123456789abcdef0123456789abcdef01234567", "target_created", false, &userID, now, now,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.CreatePreviewTarget(context.Background(), target)
 	require.NoError(t, err, "CreatePreviewTarget should insert a branch target")
@@ -630,11 +659,13 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 		name      string
 		rows      int64
 		execErr   error
+		syncErr   error
 		expectErr bool
 	}{
 		{name: "updates successfully", rows: 1},
 		{name: "not found returns error", rows: 0, expectErr: true},
 		{name: "update error returns error", execErr: errors.New("db down"), expectErr: true},
+		{name: "group sync error is best effort", rows: 1, syncErr: errors.New("group sync failed")},
 	}
 
 	for _, tt := range tests {
@@ -642,7 +673,7 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 			t.Parallel()
 
 			mock, err := pgxmock.NewPool()
-			require.NoError(t, err)
+			require.NoError(t, err, "pgxmock pool should be created")
 			defer mock.Close()
 
 			store := NewPreviewStore(mock)
@@ -651,14 +682,20 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 				WithArgs(previewAnyArgs(5)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
+			if tt.rows > 0 && tt.execErr == nil {
+				mock.ExpectExec("UPDATE preview_groups pg").
+					WithArgs(previewAnyArgs(3)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1)).
+					WillReturnError(tt.syncErr)
+			}
 
 			err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
 			if tt.expectErr {
-				require.Error(t, err)
+				require.Error(t, err, "UpdatePreviewStatus should return expected errors")
 			} else {
-				require.NoError(t, err)
+				require.NoError(t, err, "UpdatePreviewStatus should update preview status")
 			}
-			require.NoError(t, mock.ExpectationsWereMet())
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }
@@ -768,6 +805,503 @@ func TestPreviewStore_ListBranchPreviewIndex_IncludesRuntimeOnlySessionPreview(t
 			Resumable:          false,
 		},
 	}, summaries, "runtime-only session previews should be projected into preview index rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestParsePRSourceID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sourceID   string
+		wantOwner  string
+		wantRepo   string
+		wantNumber int
+		wantOK     bool
+	}{
+		{name: "plain PR source", sourceID: "acme/app#42", wantOwner: "acme", wantRepo: "app", wantNumber: 42, wantOK: true},
+		{name: "PR source with commit suffix", sourceID: "acme/app#42@abc123", wantOwner: "acme", wantRepo: "app", wantNumber: 42, wantOK: true},
+		{name: "missing number", sourceID: "acme/app", wantOK: false},
+		{name: "non numeric number", sourceID: "acme/app#nope", wantOK: false},
+		{name: "blank", sourceID: "", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			owner, repo, number, ok := ParsePRSourceID(tt.sourceID)
+			require.Equal(t, tt.wantOK, ok, "ParsePRSourceID should report whether the source is a PR")
+			require.Equal(t, tt.wantOwner, owner, "ParsePRSourceID should parse owner")
+			require.Equal(t, tt.wantRepo, repo, "ParsePRSourceID should parse repo")
+			require.Equal(t, tt.wantNumber, number, "ParsePRSourceID should parse PR number")
+		})
+	}
+}
+
+func TestPreviewStore_UpsertPreviewGroupForTarget_ClassifiesPRBeforeSource(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	targetID := uuid.New()
+	groupID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	target := models.PreviewTarget{
+		ID:                targetID,
+		OrgID:             orgID,
+		RepositoryID:      repoID,
+		Branch:            "feature/pr",
+		CommitSHA:         "abc123",
+		PreviewConfigName: "web",
+		SourceType:        models.PreviewSourceTypeAutomation,
+		SourceID:          "acme/app#42@abc123",
+		SourceURL:         "https://github.com/acme/app/pull/42",
+		CreatedByUserID:   userID,
+		CreatedAt:         now,
+	}
+	prNumber := 42
+
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(string(models.PreviewStatusReady)))
+	mock.ExpectQuery("INSERT INTO preview_groups[\\s\\S]+ON CONFLICT").
+		WithArgs(previewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindPullRequest, "feature/pr", "web",
+			&prNumber, models.PreviewSourceTypePullRequest, "acme/app#42", "https://github.com/acme/app/pull/42", &targetID,
+			"abc123", string(models.PreviewStatusReady), false, &userID, now, now,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	group, err := store.UpsertPreviewGroupForTarget(context.Background(), orgID, target, "abc123")
+	require.NoError(t, err, "UpsertPreviewGroupForTarget should upsert PR group")
+	require.Equal(t, models.PreviewGroupKindPullRequest, group.GroupKind, "PR source IDs should classify as PR groups before source groups")
+	require.NotNil(t, group.PullRequestNumber, "PR groups should carry the PR number")
+	require.Equal(t, 42, *group.PullRequestNumber, "PR group should parse number from source ID")
+	require.Equal(t, models.PreviewSourceTypePullRequest, group.SourceType, "PR grouping should normalize source type for the group")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpsertPreviewGroupStatus_UpdatesGroupForCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	groupID := uuid.New()
+
+	mock.ExpectExec("UPDATE preview_groups").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpsertPreviewGroupStatus(context.Background(), orgID, groupID, models.PreviewStatusReady)
+	require.NoError(t, err, "UpsertPreviewGroupStatus should update current status")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_ListPreviewCurrentIndex_ReturnsGroupedRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	rows := pgxmock.NewRows(previewCurrentSummaryTestCols).AddRow(
+		groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/shared", "",
+		nil, models.PreviewSourceTypeManual, "", "", &targetID,
+		"def456", string(models.PreviewStatusReady), false, &userID, now, now,
+		"acme/app", string(models.PreviewStatusReady), models.PreviewCurrentFreshnessCurrent, "def456", &previewID,
+		&now, nil, "", "", "ready", 10, 3, false, (*int)(nil),
+	)
+
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+COALESCE\\(latest\\.status, pg\\.current_status\\) IN").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(rows)
+
+	summaries, err := store.ListPreviewCurrentIndex(context.Background(), orgID, PreviewCurrentIndexFilters{
+		Scope: "running",
+		Limit: 20,
+	})
+	require.NoError(t, err, "ListPreviewCurrentIndex should return grouped preview summaries")
+	require.Equal(t, []models.PreviewCurrentSummary{
+		{
+			PreviewGroup: models.PreviewGroup{
+				ID:              groupID,
+				OrgID:           orgID,
+				RepositoryID:    repoID,
+				GroupKind:       models.PreviewGroupKindBranch,
+				Branch:          "feature/shared",
+				SourceType:      models.PreviewSourceTypeManual,
+				CurrentTargetID: &targetID,
+				LatestCommitSHA: "def456",
+				CurrentStatus:   string(models.PreviewStatusReady),
+				CreatedByUserID: &userID,
+				CreatedAt:       now,
+				LastActivityAt:  now,
+			},
+			RepositoryFullName: "acme/app",
+			Status:             models.PreviewStatusReady,
+			Freshness:          models.PreviewCurrentFreshnessCurrent,
+			RunningCommitSHA:   "def456",
+			CurrentPreviewID:   &previewID,
+			ExpiresAt:          &now,
+			CurrentPhase:       "ready",
+			AttemptCount:       10,
+			TargetCount:        3,
+		},
+	}, summaries, "ListPreviewCurrentIndex should hydrate grouped current rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewGroupsLatestSHAForBranch_UpdatesMatchingGroups(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectExec("UPDATE preview_groups").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	n, err := store.UpdatePreviewGroupsLatestSHAForBranch(context.Background(), orgID, repoID, "feature/x", "newsha")
+	require.NoError(t, err, "UpdatePreviewGroupsLatestSHAForBranch should succeed")
+	require.Equal(t, int64(2), n, "should report rows affected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpdatePreviewGroupsLatestSHAForPR_UpdatesMatchingGroups(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectExec("UPDATE preview_groups").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	n, err := store.UpdatePreviewGroupsLatestSHAForPR(context.Background(), orgID, repoID, 99, "headsha")
+	require.NoError(t, err, "UpdatePreviewGroupsLatestSHAForPR should succeed")
+	require.Equal(t, int64(1), n, "should report rows affected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpsertPreviewGroupForTarget_IdempotentOnSameIdentity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	targetID := uuid.New()
+	groupID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	target := models.PreviewTarget{
+		ID: targetID, OrgID: orgID, RepositoryID: repoID,
+		Branch: "feature/idempotent", CommitSHA: "abc123", PreviewConfigName: "web",
+		SourceType: models.PreviewSourceTypeManual, CreatedByUserID: userID, CreatedAt: now,
+	}
+
+	for i := 0; i < 2; i++ {
+		mock.ExpectQuery("SELECT COALESCE").
+			WithArgs(previewAnyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+		mock.ExpectQuery("INSERT INTO preview_groups[\\s\\S]+ON CONFLICT").
+			WithArgs(previewAnyArgs(15)...).
+			WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+				groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/idempotent", "web",
+				nil, models.PreviewSourceTypeManual, "", "", &targetID,
+				"abc123", "target_created", false, &userID, now, now,
+			))
+		mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+			WithArgs(previewAnyArgs(3)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	}
+
+	g1, err := store.UpsertPreviewGroupForTarget(context.Background(), orgID, target, "abc123")
+	require.NoError(t, err, "first upsert should succeed")
+	require.Equal(t, groupID, g1.ID, "first upsert should return the group ID")
+
+	g2, err := store.UpsertPreviewGroupForTarget(context.Background(), orgID, target, "abc123")
+	require.NoError(t, err, "second upsert with same identity should also succeed without error")
+	require.Equal(t, groupID, g2.ID, "second upsert should return the same group ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_UpsertPreviewGroupForTarget_NewerTargetBecomesCurrentTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	groupID := uuid.New()
+	targetID1 := uuid.New()
+	targetID2 := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	later := now.Add(time.Minute)
+
+	target1 := models.PreviewTarget{
+		ID: targetID1, OrgID: orgID, RepositoryID: repoID,
+		Branch: "feature/shared", CommitSHA: "aaa111", PreviewConfigName: "web",
+		SourceType: models.PreviewSourceTypeManual, CreatedByUserID: userID, CreatedAt: now,
+	}
+	target2 := models.PreviewTarget{
+		ID: targetID2, OrgID: orgID, RepositoryID: repoID,
+		Branch: "feature/shared", CommitSHA: "bbb222", PreviewConfigName: "web",
+		SourceType: models.PreviewSourceTypeManual, CreatedByUserID: userID, CreatedAt: later,
+	}
+
+	// First target upsert returns group with target1 as current.
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	mock.ExpectQuery("INSERT INTO preview_groups[\\s\\S]+ON CONFLICT").
+		WithArgs(previewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/shared", "web",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID1,
+			"aaa111", "target_created", false, &userID, now, now,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Second target upsert (newer activity) returns same group with target2 as current.
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	mock.ExpectQuery("INSERT INTO preview_groups[\\s\\S]+ON CONFLICT").
+		WithArgs(previewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/shared", "web",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID2,
+			"bbb222", "target_created", false, &userID, now, later,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	g1, err := store.UpsertPreviewGroupForTarget(context.Background(), orgID, target1, "aaa111")
+	require.NoError(t, err, "first target upsert should succeed")
+	require.Equal(t, &targetID1, g1.CurrentTargetID, "first target should be current")
+
+	g2, err := store.UpsertPreviewGroupForTarget(context.Background(), orgID, target2, "bbb222")
+	require.NoError(t, err, "second target upsert should succeed")
+	require.Equal(t, groupID, g2.ID, "both targets should belong to the same group")
+	require.Equal(t, &targetID2, g2.CurrentTargetID, "newer target should become current")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_ListPreviewCurrentIndex_UnknownFreshnessWhenSHABlank(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	// Row has blank latest_commit_sha; the SQL CASE yields freshness = 'unknown'.
+	rows := pgxmock.NewRows(previewCurrentSummaryTestCols).AddRow(
+		groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/unknown", "",
+		nil, models.PreviewSourceTypeManual, "", "", &targetID,
+		"", string(models.PreviewStatusStopped), false, &userID, now, now,
+		"acme/app", string(models.PreviewStatusStopped), string(models.PreviewCurrentFreshnessUnknown), "", (*uuid.UUID)(nil),
+		(*time.Time)(nil), &now, "", "", "", 1, 1, false, (*int)(nil),
+	)
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+COALESCE\\(latest\\.status, pg\\.current_status\\) IN").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(rows)
+
+	summaries, err := store.ListPreviewCurrentIndex(context.Background(), orgID, PreviewCurrentIndexFilters{
+		Scope: "attention",
+		Limit: 20,
+	})
+	require.NoError(t, err, "ListPreviewCurrentIndex should succeed for attention scope")
+	require.Len(t, summaries, 1, "should return the one attention row")
+	require.Equal(t, models.PreviewCurrentFreshnessUnknown, summaries[0].Freshness, "blank latest_commit_sha should produce unknown freshness")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_CountPreviewCurrentIndexScopes_OrgFilterApplied(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+
+	// The query should include org_id as a parameter; pgxmock verifies the arg count.
+	mock.ExpectQuery("SELECT[\\s\\S]+COUNT\\(\\*\\) FILTER[\\s\\S]+latest\\.base_commit_sha <> pg\\.latest_commit_sha[\\s\\S]+AS attention").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "attention", "recent"}).AddRow(2, 1, 0, 3))
+
+	counts, err := store.CountPreviewCurrentIndexScopes(context.Background(), orgID, PreviewCurrentIndexFilters{})
+	require.NoError(t, err, "CountPreviewCurrentIndexScopes should succeed")
+	require.Equal(t, 2, counts["running"], "should return running count")
+	require.Equal(t, 1, counts["resumable"], "should return resumable count")
+	require.Equal(t, 0, counts["attention"], "should return attention count")
+	require.Equal(t, 3, counts["recent"], "should return recent count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations including org_id param should be met")
+}
+
+func TestPreviewCurrentScopePredicate_AttentionIncludesOutdatedFreshness(t *testing.T) {
+	t.Parallel()
+
+	predicate := previewCurrentScopePredicate("attention")
+
+	require.Contains(t, predicate, "latest.base_commit_sha <> pg.latest_commit_sha", "attention scope should include running previews behind the latest known branch head")
+}
+
+func TestPreviewStore_ListPreviewCurrentIndex_AttentionScopeFilters(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	rows := pgxmock.NewRows(previewCurrentSummaryTestCols).AddRow(
+		groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/broken", "",
+		nil, models.PreviewSourceTypeManual, "", "", &targetID,
+		"def456", string(models.PreviewStatusFailed), false, &userID, now, now,
+		"acme/app", string(models.PreviewStatusFailed), string(models.PreviewCurrentFreshnessCurrent), "def456", (*uuid.UUID)(nil),
+		(*time.Time)(nil), &now, "error", "install failed", "preview.install", 2, 1, false, (*int)(nil),
+	)
+	// Attention scope uses the failed/unavailable/blocked/... status set.
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+COALESCE\\(latest\\.status, pg\\.current_status\\) IN").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(rows)
+
+	summaries, err := store.ListPreviewCurrentIndex(context.Background(), orgID, PreviewCurrentIndexFilters{
+		Scope: "attention",
+		Limit: 20,
+	})
+	require.NoError(t, err, "ListPreviewCurrentIndex should succeed for attention scope")
+	require.Len(t, summaries, 1, "should return the failed preview in attention scope")
+	require.Equal(t, models.PreviewStatusFailed, summaries[0].Status, "attention scope should include failed previews")
+	require.Equal(t, "install failed", summaries[0].Error, "error message should be surfaced")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_BackfillPreviewGroups_LinksExistingTargets(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	prTargetID := uuid.New()
+	branchTargetID := uuid.New()
+	prGroupID := uuid.New()
+	branchGroupID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	prNumber := 42
+
+	// First batch: returns 2 targets (PR and branch).
+	mock.ExpectQuery("SELECT id, org_id, repository_id, branch[\\s\\S]+preview_group_id IS NULL").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewTargetTestCols).
+			AddRow(prTargetID, orgID, repoID, "feature/pr", "abc123", "web", "sha256:c1", "automation", "acme/app#42@abc123", "https://github.com/acme/app/pull/42", userID, (*string)(nil), (*uuid.UUID)(nil), now).
+			AddRow(branchTargetID, orgID, repoID, "feature/branch", "def456", "web", "sha256:c2", "manual", "", "", userID, (*string)(nil), (*uuid.UUID)(nil), now.Add(time.Second)))
+
+	// PR target: currentTargetStatus + upsert + attach.
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	mock.ExpectQuery("INSERT INTO preview_groups[\\s\\S]+ON CONFLICT").
+		WithArgs(previewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+			prGroupID, orgID, repoID, models.PreviewGroupKindPullRequest, "feature/pr", "web",
+			&prNumber, models.PreviewSourceTypePullRequest, "acme/app#42", "https://github.com/acme/app/pull/42", &prTargetID,
+			"abc123", "target_created", false, &userID, now, now,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Branch target: currentTargetStatus + upsert + attach.
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	mock.ExpectQuery("INSERT INTO preview_groups[\\s\\S]+ON CONFLICT").
+		WithArgs(previewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(previewGroupTestCols).AddRow(
+			branchGroupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/branch", "web",
+			nil, models.PreviewSourceTypeManual, "", "", &branchTargetID,
+			"def456", "target_created", false, &userID, now, now,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	// Use batch size of 1 so the loop fetches each target in its own batch,
+	// which forces a follow-up query that returns empty and terminates the loop.
+	mock.ExpectQuery("SELECT id, org_id, repository_id, branch[\\s\\S]+preview_group_id IS NULL").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(previewTargetTestCols))
+
+	total, err := store.BackfillPreviewGroups(context.Background(), orgID, 1)
+	require.NoError(t, err, "BackfillPreviewGroups should succeed")
+	require.Equal(t, 2, total, "should have linked 2 targets")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1055,12 +1589,14 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_NonTerminal(t *testing.T) {
 		name      string
 		rows      int64
 		execErr   error
+		syncErr   error
 		expected  bool
 		expectErr bool
 	}{
 		{name: "updates active preview", rows: 1, expected: true},
 		{name: "already terminal returns false", rows: 0, expected: false},
 		{name: "update error returns error", execErr: errors.New("db down"), expectErr: true},
+		{name: "group sync error is best effort", rows: 1, syncErr: errors.New("group sync failed"), expected: true},
 	}
 
 	for _, tt := range tests {
@@ -1077,11 +1613,17 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_NonTerminal(t *testing.T) {
 				WithArgs(previewAnyArgs(5)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
+			if tt.rows > 0 && tt.execErr == nil {
+				mock.ExpectExec("UPDATE preview_groups pg").
+					WithArgs(previewAnyArgs(3)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1)).
+					WillReturnError(tt.syncErr)
+			}
 
 			updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
 			if tt.expectErr {
 				require.Error(t, err, "conditional non-terminal update should return database errors")
-				require.False(t, updated, "conditional non-terminal update should not report updates on error")
+				require.False(t, updated, "conditional non-terminal update should not report success on error")
 			} else {
 				require.NoError(t, err, "conditional non-terminal update should not error")
 				require.Equal(t, tt.expected, updated, "conditional non-terminal update should report whether the row changed")

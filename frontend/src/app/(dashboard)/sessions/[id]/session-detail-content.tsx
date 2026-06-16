@@ -877,18 +877,18 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
         {/* Timestamps + audit — secondary reference data, single unified row */}
         <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
           {repoBranchLabel && (
-            <>
-              <span>{repoBranchLabel}</span>
-              <span aria-hidden="true" className="text-muted-foreground/50">·</span>
-            </>
+            <span>
+              {repoBranchLabel}
+              <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
+            </span>
           )}
           {terminalSessionStatuses.has(session.status) &&
             !((session.status === "failed" || session.status === "cancelled") &&
               !hasMeaningfulDuration(session.started_at, session.completed_at)) && (
-            <>
-              <span>{formatDuration(session.started_at, session.completed_at)}</span>
-              <span aria-hidden="true" className="text-muted-foreground/50">·</span>
-            </>
+            <span>
+              {formatDuration(session.started_at, session.completed_at)}
+              <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
+            </span>
           )}
           <span>
             {!isActive && session.completed_at ? (

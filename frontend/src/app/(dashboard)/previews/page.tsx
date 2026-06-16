@@ -45,14 +45,14 @@ import { pollMs } from "@/lib/poll-intervals";
 import { formatPreviewStatus } from "@/lib/preview-types";
 import { queryKeys } from "@/lib/query-keys";
 import type {
-  BranchPreviewResponse,
   ListResponse,
+  PreviewCurrentResponse,
   PreviewListMeta,
   Repository,
 } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
 
-type PreviewScope = "running" | "resumable" | "recent";
+type PreviewScope = "running" | "resumable" | "attention" | "recent";
 
 const SECTIONS: {
   scope: PreviewScope;
@@ -73,6 +73,12 @@ const SECTIONS: {
     interval: 30000,
   },
   {
+    scope: "attention",
+    title: "Needs attention",
+    empty: "No previews need attention.",
+    interval: 30000,
+  },
+  {
     scope: "recent",
     title: "Recent",
     empty: "No recent preview activity.",
@@ -80,10 +86,11 @@ const SECTIONS: {
   },
 ];
 
-function sourceLabel(preview: BranchPreviewResponse): string {
-  if (preview.source_type === "pull_request") {
-    const number = preview.source_id?.match(/#(\d+)/)?.[1];
-    return number ? `PR #${number}` : "PR";
+function sourceLabel(preview: PreviewCurrentResponse): string {
+  if (preview.group_kind === "pull_request" || preview.source_type === "pull_request") {
+    const sourcePRNumber = preview.source_id?.match(/#(\d+)/)?.[1];
+    const prNumber = preview.pull_request_number ?? sourcePRNumber;
+    return prNumber ? `PR #${prNumber}` : "PR";
   }
   if (preview.source_type === "session") return "Session";
   if (preview.source_type === "api") return "API";
@@ -92,7 +99,7 @@ function sourceLabel(preview: BranchPreviewResponse): string {
 }
 
 function stoppedReasonLabel(
-  reason?: BranchPreviewResponse["stopped_reason"],
+  reason?: PreviewCurrentResponse["stopped_reason"],
 ): string {
   switch (reason) {
     case "warm_policy":
@@ -112,9 +119,25 @@ function stoppedReasonLabel(
   }
 }
 
-function statusLabel(preview: BranchPreviewResponse): string {
-  if (preview.status === "target_created") return "Not started";
+function statusLabel(preview: PreviewCurrentResponse): string {
+  if (preview.freshness === "outdated" && preview.status === "ready") return "Out of date";
+  if (preview.freshness === "unknown") return "Needs attention";
+  if (preview.status === "target_created" || preview.status === "none") return "Not started";
   return formatPreviewStatus(preview.status);
+}
+
+function previewDisplayName(preview: PreviewCurrentResponse): string {
+  if (preview.group_kind === "pull_request" || preview.source_type === "pull_request") {
+    const sourcePRNumber = preview.source_id?.match(/#(\d+)/)?.[1];
+    const prNumber = preview.pull_request_number ?? sourcePRNumber;
+    if (prNumber && preview.branch) return `PR #${prNumber} - ${preview.branch}`;
+    if (prNumber) return `PR #${prNumber}`;
+  }
+  return preview.branch || preview.preview_group_id.slice(0, 8);
+}
+
+function previewDetailHref(preview: PreviewCurrentResponse): string {
+  return `/previews/${preview.current_target_id ?? preview.preview_group_id}`;
 }
 
 function relativeTime(value?: string): string {
@@ -140,14 +163,14 @@ function SectionRows({
   onStartLatest,
 }: {
   scope: PreviewScope;
-  previews: BranchPreviewResponse[];
+  previews: PreviewCurrentResponse[];
   isLoading: boolean;
   isError: boolean;
   onRetry: () => void;
   canMutate: boolean;
-  onStop: (preview: BranchPreviewResponse) => void;
-  onRestart: (preview: BranchPreviewResponse) => void;
-  onStartLatest: (preview: BranchPreviewResponse) => void;
+  onStop: (preview: PreviewCurrentResponse) => void;
+  onRestart: (preview: PreviewCurrentResponse) => void;
+  onStartLatest: (preview: PreviewCurrentResponse) => void;
 }) {
   if (isError) {
     return (
@@ -197,42 +220,138 @@ function SectionRows({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {previews.map((preview) => (
-              <TableRow key={preview.target_id}>
-                <TableCell>
-                  <Link
-                    href={`/previews/${preview.target_id}`}
-                    className="font-medium text-foreground hover:underline"
-                  >
-                    {preview.branch || preview.target_id.slice(0, 8)}
-                  </Link>
-                  <p className="text-xs text-muted-foreground">
-                    {preview.repository_full_name || preview.repository_id} ·{" "}
-                    {preview.commit_sha?.slice(0, 8) || "latest"}
-                  </p>
-                </TableCell>
-                <TableCell>
-                  {preview.source_url ? (
-                    <a
-                      href={
-                        safeExternalUrl(preview.source_url) ??
-                        preview.source_url
-                      }
-                      className="inline-flex items-center gap-1 text-sm text-foreground hover:underline"
+            {previews.map((preview) => {
+              const sourceHref = safeExternalUrl(preview.source_url);
+              const previewHref = safeExternalUrl(preview.preview_url);
+              return (
+                <TableRow key={preview.preview_group_id}>
+                  <TableCell>
+                    <Link
+                      href={previewDetailHref(preview)}
+                      className="font-medium text-foreground hover:underline"
                     >
-                      {sourceLabel(preview)}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  ) : (
-                    <span className="text-sm text-foreground">
-                      {sourceLabel(preview)}
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell>
+                      {previewDisplayName(preview)}
+                    </Link>
+                    <p className="text-xs text-muted-foreground">
+                      {preview.repository_full_name || preview.repository_id} ·{" "}
+                      {preview.pinned ? "Pinned · " : ""}
+                      {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    {sourceHref ? (
+                      <a
+                        href={sourceHref}
+                        className="inline-flex items-center gap-1 text-sm text-foreground hover:underline"
+                      >
+                        {sourceLabel(preview)}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : (
+                      <span className="text-sm text-foreground">
+                        {sourceLabel(preview)}
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
+                          ? "destructive"
+                          : preview.status === "ready"
+                            ? "default"
+                            : "secondary"
+                      }
+                    >
+                      {statusLabel(preview)}
+                    </Badge>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {preview.freshness === "outdated"
+                        ? `running ${preview.running_commit_sha?.slice(0, 8) || "unknown"}, branch is ${preview.latest_commit_sha?.slice(0, 8) || "unknown"}`
+                        : scope === "resumable" && preview.resume_estimate_seconds
+                        ? `resumes in ~${preview.resume_estimate_seconds}s`
+                        : scope === "recent"
+                          ? stoppedReasonLabel(preview.stopped_reason)
+                          : preview.expires_at
+                            ? `expires ${relativeTime(preview.expires_at)}`
+                            : preview.current_phase || ""}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex justify-end gap-2">
+                      {previewHref ? (
+                        <Button asChild size="sm">
+                          <a
+                            href={previewHref}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                            Open
+                          </a>
+                        </Button>
+                      ) : null}
+                      {canMutate && scope === "running" && preview.current_preview_id ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onStop(preview)}
+                        >
+                          <Square className="h-4 w-4" />
+                          Stop
+                        </Button>
+                      ) : null}
+                      {canMutate && scope === "resumable" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onRestart(preview)}
+                        >
+                          <Play className="h-4 w-4" />
+                          Resume
+                        </Button>
+                      ) : null}
+                      {canMutate && scope !== "running" ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onStartLatest(preview)}
+                        >
+                          <RotateCw className="h-4 w-4" />
+                          Start latest
+                        </Button>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      <div className="grid gap-3 md:hidden">
+        {previews.map((preview) => {
+          const previewHref = safeExternalUrl(preview.preview_url);
+          return (
+            <Card key={preview.preview_group_id}>
+              <CardContent className="space-y-3 py-4">
+                <div className="min-w-0">
+                  <Link
+                    href={previewDetailHref(preview)}
+                    className="block truncate font-medium text-foreground"
+                  >
+                    {previewDisplayName(preview)}
+                  </Link>
+                  <p className="truncate text-sm text-muted-foreground">
+                    {preview.repository_full_name || preview.repository_id} ·{" "}
+                    {sourceLabel(preview)}
+                  </p>
+                </div>
+                <div className="flex items-center justify-between gap-2">
                   <Badge
                     variant={
-                      preview.status === "failed"
+                      preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
                         ? "destructive"
                         : preview.status === "ready"
                           ? "default"
@@ -241,153 +360,58 @@ function SectionRows({
                   >
                     {statusLabel(preview)}
                   </Badge>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {scope === "resumable" && preview.resume_estimate_seconds
-                      ? `resumes in ~${preview.resume_estimate_seconds}s`
-                      : scope === "recent"
-                        ? stoppedReasonLabel(preview.stopped_reason)
-                        : preview.expires_at
-                          ? `expires ${relativeTime(preview.expires_at)}`
-                          : preview.current_phase || ""}
-                  </p>
-                </TableCell>
-                <TableCell>
-                  <div className="flex justify-end gap-2">
-                    {preview.preview_url ? (
-                      <Button asChild size="sm">
-                        <a
-                          href={
-                            safeExternalUrl(preview.preview_url) ??
-                            preview.preview_url
-                          }
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          Open
-                        </a>
-                      </Button>
-                    ) : null}
-                    {canMutate && scope === "running" && preview.preview_id ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onStop(preview)}
+                  <span className="text-xs text-muted-foreground">
+                    {relativeTime(preview.created_at)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {previewHref ? (
+                    <Button asChild size="sm">
+                      <a
+                        href={previewHref}
+                        target="_blank"
+                        rel="noreferrer"
                       >
-                        <Square className="h-4 w-4" />
-                        Stop
-                      </Button>
-                    ) : null}
-                    {canMutate && scope === "resumable" ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onRestart(preview)}
-                      >
-                        <Play className="h-4 w-4" />
-                        Resume
-                      </Button>
-                    ) : null}
-                    {canMutate && scope !== "running" ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => onStartLatest(preview)}
-                      >
-                        <RotateCw className="h-4 w-4" />
-                        Start latest
-                      </Button>
-                    ) : null}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <div className="grid gap-3 md:hidden">
-        {previews.map((preview) => (
-          <Card key={preview.target_id}>
-            <CardContent className="space-y-3 py-4">
-              <div className="min-w-0">
-                <Link
-                  href={`/previews/${preview.target_id}`}
-                  className="block truncate font-medium text-foreground"
-                >
-                  {preview.branch || preview.target_id.slice(0, 8)}
-                </Link>
-                <p className="truncate text-sm text-muted-foreground">
-                  {preview.repository_full_name || preview.repository_id} ·{" "}
-                  {sourceLabel(preview)}
-                </p>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <Badge
-                  variant={
-                    preview.status === "failed"
-                      ? "destructive"
-                      : preview.status === "ready"
-                        ? "default"
-                        : "secondary"
-                  }
-                >
-                  {statusLabel(preview)}
-                </Badge>
-                <span className="text-xs text-muted-foreground">
-                  {relativeTime(preview.created_at)}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {preview.preview_url ? (
-                  <Button asChild size="sm">
-                    <a
-                      href={
-                        safeExternalUrl(preview.preview_url) ??
-                        preview.preview_url
-                      }
-                      target="_blank"
-                      rel="noreferrer"
+                        <ExternalLink className="h-4 w-4" />
+                        Open
+                      </a>
+                    </Button>
+                  ) : null}
+                  {canMutate && scope === "running" && preview.current_preview_id ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onStop(preview)}
                     >
-                      <ExternalLink className="h-4 w-4" />
-                      Open
-                    </a>
-                  </Button>
-                ) : null}
-                {canMutate && scope === "running" && preview.preview_id ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onStop(preview)}
-                  >
-                    <Square className="h-4 w-4" />
-                    Stop
-                  </Button>
-                ) : null}
-                {canMutate && scope === "resumable" ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onRestart(preview)}
-                  >
-                    <Play className="h-4 w-4" />
-                    Resume
-                  </Button>
-                ) : null}
-                {canMutate && scope !== "running" ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onStartLatest(preview)}
-                  >
-                    <RotateCw className="h-4 w-4" />
-                    Start latest
-                  </Button>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+                      <Square className="h-4 w-4" />
+                      Stop
+                    </Button>
+                  ) : null}
+                  {canMutate && scope === "resumable" ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onRestart(preview)}
+                    >
+                      <Play className="h-4 w-4" />
+                      Resume
+                    </Button>
+                  ) : null}
+                  {canMutate && scope !== "running" ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onStartLatest(preview)}
+                    >
+                      <RotateCw className="h-4 w-4" />
+                      Start latest
+                    </Button>
+                  ) : null}
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
     </>
   );
@@ -411,11 +435,11 @@ export default function PreviewsPage() {
   const repositoryFilter = repositoryId === "all" ? undefined : repositoryId;
 
   const runningQuery = useQuery<
-    ListResponse<BranchPreviewResponse> & { meta: PreviewListMeta }
+    ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
     queryKey: ["previews", "running", repositoryFilter ?? "", query],
     queryFn: () =>
-      api.previews.list({
+      api.previews.current.list({
         scope: "running",
         repository_id: repositoryFilter,
         q: query.trim(),
@@ -425,11 +449,11 @@ export default function PreviewsPage() {
     placeholderData: (previous) => previous,
   });
   const resumableQuery = useQuery<
-    ListResponse<BranchPreviewResponse> & { meta: PreviewListMeta }
+    ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
     queryKey: ["previews", "resumable", repositoryFilter ?? "", query],
     queryFn: () =>
-      api.previews.list({
+      api.previews.current.list({
         scope: "resumable",
         repository_id: repositoryFilter,
         q: query.trim(),
@@ -438,12 +462,26 @@ export default function PreviewsPage() {
     refetchInterval: pollMs(30000),
     placeholderData: (previous) => previous,
   });
+  const attentionQuery = useQuery<
+    ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
+  >({
+    queryKey: ["previews", "attention", repositoryFilter ?? "", query],
+    queryFn: () =>
+      api.previews.current.list({
+        scope: "attention",
+        repository_id: repositoryFilter,
+        q: query.trim(),
+        limit: 50,
+      }),
+    refetchInterval: pollMs(30000),
+    placeholderData: (previous) => previous,
+  });
   const recentQuery = useQuery<
-    ListResponse<BranchPreviewResponse> & { meta: PreviewListMeta }
+    ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
     queryKey: ["previews", "recent", repositoryFilter ?? "", query],
     queryFn: () =>
-      api.previews.list({
+      api.previews.current.list({
         scope: "recent",
         repository_id: repositoryFilter,
         q: query.trim(),
@@ -452,7 +490,7 @@ export default function PreviewsPage() {
     refetchInterval: pollMs(30000),
     placeholderData: (previous) => previous,
   });
-  const sectionQueries = [runningQuery, resumableQuery, recentQuery];
+  const sectionQueries = [runningQuery, resumableQuery, attentionQuery, recentQuery];
 
   const firstMeta = sectionQueries.find((item) => item.data?.meta)?.data?.meta;
   // A query that has only ever errored holds no data, and React Query resets
@@ -488,18 +526,18 @@ export default function PreviewsPage() {
   }, [recentQuery.data?.data]);
 
   const stopPreview = useMutation({
-    mutationFn: (preview: BranchPreviewResponse) =>
-      api.previews.stop(preview.preview_id ?? preview.target_id),
+    mutationFn: (preview: PreviewCurrentResponse) =>
+      api.previews.current.stop(preview.preview_group_id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["previews"] }),
   });
   const restartPreview = useMutation({
-    mutationFn: (preview: BranchPreviewResponse) =>
-      api.previews.restart(preview.preview_id ?? preview.target_id),
+    mutationFn: (preview: PreviewCurrentResponse) =>
+      api.previews.current.restart(preview.preview_group_id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["previews"] }),
   });
   const startLatest = useMutation({
-    mutationFn: (preview: BranchPreviewResponse) =>
-      api.previews.startLatest(preview.preview_id ?? preview.target_id),
+    mutationFn: (preview: PreviewCurrentResponse) =>
+      api.previews.current.startLatest(preview.preview_group_id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["previews"] }),
   });
 

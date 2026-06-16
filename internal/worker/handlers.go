@@ -382,6 +382,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
 	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
+	if stores.Previews != nil {
+		w.Register(models.JobTypeBackfillPreviewGroups, newBackfillPreviewGroupsHandler(stores, logger))
+	}
 	if services != nil && services.Linear != nil {
 		w.Register("prepare_linear_primary", newPrepareLinearPrimaryHandler(services.Linear, logger))
 		w.Register("link_linear_issue", newLinkLinearIssueHandler(services.Linear, logger))
@@ -449,6 +452,7 @@ type Stores struct {
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
 	SlackInstallations  *db.SlackInstallationStore
+	SlackOrgSelections  *db.SlackOrgSelectionStore
 	SlackBotSettings    *db.SlackBotSettingsStore
 	SlackUserLinks      *db.SlackUserLinkStore
 	SlackChannels       *db.SlackChannelSettingsStore
@@ -2829,6 +2833,7 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationSessionFailed),
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
+			string(models.SlackNotificationPreviewFailed),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetBalanced:
@@ -2839,6 +2844,7 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationPROpened),
 			string(models.SlackNotificationPreviewReady),
+			string(models.SlackNotificationPreviewFailed),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetVerbose:
@@ -3337,7 +3343,7 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 				return handleSlackConfigureChannelModal(ctx, stores, input)
 			}
 			if input.CallbackID == "slack_missing_context_modal" {
-				return handleSlackMissingContextModal(ctx, stores, input)
+				return handleSlackMissingContextModal(ctx, stores, services, slackClient, input)
 			}
 			return nil
 		case "slack_open_session":
@@ -3378,7 +3384,7 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 }
 
 func handleSlackSelectOrg(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.Credentials == nil || stores.SlackUserLinks == nil || stores.Memberships == nil {
+	if stores == nil || stores.Credentials == nil || stores.SlackUserLinks == nil || stores.Memberships == nil || stores.SlackInstallations == nil || stores.SlackOrgSelections == nil {
 		return fmt.Errorf("slack org selection dependencies are not configured")
 	}
 	selectedOrgID, err := uuid.Parse(input.Value)
@@ -3399,8 +3405,26 @@ func handleSlackSelectOrg(ctx context.Context, stores *Stores, services *Service
 	if _, err := stores.Memberships.Get(ctx, *link.UserID, selectedOrgID); err != nil {
 		return fmt.Errorf("selected Slack org is not available to mapped user: %w", err)
 	}
-	if stores.Credentials != nil && (input.ChannelID != "" || input.TriggerID != "") {
-		cred, err := stores.Credentials.Get(ctx, currentOrgID, models.ProviderSlack)
+	currentInstall, err := stores.SlackInstallations.GetActiveByOrg(ctx, currentOrgID)
+	if err != nil {
+		return fmt.Errorf("get current Slack installation for org selection: %w", err)
+	}
+	selectedInstall, err := stores.SlackInstallations.GetActiveByOrgTeamApp(ctx, selectedOrgID, input.TeamID, currentInstall.APIAppID)
+	if err != nil {
+		return fmt.Errorf("get selected Slack installation for org selection: %w", err)
+	}
+	selection := &models.SlackOrgSelection{
+		OrgID:               selectedOrgID,
+		SlackInstallationID: selectedInstall.ID,
+		SlackTeamID:         input.TeamID,
+		APIAppID:            selectedInstall.APIAppID,
+		SlackUserID:         input.UserID,
+	}
+	if err := stores.SlackOrgSelections.Upsert(ctx, selection); err != nil {
+		return fmt.Errorf("persist Slack org selection: %w", err)
+	}
+	if input.ChannelID != "" || input.TriggerID != "" {
+		cred, err := stores.Credentials.Get(ctx, selectedOrgID, models.ProviderSlack)
 		if err != nil {
 			return fmt.Errorf("get slack credentials: %w", err)
 		}
@@ -3408,7 +3432,7 @@ func handleSlackSelectOrg(ctx context.Context, stores *Stores, services *Service
 		if !ok {
 			return fmt.Errorf("unexpected slack credential type")
 		}
-		text := "This Slack workspace is currently connected to one active 143 organization. Open 143 to switch org context or connect another Slack installation.\n\nOpen 143: " + slackFrontendURL(services, "/settings/integrations")
+		text := "Future Slack actions from your account in this workspace will use the selected 143 organization.\n\nOpen 143: " + slackFrontendURL(services, "/settings/integrations")
 		if input.TriggerID != "" {
 			return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackInfoModal("Organization selection", text))
 		}
@@ -3903,10 +3927,78 @@ func handleSlackMissingContextPrompt(ctx context.Context, stores *Stores, slackC
 			kind = "context"
 		}
 	}
-	return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackMissingContextModal(kind, input.Value))
+	options, err := slackMissingContextOptions(ctx, stores, orgID, kind)
+	if err != nil {
+		return err
+	}
+	return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackMissingContextModal(kind, input.Value, options))
 }
 
-func slackMissingContextModal(kind string, privateMetadata string) ingestion.SlackHomeView {
+type slackMissingContextOption struct {
+	Text  string
+	Value string
+}
+
+func slackMissingContextOptions(ctx context.Context, stores *Stores, orgID uuid.UUID, kind string) ([]slackMissingContextOption, error) {
+	options := []slackMissingContextOption{}
+	if kind == "preview_target" || kind == "branch" {
+		if stores != nil && stores.Repositories != nil {
+			repos, err := stores.Repositories.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+			if err != nil {
+				return nil, fmt.Errorf("list repositories for Slack missing-context options: %w", err)
+			}
+			for _, repo := range repos {
+				if len(options) >= 100 {
+					return options, nil
+				}
+				if kind == "preview_target" {
+					options = append(options, slackMissingContextOption{
+						Text:  repo.FullName,
+						Value: slackActionValue(map[string]string{"repository_id": repo.ID.String(), "display": repo.FullName}),
+					})
+					if len(options) >= 100 {
+						return options, nil
+					}
+				}
+				branch := strings.TrimSpace(repo.DefaultBranch)
+				if branch != "" {
+					options = append(options, slackMissingContextOption{
+						Text:  repo.FullName + " " + branch,
+						Value: slackActionValue(map[string]string{"repository_id": repo.ID.String(), "branch": branch, "display": repo.FullName + "@" + branch}),
+					})
+				}
+			}
+		}
+	}
+	if kind == "preview_target" || kind == "pull_request" {
+		if stores != nil && stores.PullRequests != nil && len(options) < 100 {
+			prs, err := stores.PullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Status: models.PullRequestStatusOpen, Limit: 100 - len(options)})
+			if err != nil {
+				return nil, fmt.Errorf("list pull requests for Slack missing-context options: %w", err)
+			}
+			for _, pr := range prs {
+				if len(options) >= 100 {
+					break
+				}
+				label := fmt.Sprintf("%s #%d", pr.GitHubRepo, pr.GitHubPRNumber)
+				if strings.TrimSpace(pr.Title) != "" {
+					label += " " + strings.TrimSpace(pr.Title)
+				}
+				options = append(options, slackMissingContextOption{
+					Text: label,
+					Value: slackActionValue(map[string]string{
+						"pull_request_id":  pr.ID.String(),
+						"pull_request_url": pr.GitHubPRURL,
+						"display":          label,
+					}),
+				})
+			}
+		}
+	}
+	return options, nil
+}
+
+func slackMissingContextModal(kind string, privateMetadata string, options []slackMissingContextOption) ingestion.SlackHomeView {
 	title := "Add context"
 	label := "Context value"
 	placeholder := "Paste a URL, branch, repository, session, or PR"
@@ -3935,18 +4027,28 @@ func slackMissingContextModal(kind string, privateMetadata string) ingestion.Sla
 			Type:    "input",
 			BlockID: "context_value",
 			Label:   &ingestion.SlackTextObject{Type: "plain_text", Text: label},
-			Element: slackMissingContextInputElement(kind, placeholder),
+			Element: slackMissingContextInputElement(placeholder, options),
 		}},
 	}
 }
 
-func slackMissingContextInputElement(kind, placeholder string) map[string]any {
-	if kind == "preview_target" || kind == "pull_request" || kind == "branch" {
+func slackMissingContextInputElement(placeholder string, options []slackMissingContextOption) map[string]any {
+	if len(options) > 0 {
+		slackOptions := make([]map[string]any, 0, min(len(options), 100))
+		for i, option := range options {
+			if i >= 100 {
+				break
+			}
+			slackOptions = append(slackOptions, map[string]any{
+				"text":  map[string]string{"type": "plain_text", "text": truncateSlackButtonText(option.Text)},
+				"value": option.Value,
+			})
+		}
 		return map[string]any{
-			"type":             "external_select",
-			"action_id":        "value",
-			"min_query_length": 0,
-			"placeholder":      map[string]string{"type": "plain_text", "text": placeholder},
+			"type":        "static_select",
+			"action_id":   "value",
+			"placeholder": map[string]string{"type": "plain_text", "text": placeholder},
+			"options":     slackOptions,
 		}
 	}
 	return map[string]any{
@@ -3956,7 +4058,7 @@ func slackMissingContextInputElement(kind, placeholder string) map[string]any {
 	}
 }
 
-func handleSlackMissingContextModal(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload) error {
+func handleSlackMissingContextModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
 	var metadata struct {
 		OrgID     string `json:"org_id"`
 		SessionID string `json:"session_id"`
@@ -3988,8 +4090,16 @@ func handleSlackMissingContextModal(ctx context.Context, stores *Stores, input m
 	if value == "" {
 		return nil
 	}
-	prompt := slackMissingContextContinuationPrompt(metadata.Kind, value)
-	return enqueueSlackSessionContinuationPrompt(ctx, stores, orgID, sessionID, prompt)
+	if metadata.Kind == "preview_target" && slackMissingContextValueHasPreviewTarget(value) {
+		previewInput := input
+		previewInput.OrgID = orgID.String()
+		previewInput.ActionID = "slack_create_preview"
+		previewInput.Value = value
+		return handleSlackCreatePreview(ctx, stores, services, slackClient, previewInput)
+	}
+	display := slackMissingContextDisplayValue(metadata.Kind, value)
+	prompt := slackMissingContextContinuationPrompt(metadata.Kind, display)
+	return enqueueSlackSessionContinuationPromptWithReferences(ctx, stores, orgID, sessionID, prompt, slackMissingContextReferences(metadata.Kind, value))
 }
 
 func slackMissingContextContinuationPrompt(kind, value string) string {
@@ -4004,6 +4114,82 @@ func slackMissingContextContinuationPrompt(kind, value string) string {
 	default:
 		return "Continue this Slack-started session using this additional context: " + value
 	}
+}
+
+func slackMissingContextValueHasPreviewTarget(value string) bool {
+	var actionValue struct {
+		SessionID     string `json:"session_id"`
+		RepositoryID  string `json:"repository_id"`
+		PullRequestID string `json:"pull_request_id"`
+	}
+	if err := json.Unmarshal([]byte(value), &actionValue); err != nil {
+		return false
+	}
+	return actionValue.SessionID != "" || actionValue.RepositoryID != "" || actionValue.PullRequestID != ""
+}
+
+func slackMissingContextDisplayValue(kind, value string) string {
+	var actionValue struct {
+		Display        string `json:"display"`
+		PullRequestURL string `json:"pull_request_url"`
+		Branch         string `json:"branch"`
+		RepositoryID   string `json:"repository_id"`
+		PullRequestID  string `json:"pull_request_id"`
+		SessionID      string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(value), &actionValue); err == nil {
+		switch {
+		case strings.TrimSpace(actionValue.Display) != "":
+			return strings.TrimSpace(actionValue.Display)
+		case strings.TrimSpace(actionValue.PullRequestURL) != "":
+			return strings.TrimSpace(actionValue.PullRequestURL)
+		case strings.TrimSpace(actionValue.Branch) != "":
+			return strings.TrimSpace(actionValue.Branch)
+		case strings.TrimSpace(actionValue.RepositoryID) != "":
+			return "repository " + strings.TrimSpace(actionValue.RepositoryID)
+		case strings.TrimSpace(actionValue.PullRequestID) != "":
+			return "pull request " + strings.TrimSpace(actionValue.PullRequestID)
+		case strings.TrimSpace(actionValue.SessionID) != "":
+			return "session " + strings.TrimSpace(actionValue.SessionID)
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func slackMissingContextReferences(kind, value string) []slackContextReference {
+	display := slackMissingContextDisplayValue(kind, value)
+	if display == "" {
+		return nil
+	}
+	var actionValue struct {
+		Display        string `json:"display"`
+		PullRequestURL string `json:"pull_request_url"`
+		Branch         string `json:"branch"`
+		RepositoryID   string `json:"repository_id"`
+		PullRequestID  string `json:"pull_request_id"`
+	}
+	_ = json.Unmarshal([]byte(value), &actionValue)
+	ref := slackContextReference{Value: display, Source: "slack_modal"}
+	switch kind {
+	case "pull_request":
+		ref.Kind = slackReferenceKindPullRequest
+	case "branch":
+		ref.Kind = slackReferenceKindBranch
+	case "preview_target":
+		switch {
+		case strings.TrimSpace(actionValue.PullRequestURL) != "" || strings.TrimSpace(actionValue.PullRequestID) != "":
+			ref.Kind = slackReferenceKindPullRequest
+		case strings.TrimSpace(actionValue.Branch) != "":
+			ref.Kind = slackReferenceKindBranch
+		case strings.TrimSpace(actionValue.RepositoryID) != "":
+			ref.Kind = slackReferenceKindRepository
+		default:
+			ref.Kind = classifySlackURLReference(display)
+		}
+	default:
+		ref.Kind = classifySlackURLReference(display)
+	}
+	return []slackContextReference{ref}
 }
 
 func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessage {
@@ -4021,7 +4207,7 @@ func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessag
 }
 
 func handleSlackCreatePreview(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.Credentials == nil {
+	if stores == nil {
 		return fmt.Errorf("slack preview prompt dependencies are not configured")
 	}
 	var actionValue struct {
@@ -4117,6 +4303,9 @@ func handleSlackCreatePreview(ctx context.Context, stores *Stores, services *Ser
 			return fmt.Errorf("create Slack preview: %w", err)
 		}
 		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Preview requested: "+slackPreviewURL(services, preview.ID))
+	}
+	if stores.Credentials == nil {
+		return fmt.Errorf("slack preview prompt dependencies are not configured")
 	}
 	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
 	if err != nil {
@@ -4338,6 +4527,10 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 }
 
 func enqueueSlackSessionContinuationPrompt(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, prompt string) error {
+	return enqueueSlackSessionContinuationPromptWithReferences(ctx, stores, orgID, sessionID, prompt, nil)
+}
+
+func enqueueSlackSessionContinuationPromptWithReferences(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, prompt string, refs []slackContextReference) error {
 	if stores == nil || stores.Sessions == nil || stores.SessionMessages == nil || stores.Jobs == nil {
 		return fmt.Errorf("slack session continuation dependencies are not configured")
 	}
@@ -4353,6 +4546,7 @@ func enqueueSlackSessionContinuationPrompt(ctx context.Context, stores *Stores, 
 		TurnNumber: session.CurrentTurn,
 		Role:       models.MessageRoleUser,
 		Content:    prompt,
+		References: slackContextReferencesForSessionInput(refs),
 	}
 	if err := stores.SessionMessages.Create(ctx, msg); err != nil {
 		return fmt.Errorf("create Slack continuation message: %w", err)
@@ -8290,6 +8484,35 @@ func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobH
 			Int64("deleted", deleted).
 			Msg("audit retention cleanup complete")
 
+		return nil
+	}
+}
+
+// backfill_preview_groups handler links existing preview_targets rows that have
+// no preview_group_id to their correct preview_groups row. The job is safe to
+// run multiple times; targets that are already linked are skipped.
+func newBackfillPreviewGroupsHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var p struct {
+			BatchSize int `json:"batch_size"`
+		}
+		if len(payload) > 0 {
+			if err := json.Unmarshal(payload, &p); err != nil {
+				return &FatalError{Err: fmt.Errorf("unmarshal backfill_preview_groups payload: %w", err)}
+			}
+		}
+		orgID, ok := jobOrgIDFromContext(ctx)
+		if !ok {
+			return &FatalError{Err: fmt.Errorf("backfill_preview_groups: missing org_id in job context")}
+		}
+		total, err := stores.Previews.BackfillPreviewGroups(ctx, orgID, p.BatchSize)
+		if err != nil {
+			return fmt.Errorf("backfill preview groups: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Int("targets_linked", total).
+			Msg("backfill_preview_groups completed")
 		return nil
 	}
 }

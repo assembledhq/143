@@ -44,6 +44,8 @@ When `Start Preview` is requested:
 
 Cold starts reserve a `starting` preview row and enqueue durable startup work to the selected worker. Live-container reuse never retries onto a different worker; if a pinned startup worker is later declared dead before claim, the job target-node fallback allows another worker to claim and reassign the reserved preview.
 
+Before reserving a new session preview, app nodes recover stale live-session ownership when no active preview exists: if `sessions.container_id` points at a worker node whose status is no longer routable, the API CAS-clears the session's `container_id`/`worker_node_id`, refetches the session, and re-runs worker selection. This lets the preview cold-start from the saved snapshot on a healthy worker instead of failing selection on a dead owner.
+
 ## Internal Auth
 
 App-to-worker preview RPC uses a dedicated signed preview token. The signing

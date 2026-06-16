@@ -275,6 +275,50 @@ func TestWorkerSelector_SelectStartNode(t *testing.T) {
 		require.ErrorIs(t, err, ErrLegacySessionWorkerOwnership, "SelectStartNode should fail closed for legacy live sessions")
 		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
+
+	t.Run("returns typed error for live session owner on dead worker", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgxmock pool")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		containerID := "container-on-dead-worker"
+		workerNodeID := "worker-dead"
+		now := time.Now().UTC()
+		metadata, err := json.Marshal(WorkerNodeMetadata{
+			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
+			PreviewInternalBaseURL: "http://worker-dead.internal:8080",
+		})
+		require.NoError(t, err, "dead worker metadata should marshal")
+
+		mock.ExpectQuery("SELECT .+ FROM preview_instances").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+			WithArgs(pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(workerNodeTestCols).
+					AddRow(workerNodeID, "worker", "worker-dead.internal", "dead", metadata, now, now),
+			)
+
+		selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
+		_, err = selector.SelectStartNode(context.Background(), orgID, &models.Session{
+			ID:           sessionID,
+			ContainerID:  &containerID,
+			WorkerNodeID: &workerNodeID,
+			SandboxState: models.SandboxStateRunning,
+		})
+
+		var ownerErr *LiveSessionWorkerOwnerNotRoutableError
+		require.ErrorAs(t, err, &ownerErr, "SelectStartNode should classify dead live-session worker ownership")
+		require.Equal(t, workerNodeID, ownerErr.WorkerNodeID, "typed error should include the stale worker node id")
+		require.Equal(t, containerID, ownerErr.ContainerID, "typed error should include the stale container id")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
 }
 
 func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
