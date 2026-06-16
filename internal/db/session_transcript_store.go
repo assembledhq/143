@@ -19,10 +19,8 @@ import (
 )
 
 const (
-	DefaultTranscriptLimitTurns  = 20
-	MaxTranscriptLimitTurns      = 80
-	DefaultTranscriptSearchLimit = 20
-	MaxTranscriptSearchLimit     = 100
+	DefaultTranscriptLimitTurns = 20
+	MaxTranscriptLimitTurns     = 80
 )
 
 // SessionTranscriptWindowOptions controls which slice of the conversation is
@@ -44,14 +42,6 @@ type TranscriptInclude struct {
 	HumanInputs bool
 	System      bool
 }
-
-type SessionTranscriptSearchOptions struct {
-	Query   string
-	Limit   int
-	Include TranscriptInclude
-}
-
-type SessionTranscriptSearchMatch = models.SessionTranscriptSearchMatch
 
 func DefaultTranscriptInclude() TranscriptInclude {
 	return TranscriptInclude{Messages: true, Tools: true, HumanInputs: true, System: true}
@@ -132,16 +122,6 @@ func normalizeTranscriptLimitTurns(n int) int {
 	}
 	if n > MaxTranscriptLimitTurns {
 		return MaxTranscriptLimitTurns
-	}
-	return n
-}
-
-func normalizeTranscriptSearchLimit(n int) int {
-	if n <= 0 {
-		return DefaultTranscriptSearchLimit
-	}
-	if n > MaxTranscriptSearchLimit {
-		return MaxTranscriptSearchLimit
 	}
 	return n
 }
@@ -360,163 +340,6 @@ func (s *SessionTranscriptStore) ListThreadWindow(
 	default: // latest or older
 		return s.listLatestOrOlderWindow(ctx, orgID, threadID, opts, limit)
 	}
-}
-
-func (s *SessionTranscriptStore) SearchThread(
-	ctx context.Context,
-	orgID, threadID uuid.UUID,
-	opts SessionTranscriptSearchOptions,
-) ([]SessionTranscriptSearchMatch, error) {
-	queryText := strings.TrimSpace(opts.Query)
-	if queryText == "" {
-		return []SessionTranscriptSearchMatch{}, nil
-	}
-	limit := normalizeTranscriptSearchLimit(opts.Limit)
-	include := normalizeTranscriptInclude(opts.Include)
-	pattern := "%" + queryText + "%"
-
-	var branches []string
-	if include.Messages {
-		branches = append(branches, `
-			SELECT
-				('msg_' || id::text) AS entry_id,
-				'message'::text AS kind,
-				turn_number,
-				created_at,
-				left(content, 240) AS snippet,
-				id AS message_id,
-				NULL::bigint AS log_id,
-				NULL::uuid AS request_id,
-				role::text AS role,
-				''::text AS level,
-				''::text AS tool_name,
-				1 AS source_rank,
-				id AS source_id
-			FROM session_messages
-			WHERE org_id = @org_id AND thread_id = @thread_id AND content ILIKE @pattern`)
-	}
-	if include.Tools || include.System {
-		logPredicate := ""
-		toolLogPredicate := "(level = 'tool_use' OR metadata->>'type' = 'tool_result')"
-		switch {
-		case include.Tools && !include.System:
-			logPredicate = " AND " + toolLogPredicate
-		case include.System && !include.Tools:
-			logPredicate = " AND NOT " + toolLogPredicate
-		}
-		branches = append(branches, `
-			SELECT
-				CASE
-					WHEN level = 'tool_use' THEN 'tuse_' || id::text
-					WHEN metadata->>'type' = 'tool_result' THEN 'tres_' || id::text
-					ELSE 'log_' || id::text
-				END AS entry_id,
-				CASE
-					WHEN level = 'tool_use' THEN 'tool_use'
-					WHEN metadata->>'type' = 'tool_result' THEN 'tool_result'
-					ELSE 'log'
-				END AS kind,
-				turn_number,
-				timestamp AS created_at,
-				left(message, 240) AS snippet,
-				NULL::bigint AS message_id,
-				id AS log_id,
-				NULL::uuid AS request_id,
-				''::text AS role,
-				level::text AS level,
-				COALESCE(metadata->>'tool_name', metadata->>'tool', '') AS tool_name,
-				2 AS source_rank,
-				id AS source_id
-			FROM session_logs
-			WHERE org_id = @org_id AND thread_id = @thread_id AND message ILIKE @pattern`+logPredicate)
-	}
-	if include.HumanInputs {
-		branches = append(branches, `
-			SELECT
-				('hiq_' || id::text) AS entry_id,
-				'human_input'::text AS kind,
-				turn_number,
-				created_at,
-				left(concat_ws(' ', title, body, context), 240) AS snippet,
-				NULL::bigint AS message_id,
-				NULL::bigint AS log_id,
-				id AS request_id,
-				''::text AS role,
-				''::text AS level,
-				''::text AS tool_name,
-				3 AS source_rank,
-				0::bigint AS source_id
-			FROM session_human_input_requests
-			WHERE org_id = @org_id AND thread_id = @thread_id
-			  AND concat_ws(' ', title, body, context) ILIKE @pattern`)
-	}
-	if len(branches) == 0 {
-		return []SessionTranscriptSearchMatch{}, nil
-	}
-
-	sqlText := `
-		SELECT entry_id, kind, turn_number, created_at, snippet, message_id, log_id, request_id, role, level, tool_name
-		FROM (
-			` + strings.Join(branches, "\nUNION ALL\n") + `
-		) matches
-		WHERE turn_number > 0
-		ORDER BY turn_number DESC, created_at DESC, source_rank DESC, source_id DESC
-		LIMIT @limit`
-
-	rows, err := s.db.Query(ctx, sqlText, pgx.NamedArgs{
-		"org_id":    orgID,
-		"thread_id": threadID,
-		"pattern":   pattern,
-		"limit":     limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("query transcript search: %w", err)
-	}
-	defer rows.Close()
-
-	matches := []SessionTranscriptSearchMatch{}
-	for rows.Next() {
-		var match SessionTranscriptSearchMatch
-		var kind string
-		var messageID sql.NullInt64
-		var logID sql.NullInt64
-		var requestID uuid.NullUUID
-		var role string
-		var level string
-		if err := rows.Scan(
-			&match.EntryID,
-			&kind,
-			&match.TurnNumber,
-			&match.CreatedAt,
-			&match.Snippet,
-			&messageID,
-			&logID,
-			&requestID,
-			&role,
-			&level,
-			&match.ToolName,
-		); err != nil {
-			return nil, fmt.Errorf("scan transcript search match: %w", err)
-		}
-		match.Kind = models.TranscriptEntryKind(kind)
-		if messageID.Valid {
-			match.MessageID = messageID.Int64
-		}
-		if logID.Valid {
-			match.LogID = logID.Int64
-		}
-		if requestID.Valid {
-			id := requestID.UUID
-			match.RequestID = &id
-		}
-		match.Role = models.MessageRole(role)
-		match.Level = models.SessionLogLevel(level)
-		matches = append(matches, match)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate transcript search matches: %w", err)
-	}
-	return matches, nil
 }
 
 func (s *SessionTranscriptStore) listLatestOrOlderWindow(

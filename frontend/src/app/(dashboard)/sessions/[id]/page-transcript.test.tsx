@@ -12,9 +12,8 @@ import type {
   User,
   SingleResponse,
   ListResponse,
-  ThreadMessageWindowResponse,
 } from '@/lib/types';
-import { installSessionDetailPageTestHooks, getChatScroller } from './session-detail-test-kit';
+import { installSessionDetailPageTestHooks, getChatScroller, makeTranscriptWindow } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -458,14 +457,8 @@ describe('SessionDetailPage transcript and scroll', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
     );
 
@@ -528,14 +521,8 @@ describe('SessionDetailPage transcript and scroll', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
     );
 
@@ -645,26 +632,25 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => {
         const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
-        return HttpResponse.json({
-          data: [
-            {
-              id: params.threadId === 'thread-main' ? 1 : 2,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 1,
-              role: 'assistant',
-              content: assistantContent,
-              created_at: '2026-02-17T07:02:00Z',
-            },
-          ] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: params.threadId === 'thread-main' ? 1 : 2,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'assistant',
+                content: assistantContent,
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            [],
+          ),
+        );
       }),
     );
 
@@ -723,26 +709,25 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => {
         const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
-        return HttpResponse.json({
-          data: [
-            {
-              id: params.threadId === 'thread-main' ? 1 : 2,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 1,
-              role: 'assistant',
-              content: assistantContent,
-              created_at: '2026-02-17T07:02:00Z',
-            },
-          ] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: params.threadId === 'thread-main' ? 1 : 2,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'assistant',
+                content: assistantContent,
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            [],
+          ),
+        );
       }),
     );
 
@@ -806,26 +791,25 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => {
         const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
-        return HttpResponse.json({
-          data: [
-            {
-              id: params.threadId === 'thread-main' ? 1 : 2,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 1,
-              role: 'assistant',
-              content: assistantContent,
-              created_at: '2026-02-17T07:02:00Z',
-            },
-          ] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: params.threadId === 'thread-main' ? 1 : 2,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'assistant',
+                content: assistantContent,
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            [],
+          ),
+        );
       }),
     );
 
@@ -868,60 +852,63 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request, params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ request, params }) => {
         requestedUrls.push(request.url);
         const url = new URL(request.url);
         if (url.searchParams.get('before') === '3') {
-          return HttpResponse.json({
-            data: [
+          return HttpResponse.json(
+            makeTranscriptWindow(
+              [
+                {
+                  id: 1,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 1,
+                  role: 'user',
+                  content: 'Older user prompt',
+                  created_at: '2026-02-17T07:01:00Z',
+                },
+                {
+                  id: 2,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 1,
+                  role: 'assistant',
+                  content: 'Older assistant reply',
+                  created_at: '2026-02-17T07:02:00Z',
+                },
+              ] as SessionMessage[],
+              [],
+              { position: 'older', has_older: false, thread_status: 'idle' },
+            ),
+          );
+        }
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
               {
-                id: 1,
+                id: 3,
                 session_id: threadSession.id,
                 org_id: 'org-1',
                 thread_id: params.threadId as string,
-                turn_number: 1,
-                role: 'user',
-                content: 'Older user prompt',
-                created_at: '2026-02-17T07:01:00Z',
-              },
-              {
-                id: 2,
-                session_id: threadSession.id,
-                org_id: 'org-1',
-                thread_id: params.threadId as string,
-                turn_number: 1,
+                turn_number: 2,
                 role: 'assistant',
-                content: 'Older assistant reply',
-                created_at: '2026-02-17T07:02:00Z',
+                content: 'Latest assistant reply',
+                created_at: '2026-02-17T07:03:00Z',
               },
             ] as SessionMessage[],
-            meta: { has_older: false, thread_status: 'idle' },
-          } satisfies ThreadMessageWindowResponse);
-        }
-        return HttpResponse.json({
-          data: [
+            [],
             {
-              id: 3,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 2,
-              role: 'assistant',
-              content: 'Latest assistant reply',
-              created_at: '2026-02-17T07:03:00Z',
+              next_older_cursor: '3',
+              has_older: true,
+              latest_assistant_message_id: 3,
+              live_edge_message_id: 3,
+              thread_status: 'idle',
             },
-          ] as SessionMessage[],
-          meta: {
-            next_older_cursor: '3',
-            has_older: true,
-            latest_assistant_message_id: 3,
-            live_edge_message_id: 3,
-            thread_status: 'idle',
-          },
-        } satisfies ThreadMessageWindowResponse);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+          ),
+        );
       }),
     );
 
@@ -931,7 +918,6 @@ describe('SessionDetailPage transcript and scroll', () => {
     await screen.findByText('Latest assistant reply');
     const firstRequest = new URL(requestedUrls[0]);
     expect(firstRequest.searchParams.get('position')).toBe('latest');
-    expect(firstRequest.searchParams.get('limit')).toBe('60');
 
     await user.click(screen.getByRole('button', { name: /Load older/i }));
 
@@ -976,61 +962,64 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request, params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ request, params }) => {
         requestedUrls.push(request.url);
         const url = new URL(request.url);
         if (url.searchParams.get('before') === '3') {
           transcriptScrollHeight = 1000;
-          return HttpResponse.json({
-            data: [
+          return HttpResponse.json(
+            makeTranscriptWindow(
+              [
+                {
+                  id: 1,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 1,
+                  role: 'user',
+                  content: 'Older saved-scroll prompt',
+                  created_at: '2026-02-17T07:01:00Z',
+                },
+                {
+                  id: 2,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 1,
+                  role: 'assistant',
+                  content: 'Older saved-scroll reply',
+                  created_at: '2026-02-17T07:02:00Z',
+                },
+              ] as SessionMessage[],
+              [],
+              { position: 'older', has_older: false, thread_status: 'idle' },
+            ),
+          );
+        }
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
               {
-                id: 1,
+                id: 3,
                 session_id: threadSession.id,
                 org_id: 'org-1',
                 thread_id: params.threadId as string,
-                turn_number: 1,
-                role: 'user',
-                content: 'Older saved-scroll prompt',
-                created_at: '2026-02-17T07:01:00Z',
-              },
-              {
-                id: 2,
-                session_id: threadSession.id,
-                org_id: 'org-1',
-                thread_id: params.threadId as string,
-                turn_number: 1,
+                turn_number: 2,
                 role: 'assistant',
-                content: 'Older saved-scroll reply',
-                created_at: '2026-02-17T07:02:00Z',
+                content: 'Latest saved-scroll reply',
+                created_at: '2026-02-17T07:03:00Z',
               },
             ] as SessionMessage[],
-            meta: { has_older: false, thread_status: 'idle' },
-          } satisfies ThreadMessageWindowResponse);
-        }
-        return HttpResponse.json({
-          data: [
+            [],
             {
-              id: 3,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 2,
-              role: 'assistant',
-              content: 'Latest saved-scroll reply',
-              created_at: '2026-02-17T07:03:00Z',
+              next_older_cursor: '3',
+              has_older: true,
+              latest_assistant_message_id: 3,
+              live_edge_message_id: 3,
+              thread_status: 'idle',
             },
-          ] as SessionMessage[],
-          meta: {
-            next_older_cursor: '3',
-            has_older: true,
-            latest_assistant_message_id: 3,
-            live_edge_message_id: 3,
-            thread_status: 'idle',
-          },
-        } satisfies ThreadMessageWindowResponse);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+          ),
+        );
       }),
     );
 
@@ -1083,82 +1072,85 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request, params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ request, params }) => {
         requestedUrls.push(request.url);
         const url = new URL(request.url);
         if (url.searchParams.get('after') === '23') {
-          return HttpResponse.json({
-            data: [
+          return HttpResponse.json(
+            makeTranscriptWindow(
+              [
+                {
+                  id: 24,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 4,
+                  role: 'assistant',
+                  content: 'Newer anchored reply',
+                  created_at: '2026-02-17T07:04:00Z',
+                },
+              ] as SessionMessage[],
+              [],
               {
-                id: 24,
+                position: 'newer',
+                has_older: false,
+                has_newer: false,
+                latest_assistant_message_id: 24,
+                live_edge_message_id: 24,
+                thread_status: 'idle',
+              },
+            ),
+          );
+        }
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: 21,
                 session_id: threadSession.id,
                 org_id: 'org-1',
                 thread_id: params.threadId as string,
-                turn_number: 4,
+                turn_number: 2,
+                role: 'user',
+                content: 'Older anchored prompt',
+                created_at: '2026-02-17T07:01:00Z',
+              },
+              {
+                id: 22,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 2,
                 role: 'assistant',
-                content: 'Newer anchored reply',
-                created_at: '2026-02-17T07:04:00Z',
+                content: 'Saved anchored reply',
+                created_at: '2026-02-17T07:02:00Z',
+              },
+              {
+                id: 23,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 3,
+                role: 'user',
+                content: 'Next anchored prompt',
+                created_at: '2026-02-17T07:03:00Z',
               },
             ] as SessionMessage[],
-            meta: {
-              has_older: false,
-              has_newer: false,
-              latest_assistant_message_id: 24,
+            [],
+            {
+              position: 'around',
+              next_older_cursor: '21',
+              has_older: true,
+              next_newer_cursor: '23',
+              has_newer: true,
+              anchor_entry_id: 'msg_22',
+              anchor_found: true,
+              latest_assistant_message_id: 22,
               live_edge_message_id: 24,
               thread_status: 'idle',
-              window_position: 'newer',
             },
-          } satisfies ThreadMessageWindowResponse);
-        }
-        return HttpResponse.json({
-          data: [
-            {
-              id: 21,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 2,
-              role: 'user',
-              content: 'Older anchored prompt',
-              created_at: '2026-02-17T07:01:00Z',
-            },
-            {
-              id: 22,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 2,
-              role: 'assistant',
-              content: 'Saved anchored reply',
-              created_at: '2026-02-17T07:02:00Z',
-            },
-            {
-              id: 23,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 3,
-              role: 'user',
-              content: 'Next anchored prompt',
-              created_at: '2026-02-17T07:03:00Z',
-            },
-          ] as SessionMessage[],
-          meta: {
-            next_older_cursor: '21',
-            has_older: true,
-            next_newer_cursor: '23',
-            has_newer: true,
-            anchor_message_id: 22,
-            anchor_found: true,
-            latest_assistant_message_id: 22,
-            live_edge_message_id: 24,
-            thread_status: 'idle',
-            window_position: 'around',
-          },
-        } satisfies ThreadMessageWindowResponse);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+          ),
+        );
       }),
     );
 
@@ -1219,62 +1211,65 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', async ({ request, params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', async ({ request, params }) => {
         requestedUrls.push(request.url);
         const url = new URL(request.url);
         if (url.searchParams.get('before') === '3') {
           await olderPageBlocked;
           transcriptScrollHeight = 1000;
-          return HttpResponse.json({
-            data: [
+          return HttpResponse.json(
+            makeTranscriptWindow(
+              [
+                {
+                  id: 1,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 1,
+                  role: 'user',
+                  content: 'Older prompt after jump',
+                  created_at: '2026-02-17T07:01:00Z',
+                },
+                {
+                  id: 2,
+                  session_id: threadSession.id,
+                  org_id: 'org-1',
+                  thread_id: params.threadId as string,
+                  turn_number: 1,
+                  role: 'assistant',
+                  content: 'Older reply after jump',
+                  created_at: '2026-02-17T07:02:00Z',
+                },
+              ] as SessionMessage[],
+              [],
+              { position: 'older', has_older: false, thread_status: 'idle' },
+            ),
+          );
+        }
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
               {
-                id: 1,
+                id: 3,
                 session_id: threadSession.id,
                 org_id: 'org-1',
                 thread_id: params.threadId as string,
-                turn_number: 1,
-                role: 'user',
-                content: 'Older prompt after jump',
-                created_at: '2026-02-17T07:01:00Z',
-              },
-              {
-                id: 2,
-                session_id: threadSession.id,
-                org_id: 'org-1',
-                thread_id: params.threadId as string,
-                turn_number: 1,
+                turn_number: 2,
                 role: 'assistant',
-                content: 'Older reply after jump',
-                created_at: '2026-02-17T07:02:00Z',
+                content: 'Latest reply before jump',
+                created_at: '2026-02-17T07:03:00Z',
               },
             ] as SessionMessage[],
-            meta: { has_older: false, thread_status: 'idle' },
-          } satisfies ThreadMessageWindowResponse);
-        }
-        return HttpResponse.json({
-          data: [
+            [],
             {
-              id: 3,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 2,
-              role: 'assistant',
-              content: 'Latest reply before jump',
-              created_at: '2026-02-17T07:03:00Z',
+              next_older_cursor: '3',
+              has_older: true,
+              latest_assistant_message_id: 3,
+              live_edge_message_id: 3,
+              thread_status: 'idle',
             },
-          ] as SessionMessage[],
-          meta: {
-            next_older_cursor: '3',
-            has_older: true,
-            latest_assistant_message_id: 3,
-            live_edge_message_id: 3,
-            thread_status: 'idle',
-          },
-        } satisfies ThreadMessageWindowResponse);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+          ),
+        );
       }),
     );
 
@@ -1352,26 +1347,25 @@ describe('SessionDetailPage transcript and scroll', () => {
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => {
         const assistantContent = params.threadId === 'thread-main' ? 'Main reply' : 'Codex 2 reply';
-        return HttpResponse.json({
-          data: [
-            {
-              id: params.threadId === 'thread-main' ? 1 : 2,
-              session_id: threadSession.id,
-              org_id: 'org-1',
-              thread_id: params.threadId as string,
-              turn_number: 1,
-              role: 'assistant',
-              content: assistantContent,
-              created_at: '2026-02-17T07:02:00Z',
-            },
-          ] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: params.threadId === 'thread-main' ? 1 : 2,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 1,
+                role: 'assistant',
+                content: assistantContent,
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            [],
+          ),
+        );
       }),
     );
 

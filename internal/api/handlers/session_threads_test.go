@@ -2132,7 +2132,6 @@ func TestParseLatestTurns(t *testing.T) {
 
 type mockTranscriptStore struct {
 	listWindowFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
-	searchFn     func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error)
 }
 
 func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
@@ -2140,13 +2139,6 @@ func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threa
 		return m.listWindowFn(ctx, orgID, threadID, opts)
 	}
 	return db.SessionTranscriptWindow{}, nil
-}
-
-func (m *mockTranscriptStore) SearchThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error) {
-	if m.searchFn != nil {
-		return m.searchFn(ctx, orgID, threadID, opts)
-	}
-	return []db.SessionTranscriptSearchMatch{}, nil
 }
 
 // newThreadHandlerWithTranscript creates a handler with the given transcript store wired in.
@@ -2466,74 +2458,4 @@ func TestSessionThreadHandler_GetThreadTranscript_ResponseContract(t *testing.T)
 	require.Equal(t, "msg_41", resp.Data[0].Entries[0].ID, "message entry should use the stable message entry id")
 	require.Equal(t, "tres_42", resp.Data[0].Entries[1].ID, "tool result entry should use the stable tool-result entry id")
 	require.Equal(t, models.TranscriptEntryKindToolResult, resp.Data[0].Entries[1].Kind, "tool result logs should render as tool_result entries")
-}
-
-func TestSessionThreadHandler_SearchThreadTranscript_ResponseContract(t *testing.T) {
-	t.Parallel()
-
-	orgID := uuid.New()
-	sessionID := uuid.New()
-	threadID := uuid.New()
-	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
-
-	ts := &mockTranscriptStore{}
-	handler, deps := newThreadHandlerWithTranscript(t, ts)
-	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
-		require.Equal(t, orgID, gotOrgID, "SearchThreadTranscript should scope the thread lookup by org")
-		require.Equal(t, threadID, gotThreadID, "SearchThreadTranscript should load the requested thread")
-		return models.SessionThread{
-			ID:        threadID,
-			SessionID: sessionID,
-			OrgID:     orgID,
-			Status:    models.ThreadStatusIdle,
-		}, nil
-	}
-	ts.searchFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error) {
-		require.Equal(t, orgID, gotOrgID, "transcript search store should receive the request org")
-		require.Equal(t, threadID, gotThreadID, "transcript search store should receive the request thread")
-		require.Equal(t, "focused tests", opts.Query, "transcript search should pass the query text")
-		require.Equal(t, 5, opts.Limit, "transcript search should pass the requested limit")
-		require.True(t, opts.Include.Messages, "include should allow searching messages")
-		require.True(t, opts.Include.Tools, "include should allow searching tools")
-		require.False(t, opts.Include.HumanInputs, "omitted include kinds should be false")
-		return []db.SessionTranscriptSearchMatch{
-			{
-				EntryID:    "msg_41",
-				Kind:       models.TranscriptEntryKindMessage,
-				TurnNumber: 7,
-				CreatedAt:  now,
-				Snippet:    "Run focused tests",
-				MessageID:  41,
-				Role:       models.MessageRoleUser,
-			},
-		}, nil
-	}
-
-	req := threadRequest(
-		http.MethodGet,
-		"/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/transcript/search?q=focused+tests&limit=5&include=messages,tools",
-		"",
-		orgID,
-		map[string]string{"id": sessionID.String(), "tid": threadID.String()},
-	)
-	w := httptest.NewRecorder()
-
-	handler.SearchThreadTranscript(w, req)
-	require.Equal(t, http.StatusOK, w.Code, "SearchThreadTranscript should return a successful response")
-
-	var resp models.SessionTranscriptSearchResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "SearchThreadTranscript response should be valid JSON")
-	require.Equal(t, "focused tests", resp.Meta.Query, "response meta should echo the search query")
-	require.Equal(t, 5, resp.Meta.Limit, "response meta should report the effective limit")
-	require.Equal(t, []models.SessionTranscriptSearchMatch{
-		{
-			EntryID:    "msg_41",
-			Kind:       models.TranscriptEntryKindMessage,
-			TurnNumber: 7,
-			CreatedAt:  now,
-			Snippet:    "Run focused tests",
-			MessageID:  41,
-			Role:       models.MessageRoleUser,
-		},
-	}, resp.Data, "response should return the expected search matches")
 }
