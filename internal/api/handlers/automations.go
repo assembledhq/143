@@ -629,7 +629,10 @@ func resolveAutomationGitHubEventTriggers(productTriggers []models.AutomationPro
 				models.AutomationGitHubEventPullRequestReviewCommentCreated,
 			)
 		case models.AutomationProductTriggerChecksCompleted:
-			events = append(events, models.AutomationGitHubEventCheckSuiteCompleted)
+			events = append(events,
+				models.AutomationGitHubEventCheckSuiteCompleted,
+				models.AutomationGitHubEventCheckRunCompleted,
+			)
 		case models.AutomationProductTriggerPRMerged:
 			events = append(events, models.AutomationGitHubEventPullRequestMerged)
 		}

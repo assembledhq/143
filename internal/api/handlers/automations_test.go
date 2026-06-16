@@ -123,10 +123,11 @@ func TestResolveAutomationGitHubEventTriggers(t *testing.T) {
 		expectErr       bool
 	}{
 		{
-			name:            "expands product checks trigger to check_suite.completed only",
+			name:            "expands product checks trigger to both checks events",
 			productTriggers: []models.AutomationProductTrigger{models.AutomationProductTriggerChecksCompleted},
 			expected: []models.AutomationGitHubEvent{
 				models.AutomationGitHubEventCheckSuiteCompleted,
+				models.AutomationGitHubEventCheckRunCompleted,
 			},
 		},
 		{

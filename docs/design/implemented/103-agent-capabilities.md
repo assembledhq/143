@@ -21,7 +21,7 @@ GitHub webhook event names remain backend implementation details. Clients can se
 - `github.pull_request_review.submitted`
 - `github.pull_request_review_comment.created`
 
-`When checks finish` expands to `github.check_suite.completed`. The backend also accepts `github.check_run.completed` through the compatibility `github_event_triggers` field, and the frontend coalesces either raw checks event back to the product-level `When checks finish` label for display.
+`When checks finish` expands to both `github.check_suite.completed` and `github.check_run.completed` so automations work regardless of which GitHub checks webhook shape an installation emits.
 
 Feedback events are debounced through the durable `automation_trigger_dedupes` table for a short window so one submitted review with inline comments produces one automation run instead of a burst of duplicate runs. The dedupe key prefers a GitHub review group id, falls back to a concrete comment/review event id, and only falls back to repository/PR when GitHub does not provide a better identity. This avoids suppressing distinct PR comments.
 
@@ -35,7 +35,7 @@ Feedback events are debounced through the durable `automation_trigger_dedupes` t
 
 `When there is new PR feedback` includes top-level PR conversation comments, submitted reviews, and inline review comments. The UI intentionally avoids exposing those three GitHub-specific mechanisms as separate first-level checkboxes because users experience them as one feedback moment.
 
-`When checks finish` starts from completed GitHub check suites associated with a PR. Automations configured through the raw compatibility field can also start from completed check runs.
+`When checks finish` starts from completed GitHub check suites or check runs associated with a PR.
 
 `When a PR is merged` starts from a `pull_request.closed` webhook where GitHub marks the PR as merged.
 

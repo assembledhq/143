@@ -17,7 +17,7 @@ const productTriggerEvents: Record<AutomationProductTrigger, AutomationGitHubEve
   "github.pr.opened": ["github.pull_request.opened"],
   "github.pr.updated": ["github.pull_request.updated"],
   "github.pr.feedback": prFeedbackGitHubEvents,
-  "github.checks.completed": ["github.check_suite.completed"],
+  "github.checks.completed": ["github.check_suite.completed", "github.check_run.completed"],
   "github.pr.merged": ["github.pull_request.merged"],
 };
 

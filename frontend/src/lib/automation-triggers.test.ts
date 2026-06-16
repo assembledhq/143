@@ -31,6 +31,7 @@ describe("automation trigger mapping", () => {
       "github.pull_request_review.submitted",
       "github.pull_request_review_comment.created",
       "github.check_suite.completed",
+      "github.check_run.completed",
       "github.pull_request.merged",
     ]);
   });
