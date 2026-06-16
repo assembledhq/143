@@ -176,6 +176,17 @@ func TestSessionTitlePrompt(t *testing.T) {
 	require.Contains(t, result, "Only change the title if the conversation clearly shifted to a new primary topic", "prompt should only allow retitling on real topic changes")
 }
 
+func TestPRContentPromptUsesProblemFirstDefaultShape(t *testing.T) {
+	t.Parallel()
+
+	result := PRContentPrompt(PRContentPromptData{HasTemplate: false})
+
+	require.Contains(t, result, "first sentence should name the product problem", "default PR prompt should ask for product-problem context before implementation details")
+	require.Contains(t, result, "2-4 bullets", "default PR prompt should keep change details brief")
+	require.Contains(t, result, "## Validation", "default PR prompt should use validation wording instead of a generic test-plan checklist")
+	require.Contains(t, result, "about 150-300 words", "default PR prompt should bound PR body length for skim-friendly review")
+}
+
 func TestLinkedIssuesContext(t *testing.T) {
 	t.Parallel()
 
