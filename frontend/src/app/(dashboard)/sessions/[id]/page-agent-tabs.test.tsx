@@ -955,19 +955,22 @@ describe('SessionDetailPage agent tabs and threads', () => {
       pending_message_count: 0,
     };
     let sessionFetchCount = 0;
+    const servedStatuses: Array<Session["status"]> = [];
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         sessionFetchCount += 1;
+        const status = sessionFetchCount >= 2 ? 'completed' : 'running';
+        servedStatuses.push(status);
         return HttpResponse.json({
           data: {
             ...mockSessions[0],
             id: sessionId,
-            status: sessionFetchCount >= 2 ? 'completed' : 'running',
+            status,
             sandbox_state: sessionFetchCount >= 2 ? 'snapshotted' : 'running',
             threads: [{
               ...thread,
-              status: sessionFetchCount >= 2 ? 'completed' : 'running',
+              status,
             }],
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
@@ -993,11 +996,13 @@ describe('SessionDetailPage agent tabs and threads', () => {
 
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    expect(await screen.findByText('Start work')).toBeInTheDocument();
+    expect(servedStatuses[0]).toBe('running');
 
     await waitFor(() => {
       expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
     }, { timeout: 5000 });
+    expect(servedStatuses).toContain('completed');
     expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
   }, 10000);
 

@@ -51,6 +51,19 @@ func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.O
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
 }
 
+// ListIDs returns tenant root IDs for system cleanup tasks.
+// lint:allow-no-orgid reason="organizations is the root tenant table; cleanup iterates org IDs before org-scoped deletes"
+func (s *OrganizationStore) ListIDs(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id
+		FROM organizations
+		ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query organization ids: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+}
+
 // Update mutates the organization identified by org.ID.
 // lint:allow-no-orgid reason="organizations is the root tenant table; org.ID IS the org"
 func (s *OrganizationStore) Update(ctx context.Context, org *models.Organization) error {

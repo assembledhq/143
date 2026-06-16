@@ -207,6 +207,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		repoHandler.SetPRService(prService)
 	}
+	slackMetrics, slackMetricsErr := metrics.NewSlackbotMetrics()
+	if slackMetricsErr != nil {
+		logger.Warn().Err(slackMetricsErr).Msg("failed to initialize Slackbot metrics")
+	}
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
@@ -219,6 +223,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSlackBotSettingsStore(slackBotSettingsStore),
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
+		handlers.WithSlackbotMetrics(slackMetrics),
 	}
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
@@ -256,10 +261,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 	)
 	slackbotHandler.SetLogger(logger)
-	if slackMetrics, err := metrics.NewSlackbotMetrics(); err == nil {
+	if slackMetrics != nil {
 		slackbotHandler.SetMetrics(slackMetrics)
-	} else {
-		logger.Warn().Err(err).Msg("failed to initialize Slackbot metrics")
 	}
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)

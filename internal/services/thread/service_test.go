@@ -367,7 +367,8 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 var threadHumanInputRequestColumns = []string{
 	"id", "org_id", "session_id", "thread_id", "turn_number", "agent_type",
 	"provider_request_id", "request_kind", "status", "title", "body",
-	"context", "blocks_phase", "choices", "response_schema", "provider_payload",
+	"context", "blocks_phase", "assigned_user_id", "sensitivity", "preferred_channel",
+	"choices", "response_schema", "provider_payload",
 	"answer_text", "answer_payload", "answered_by", "answered_at", "expires_at", "created_at",
 }
 
@@ -376,7 +377,8 @@ func threadHumanInputRequestRow(id, orgID, sessionID, threadID, userID uuid.UUID
 		id, orgID, sessionID, &threadID, 3, models.AgentTypeClaudeCode,
 		humanInputTestStringPtr("toolu_thread"), models.HumanInputRequestKindFreeText,
 		models.HumanInputRequestStatusAnswered, "Claude needs input", "What should Claude do?",
-		(*string)(nil), (*string)(nil), []byte("[]"), json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
+		(*string)(nil), (*string)(nil), (*uuid.UUID)(nil), models.HumanInputSensitivityTeam,
+		models.HumanInputPreferredChannelSlackThread, []byte("[]"), json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
 		&answer, json.RawMessage(`{"answer_text":"` + answer + `"}`), &userID, &now, (*time.Time)(nil), now,
 	}
 }

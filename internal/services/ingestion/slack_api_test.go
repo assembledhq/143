@@ -364,6 +364,67 @@ func TestSlackAPIClient_WriteMethods(t *testing.T) {
 	}
 }
 
+func TestSlackAPIClient_WriteMethodSlackAPIFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		status      int
+		body        map[string]any
+		headers     map[string]string
+		errContains string
+	}{
+		{
+			name:        "not in channel",
+			status:      http.StatusOK,
+			body:        map[string]any{"ok": false, "error": "not_in_channel"},
+			errContains: "not_in_channel",
+		},
+		{
+			name:        "missing scope",
+			status:      http.StatusOK,
+			body:        map[string]any{"ok": false, "error": "missing_scope"},
+			errContains: "missing_scope",
+		},
+		{
+			name:        "invalid auth",
+			status:      http.StatusOK,
+			body:        map[string]any{"ok": false, "error": "invalid_auth"},
+			errContains: "invalid_auth",
+		},
+		{
+			name:        "rate limit",
+			status:      http.StatusTooManyRequests,
+			headers:     map[string]string{"Retry-After": "30"},
+			errContains: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/chat.postMessage", r.URL.Path, "test should exercise chat.postMessage")
+				for key, value := range tt.headers {
+					w.Header().Set(key, value)
+				}
+				w.WriteHeader(tt.status)
+				if tt.body != nil {
+					require.NoError(t, json.NewEncoder(w).Encode(tt.body), "test response should encode")
+				}
+			}))
+			defer server.Close()
+
+			client := newTestSlackClient(server.URL)
+			_, err := client.PostMessage(context.Background(), "test-token", "C123", "1000.1", "hello")
+
+			require.Error(t, err, "PostMessage should return Slack API failures")
+			require.Contains(t, err.Error(), tt.errContains, "PostMessage error should name the Slack API failure")
+		})
+	}
+}
+
 func TestSlackAPIClient_ListChannels(t *testing.T) {
 	t.Parallel()
 
