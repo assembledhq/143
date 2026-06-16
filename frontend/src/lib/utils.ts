@@ -46,7 +46,7 @@ export function safeExternalUrl(url: string | undefined | null): string | undefi
   if (!url) return undefined;
   try {
     const parsed = new URL(url);
-    if (parsed.protocol === "https:") {
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
       return url;
     }
   } catch {

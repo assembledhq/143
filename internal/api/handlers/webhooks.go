@@ -65,6 +65,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handleOrganization(w, r, body)
 	case "installation_repositories":
 		h.handleInstallationRepositories(w, r, body)
+	case "push":
+		h.handlePush(w, r, body)
 	case "pull_request":
 		h.handlePullRequest(w, r, body)
 	case "pull_request_review":
@@ -289,6 +291,30 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "repositories updated"})
+}
+
+func (h *WebhookHandler) handlePush(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+	var event ghservice.PushEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse push event")
+		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+	if err := h.prService.HandlePushEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PUSH_EVENT_FAILED", "failed to process push event", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
 func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Request, body []byte) {

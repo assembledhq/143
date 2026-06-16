@@ -49,7 +49,22 @@ func ptrToInt(value int) *int {
 var branchPreviewTargetTestCols = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
 	"resolved_config_digest", "source_type", "source_id", "source_url",
-	"created_by_user_id", "request_id", "created_at",
+	"created_by_user_id", "request_id", "preview_group_id", "created_at",
+}
+
+var branchPreviewGroupTestCols = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
+}
+
+var branchPreviewCurrentSummaryTestCols = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
+	"repository_full_name", "status", "freshness", "running_commit_sha", "current_preview_id",
+	"expires_at", "stopped_at", "stopped_reason", "error", "current_phase", "attempt_count", "target_count",
+	"resumable", "resume_estimate_seconds",
 }
 
 var branchPreviewLinkTestCols = []string{
@@ -96,6 +111,35 @@ func (f fakeBranchPreviewGitHub) GetFileContent(context.Context, string, string,
 		return f.configContent, nil
 	}
 	return `{"preview":{"name":"web","command":["npm","run","dev"],"port":3000}}`, nil
+}
+
+func expectBranchPreviewGroupUpsert(mock pgxmock.PgxPoolIface, orgID, repoID, targetID, userID uuid.UUID, branch, sha, configName string, sourceType models.PreviewSourceType, sourceID, sourceURL string, now time.Time) {
+	groupID := uuid.New()
+	kind := models.PreviewGroupKindBranch
+	groupSourceType := sourceType
+	groupSourceID := sourceID
+	var prNumber *int
+	if _, _, number, ok := db.ParsePRSourceID(sourceID); ok {
+		kind = models.PreviewGroupKindPullRequest
+		groupSourceType = models.PreviewSourceTypePullRequest
+		groupSourceID = fmt.Sprintf("acme/app#%d", number)
+		prNumber = &number
+	} else if sourceID != "" {
+		kind = models.PreviewGroupKindSource
+	}
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(branchPreviewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	mock.ExpectQuery("INSERT INTO preview_groups").
+		WithArgs(branchPreviewAnyArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewGroupTestCols).AddRow(
+			groupID, orgID, repoID, kind, branch, configName,
+			prNumber, groupSourceType, groupSourceID, sourceURL, &targetID,
+			sha, "target_created", false, &userID, now, now,
+		))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(branchPreviewAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 }
 
 func TestBranchPreviewHandler_ResponseForPreviewUsesTargetPreviewOrigin(t *testing.T) {
@@ -165,7 +209,8 @@ func TestBranchPreviewHandler_CreateResolvesBranchHeadAndCreatesTarget(t *testin
 
 	mock.ExpectQuery("INSERT INTO preview_targets").
 		WithArgs(branchPreviewAnyArgs(11)...).
-		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(targetID, orgID, repoID, "feature/previews", head, "", "", "manual", "", "", userID, nil, now))
+		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(targetID, orgID, repoID, "feature/previews", head, "", "", "manual", "", "", userID, nil, nil, now))
+	expectBranchPreviewGroupUpsert(mock, orgID, repoID, targetID, userID, "feature/previews", head, "", models.PreviewSourceTypeManual, "", "", now)
 
 	mock.ExpectQuery("INSERT INTO preview_links").
 		WithArgs(branchPreviewAnyArgs(6)...).
@@ -572,7 +617,7 @@ func TestBranchPreviewHandler_StopRejectsPreviewTokenWithoutStopScope(t *testing
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, now,
+			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, nil, now,
 		))
 
 	handler := NewBranchPreviewHandler(
@@ -637,7 +682,7 @@ func TestBranchPreviewHandler_RestartRejectsPreviewTokenWithoutCreateScope(t *te
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, now,
+			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, nil, now,
 		))
 
 	// resolveTargetRepoAndActive: repos.GetByID
@@ -710,7 +755,7 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, now,
+			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, nil, now,
 		))
 
 	// resolveTargetRepoAndActive: repos.GetByID
@@ -781,7 +826,7 @@ func TestBranchPreviewHandler_MintBootstrapTokenRejectsPreviewTokenForDifferentR
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			targetID, orgID, repoB, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, now,
+			targetID, orgID, repoB, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, nil, now,
 		))
 
 	// A non-nil manager is required to pass the early nil-guard in MintBootstrapToken.
@@ -850,7 +895,7 @@ func TestBranchPreviewHandler_CreateDeduplicatesByIdempotencyKeyHeader(t *testin
 	mock.ExpectQuery("SELECT .+ FROM preview_targets target JOIN preview_idempotency_keys").
 		WithArgs(branchPreviewAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			existingTargetID, orgID, repoID, "feature/x", head, "", "", "manual", "", "", userID, nil, now,
+			existingTargetID, orgID, repoID, "feature/x", head, "", "", "manual", "", "", userID, nil, nil, now,
 		))
 
 	// 3. UpsertPreviewLink
@@ -921,7 +966,7 @@ func TestBranchPreviewHandler_CreateDeduplicatesBySourceExternalID(t *testing.T)
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(branchPreviewAnyArgs(3)...).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			existingTargetID, orgID, repoID, "feature/x", head, "", "", "pull_request", "pr-999", "https://github.com/acme/app/pull/1", userID, nil, now,
+			existingTargetID, orgID, repoID, "feature/x", head, "", "", "pull_request", "pr-999", "https://github.com/acme/app/pull/1", userID, nil, nil, now,
 		))
 
 	// 3. UpsertPreviewLink
@@ -998,8 +1043,9 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 	mock.ExpectQuery("INSERT INTO preview_targets").
 		WithArgs(branchPreviewAnyArgs(11)...).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			targetID, orgID, repoID, "feature/x", head, "", "", "session", sessionID.String(), "", userID, nil, now,
+			targetID, orgID, repoID, "feature/x", head, "", "", "session", sessionID.String(), "", userID, nil, nil, now,
 		))
+	expectBranchPreviewGroupUpsert(mock, orgID, repoID, targetID, userID, "feature/x", head, "", models.PreviewSourceTypeSession, sessionID.String(), "", now)
 
 	// 4. UpsertPreviewLink
 	mock.ExpectQuery("INSERT INTO preview_links").
@@ -1259,7 +1305,7 @@ func TestBranchPreviewHandler_ResolveLinkRejectsPreviewTokenWithoutReadScope(t *
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
-			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, now,
+			targetID, orgID, repoID, "feature/x", "abc123", "", "", "manual", "", "", userID, nil, nil, now,
 		))
 
 	handler := NewBranchPreviewHandler(
@@ -1396,6 +1442,294 @@ func TestBranchPreviewHandler_ListSupportsLegacyAndIndexParams(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestBranchPreviewHandler_ListCurrentReturnsGroupedRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+COALESCE\\(latest\\.status, pg\\.current_status\\) IN").
+		WithArgs(branchPreviewAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewCurrentSummaryTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/shared", "",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID,
+			"abc123", string(models.PreviewStatusReady), false, &userID, now, now,
+			"acme/app", string(models.PreviewStatusReady), models.PreviewCurrentFreshnessCurrent, "abc123", &previewID,
+			&now, nil, "", "", "ready", 3, 2, false, (*int)(nil),
+		))
+	mock.ExpectQuery("SELECT[\\s\\S]+COUNT\\(\\*\\) FILTER").
+		WithArgs(branchPreviewAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "attention", "recent"}).AddRow(1, 0, 0, 0))
+	mock.ExpectQuery("COUNT\\(\\*\\)[\\s\\S]+user_id = @user_id").
+		WithArgs(branchPreviewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("COUNT\\(\\*\\)::int[\\s\\S]+repository_preview_policies").
+		WithArgs(branchPreviewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/current?scope=running", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.ListCurrent(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ListCurrent should return grouped preview rows")
+	require.Contains(t, rr.Body.String(), `"preview_group_id":"`+groupID.String()+`"`, "response should expose the group ID")
+	require.Contains(t, rr.Body.String(), `"primary_label":"Open"`, "response should include launch recommendation")
+	require.Contains(t, rr.Body.String(), `"attention":0`, "response should include attention counts")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_GetCurrentReturnsSummary(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+pg\\.id = @group_id").
+		WithArgs(branchPreviewAnyArgs(8)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewCurrentSummaryTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/get-current", "",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID,
+			"abc123", string(models.PreviewStatusReady), false, &userID, now, now,
+			"acme/app", string(models.PreviewStatusReady), models.PreviewCurrentFreshnessCurrent, "abc123", &previewID,
+			&now, nil, "", "", "ready", 1, 1, false, (*int)(nil),
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/current/"+groupID.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	req = req.WithContext(withChiParam(req.Context(), "preview_group_id", groupID.String()))
+	rr := httptest.NewRecorder()
+
+	handler.GetCurrent(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "GetCurrent should return 200 for a valid group ID")
+	require.Contains(t, rr.Body.String(), `"preview_group_id":"`+groupID.String()+`"`, "response should include the group ID")
+	require.Contains(t, rr.Body.String(), `"primary_label":"Open"`, "response should include launch recommendation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_GetCurrentReturns404WhenNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	groupID := uuid.New()
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+pg\\.id = @group_id").
+		WithArgs(branchPreviewAnyArgs(8)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewCurrentSummaryTestCols))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/current/"+groupID.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	req = req.WithContext(withChiParam(req.Context(), "preview_group_id", groupID.String()))
+	rr := httptest.NewRecorder()
+
+	handler.GetCurrent(rr, req)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "GetCurrent should return 404 when the group does not exist")
+	require.Contains(t, rr.Body.String(), "PREVIEW_NOT_FOUND", "response should include the not-found error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_CurrentHistoryReturnsTargets(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("FROM preview_groups WHERE id = @group_id").
+		WithArgs(branchPreviewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewGroupTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/history", "",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID,
+			"abc123", string(models.PreviewStatusStopped), false, &userID, now, now,
+		))
+	histCols := []string{"target_id", "commit_sha", "preview_config_name", "source_type", "source_id", "created_at", "is_latest_head"}
+	mock.ExpectQuery("SELECT target.id AS target_id[\\s\\S]+FROM preview_targets target").
+		WithArgs(branchPreviewAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows(histCols).AddRow(
+			targetID, "abc123", "web", string(models.PreviewSourceTypeManual), "", now, true,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/current/"+groupID.String()+"/history", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	req = req.WithContext(withChiParam(req.Context(), "preview_group_id", groupID.String()))
+	rr := httptest.NewRecorder()
+
+	handler.CurrentHistory(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "CurrentHistory should return 200")
+	require.Contains(t, rr.Body.String(), targetID.String(), "response should include the target ID")
+	require.Contains(t, rr.Body.String(), `"is_latest_head":true`, "response should indicate the latest head target")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_StopCurrentNoOpWhenNoActivePreview(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	// Summary has no active preview (CurrentPreviewID is nil).
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+pg\\.id = @group_id").
+		WithArgs(branchPreviewAnyArgs(8)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewCurrentSummaryTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/idle", "",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID,
+			"abc123", string(models.PreviewStatusStopped), false, &userID, now, now,
+			"acme/app", string(models.PreviewStatusStopped), models.PreviewCurrentFreshnessCurrent, "abc123", (*uuid.UUID)(nil),
+			(*time.Time)(nil), &now, "user", "", "preview.stopped", 1, 1, false, (*int)(nil),
+		))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/current/"+groupID.String()+"/stop", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	req = req.WithContext(withChiParam(req.Context(), "preview_group_id", groupID.String()))
+	rr := httptest.NewRecorder()
+
+	handler.StopCurrent(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "StopCurrent should return 200 when there is no active preview to stop")
+	require.Contains(t, rr.Body.String(), `"preview_group_id":"`+groupID.String()+`"`, "response should include the group ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_StopCurrentReturnsErrorWithoutPreviewService(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	groupID := uuid.New()
+	targetID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	// Handler has no stopper and no manager — StopCurrent should report unavailable.
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+pg\\.id = @group_id").
+		WithArgs(branchPreviewAnyArgs(8)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewCurrentSummaryTestCols).AddRow(
+			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/running", "",
+			nil, models.PreviewSourceTypeManual, "", "", &targetID,
+			"abc123", string(models.PreviewStatusReady), false, &userID, now, now,
+			"acme/app", string(models.PreviewStatusReady), models.PreviewCurrentFreshnessCurrent, "abc123", &previewID,
+			&now, nil, "", "", "ready", 1, 1, false, (*int)(nil),
+		))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/current/"+groupID.String()+"/stop", nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	req = req.WithContext(withChiParam(req.Context(), "preview_group_id", groupID.String()))
+	rr := httptest.NewRecorder()
+
+	handler.StopCurrent(rr, req)
+
+	require.Equal(t, http.StatusInternalServerError, rr.Code, "StopCurrent should return 500 when no preview service is configured")
+	require.Contains(t, rr.Body.String(), "PREVIEW_UNAVAILABLE", "response should report the unavailable error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func branchPreviewSummaryTestCols() []string {
