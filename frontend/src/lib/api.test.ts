@@ -226,101 +226,6 @@ describe('api client', () => {
       expect(result.data.status).toBe('running');
     });
 
-    it('fetches a thread message window with cursor params', async () => {
-      let capturedUrl: string | undefined;
-      const mockWindow = {
-        data: [{ id: 21, role: 'assistant', content: 'latest' }],
-        meta: {
-          next_older_cursor: '21',
-          has_older: true,
-          latest_assistant_message_id: 21,
-          live_edge_message_id: 21,
-          thread_status: 'idle',
-        },
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
-          capturedUrl = request.url;
-          return HttpResponse.json(mockWindow);
-        }),
-      );
-
-      const result = await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        before: '30',
-        limit: 25,
-      });
-
-      expect(result).toEqual(mockWindow);
-      expect(capturedUrl).toBeDefined();
-      const url = new URL(capturedUrl!);
-      expect(url.searchParams.get('before')).toBe('30');
-      expect(url.searchParams.get('limit')).toBe('25');
-    });
-
-    it('fetches thread message windows around anchors and after cursors', async () => {
-      const capturedUrls: string[] = [];
-      const mockWindow = {
-        data: [],
-        meta: {
-          has_older: false,
-          has_newer: false,
-          thread_status: 'idle',
-          window_position: 'around',
-        },
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
-          capturedUrls.push(request.url);
-          return HttpResponse.json(mockWindow);
-        }),
-      );
-
-      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        position: 'around',
-        anchorMessageId: 456,
-        limit: 80,
-      });
-      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        after: '789',
-        limit: 40,
-      });
-
-      const aroundUrl = new URL(capturedUrls[0]!);
-      expect(aroundUrl.searchParams.get('position')).toBe('around');
-      expect(aroundUrl.searchParams.get('anchor_message_id')).toBe('456');
-      expect(aroundUrl.searchParams.get('limit')).toBe('80');
-
-      const afterUrl = new URL(capturedUrls[1]!);
-      expect(afterUrl.searchParams.get('after')).toBe('789');
-      expect(afterUrl.searchParams.get('limit')).toBe('40');
-    });
-
-    it('fetches thread logs only for loaded message turns', async () => {
-      let capturedUrl: string | undefined;
-      const mockLogs = {
-        data: [{ id: 101, level: 'output', message: 'latest turn', turn_number: 7 }],
-        meta: {},
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/logs', ({ request }) => {
-          capturedUrl = request.url;
-          return HttpResponse.json(mockLogs);
-        }),
-      );
-
-      const result = await api.sessions.getThreadLogs('session-abc', 'thread-1', {
-        turnNumbers: [7, 6, 7, 5],
-      });
-
-      expect(result).toEqual(mockLogs);
-      expect(capturedUrl).toBeDefined();
-      const url = new URL(capturedUrl!);
-      expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
-    });
-
     it('fetches session log detail by log id', async () => {
       let capturedUrl: string | undefined;
       const mockDetail = {
@@ -2039,30 +1944,6 @@ describe('api client', () => {
       expect(url.searchParams.get('anchor_message_id')).toBeNull();
       expect(url.searchParams.get('anchor_turn_number')).toBeNull();
       expect(url.searchParams.get('limit_turns')).toBeNull();
-    });
-  });
-
-  describe('sessions.searchThreadTranscript', () => {
-    it('sends query, limit, and include filters', async () => {
-      let capturedUrl: string | undefined;
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:tid/transcript/search', ({ request }) => {
-          capturedUrl = request.url;
-          return HttpResponse.json({ data: [], meta: { query: 'focused tests', limit: 5 } });
-        }),
-      );
-
-      await api.sessions.searchThreadTranscript('sess-1', 'thread-1', {
-        q: 'focused tests',
-        limit: 5,
-        include: ['messages', 'tools'],
-      });
-
-      const url = new URL(capturedUrl!);
-      expect(url.pathname).toBe('/api/v1/sessions/sess-1/threads/thread-1/transcript/search');
-      expect(url.searchParams.get('q')).toBe('focused tests');
-      expect(url.searchParams.get('limit')).toBe('5');
-      expect(url.searchParams.get('include')).toBe('messages,tools');
     });
   });
 });

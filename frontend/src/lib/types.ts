@@ -55,24 +55,6 @@ export interface UserSettings {
   diff_viewer_full_screen?: boolean;
 }
 
-export interface ThreadMessageWindowMeta {
-  next_older_cursor?: string;
-  has_older: boolean;
-  next_newer_cursor?: string;
-  has_newer?: boolean;
-  anchor_message_id?: number;
-  anchor_found?: boolean;
-  latest_assistant_message_id?: number;
-  live_edge_message_id?: number;
-  window_position?: "latest" | "older" | "newer" | "around";
-  thread_status: ThreadStatus;
-}
-
-export interface ThreadMessageWindowResponse {
-  data: SessionMessage[];
-  meta: ThreadMessageWindowMeta;
-}
-
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
 // fields keep their stored value, null clears a field, and nested objects
 // merge per key. Send only the fields being changed — never a full settings
@@ -1117,28 +1099,6 @@ export interface SessionTranscriptWindowMeta {
 export interface SessionTranscriptWindowResponse {
   data: SessionTranscriptTurn[];
   meta: SessionTranscriptWindowMeta;
-}
-
-export interface SessionTranscriptSearchMatch {
-  entry_id: string;
-  kind: SessionTranscriptEntryKind;
-  turn_number: number;
-  created_at: string;
-  snippet: string;
-  message_id?: number;
-  log_id?: number;
-  request_id?: string;
-  role?: 'user' | 'assistant';
-  level?: string;
-  tool_name?: string;
-}
-
-export interface SessionTranscriptSearchResponse {
-  data: SessionTranscriptSearchMatch[];
-  meta: {
-    query: string;
-    limit: number;
-  };
 }
 
 export interface PullRequest {
