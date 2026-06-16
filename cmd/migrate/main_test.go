@@ -90,6 +90,51 @@ func TestMigrationVersionsAreUnique(t *testing.T) {
 	}
 }
 
+func TestSlackOrgSelectionsMigrationUsesPostPreviewSlot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		filename    string
+		shouldExist bool
+	}{
+		{
+			name:        "up migration uses version after preview current groups",
+			filename:    "000197_slack_org_selections.up.sql",
+			shouldExist: true,
+		},
+		{
+			name:        "down migration uses version after preview current groups",
+			filename:    "000197_slack_org_selections.down.sql",
+			shouldExist: true,
+		},
+		{
+			name:        "up migration does not occupy preview current groups slot",
+			filename:    "000196_slack_org_selections.up.sql",
+			shouldExist: false,
+		},
+		{
+			name:        "down migration does not occupy preview current groups slot",
+			filename:    "000196_slack_org_selections.down.sql",
+			shouldExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := os.Stat(filepath.Join("..", "..", "migrations", tt.filename))
+			if tt.shouldExist {
+				require.NoError(t, err, "slack org selections migration should use version 000197")
+				return
+			}
+			require.True(t, os.IsNotExist(err), "slack org selections migration should not use version 000196")
+		})
+	}
+}
+
 func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
 	t.Parallel()
 
