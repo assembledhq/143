@@ -400,6 +400,31 @@ func TestInjectScriptsIntoHTML_GzipResponse(t *testing.T) {
 	require.Contains(t, string(body), preview.ComponentResolverScript, "modified HTML should include the component resolver script")
 }
 
+func TestActivityHeartbeatScriptWatchesForSessionExpiry(t *testing.T) {
+	t.Parallel()
+
+	// The heartbeat must use fetch (not a fire-and-forget Image) so it can read
+	// the gateway's 401 PREVIEW_SESSION_EXPIRED status, and it must surface an
+	// in-app reconnect overlay with a button. A regression here reintroduces the
+	// silent blank-screen-on-expiry failure mode.
+	require.Contains(t, activityHeartbeatScript, "window.fetch.bind(window)",
+		"heartbeat must capture native fetch at init so app fetch wrappers cannot hide the 401")
+	require.Contains(t, activityHeartbeatScript, "nativeFetch(url",
+		"heartbeat must probe via the captured native fetch")
+	require.Contains(t, activityHeartbeatScript, "/__143_heartbeat?t=",
+		"heartbeat must hit the gateway heartbeat endpoint")
+	require.Contains(t, activityHeartbeatScript, "new Image().src = url",
+		"heartbeat must fall back to an Image keep-alive when fetch is unavailable")
+	require.Contains(t, activityHeartbeatScript, "resp.status === 401",
+		"heartbeat must react to the gateway's 401 expiry signal")
+	require.Contains(t, activityHeartbeatScript, "__143-preview-reconnect",
+		"expiry must render the in-app reconnect overlay")
+	require.Contains(t, activityHeartbeatScript, "pv-reconnect",
+		"the reconnect overlay must expose a reconnect button")
+	require.Contains(t, activityHeartbeatScript, "window.location.reload()",
+		"reconnecting must reload so the gateway serves the full control overlay")
+}
+
 func TestInjectScriptsIntoHTML_OversizedCompressedBodyPassesThroughUnchanged(t *testing.T) {
 	t.Parallel()
 
