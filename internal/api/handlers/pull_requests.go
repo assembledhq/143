@@ -238,6 +238,10 @@ func (h *PullRequestHandler) startRepair(w http.ResponseWriter, r *http.Request,
 			writeError(w, r, http.StatusConflict, "REPAIR_ALREADY_IN_PROGRESS", "a repair session is already in progress for this pull request")
 			return
 		}
+		if errors.Is(err, ghservice.ErrRepairSessionBusy) {
+			writeError(w, r, http.StatusConflict, "REPAIR_SESSION_BUSY", "a session is already running for this pull request")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "PULL_REQUEST_REPAIR_FAILED", "failed to start pull request repair", err)
 		return
 	}

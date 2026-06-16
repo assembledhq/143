@@ -490,6 +490,7 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
@@ -6570,6 +6571,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if services.TitleService != nil {
 			if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID); titleErr != nil {
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
+			}
+		}
+		if continueOpts != nil && continueOpts.PRRepair != nil && services.PR != nil {
+			if completionErr := services.PR.CompletePullRequestRepairRun(ctx, orgID, continueOpts.PRRepair.PullRequestID, continueOpts.PRRepair.RepairRunID); completionErr != nil {
+				logger.Warn().
+					Err(completionErr).
+					Str("session_id", sessionID.String()).
+					Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
+					Msg("failed to complete pull request repair run after continue_session")
 			}
 		}
 		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")

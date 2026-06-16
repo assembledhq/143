@@ -1414,6 +1414,8 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
+		redisClient,
+		logger,
 	)
 
 	// Failure analysis service.
@@ -1657,6 +1659,8 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
+	redisClient *cache.Client,
+	logger zerolog.Logger,
 ) {
 	if prService == nil {
 		return
@@ -1670,4 +1674,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
+	prService.SetRedisClient(redisClient)
+	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }

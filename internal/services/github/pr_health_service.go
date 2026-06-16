@@ -226,7 +226,15 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 		return nil
 	}
 
-	runs, err := s.pullRequests.ListActiveRepairRuns(ctx, pr.OrgID, pr.ID, resp.HealthVersion)
+	var (
+		runs []models.PullRequestRepairRun
+		err  error
+	)
+	if resp.HeadSHA != "" {
+		runs, err = s.pullRequests.ListActiveRepairRunsByHead(ctx, pr.OrgID, pr.ID, resp.HeadSHA)
+	} else {
+		runs, err = s.pullRequests.ListActiveRepairRuns(ctx, pr.OrgID, pr.ID, resp.HealthVersion)
+	}
 	if err != nil {
 		return err
 	}
@@ -589,7 +597,7 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 		}
 	}
 
-	existing, err := s.pullRequests.GetActiveRepairRun(ctx, orgID, pullRequestID, action, current.Version)
+	existing, err := s.getActiveRepairRunForCurrentHead(ctx, orgID, pullRequestID, action, current)
 	if err == nil {
 		session, sessionErr := s.sessions.GetByID(ctx, orgID, existing.SessionID)
 		if sessionErr == nil && !isSessionTerminalStatus(session.Status) {
@@ -599,7 +607,9 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 			// navigate to the active repair via active_repairs on the health response.
 			return nil, ErrRepairAlreadyInProgress
 		}
-		_ = s.pullRequests.DeactivateRepairRun(ctx, orgID, existing.ID)
+		if deactivateErr := s.pullRequests.DeactivateRepairRun(ctx, orgID, existing.ID); deactivateErr != nil {
+			return nil, deactivateErr
+		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
@@ -625,9 +635,16 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 			Msg("selected pull request repair workspace mode")
 	}
 	if workspaceMode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason != "" {
-		return nil, fmt.Errorf("canonical pull request session is not ready for repair: %s", reason)
+		return nil, fmt.Errorf("%w: canonical pull request session is not ready for repair: %s", ErrRepairSessionBusy, reason)
 	}
 	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action, repairShouldPushChanges(opts)), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID)
+}
+
+func (s *PRService) getActiveRepairRunForCurrentHead(ctx context.Context, orgID, pullRequestID uuid.UUID, action models.PullRequestRepairActionType, current models.PullRequestHealthCurrent) (models.PullRequestRepairRun, error) {
+	if current.HeadSHA != "" {
+		return s.pullRequests.GetActiveRepairRunByHead(ctx, orgID, pullRequestID, action, current.HeadSHA)
+	}
+	return s.pullRequests.GetActiveRepairRun(ctx, orgID, pullRequestID, action, current.Version)
 }
 
 func repairShouldPushChanges(opts StartPullRequestRepairOptions) bool {
@@ -767,6 +784,8 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		ThreadID:      threadID,
 		ActionType:    action,
 		HealthVersion: healthVersion,
+		HeadSHA:       headSHA,
+		BaseSHA:       baseSHA,
 		WorkspaceMode: workspaceMode,
 		Active:        true,
 	}
@@ -816,12 +835,41 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	}, nil
 }
 
+func (s *PRService) CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error {
+	if s.pullRequests == nil {
+		return nil
+	}
+	if repairRunID != uuid.Nil {
+		if err := s.pullRequests.DeactivateRepairRun(ctx, orgID, repairRunID); err != nil {
+			return fmt.Errorf("deactivate pull request repair run: %w", err)
+		}
+	}
+
+	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
+	if err != nil {
+		return fmt.Errorf("load pull request for repair completion event: %w", err)
+	}
+	current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("load pull request health for repair completion event: %w", err)
+	}
+	s.publishPullRequestUpdated(ctx, pr, current)
+	return nil
+}
+
 // ErrRepairThreadNotFound is returned when the requested thread_id is not found in the canonical PR session.
 var ErrRepairThreadNotFound = errors.New("requested repair thread does not belong to the canonical pull request session")
 
 // ErrRepairAlreadyInProgress is returned when a repair session is already running and the caller requested a
 // different push behavior than the default, meaning the new preference cannot be honored.
 var ErrRepairAlreadyInProgress = errors.New("a repair session is already in progress")
+
+// ErrRepairSessionBusy is returned when the canonical PR session is doing other runtime work and cannot accept
+// a new repair turn yet.
+var ErrRepairSessionBusy = errors.New("canonical pull request session is busy")
 
 func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*uuid.UUID, error) {
 	if requestedThreadID != nil {
@@ -1175,5 +1223,7 @@ func isSessionTerminalStatus(status models.SessionStatus) bool {
 
 func isUniqueActiveRepairRunViolation(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation && pgErr.ConstraintName == "idx_pull_request_repair_runs_active"
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgerrcode.UniqueViolation &&
+		(pgErr.ConstraintName == "idx_pull_request_repair_runs_active" || pgErr.ConstraintName == "idx_pull_request_repair_runs_active_head")
 }
