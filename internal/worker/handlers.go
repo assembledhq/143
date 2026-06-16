@@ -7524,7 +7524,7 @@ func newBackfillPreviewGroupsHandler(stores *Stores, logger zerolog.Logger) JobH
 				return &FatalError{Err: fmt.Errorf("unmarshal backfill_preview_groups payload: %w", err)}
 			}
 		}
-		orgID, ok := jobctx.OrgID(ctx)
+		orgID, ok := jobOrgIDFromContext(ctx)
 		if !ok {
 			return &FatalError{Err: fmt.Errorf("backfill_preview_groups: missing org_id in job context")}
 		}
