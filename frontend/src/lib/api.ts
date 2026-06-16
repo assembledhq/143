@@ -269,6 +269,34 @@ export const api = {
     cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
   },
   previews: {
+    current: {
+      list: (params?: { repository_id?: string; scope?: 'running' | 'resumable' | 'attention' | 'recent'; pinned?: boolean; q?: string; limit?: number; cursor?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+        if (params?.scope) searchParams.set('scope', params.scope);
+        if (params?.pinned !== undefined) searchParams.set('pinned', String(params.pinned));
+        if (params?.q) searchParams.set('q', params.q);
+        if (params?.limit) searchParams.set('limit', String(params.limit));
+        if (params?.cursor) searchParams.set('cursor', params.cursor);
+        const query = searchParams.toString();
+        return get<import('./types').ListResponse<import('./types').PreviewCurrentResponse> & { meta: import('./types').PreviewListMeta }>(`/api/v1/previews/current${query ? `?${query}` : ''}`);
+      },
+      get: (id: string) =>
+        get<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}`),
+      history: (id: string, params?: { limit?: number; cursor?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.limit) searchParams.set('limit', String(params.limit));
+        if (params?.cursor) searchParams.set('cursor', params.cursor);
+        const query = searchParams.toString();
+        return get<import('./types').ListResponse<unknown>>(`/api/v1/previews/current/${id}/history${query ? `?${query}` : ''}`);
+      },
+      startLatest: (id: string, body?: { restart?: boolean; ttl_seconds?: number }) =>
+        post<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}/start-latest`, body ?? {}),
+      restart: (id: string, body?: { restart?: boolean; ttl_seconds?: number }) =>
+        post<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}/restart`, body ?? {}),
+      stop: (id: string) =>
+        post<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}/stop`),
+    },
     list: (params?: { repository_id?: string; branch?: string; status?: string; scope?: 'running' | 'resumable' | 'recent'; q?: string; limit?: number; cursor?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);

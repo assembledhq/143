@@ -37,7 +37,13 @@ var handlerPRColumns = []string{
 var handlerPreviewTargetColumns = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha", "preview_config_name",
 	"resolved_config_digest", "source_type", "source_id", "source_url",
-	"created_by_user_id", "request_id", "created_at",
+	"created_by_user_id", "request_id", "preview_group_id", "created_at",
+}
+
+var handlerPreviewGroupColumns = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
 }
 
 var handlerPreviewLinkColumns = []string{
@@ -121,7 +127,18 @@ func TestPRService_PRPreviewURLReturnsStableAppRouteAfterCreatingPreviewMetadata
 	mock.ExpectQuery("INSERT INTO preview_targets").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(handlerPreviewTargetColumns).
-			AddRow(targetID, orgID, repoID, "feature/preview", headSHA, "", "", string(models.PreviewSourceTypePullRequest), "acme/web#42@"+headSHA, "https://github.com/acme/web/pull/42", userID, nil, now))
+			AddRow(targetID, orgID, repoID, "feature/preview", headSHA, "", "", string(models.PreviewSourceTypePullRequest), "acme/web#42@"+headSHA, "https://github.com/acme/web/pull/42", userID, nil, nil, now))
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	prNumber := 42
+	mock.ExpectQuery("INSERT INTO preview_groups").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerPreviewGroupColumns).
+			AddRow(uuid.New(), orgID, repoID, models.PreviewGroupKindPullRequest, "feature/preview", "", &prNumber, models.PreviewSourceTypePullRequest, "acme/web#42", "https://github.com/acme/web/pull/42", &targetID, headSHA, "target_created", false, &userID, now, now))
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(handlerPreviewLinkColumns).
@@ -2916,4 +2933,119 @@ func TestHandlePullRequestEvent_ClosedWith143GeneratedPRTeardownAutoPreview(t *t
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
 	require.NoError(t, repoMock.ExpectationsWereMet(), "repo lookup for teardownAutoPreview must be called")
 	require.NoError(t, previewMock.ExpectationsWereMet(), "GetPRPreviewState and UpdatePRPreviewStatus must be called")
+}
+
+func TestHandlePushEvent_UpdatesBranchPreviewGroups(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	svc := &PRService{
+		repos:    db.NewRepositoryStore(repoMock),
+		previews: db.NewPreviewStore(previewMock),
+		logger:   zerolog.Nop(),
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectExec("UPDATE preview_groups").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := PushEvent{
+		Ref:        "refs/heads/feature/foo",
+		After:      "newcommitsha",
+		OwnerOrgID: &orgID,
+	}
+	event.Repository.FullName = "acme/app"
+
+	err := svc.HandlePushEvent(context.Background(), event)
+
+	require.NoError(t, err, "HandlePushEvent should succeed for a valid branch push")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository lookup should be called")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "preview group SHA update should be called")
+}
+
+func TestHandlePushEvent_IgnoresTagPush(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{
+		repos:    db.NewRepositoryStore(newMockPool(t)),
+		previews: db.NewPreviewStore(newMockPool(t)),
+		logger:   zerolog.Nop(),
+	}
+
+	event := PushEvent{Ref: "refs/tags/v1.0.0", After: "abc123"}
+	err := svc.HandlePushEvent(context.Background(), event)
+
+	require.NoError(t, err, "HandlePushEvent should silently ignore tag push refs")
+}
+
+func TestBranchFromRef(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		ref    string
+		branch string
+		ok     bool
+	}{
+		{"refs/heads/main", "main", true},
+		{"refs/heads/feature/foo", "feature/foo", true},
+		{"refs/tags/v1.0", "", false},
+		{"refs/heads/", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		branch, ok := BranchFromRef(tt.ref)
+		require.Equal(t, tt.ok, ok, "BranchFromRef(%q) ok", tt.ref)
+		require.Equal(t, tt.branch, branch, "BranchFromRef(%q) branch", tt.ref)
+	}
+}
+
+func TestHandleAutoPreviewEvent_SynchronizeUpdatesPRPreviewGroupSHA(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	starter := &recordingAutoPreviewStarter{}
+
+	svc := &PRService{
+		repos:              db.NewRepositoryStore(repoMock),
+		previews:           db.NewPreviewStore(previewMock),
+		autoPreviewStarter: starter,
+		logger:             zerolog.Nop(),
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), userID, now, now))
+	previewMock.ExpectExec("UPDATE preview_groups").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := autoPreviewPullRequestEvent(orgID)
+	event.Action = "synchronize"
+	event.PR.Head.SHA = "newheadsha"
+
+	err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+	require.NoError(t, err, "handleAutoPreviewEvent for synchronize should not fail")
+	require.True(t, starter.called, "auto preview starter should still be invoked on synchronize")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "preview group SHA update should be called on synchronize")
 }

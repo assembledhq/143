@@ -91,7 +91,7 @@ const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, w
 
 const previewTargetColumns = `id, org_id, repository_id, branch, commit_sha,
 	preview_config_name, resolved_config_digest, source_type, source_id, source_url,
-	created_by_user_id, request_id, created_at`
+	created_by_user_id, request_id, preview_group_id, created_at`
 
 const previewLinkColumns = `id, org_id, preview_target_id, link_type, slug,
 	repository_id, pr_number, created_at, updated_at`
@@ -228,6 +228,9 @@ func (s *PreviewStore) CreatePreviewTarget(ctx context.Context, target *models.P
 		return fmt.Errorf("scan preview target: %w", scanErr)
 	}
 	*target = row
+	if _, err := s.UpsertPreviewGroupForTarget(ctx, target.OrgID, *target, target.CommitSHA); err != nil {
+		return fmt.Errorf("upsert preview group for target: %w", err)
+	}
 	return nil
 }
 
@@ -1356,7 +1359,11 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	if err != nil {
 		return 0, fmt.Errorf("update preview status: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	rows := tag.RowsAffected()
+	if rows > 0 {
+		_ = s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status)
+	}
+	return rows, nil
 }
 
 // UpdatePreviewStatusIfActive atomically transitions a preview to the given
@@ -1419,7 +1426,11 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	if err != nil {
 		return 0, fmt.Errorf("conditional update preview status: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	rows := tag.RowsAffected()
+	if rows > 0 {
+		_ = s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status)
+	}
+	return rows, nil
 }
 
 func (s *PreviewStore) UpdatePreviewSourceWorkspaceRevision(ctx context.Context, orgID, id uuid.UUID, revision int64, revisionUpdatedAt time.Time) error {

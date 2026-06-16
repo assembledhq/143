@@ -233,9 +233,12 @@ export type PreviewLaunchAction =
   | "resume"
   | "start"
   | "start_latest"
+  | "restart"
   | "retry"
+  | "cancel"
   | "blocked"
-  | "closed";
+  | "closed"
+  | "none";
 
 export type PreviewLaunchReason =
   | "ready"
@@ -268,8 +271,53 @@ export interface PreviewLaunchDecision {
 
 export interface PreviewListMeta {
   next_cursor?: string;
-  counts?: { running: number; resumable: number; recent: number };
+  counts?: { running: number; resumable: number; attention?: number; recent: number };
   pool?: { auto_active: number; auto_max: number; user_active: number; user_max: number };
+}
+
+export type PreviewGroupKind = "pull_request" | "branch" | "source" | "session" | "pinned";
+export type PreviewCurrentFreshness = "current" | "outdated" | "unknown" | "pinned";
+
+export interface PreviewLaunchRecommendation {
+  action: PreviewLaunchAction;
+  primary_label: string;
+  secondary_label?: string;
+  message?: string;
+}
+
+export interface PreviewCurrentResponse {
+  preview_group_id: string;
+  id?: string;
+  repository_id: string;
+  repository_full_name?: string;
+  group_kind: PreviewGroupKind;
+  branch?: string;
+  pull_request_number?: number;
+  preview_config_name?: string;
+  source_type?: "api" | "manual" | "session" | "pull_request" | "automation";
+  source_id?: string;
+  source_url?: string;
+  status: string;
+  freshness: PreviewCurrentFreshness;
+  latest_commit_sha?: string;
+  running_commit_sha?: string;
+  current_target_id?: string;
+  current_preview_id?: string;
+  preview_url?: string;
+  stable_url: string;
+  pinned: boolean;
+  created_at: string;
+  last_activity_at: string;
+  expires_at?: string;
+  stopped_at?: string;
+  stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  error?: string;
+  current_phase?: string;
+  attempt_count: number;
+  target_count: number;
+  resumable: boolean;
+  resume_estimate_seconds?: number;
+  launch: PreviewLaunchRecommendation;
 }
 
 export interface PreviewPolicySummary {

@@ -1587,6 +1587,14 @@ func (s *PRService) handleAutoPreviewEvent(ctx context.Context, event PullReques
 	if policy.AutoMode == models.PreviewAutoModeOff {
 		return nil
 	}
+	if event.Action == "synchronize" && event.PR.Head.SHA != "" {
+		if _, err := s.previews.UpdatePreviewGroupsLatestSHAForPR(ctx, repo.OrgID, repo.ID, event.Number, event.PR.Head.SHA); err != nil {
+			s.logger.Warn().Err(err).
+				Int("pr_number", event.Number).
+				Str("repo", event.Repository.FullName).
+				Msg("failed to update preview group latest sha on pr synchronize")
+		}
+	}
 	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode)
 }
 
@@ -1599,6 +1607,74 @@ func (s *PRService) repositoryFromPullRequestEvent(ctx context.Context, event Pu
 		return models.Repository{}, err
 	}
 	return s.repos.GetByID(ctx, owner.OrgID, owner.RepositoryID)
+}
+
+// PushEvent represents a GitHub push webhook event.
+type PushEvent struct {
+	Ref        string     `json:"ref"`
+	After      string     `json:"after"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Repository struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// BranchFromRef extracts the branch name from a GitHub ref such as
+// "refs/heads/feature/foo". Returns ("", false) for non-branch refs.
+func BranchFromRef(ref string) (string, bool) {
+	const prefix = "refs/heads/"
+	if !strings.HasPrefix(ref, prefix) {
+		return "", false
+	}
+	branch := strings.TrimPrefix(ref, prefix)
+	if branch == "" {
+		return "", false
+	}
+	return branch, true
+}
+
+// HandlePushEvent processes push webhook events. It updates latest_commit_sha
+// on any preview_groups rows that track the pushed branch so the freshness
+// signal updates without waiting for a user to start a new preview.
+func (s *PRService) HandlePushEvent(ctx context.Context, event PushEvent) error {
+	if s == nil || s.previews == nil || s.repos == nil {
+		return nil
+	}
+	branch, ok := BranchFromRef(event.Ref)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(event.After) == "" {
+		return nil
+	}
+	var repo models.Repository
+	var err error
+	if event.OwnerOrgID != nil {
+		repo, err = s.repos.GetByFullName(ctx, *event.OwnerOrgID, event.Repository.FullName)
+	} else {
+		owner, ownerErr := s.repos.GetActiveOwnerByGitHubID(ctx, event.Repository.ID)
+		if ownerErr != nil {
+			if errors.Is(ownerErr, pgx.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("resolve repository owner for push event: %w", ownerErr)
+		}
+		repo, err = s.repos.GetByID(ctx, owner.OrgID, owner.RepositoryID)
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("resolve repository for push event: %w", err)
+	}
+	if _, err := s.previews.UpdatePreviewGroupsLatestSHAForBranch(ctx, repo.OrgID, repo.ID, branch, event.After); err != nil {
+		s.logger.Warn().Err(err).
+			Str("repo", event.Repository.FullName).
+			Str("branch", branch).
+			Msg("failed to update preview group latest sha on push")
+	}
+	return nil
 }
 
 func (s *PRService) teardownAutoPreview(ctx context.Context, event PullRequestEvent) error {

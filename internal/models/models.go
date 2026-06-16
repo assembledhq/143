@@ -976,7 +976,8 @@ const (
 	JobTypeStartBranchPreview  = "start_branch_preview"
 	JobTypeAutoPreviewDeferred = "auto_preview_deferred"
 	JobTypeSyncGitHubOrgRoster = "sync_github_org_roster"
-	JobTypePreviewCachePrewarm = "preview_cache_prewarm"
+	JobTypePreviewCachePrewarm        = "preview_cache_prewarm"
+	JobTypeBackfillPreviewGroups      = "backfill_preview_groups"
 )
 
 // Job represents an async work queue item.

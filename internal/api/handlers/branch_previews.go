@@ -223,6 +223,7 @@ const (
 type previewIndexCounts struct {
 	Running   int `json:"running"`
 	Resumable int `json:"resumable"`
+	Attention int `json:"attention"`
 	Recent    int `json:"recent"`
 }
 
@@ -1462,6 +1463,371 @@ func (h *BranchPreviewHandler) List(w http.ResponseWriter, r *http.Request) {
 			Pool: pool,
 		},
 	})
+}
+
+func (h *BranchPreviewHandler) ListCurrent(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	repoID, ok := previewRepositoryFilter(w, r)
+	if !ok {
+		return
+	}
+	if !previewListTokenAllows(w, r, repoID) {
+		return
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	switch scope {
+	case "", "running", "resumable", "attention", "recent":
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCOPE", "scope must be running, resumable, attention, or recent")
+		return
+	}
+	var pinned *bool
+	if raw := strings.TrimSpace(r.URL.Query().Get("pinned")); raw != "" {
+		parsed := raw == "true"
+		if raw != "true" && raw != "false" {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PINNED", "pinned must be true or false")
+			return
+		}
+		pinned = &parsed
+	}
+	const defaultPreviewListLimit = 50
+	const maxPreviewListLimit = 100
+	limit := clampListLimit(queryInt(r, "limit", defaultPreviewListLimit), defaultPreviewListLimit, maxPreviewListLimit)
+	var cursorTime *time.Time
+	var cursorID *uuid.UUID
+	if cursor := strings.TrimSpace(r.URL.Query().Get("cursor")); cursor != "" {
+		t, rawID, err := decodeCursor(cursor)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		id, err := uuid.Parse(rawID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor id")
+			return
+		}
+		cursorTime = &t
+		cursorID = &id
+	}
+	filters := db.PreviewCurrentIndexFilters{
+		RepositoryID: repoID,
+		Scope:        scope,
+		Pinned:       pinned,
+		Query:        strings.TrimSpace(r.URL.Query().Get("q")),
+		CursorTime:   cursorTime,
+		CursorID:     cursorID,
+		Limit:        limit + 1,
+	}
+	summaries, err := h.previews.ListPreviewCurrentIndex(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LIST_FAILED", "failed to list previews", err)
+		return
+	}
+	filters.Limit = 0
+	counts, err := h.previews.CountPreviewCurrentIndexScopes(r.Context(), orgID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LIST_FAILED", "failed to count previews", err)
+		return
+	}
+	var nextCursor string
+	if len(summaries) > limit {
+		last := summaries[limit-1]
+		nextCursor = encodeCursor(last.LastActivityAt, last.ID.String())
+		summaries = summaries[:limit]
+	}
+	responses := make([]models.PreviewCurrentSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		responses = append(responses, h.decorateCurrentPreviewSummary(summary))
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.PreviewCurrentSummary]{
+		Data: responses,
+		Meta: models.PaginationMeta{
+			NextCursor: nextCursor,
+			Counts: previewIndexCounts{
+				Running:   counts["running"],
+				Resumable: counts["resumable"],
+				Attention: counts["attention"],
+				Recent:    counts["recent"],
+			},
+			Pool: h.previewIndexPool(r.Context(), orgID),
+		},
+	})
+}
+
+func (h *BranchPreviewHandler) GetCurrent(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	groupID, err := uuid.Parse(chi.URLParam(r, "preview_group_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid preview group ID")
+		return
+	}
+	summary, err := h.previews.GetPreviewCurrentSummary(r.Context(), orgID, groupID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "PREVIEW_NOT_FOUND", "preview not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview", err)
+		return
+	}
+	if !previewTokenAllows(r.Context(), "previews:read", summary.RepositoryID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read this preview")
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewCurrentSummary]{Data: h.decorateCurrentPreviewSummary(summary)})
+}
+
+func (h *BranchPreviewHandler) CurrentHistory(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	groupID, err := uuid.Parse(chi.URLParam(r, "preview_group_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid preview group ID")
+		return
+	}
+	group, err := h.previews.GetPreviewGroup(r.Context(), orgID, groupID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "PREVIEW_NOT_FOUND", "preview not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview", err)
+		return
+	}
+	if !previewTokenAllows(r.Context(), "previews:read", group.RepositoryID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read this preview")
+		return
+	}
+	limit := clampListLimit(queryInt(r, "limit", 25), 25, 100)
+	var cursorTime *time.Time
+	var cursorID *uuid.UUID
+	if cursor := strings.TrimSpace(r.URL.Query().Get("cursor")); cursor != "" {
+		t, rawID, cursorErr := decodeCursor(cursor)
+		if cursorErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor")
+			return
+		}
+		id, parseErr := uuid.Parse(rawID)
+		if parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid cursor id")
+			return
+		}
+		cursorTime = &t
+		cursorID = &id
+	}
+	history, err := h.previews.ListPreviewGroupHistory(r.Context(), orgID, groupID, cursorTime, cursorID, limit+1)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_HISTORY_FAILED", "failed to load preview history", err)
+		return
+	}
+	var nextCursor string
+	if len(history) > limit {
+		last := history[limit-1]
+		nextCursor = encodeCursor(last.CreatedAt, last.TargetID.String())
+		history = history[:limit]
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.PreviewTargetHistory]{
+		Data: history,
+		Meta: models.PaginationMeta{NextCursor: nextCursor},
+	})
+}
+
+func (h *BranchPreviewHandler) StartLatestCurrent(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.startCurrent(w, r, false)
+}
+
+func (h *BranchPreviewHandler) RestartCurrent(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.startCurrent(w, r, true)
+}
+
+func (h *BranchPreviewHandler) startCurrent(w http.ResponseWriter, r *http.Request, restart bool) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	userID, ok := previewRequestUserID(r.Context(), user)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	group, target, repo, ok := h.resolveCurrentGroupTargetRepo(w, r, orgID, "previews:create")
+	if !ok {
+		return
+	}
+	latest, err := h.resolveLatestTarget(r.Context(), orgID, userID, repo, target)
+	if err != nil {
+		writeError(w, r, http.StatusBadGateway, "BRANCH_HEAD_RESOLVE_FAILED", "failed to resolve latest branch head", err)
+		return
+	}
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, latest, nil, restart, nil)
+	if startErr != nil {
+		writePreviewHTTPError(w, r, startErr)
+		return
+	}
+	summary, err := h.previews.GetPreviewCurrentSummary(r.Context(), orgID, group.ID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewCurrentSummary]{Data: h.decorateCurrentPreviewSummary(summary)})
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
+}
+
+func (h *BranchPreviewHandler) StopCurrent(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	summary, err := h.currentSummaryForPath(r, orgID)
+	if err != nil {
+		writeCurrentSummaryLoadError(w, r, err)
+		return
+	}
+	if !previewTokenAllows(r.Context(), "previews:stop", summary.RepositoryID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to stop this preview")
+		return
+	}
+	if summary.CurrentPreviewID == nil {
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewCurrentSummary]{Data: h.decorateCurrentPreviewSummary(summary)})
+		return
+	}
+	if h.stopper != nil {
+		if err := h.stopper.StopPreview(r.Context(), orgID, *summary.CurrentPreviewID); err != nil {
+			writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
+			return
+		}
+		if err := h.previews.UpdatePreviewStoppedReason(r.Context(), orgID, *summary.CurrentPreviewID, models.PreviewStoppedReasonUser); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_STOP_REASON_FAILED", "failed to record preview stop reason", err)
+			return
+		}
+	} else if h.manager != nil {
+		if err := h.manager.StopPreviewWithReason(r.Context(), orgID, *summary.CurrentPreviewID, models.PreviewStoppedReasonUser); err != nil {
+			writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_STOP_FAILED", "failed to stop preview", err)
+			return
+		}
+	} else {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_UNAVAILABLE", "preview service is not configured")
+		return
+	}
+	if err := h.previews.UpsertPreviewGroupStatus(r.Context(), orgID, summary.ID, models.PreviewStatusStopped); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_GROUP_STATUS_FAILED", "failed to update preview status", err)
+		return
+	}
+	summary.Status = models.PreviewStatusStopped
+	summary.CurrentStatus = string(models.PreviewStatusStopped)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewCurrentSummary]{Data: h.decorateCurrentPreviewSummary(summary)})
+}
+
+func (h *BranchPreviewHandler) decorateCurrentPreviewSummary(summary models.PreviewCurrentSummary) models.PreviewCurrentSummary {
+	summary.StableURL = h.stableURL("current/" + summary.ID.String())
+	if summary.CurrentTargetID != nil {
+		if url := h.previewURL(*summary.CurrentTargetID); url != "" {
+			summary.PreviewURL = &url
+		}
+	}
+	summary.Launch = currentPreviewLaunch(summary)
+	return summary
+}
+
+func currentPreviewLaunch(summary models.PreviewCurrentSummary) models.PreviewLaunchRecommendation {
+	if summary.Pinned && summary.Status != models.PreviewStatusReady {
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionStart, PrimaryLabel: "Start pinned", SecondaryLabel: "History"}
+	}
+	switch {
+	case summary.Status == models.PreviewStatusReady && summary.Freshness == models.PreviewCurrentFreshnessOutdated:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionStart, PrimaryLabel: "Start", SecondaryLabel: "Open stale"}
+	case summary.Status == models.PreviewStatusReady:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionOpen, PrimaryLabel: "Open", SecondaryLabel: "Restart"}
+	case summary.Status == models.PreviewStatusStarting:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionCancel, PrimaryLabel: "Cancel"}
+	case summary.Resumable:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionResume, PrimaryLabel: "Resume", SecondaryLabel: "Restart"}
+	case summary.Status == models.PreviewStatusFailed && summary.Freshness == models.PreviewCurrentFreshnessCurrent:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionRetry, PrimaryLabel: "Retry", SecondaryLabel: "Start"}
+	case summary.Status == models.PreviewStatusFailed:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionStart, PrimaryLabel: "Start"}
+	default:
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionStart, PrimaryLabel: "Start"}
+	}
+}
+
+func (h *BranchPreviewHandler) currentSummaryForPath(r *http.Request, orgID uuid.UUID) (models.PreviewCurrentSummary, error) {
+	groupID, err := uuid.Parse(chi.URLParam(r, "preview_group_id"))
+	if err != nil {
+		return models.PreviewCurrentSummary{}, err
+	}
+	return h.previews.GetPreviewCurrentSummary(r.Context(), orgID, groupID)
+}
+
+func writeCurrentSummaryLoadError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusNotFound, "PREVIEW_NOT_FOUND", "preview not found")
+		return
+	}
+	writeError(w, r, http.StatusInternalServerError, "PREVIEW_LOOKUP_FAILED", "failed to load preview", err)
+}
+
+func (h *BranchPreviewHandler) resolveCurrentGroupTargetRepo(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, scope string) (*models.PreviewGroup, *models.PreviewTarget, models.Repository, bool) {
+	groupID, err := uuid.Parse(chi.URLParam(r, "preview_group_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid preview group ID")
+		return nil, nil, models.Repository{}, false
+	}
+	group, err := h.previews.GetPreviewGroup(r.Context(), orgID, groupID)
+	if err != nil {
+		writeCurrentSummaryLoadError(w, r, err)
+		return nil, nil, models.Repository{}, false
+	}
+	if group.CurrentTargetID == nil {
+		writeError(w, r, http.StatusConflict, "PREVIEW_TARGET_REQUIRED", "current preview has no target yet")
+		return nil, nil, models.Repository{}, false
+	}
+	if !previewTokenAllows(r.Context(), scope, group.RepositoryID) {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to mutate this preview")
+		return nil, nil, models.Repository{}, false
+	}
+	target, err := h.previews.GetPreviewTarget(r.Context(), orgID, *group.CurrentTargetID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load preview target", err)
+		return nil, nil, models.Repository{}, false
+	}
+	repo, err := h.repos.GetByID(r.Context(), orgID, group.RepositoryID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to load repository", err)
+		return nil, nil, models.Repository{}, false
+	}
+	return group, target, repo, true
+}
+
+func previewRepositoryFilter(w http.ResponseWriter, r *http.Request) (*uuid.UUID, bool) {
+	if raw := strings.TrimSpace(r.URL.Query().Get("repository_id")); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+			return nil, false
+		}
+		return &parsed, true
+	}
+	return nil, true
+}
+
+func previewListTokenAllows(w http.ResponseWriter, r *http.Request, repoID *uuid.UUID) bool {
+	if token := middleware.PreviewAPITokenFromContext(r.Context()); token != nil {
+		if repoID == nil && len(token.RepositoryIDs) > 0 {
+			writeError(w, r, http.StatusBadRequest, "REPOSITORY_ID_REQUIRED", "repository_id is required for repository-scoped preview API tokens")
+			return false
+		}
+		if repoID != nil && !previewTokenAllows(r.Context(), "previews:read", *repoID) {
+			writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read previews for this repository")
+			return false
+		}
+	}
+	if token := middleware.APITokenFromContext(r.Context()); token != nil {
+		if repoID == nil && len(token.RepositoryIDs) > 0 {
+			writeError(w, r, http.StatusBadRequest, "REPOSITORY_ID_REQUIRED", "repository_id is required for repository-scoped API tokens")
+			return false
+		}
+		if repoID != nil && !previewTokenAllows(r.Context(), "previews:read", *repoID) {
+			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "API token is not allowed to access this repository")
+			return false
+		}
+	}
+	return true
 }
 
 func (h *BranchPreviewHandler) previewIndexPool(ctx context.Context, orgID uuid.UUID) previewIndexPoolMeta {
