@@ -49,6 +49,8 @@ import {
 import { cn, safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
 
+const PREVIEW_LAUNCH_BOOTSTRAP_TIMEOUT_MS = 5_000;
+
 type PreviewStepTone = "complete" | "active" | "failed" | "pending";
 
 function previewUnavailableRecoveryCopy(unavailableReason?: string) {
@@ -143,6 +145,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
   const launchError =
     bootstrapError ??
     (preview?.status === "failed" ? preview.error || "Preview failed to start." : null);
+  const commandIsFailed = isFailed || Boolean(bootstrapError);
 
   const shouldStartForLaunch =
     launchMode &&
@@ -162,11 +165,21 @@ export function PreviewLandingContent({ id }: { id: string }) {
   useEffect(() => {
     if (!launchMode || !previewOrigin || !previewUrl || !preview?.preview_id || !isReady) return;
     const activePreviewId = preview.preview_id;
+    let completed = false;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      if (completed) return;
+      timedOut = true;
+      bootstrappedPreviewIdRef.current = null;
+      setBootstrapError("Preview bootstrap timed out. Try opening it again.");
+    }, PREVIEW_LAUNCH_BOOTSTRAP_TIMEOUT_MS);
 
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== previewOrigin) return;
       if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
-        if (bootstrappedPreviewIdRef.current === activePreviewId) {
+        if (!timedOut && bootstrappedPreviewIdRef.current === activePreviewId) {
+          completed = true;
+          window.clearTimeout(timeout);
           if (popupMode && window.opener) {
             (window.opener as Window).postMessage(
               { type: PREVIEW_LAUNCH_COMPLETE_EVENT, url: previewUrl },
@@ -186,6 +199,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
       setBootstrapError(null);
       bootstrapPreview.mutate(activePreviewId, {
         onSuccess: (data) => {
+          if (timedOut) return;
           iframeRef.current?.contentWindow?.postMessage(
             { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token: data.data.token },
             previewOrigin,
@@ -199,7 +213,10 @@ export function PreviewLandingContent({ id }: { id: string }) {
     };
 
     window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
+    return () => {
+      window.clearTimeout(timeout);
+      window.removeEventListener("message", handleMessage);
+    };
   }, [bootstrapPreview, isReady, launchMode, popupMode, preview?.preview_id, previewOrigin, previewUrl]);
 
   const startLatest = () => {
@@ -261,7 +278,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
                   launchMode={launchMode}
                   isReady={isReady}
                   isStarting={isStarting}
-                  isFailed={isFailed}
+                  isFailed={commandIsFailed}
                   isExpired={isExpired}
                   launchError={launchError}
                   stoppedAtText={stoppedAtText}
@@ -282,7 +299,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
                   </div>
                 ) : null}
 
-                <PreviewProgress preview={preview} prominent={isStarting || isFailed} />
+                <PreviewProgress preview={preview} prominent={isStarting || commandIsFailed} />
 
 
                 {unavailableRecovery ? (
@@ -403,7 +420,7 @@ function PreviewCommandState({
       </div>
 
       <div className="flex gap-2 md:justify-end">
-        {isReady && previewUrl ? (
+        {isReady && previewUrl && !isFailed ? (
           launchMode ? (
             <Button type="button" disabled className="w-full sm:w-auto">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -679,9 +696,9 @@ function getCommandTitle({
   isFailed: boolean;
   isExpired: boolean;
 }) {
+  if (launchMode && isFailed) return "Preview could not open";
   if (launchMode && isReady) return "Opening preview";
   if (launchMode && isStarting) return "Opening when ready";
-  if (launchMode && isFailed) return "Preview could not open";
   if (isReady) return "Preview is ready";
   if (isStarting) return "Starting preview";
   if (isFailed) return "Preview failed";
@@ -704,9 +721,9 @@ function getCommandDescription({
   isExpired: boolean;
   stoppedAtText: string | null;
 }) {
+  if (launchMode && isFailed) return "This preview failed to start. Retry to try opening it again.";
   if (launchMode && isReady) return "Connecting this browser to the running preview.";
   if (launchMode && isStarting) return "This preview will open automatically when it is ready.";
-  if (launchMode && isFailed) return "This preview failed to start. Retry to try opening it again.";
   if (isReady) return "Open the running branch preview, or use preview actions for lifecycle controls.";
   if (isStarting) return "Preparing the branch runtime. The preview will be available after readiness checks pass.";
   if (isFailed) return "Retry the preview from this page, then use details only if the failure needs investigation.";

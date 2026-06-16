@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,42 @@ import (
 // worker routing/auth failures from ordinary responses returned by previewed
 // applications.
 const PreviewWorkerErrorHeader = "X-143-Preview-Worker-Error"
+
+// PreviewWorkerAuthDetailHeader carries a coarse, non-sensitive classification
+// of why a preview token failed validation (e.g. "bad_signature", "expired").
+// It travels only on the trusted worker→gateway hop and is consumed by the
+// public preview gateway for diagnostics; the gateway never forwards it to the
+// browser. Distinguishing a signature mismatch (divergent secret) from an
+// expired token (clock skew) from the app side — whose logs ship reliably —
+// turns an opaque "invalid preview token" into an actionable cause.
+const PreviewWorkerAuthDetailHeader = "X-143-Preview-Worker-Auth-Detail"
+
+// Sentinel errors classifying preview token validation failures. They carry the
+// legacy human strings so existing log output and assertions keep matching,
+// while errors.Is enables structured classification via ClassifyPreviewTokenError.
+var (
+	ErrPreviewTokenMalformed    = errors.New("invalid token format")
+	ErrPreviewTokenBadSignature = errors.New("invalid signature")
+	ErrPreviewTokenExpired      = errors.New("token expired")
+)
+
+// ClassifyPreviewTokenError maps a validation error to a coarse, non-sensitive
+// detail label suitable for logs and the worker auth-detail header. It returns
+// "" for a nil error and "unknown" for an unrecognized failure.
+func ClassifyPreviewTokenError(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrPreviewTokenExpired):
+		return "expired"
+	case errors.Is(err, ErrPreviewTokenBadSignature):
+		return "bad_signature"
+	case errors.Is(err, ErrPreviewTokenMalformed):
+		return "malformed"
+	default:
+		return "unknown"
+	}
+}
 
 // PreviewTokenClaims scopes internal preview control-plane calls.
 type PreviewTokenClaims struct {
@@ -80,7 +117,10 @@ func (k PreviewTokenKeyring) Validate(token string) (*PreviewTokenClaims, error)
 		if err == nil {
 			return claims, nil
 		}
-		if firstErr == nil || !strings.Contains(err.Error(), "invalid signature") {
+		// Prefer a non-signature error (expired/malformed) when reporting: a
+		// matching-secret-but-expired token is far more diagnostic than the
+		// signature mismatches from every other configured secret.
+		if firstErr == nil || !errors.Is(err, ErrPreviewTokenBadSignature) {
 			firstErr = err
 		}
 	}
@@ -106,18 +146,18 @@ func GeneratePreviewToken(secret string, claims PreviewTokenClaims) (string, err
 func ValidatePreviewToken(secret, token string) (*PreviewTokenClaims, error) {
 	dotIdx := strings.LastIndexByte(token, '.')
 	if dotIdx < 0 {
-		return nil, fmt.Errorf("invalid token format")
+		return nil, ErrPreviewTokenMalformed
 	}
 	payloadB64 := token[:dotIdx]
 	sigB64 := token[dotIdx+1:]
 
 	payload, err := base64.RawURLEncoding.DecodeString(payloadB64)
 	if err != nil {
-		return nil, fmt.Errorf("decode payload: %w", err)
+		return nil, fmt.Errorf("decode payload: %v: %w", err, ErrPreviewTokenMalformed)
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(sigB64)
 	if err != nil {
-		return nil, fmt.Errorf("decode signature: %w", err)
+		return nil, fmt.Errorf("decode signature: %v: %w", err, ErrPreviewTokenMalformed)
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -125,15 +165,15 @@ func ValidatePreviewToken(secret, token string) (*PreviewTokenClaims, error) {
 		return nil, fmt.Errorf("compute HMAC: %w", err)
 	}
 	if !hmac.Equal(sig, mac.Sum(nil)) {
-		return nil, fmt.Errorf("invalid signature")
+		return nil, ErrPreviewTokenBadSignature
 	}
 
 	var claims PreviewTokenClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {
-		return nil, fmt.Errorf("decode claims: %w", err)
+		return nil, fmt.Errorf("decode claims: %v: %w", err, ErrPreviewTokenMalformed)
 	}
 	if time.Now().After(claims.ExpiresAt) {
-		return nil, fmt.Errorf("token expired")
+		return nil, ErrPreviewTokenExpired
 	}
 	return &claims, nil
 }

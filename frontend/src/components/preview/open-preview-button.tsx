@@ -14,7 +14,15 @@ import {
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
 } from "@/lib/preview-bootstrap";
 
-const BOOTSTRAP_TIMEOUT_MS = 15_000;
+const BOOTSTRAP_TIMEOUT_MS = 5_000;
+
+// Document shown in the popup while the preview connects. Once the bootstrap
+// handshake completes we navigate the popup to the preview origin; because that
+// is a cross-origin load the opener cannot observe its progress, so this
+// placeholder stays visible until the preview's first bytes arrive (which can
+// take a few seconds while a cold worker wakes up). A styled spinner + copy
+// makes that wait read as intentional instead of a frozen "Opening preview..."
+const OPENING_PREVIEW_DOCUMENT = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Opening preview</title><style>:root{color-scheme:light dark}html,body{height:100%;margin:0}body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;background:Canvas;color:CanvasText}main{text-align:center;padding:24px}.spinner{width:28px;height:28px;margin:0 auto 16px;border-radius:50%;border:3px solid color-mix(in srgb,CanvasText 18%,transparent);border-top-color:CanvasText;animation:spin .8s linear infinite}h1{font-size:16px;font-weight:600;margin:0}p{font-size:13px;margin:8px 0 0;color:color-mix(in srgb,CanvasText 62%,transparent)}@keyframes spin{to{transform:rotate(360deg)}}</style></head><body><main><div class="spinner" role="status" aria-label="Connecting"></div><h1>Opening preview…</h1><p>Connecting to your preview — this can take a few moments while it wakes up.</p></main></body></html>`;
 
 type BootstrapToken = {
   token: string;
@@ -122,7 +130,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
         popup = window.open("about:blank", "_blank");
         if (popup) {
           popup.opener = null;
-          popup.document.write("<!doctype html><title>Opening preview</title><p>Opening preview...</p>");
+          popup.document.write(OPENING_PREVIEW_DOCUMENT);
           popup.document.close();
         }
       } catch {

@@ -1432,6 +1432,12 @@ func (h *BranchPreviewHandler) Get(w http.ResponseWriter, r *http.Request) {
 			resp.SourceURL = target.SourceURL
 			resp.RequestID = derefStrPtr(target.RequestID)
 		}
+	} else {
+		resp = h.enrichSessionPreviewResponse(r.Context(), orgID, resp)
+		if resp.RepositoryID != uuid.Nil && !previewTokenAllows(r.Context(), "previews:read", resp.RepositoryID) {
+			writeError(w, r, http.StatusForbidden, "PREVIEW_TOKEN_FORBIDDEN", "preview API token is not scoped to read this preview")
+			return
+		}
 	}
 	h.decoratePreviewResponse(r.Context(), orgID, &resp)
 	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
@@ -1938,8 +1944,39 @@ func (h *BranchPreviewHandler) restartSessionPreviewInstance(w http.ResponseWrit
 		return
 	}
 	resp := h.previewInstanceResponse(restarted)
+	resp = h.enrichSessionPreviewResponse(r.Context(), orgID, resp)
 	h.decoratePreviewResponse(r.Context(), orgID, &resp)
 	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
+}
+
+func (h *BranchPreviewHandler) enrichSessionPreviewResponse(ctx context.Context, orgID uuid.UUID, resp branchPreviewResponse) branchPreviewResponse {
+	if h == nil || h.previews == nil || resp.PreviewID == nil || resp.TargetID != uuid.Nil {
+		return resp
+	}
+	summary, err := h.previews.GetSessionPreviewSummary(ctx, orgID, *resp.PreviewID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("preview_id", resp.PreviewID.String()).Msg("failed to enrich session preview response")
+		}
+		return resp
+	}
+	enriched := resp
+	enriched.TargetID = summary.TargetID
+	enriched.RepositoryID = summary.RepositoryID
+	enriched.RepositoryFullName = summary.RepositoryFullName
+	enriched.Branch = summary.Branch
+	enriched.CommitSHA = summary.CommitSHA
+	enriched.PreviewConfigName = summary.PreviewConfigName
+	enriched.SourceType = summary.SourceType
+	enriched.SourceID = summary.SourceID
+	enriched.SourceURL = summary.SourceURL
+	enriched.StoppedReason = summary.StoppedReason
+	enriched.Resumable = summary.Resumable
+	enriched.ResumeEstimateSeconds = summary.ResumeEstimateSeconds
+	if enriched.CreatedAt == nil {
+		enriched.CreatedAt = &summary.CreatedAt
+	}
+	return enriched
 }
 
 // resolveTargetRepoAndActive resolves the {preview_id} route param — an

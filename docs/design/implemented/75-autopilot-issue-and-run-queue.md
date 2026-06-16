@@ -213,7 +213,13 @@ Each row has exactly one dominant action based on current state:
 - `Start run` when no session exists and the issue is eligible for manual launch
 - `View run` when a session is queued or running
 - `Review` when the latest run needs approval/guidance
-- `Open PR` when the latest session has an active PR
+- Preview actions take precedence for active PR rows when a PR preview target
+  exists: `Open preview` for a ready current runtime, `Start preview` when the
+  target has no runtime, `Retry preview` for failed/unavailable previews, and
+  `Update to latest` for stale previews with `Open stale preview` as the
+  secondary action
+- `Open PR` when the latest session has an active PR but no preview target is
+  available
 - `Retry` when the latest run failed and the issue remains eligible
 - `Blocked` when prerequisites are missing or policy disallows launch
 
