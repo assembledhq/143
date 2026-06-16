@@ -3190,14 +3190,15 @@ type mockPMService struct {
 }
 
 type stubPRService struct {
-	createPRFn                func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
-	createBranchFn            func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
-	pushChangesToPRFn         func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
-	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
-	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
-	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
-	queueMergeWhenReadyFn     func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
-	processMergeWhenReadyFn   func(context.Context, uuid.UUID, uuid.UUID) error
+	createPRFn                     func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	createBranchFn                 func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
+	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
+	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
+	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
+	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
+	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -3238,6 +3239,13 @@ func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uui
 func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {
 	if s.enrichPullRequestHealthFn != nil {
 		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
+	}
+	return nil
+}
+
+func (s *stubPRService) CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error {
+	if s.completePullRequestRepairRunFn != nil {
+		return s.completePullRequestRepairRunFn(ctx, orgID, pullRequestID, repairRunID)
 	}
 	return nil
 }
@@ -7337,6 +7345,65 @@ func TestContinueSessionHandler_PassesPRRepairCommandOptions(t *testing.T) {
 	err = handler(context.Background(), "continue_session", payloadJSON)
 	require.NoError(t, err, "continue_session should accept PR repair command metadata")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_CompletesPRRepairAfterSuccess(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	repairRunID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass PR repair metadata to the orchestrator")
+			require.NotNil(t, opts.PRRepair, "continue_session should decode PR repair metadata before completion")
+			return nil
+		},
+	}
+	var completed bool
+	prSvc := &stubPRService{
+		completePullRequestRepairRunFn: func(ctx context.Context, gotOrgID, gotPullRequestID, gotRepairRunID uuid.UUID) error {
+			completed = true
+			require.Equal(t, orgID, gotOrgID, "repair completion should use the payload org")
+			require.Equal(t, prID, gotPullRequestID, "repair completion should use the payload PR")
+			require.Equal(t, repairRunID, gotRepairRunID, "repair completion should use the payload repair run")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch, PR: prSvc}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":          sessionID.String(),
+		"org_id":              orgID.String(),
+		"pull_request_id":     prID.String(),
+		"repair_run_id":       repairRunID.String(),
+		"command_type":        "fix_tests",
+		"health_version":      12,
+		"head_sha":            "head-sha",
+		"workspace_mode":      "snapshot_continuation",
+		"pull_request_number": 42,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.NoError(t, err, "continue_session should succeed when repair completion notification succeeds")
+	require.True(t, completed, "continue_session should complete the linked PR repair run after a successful repair turn")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

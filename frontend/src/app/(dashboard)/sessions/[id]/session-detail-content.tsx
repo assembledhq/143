@@ -2788,6 +2788,7 @@ function ChatPanel({
         if (updated.status !== "running") {
           clearCurrentLiveLogs();
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+          queryClient.invalidateQueries({ queryKey: ["pull-request"] });
           invalidateSessionHumanInputRequests(queryClient, sessionId);
           if (activeThreadId) {
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
@@ -2805,6 +2806,7 @@ function ChatPanel({
         eventSource?.close();
         clearCurrentLiveLogs();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        queryClient.invalidateQueries({ queryKey: ["pull-request"] });
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         if (activeThreadId) {
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
@@ -3997,7 +3999,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (err, { action }) => {
       setPendingPRAction(null);
-      if (err instanceof ApiError && err.code === "REPAIR_ALREADY_IN_PROGRESS") {
+      if (err instanceof ApiError && (err.code === "REPAIR_ALREADY_IN_PROGRESS" || err.code === "REPAIR_SESSION_BUSY")) {
         const label = action === "fix_tests"
           ? "Fix tests session is already in progress"
           : "Resolve conflicts session is already in progress";
