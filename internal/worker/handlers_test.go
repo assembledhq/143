@@ -4377,6 +4377,11 @@ func TestUserFacingPRError(t *testing.T) {
 			want: "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session.",
 		},
 		{
+			name: "sandbox auth unavailable",
+			err:  fmt.Errorf("open sandbox auth socket: %w", ghservice.ErrSandboxAuthUnavailable),
+			want: "143 could not prepare GitHub credentials for this push.",
+		},
+		{
 			name: "generic fallback",
 			err:  errors.New("boom"),
 			want: "Check GitHub access or repo permissions and try again.",

@@ -487,6 +487,11 @@ type MemoryReinforcer interface {
 	ReinforceMemories(ctx context.Context, orgID uuid.UUID, memoryIDs []uuid.UUID) error
 }
 
+type SandboxAuthBroker interface {
+	Acquire(ctx context.Context, orgID, sessionID, holderID uuid.UUID) (string, error)
+	Release(ctx context.Context, orgID, sessionID, holderID uuid.UUID) error
+}
+
 type prCreator interface {
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
@@ -557,6 +562,9 @@ type Services struct {
 	// leftover dirs from prior worker generations don't accumulate. nil
 	// when no SandboxAuthSocketDir is configured.
 	SandboxAuthSweep func(keep map[uuid.UUID]struct{})
+	// SandboxAuthBroker is the worker-owned lease manager exposed through
+	// signed internal RPCs for detached session executors.
+	SandboxAuthBroker SandboxAuthBroker
 	// RuntimeSampler periodically polls per-container resource usage and
 	// records it as OTel histograms so operators can size SANDBOX_* limits
 	// against actual consumption rather than allocation. nil when sampling
@@ -8119,6 +8127,8 @@ func userFacingPRError(err error) string {
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return ghservice.PushRejectedPRMessage
+	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
+		return ghservice.SandboxAuthUnavailablePRMessage
 	default:
 		return "Check GitHub access or repo permissions and try again."
 	}

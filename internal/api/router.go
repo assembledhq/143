@@ -225,6 +225,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
 		handlers.WithSlackbotMetrics(slackMetrics),
+		handlers.WithWebhookDeliveryStore(webhookDeliveryStore),
 	}
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
@@ -263,6 +264,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	slackbotHandler.SetLogger(logger)
 	slackbotHandler.SetOrgSelectionStore(slackOrgSelectionStore)
+	slackbotHandler.SetWebhookDeliveries(webhookDeliveryStore)
 	if slackMetrics != nil {
 		slackbotHandler.SetMetrics(slackMetrics)
 	}
@@ -831,6 +833,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Common middleware shared by both public/API routes and worker preview RPC.
 	r.Use(chiMiddleware.RequestID)
+	r.Use(middleware.LogContext(logger))
 	r.Use(middleware.Logging(logger, sentryReporter))
 	r.Use(middleware.Recoverer(logger, sentryReporter))
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))

@@ -315,18 +315,19 @@ func (s *SlackInboundEventStore) CreateReceived(ctx context.Context, event *mode
 	}
 	rows, err := s.db.Query(ctx, `
 		INSERT INTO slack_inbound_events (
-			org_id, slack_installation_id, slack_event_id, slack_team_id, event_type,
+			org_id, webhook_delivery_id, slack_installation_id, slack_event_id, slack_team_id, event_type,
 			channel_id, user_id, event_ts, payload, status
 		)
 		VALUES (
-			@org_id, @slack_installation_id, @slack_event_id, @slack_team_id, @event_type,
+			@org_id, @webhook_delivery_id, @slack_installation_id, @slack_event_id, @slack_team_id, @event_type,
 			@channel_id, @user_id, @event_ts, @payload, @status
 		)
 		ON CONFLICT (org_id, slack_event_id) WHERE slack_event_id IS NOT NULL DO NOTHING
-		RETURNING id, org_id, slack_installation_id, slack_event_id, slack_team_id, event_type,
+		RETURNING id, org_id, webhook_delivery_id, slack_installation_id, slack_event_id, slack_team_id, event_type,
 			channel_id, user_id, event_ts, payload, status, job_id, error, received_at, processed_at`,
 		pgx.NamedArgs{
 			"org_id":                event.OrgID,
+			"webhook_delivery_id":   event.WebhookDeliveryID,
 			"slack_installation_id": event.SlackInstallationID,
 			"slack_event_id":        event.SlackEventID,
 			"slack_team_id":         event.SlackTeamID,
@@ -342,6 +343,14 @@ func (s *SlackInboundEventStore) CreateReceived(ctx context.Context, event *mode
 	}
 	inserted, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackInboundEvent])
 	if errors.Is(err, pgx.ErrNoRows) {
+		if event.SlackEventID == nil {
+			return false, nil
+		}
+		existing, lookupErr := s.getBySlackEventID(ctx, event.OrgID, *event.SlackEventID)
+		if lookupErr != nil {
+			return false, lookupErr
+		}
+		*event = existing
 		return false, nil
 	}
 	if err != nil {
@@ -349,6 +358,24 @@ func (s *SlackInboundEventStore) CreateReceived(ctx context.Context, event *mode
 	}
 	*event = inserted
 	return true, nil
+}
+
+func (s *SlackInboundEventStore) getBySlackEventID(ctx context.Context, orgID uuid.UUID, slackEventID string) (models.SlackInboundEvent, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, webhook_delivery_id, slack_installation_id, slack_event_id, slack_team_id, event_type,
+			channel_id, user_id, event_ts, payload, status, job_id, error, received_at, processed_at
+		FROM slack_inbound_events
+		WHERE org_id = @org_id
+		  AND slack_event_id = @slack_event_id`,
+		pgx.NamedArgs{"org_id": orgID, "slack_event_id": slackEventID})
+	if err != nil {
+		return models.SlackInboundEvent{}, fmt.Errorf("query slack inbound duplicate: %w", err)
+	}
+	existing, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackInboundEvent])
+	if err != nil {
+		return models.SlackInboundEvent{}, fmt.Errorf("scan slack inbound duplicate: %w", err)
+	}
+	return existing, nil
 }
 
 func (s *SlackInboundEventStore) MarkEnqueued(ctx context.Context, orgID, eventID, jobID uuid.UUID) error {

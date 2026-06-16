@@ -49,11 +49,12 @@ const (
 	SlackInboundEventStatusEnqueued  SlackInboundEventStatus = "enqueued"
 	SlackInboundEventStatusProcessed SlackInboundEventStatus = "processed"
 	SlackInboundEventStatusFailed    SlackInboundEventStatus = "failed"
+	SlackInboundEventStatusIgnored   SlackInboundEventStatus = "ignored"
 )
 
 func (s SlackInboundEventStatus) Validate() error {
 	switch s {
-	case SlackInboundEventStatusReceived, SlackInboundEventStatusEnqueued, SlackInboundEventStatusProcessed, SlackInboundEventStatusFailed:
+	case SlackInboundEventStatusReceived, SlackInboundEventStatusEnqueued, SlackInboundEventStatusProcessed, SlackInboundEventStatusFailed, SlackInboundEventStatusIgnored:
 		return nil
 	default:
 		return fmt.Errorf("invalid SlackInboundEventStatus: %q", s)
@@ -116,14 +117,23 @@ type SlackOrgSelection struct {
 }
 
 type SlackInstallationHealth struct {
-	Installation    SlackInstallation     `json:"installation"`
-	RequiredScopes  []string              `json:"required_scopes"`
-	MissingScopes   []string              `json:"missing_scopes"`
-	LastEventAt     *time.Time            `json:"last_event_at,omitempty"`
-	LastAuthCheckAt *time.Time            `json:"last_auth_check_at,omitempty"`
-	AuthOK          bool                  `json:"auth_ok"`
-	AuthError       *IntegrationAuthError `json:"auth_error,omitempty"`
-	Symptoms        []string              `json:"symptoms,omitempty"`
+	Installation           SlackInstallation      `json:"installation"`
+	RequiredScopes         []string               `json:"required_scopes"`
+	MissingScopes          []string               `json:"missing_scopes"`
+	LastEventAt            *time.Time             `json:"last_event_at,omitempty"`
+	LastAuthCheckAt        *time.Time             `json:"last_auth_check_at,omitempty"`
+	AuthOK                 bool                   `json:"auth_ok"`
+	AuthError              *IntegrationAuthError  `json:"auth_error,omitempty"`
+	Symptoms               []string               `json:"symptoms,omitempty"`
+	RecentCallbackFailures []SlackCallbackFailure `json:"recent_callback_failures,omitempty"`
+}
+
+type SlackCallbackFailure struct {
+	ID         uuid.UUID `json:"id"`
+	DeliveryID *string   `json:"delivery_id,omitempty"`
+	EventType  string    `json:"event_type"`
+	Error      *string   `json:"error,omitempty"`
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 type SlackUserLink struct {
@@ -326,6 +336,7 @@ type SlackSessionClaim struct {
 type SlackInboundEvent struct {
 	ID                  uuid.UUID               `db:"id" json:"id"`
 	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
+	WebhookDeliveryID   *uuid.UUID              `db:"webhook_delivery_id" json:"webhook_delivery_id,omitempty"`
 	SlackInstallationID uuid.UUID               `db:"slack_installation_id" json:"slack_installation_id"`
 	SlackEventID        *string                 `db:"slack_event_id" json:"slack_event_id,omitempty"`
 	SlackTeamID         string                  `db:"slack_team_id" json:"slack_team_id"`
