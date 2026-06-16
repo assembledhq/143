@@ -104,6 +104,18 @@ type SlackInstallation struct {
 	UpdatedAt         time.Time               `db:"updated_at" json:"updated_at"`
 }
 
+type SlackOrgSelection struct {
+	ID                  uuid.UUID `db:"id" json:"id"`
+	OrgID               uuid.UUID `db:"org_id" json:"org_id"`
+	SlackInstallationID uuid.UUID `db:"slack_installation_id" json:"slack_installation_id"`
+	SlackTeamID         string    `db:"slack_team_id" json:"slack_team_id"`
+	APIAppID            string    `db:"api_app_id" json:"api_app_id"`
+	SlackUserID         string    `db:"slack_user_id" json:"slack_user_id"`
+	SelectedAt          time.Time `db:"selected_at" json:"selected_at"`
+	CreatedAt           time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time `db:"updated_at" json:"updated_at"`
+}
+
 type SlackInstallationHealth struct {
 	Installation           SlackInstallation      `json:"installation"`
 	RequiredScopes         []string               `json:"required_scopes"`
