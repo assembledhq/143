@@ -874,14 +874,20 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
           </div>
         )}
 
-        {/* Timestamps + audit — secondary reference data, single unified row */}
-        <div className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground">
-          {repoBranchLabel && (
-            <span>
-              {repoBranchLabel}
-              <span aria-hidden="true" className="ml-1.5 text-muted-foreground/50">·</span>
-            </span>
-          )}
+        {repoBranchLabel && (
+          <div
+            data-testid="session-overview-repo-branch"
+            className="text-xs text-muted-foreground break-words"
+          >
+            {repoBranchLabel}
+          </div>
+        )}
+
+        {/* Timestamps + audit — secondary reference data, kept separate from long repo/branch labels */}
+        <div
+          data-testid="session-overview-timing"
+          className="flex items-center gap-x-1.5 gap-y-1 flex-wrap text-xs text-muted-foreground"
+        >
           {terminalSessionStatuses.has(session.status) &&
             !((session.status === "failed" || session.status === "cancelled") &&
               !hasMeaningfulDuration(session.started_at, session.completed_at)) && (

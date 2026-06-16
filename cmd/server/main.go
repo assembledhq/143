@@ -634,17 +634,16 @@ func main() {
 		if services != nil {
 			if orch, ok := services.Orchestrator.(*agent.Orchestrator); ok {
 				rehydrateCtx, rehydrateCancel := context.WithTimeout(ctx, 2*time.Minute)
-				keep, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
+				_, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
 				if rehydrateErr != nil {
 					logger.Warn().Err(rehydrateErr).Msg("startup: rehydrating sandbox auth listeners failed; remaining sessions will retry on next turn boundary")
 				}
-				// Only sweep when rehydrate actually ran (keep != nil) — a nil
-				// keep means we don't know which sockets are live, so sweeping
-				// would clobber listeners the next turn boundary will rebind.
-				// See orch.RehydrateSandboxAuthListeners' return contract.
-				if keep != nil && services.SandboxAuthSweep != nil {
-					services.SandboxAuthSweep(keep)
-				}
+				// Do not sweep the shared socket directory at startup. During
+				// rolling deploys, an older worker generation on this same host
+				// may still own live session sockets while the new generation
+				// boots. A broad startup sweep cannot distinguish those live
+				// sockets from stale dirs and would unlink /run/143-auth/sock
+				// inside still-running sandboxes.
 				rehydrateCancel()
 			}
 		}
@@ -1717,7 +1716,6 @@ func buildServices(
 		// *Broker pointer is stable for the process lifetime.
 		b := sandboxAuthBroker
 		svc.SandboxAuthShutdown = b.Shutdown
-		svc.SandboxAuthSweep = b.SweepStaleSessionDirs
 	}
 	return svc
 }
