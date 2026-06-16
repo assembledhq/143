@@ -118,6 +118,18 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      - name: Wait for Postgres
+        run: |
+          for i in {1..60}; do
+            if PGPASSWORD=dev pg_isready -h localhost -p 5432 -U onefortythree -d onefortythree; then
+              PGPASSWORD=dev psql -h localhost -p 5432 -U onefortythree -d onefortythree -c 'SELECT 1'
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Postgres did not become ready within 60s"
+          exit 1
+
       - name: Run go vet and migrations
         run: |
           go run cmd/migrate/main.go up
@@ -302,6 +314,18 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..60}; do
+            if PGPASSWORD=dev pg_isready -h localhost -p 5432 -U onefortythree -d onefortythree; then
+              PGPASSWORD=dev psql -h localhost -p 5432 -U onefortythree -d onefortythree -c 'SELECT 1'
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Postgres did not become ready within 60s"
+          exit 1
 
       - name: Migrate up
         run: go run cmd/migrate/main.go up
