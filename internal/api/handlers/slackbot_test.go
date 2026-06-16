@@ -21,16 +21,43 @@ import (
 )
 
 type slackbotInstallStoreStub struct {
-	install             models.SlackInstallation
-	err                 error
-	markLastEventCalled bool
+	install                         models.SlackInstallation
+	installsByOrg                   map[uuid.UUID]models.SlackInstallation
+	requestedOrgID                  uuid.UUID
+	err                             error
+	getActiveByTeamAppCalled        bool
+	markLastEventCalled             bool
+	markDisconnectedByTeamAppCalled bool
+	disconnectedTeamID              string
+	disconnectedAPIAppID            string
 }
 
 func (s *slackbotInstallStoreStub) GetActiveByTeamApp(ctx context.Context, teamID, apiAppID string) (models.SlackInstallation, error) {
+	s.getActiveByTeamAppCalled = true
 	return s.install, s.err
 }
 
+func (s *slackbotInstallStoreStub) GetActiveByOrgTeamApp(ctx context.Context, orgID uuid.UUID, teamID, apiAppID string) (models.SlackInstallation, error) {
+	s.requestedOrgID = orgID
+	if s.err != nil {
+		return models.SlackInstallation{}, s.err
+	}
+	if s.installsByOrg != nil {
+		if install, ok := s.installsByOrg[orgID]; ok {
+			return install, nil
+		}
+	}
+	return s.install, nil
+}
+
 func (s *slackbotInstallStoreStub) MarkDisconnected(ctx context.Context, orgID, installationID uuid.UUID) error {
+	return s.err
+}
+
+func (s *slackbotInstallStoreStub) MarkDisconnectedByTeamApp(ctx context.Context, teamID, apiAppID string) error {
+	s.markDisconnectedByTeamAppCalled = true
+	s.disconnectedTeamID = teamID
+	s.disconnectedAPIAppID = apiAppID
 	return s.err
 }
 
@@ -117,6 +144,17 @@ func (s *slackbotJobStoreStub) Enqueue(ctx context.Context, orgID uuid.UUID, que
 	s.jobType = jobType
 	s.payload = payload
 	return uuid.New(), nil
+}
+
+type slackbotOrgSelectionStoreStub struct {
+	selection models.SlackOrgSelection
+	err       error
+	called    bool
+}
+
+func (s *slackbotOrgSelectionStoreStub) GetBySlackUser(ctx context.Context, teamID, apiAppID, slackUserID string) (models.SlackOrgSelection, error) {
+	s.called = true
+	return s.selection, s.err
 }
 
 func TestSlackbotHandler_EventsVerifiesSignatureAndEnqueuesMention(t *testing.T) {
@@ -213,6 +251,63 @@ func TestSlackbotHandler_CommandsPersistsAndEnqueues(t *testing.T) {
 	payload, ok := jobs.payload.(models.SlackStartSessionJobPayload)
 	require.True(t, ok, "slash command should enqueue typed start-session payload")
 	require.Equal(t, "fix this", payload.Text, "slash command payload should include command text")
+}
+
+func TestSlackbotHandler_CommandsUsesSelectedOrgInstallation(t *testing.T) {
+	t.Parallel()
+
+	defaultOrgID := uuid.New()
+	selectedOrgID := uuid.New()
+	selectedInstallationID := uuid.New()
+	inbound := &slackbotInboundStoreStub{}
+	jobs := &slackbotJobStoreStub{}
+	deliveries := &slackbotWebhookDeliveryStoreStub{inserted: true}
+	installations := &slackbotInstallStoreStub{
+		install: models.SlackInstallation{
+			ID:       uuid.New(),
+			OrgID:    defaultOrgID,
+			TeamID:   "T123",
+			APIAppID: "A123",
+			Status:   models.SlackInstallationStatusActive,
+		},
+		installsByOrg: map[uuid.UUID]models.SlackInstallation{
+			selectedOrgID: {
+				ID:       selectedInstallationID,
+				OrgID:    selectedOrgID,
+				TeamID:   "T123",
+				APIAppID: "A123",
+				Status:   models.SlackInstallationStatusActive,
+			},
+		},
+	}
+	orgSelections := &slackbotOrgSelectionStoreStub{selection: models.SlackOrgSelection{
+		OrgID:       selectedOrgID,
+		SlackTeamID: "T123",
+		APIAppID:    "A123",
+		SlackUserID: "U999",
+	}}
+	handler := NewSlackbotHandler(SlackbotHandlerConfig{SigningSecret: "secret", FrontendURL: "https://143.test"},
+		installations,
+		inbound,
+		jobs,
+	)
+	handler.SetOrgSelectionStore(orgSelections)
+	handler.SetWebhookDeliveries(deliveries)
+
+	body := []byte("team_id=T123&api_app_id=A123&channel_id=C123&user_id=U999&command=%2F143&text=fix+this&trigger_id=trig-selected")
+	req := signedSlackRequest(t, body, "secret", time.Now())
+	rr := httptest.NewRecorder()
+
+	handler.Commands(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "command endpoint should acknowledge valid Slack commands")
+	require.True(t, orgSelections.called, "command routing should consult the Slack user's selected org")
+	require.Equal(t, selectedOrgID, installations.requestedOrgID, "command routing should load the installation for the selected org")
+	require.Equal(t, selectedOrgID, jobs.orgID, "command job should be enqueued in the selected org")
+	require.Equal(t, selectedOrgID, inbound.event.OrgID, "inbound command should persist under the selected org")
+	payload, ok := jobs.payload.(models.SlackStartSessionJobPayload)
+	require.True(t, ok, "command should enqueue typed start-session payload")
+	require.Equal(t, selectedInstallationID.String(), payload.SlackInstallationID, "job payload should carry the selected org installation")
 }
 
 func TestSlackbotHandler_InteractionsPersistsAndEnqueues(t *testing.T) {
@@ -543,6 +638,29 @@ func TestSlackbotHandler_EventsMarksLastEventAndEnqueuesBotInviteSetup(t *testin
 	payload, ok := jobs.payload.(models.SlackInteractionJobPayload)
 	require.True(t, ok, "channel invite should enqueue typed interaction payload")
 	require.Equal(t, "slack_member_joined_channel", payload.ActionID, "channel invite should route to setup-message action")
+}
+
+func TestSlackbotHandler_EventsDisconnectsAllActiveInstallsOnUninstall(t *testing.T) {
+	t.Parallel()
+
+	installations := &slackbotInstallStoreStub{}
+	handler := NewSlackbotHandler(SlackbotHandlerConfig{SigningSecret: "secret"},
+		installations,
+		&slackbotInboundStoreStub{},
+		&slackbotJobStoreStub{},
+	)
+
+	body := []byte(`{"type":"event_callback","team_id":"T123","api_app_id":"A123","event_id":"EvUninstall","event":{"type":"app_uninstalled","ts":"1710000001.000000"}}`)
+	req := signedSlackRequest(t, body, "secret", time.Now())
+	rr := httptest.NewRecorder()
+
+	handler.Events(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "uninstall events should be acknowledged")
+	require.True(t, installations.markDisconnectedByTeamAppCalled, "uninstall should disconnect every active install for the team/app")
+	require.Equal(t, "T123", installations.disconnectedTeamID, "uninstall disconnect should scope by Slack team")
+	require.Equal(t, "A123", installations.disconnectedAPIAppID, "uninstall disconnect should scope by Slack app")
+	require.False(t, installations.getActiveByTeamAppCalled, "uninstall should not resolve one arbitrary active installation")
 }
 
 func TestSlackbotHandler_PersistsSanitizedSlackPayloads(t *testing.T) {
