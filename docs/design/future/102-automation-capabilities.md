@@ -11,15 +11,21 @@ sources, eval authoring, publishing, and related tool groups.
 
 Manual sessions inherit org defaults from **Settings -> Coding Agents**.
 Automations can override those defaults per automation because they run
-unattended and repeatedly. Every run resolves to an immutable
-`capability_snapshot` before the agent starts.
+unattended and repeatedly. Every run resolves to a `capability_snapshot` before
+the agent starts, and manual sessions can append explicit, user-approved
+capability grants later through the existing human-input request flow.
+
+`143-tools` remains the delivery surface for sandbox agents. Capabilities
+control which existing `143-tools` namespaces/actions are visible, plus a small
+always-available capability request command for explicit escalation.
 
 ```text
 code-owned catalog
   -> org default policy
   -> launch/template defaults
   -> automation override, when present
-  -> session/run capability_snapshot
+  -> initial session/run capability_snapshot
+  -> optional user-approved in-session grant
 ```
 
 ## Product Specification
@@ -31,7 +37,7 @@ code-owned catalog
 | Goal | What the agent should accomplish. | Prompt/task input. |
 | Capability | Context or action class the agent may use. | Catalog entry plus grant. |
 | Policy | Saved set of enabled capabilities. | Org default or automation override. |
-| Snapshot | What the run actually received. | Immutable JSON stored on the run/session. |
+| Snapshot | What the run actually received. | JSON stored on the run/session; initial grants are fixed at launch and later grants require explicit approval. |
 
 Use the word **capabilities** in product surfaces. Keep raw "tools" as an
 implementation detail, except in developer/admin diagnostics.
@@ -45,6 +51,8 @@ implementation detail, except in developer/admin diagnostics.
 - High-risk capabilities must require deliberate confirmation.
 - Disabled capabilities must be absent from prompts, env injection, and
   `143-tools` registration.
+- Agents can request more capability during a manual session, but only through
+  an explicit user approval request in the session UI.
 - All retrieved history, comments, docs, messages, and logs are untrusted
   context, never instructions.
 
@@ -69,6 +77,14 @@ scope.
 | `publishing` | Branch and PR publishing | Publish | High | Branch/PR publication through 143 workflows. |
 
 Future candidates: `external_advisories`, `preview_control`, `merge_control`.
+
+### Non-Goals
+
+- Do not rebuild the `143-tools` command model or duplicate tool definitions.
+- Do not expose user-authored custom tools/capabilities in v1.
+- Do not silently escalate unattended automations.
+- Do not inject new raw provider credentials into a running sandbox without a
+  continuation/restart path.
 
 ### Settings -> Coding Agents Defaults
 
@@ -112,6 +128,37 @@ Behavior:
   inspect and edit them.
 - High-risk capabilities are never silently enabled outside explicit templates.
 - Run history shows the snapshot used for that run.
+- Unattended automations should not interactively escalate by default. If a
+  run needs a missing capability, it should return a clear configuration
+  recommendation unless the automation is explicitly configured to pause for
+  approval.
+
+### In-Session Capability Requests
+
+Manual coding agents should be able to ask for a missing capability without
+making the user preconfigure every possible tool. The request must be explicit:
+the agent states the capability, why it needs it, and the minimum access level.
+
+Primary path:
+
+```bash
+143-tools capability request \
+  --capability session_history \
+  --access read \
+  --reason "Compare this AGENTS.md update against prior failed automation runs."
+```
+
+Product behavior:
+
+- The command creates a durable `session_human_input_requests` approval using
+  the existing session request UI.
+- The session moves to `awaiting_input`; approving resumes the agent with an
+  updated snapshot and regenerated `143-tools` help.
+- Denying resumes or fails with a clear `CAPABILITY_DENIED` result.
+- Approval is scoped to the current session/thread by default, not to org
+  settings or the automation's saved policy.
+- High-risk capabilities show stronger copy and may require an admin answer.
+- Automations only use this path when configured to pause for approval.
 
 ### Use Case Defaults
 
@@ -149,13 +196,20 @@ Behavior:
 8. Orchestration injects only allowed provider env vars and generated
    `143-tools` docs.
 9. Internal capability-backed APIs validate the current session snapshot.
+10. If the agent calls `143-tools capability request`, the backend creates a
+    `session_human_input_requests` approval and, on approval, appends the grant
+    before resuming. If the newly approved capability needs provider env vars
+    that were not already present, resume through a continuation/restart path
+    that can refresh the sandbox env.
 
 ### Database Schema
 
-Use shared policy/grant tables and immutable run snapshots. These tables are
-settings/config data, so update them with the repo's insert-only versioning
-pattern if historical policy versions are required in the first implementation;
-otherwise use `updated_at` and audit events for v1.
+Use shared policy/grant tables and run snapshots. Policy tables are
+settings/config data, so they should follow the repo's insert-only versioning
+pattern: deactivate the current policy, insert a new active policy, and insert
+its grants in the same transaction. Launch-time snapshot entries are fixed;
+user-approved in-session grants append new entries instead of mutating prior
+entries.
 
 ```sql
 CREATE TABLE agent_capability_policies (
@@ -166,9 +220,7 @@ CREATE TABLE agent_capability_policies (
     name text NOT NULL DEFAULT '',
     active boolean NOT NULL DEFAULT true,
     created_by uuid REFERENCES users(id),
-    updated_by uuid REFERENCES users(id),
     created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT chk_agent_capability_policy_type
         CHECK (policy_type IN ('session_default', 'automation')),
     CONSTRAINT chk_agent_capability_policy_owner
@@ -196,9 +248,7 @@ CREATE TABLE agent_capability_policy_grants (
     enabled boolean NOT NULL DEFAULT true,
     config jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_by uuid REFERENCES users(id),
-    updated_by uuid REFERENCES users(id),
     created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT chk_agent_capability_grant_access_level
         CHECK (access_level IN ('read', 'write', 'publish')),
     CONSTRAINT chk_agent_capability_grant_config_object
@@ -227,52 +277,31 @@ Store requirements:
 
 - Every query filters by `org_id`.
 - Automation policy reads join `automations` on `org_id` and `automation_id`.
+- Policy writes run in a transaction and use insert-only replacement.
 - Required store methods:
-  `GetSessionDefaultPolicy`, `GetAutomationPolicy`, `UpsertSessionDefault`,
-  `ReplaceForAutomation`, `ListGrantsByPolicy`.
+  `GetSessionDefaultPolicy`, `GetAutomationPolicy`,
+  `UpdateSessionDefaultPolicy`, `ReplaceAutomationPolicy`, `ListGrantsByPolicy`,
+  `AppendApprovedSessionGrant`.
+- `AppendApprovedSessionGrant` locks the session row, rejects duplicate active
+  grants, appends a `source = "user_approved"` snapshot item, and records the
+  `human_input_request_id`. If the session belongs to an automation run, update
+  the run snapshot in the same transaction.
 
-Snapshot item:
-
-```json
-{
-  "id": "session_history",
-  "display_name": "Session history",
-  "access_level": "read",
-  "risk": "medium",
-  "scope": "repository",
-  "config": {
-    "max_age_days": 30,
-    "raw_messages": false
-  }
-}
-```
+Snapshot item fields: `id`, `display_name`, `access_level`, `risk`, `scope`,
+`config`, `source`, `granted_at`, and optional `human_input_request_id`.
 
 ### Go Models And Service
 
 Add typed string enums in `internal/models` with table-driven validation tests.
+The enum values mirror the catalog IDs above.
 
 ```go
 type AgentCapabilityID string
-
-const (
-    AgentCapabilityRepoContext           AgentCapabilityID = "repo_context"
-    AgentCapabilityPRHistory             AgentCapabilityID = "pr_history"
-    AgentCapabilitySessionHistory        AgentCapabilityID = "session_history"
-    AgentCapabilityReviewFeedback        AgentCapabilityID = "review_feedback"
-    AgentCapabilityCIHistory             AgentCapabilityID = "ci_history"
-    AgentCapabilityIssueSources          AgentCapabilityID = "issue_sources"
-    AgentCapabilityTeamDocs              AgentCapabilityID = "team_docs"
-    AgentCapabilityProductionDiagnostics AgentCapabilityID = "production_diagnostics"
-    AgentCapabilityExternalComments      AgentCapabilityID = "external_comments"
-    AgentCapabilityProjectProposals      AgentCapabilityID = "project_proposals"
-    AgentCapabilityEvalAuthoring         AgentCapabilityID = "eval_authoring"
-    AgentCapabilityPublishing            AgentCapabilityID = "publishing"
-)
-
 type AgentCapabilityAccessLevel string // read, write, publish
 type AgentCapabilityRisk string        // low, medium, high
 type AgentCapabilityScope string       // repository, org, integration
 type AgentCapabilityPolicyType string  // session_default, automation
+type AgentCapabilityGrantSource string // session_default, automation, launch_default, user_approved
 
 type AgentCapabilityGrant struct {
     ID           uuid.UUID                  `db:"id" json:"id"`
@@ -285,12 +314,15 @@ type AgentCapabilityGrant struct {
 }
 
 type AgentCapabilitySnapshotItem struct {
-    ID          AgentCapabilityID          `json:"id"`
-    DisplayName string                     `json:"display_name"`
-    AccessLevel AgentCapabilityAccessLevel `json:"access_level"`
-    Risk        AgentCapabilityRisk        `json:"risk"`
-    Scope       AgentCapabilityScope       `json:"scope"`
-    Config      json.RawMessage            `json:"config"`
+    ID                  AgentCapabilityID          `json:"id"`
+    DisplayName         string                     `json:"display_name"`
+    AccessLevel         AgentCapabilityAccessLevel `json:"access_level"`
+    Risk                AgentCapabilityRisk        `json:"risk"`
+    Scope               AgentCapabilityScope       `json:"scope"`
+    Config              json.RawMessage            `json:"config"`
+    Source              AgentCapabilityGrantSource `json:"source"`
+    GrantedAt           time.Time                  `json:"granted_at"`
+    HumanInputRequestID *uuid.UUID                 `json:"human_input_request_id,omitempty"`
 }
 ```
 
@@ -304,12 +336,15 @@ type ResolveInput struct {
     AutomationID    *uuid.UUID
     AutomationRunID *uuid.UUID
     TemplateID      string
+    ExistingSnapshot []models.AgentCapabilitySnapshotItem
 }
 
 func (s *Service) Definitions() []models.AgentCapabilityDefinition
 func (s *Service) ValidateGrant(models.AgentCapabilityGrant) error
 func (s *Service) ResolveAvailability(ctx context.Context, orgID uuid.UUID, repoID *uuid.UUID) ([]Availability, error)
 func (s *Service) ResolveForSession(ctx context.Context, in ResolveInput) ([]models.AgentCapabilitySnapshotItem, error)
+func (s *Service) RequestGrant(ctx context.Context, in GrantRequestInput) (models.HumanInputRequest, error)
+func (s *Service) ApplyApprovedGrant(ctx context.Context, in ApprovedGrantInput) ([]models.AgentCapabilitySnapshotItem, error)
 ```
 
 Responsibilities:
@@ -318,7 +353,8 @@ Responsibilities:
 - validate grant IDs, access levels, and config,
 - resolve provider/integration availability,
 - merge defaults, launch defaults, template defaults, and automation overrides,
-- map snapshots to allowed `143-tools` namespaces and env vars.
+- map snapshots to allowed `143-tools` namespaces and env vars,
+- append approved session-scoped grants after human-input approval.
 
 ### API Contract
 
@@ -330,6 +366,8 @@ Responsibilities:
 | `GET /api/v1/automations/{id}/capabilities` | Viewer+ | Automation effective/override policy. |
 | `POST /api/v1/automations` | Existing automation auth | Optional `capabilities` on create. |
 | `PATCH /api/v1/automations/{id}` | Existing automation auth | Optional full policy replacement. |
+| `GET /api/v1/internal/agent-capabilities/effective` | Internal session token | Effective snapshot for `143-tools capability list`. |
+| `POST /api/v1/internal/agent-capabilities/requests` | Internal session token | Create a human-input capability approval request. |
 
 Policy request shape:
 
@@ -349,28 +387,9 @@ Policy request shape:
 }
 ```
 
-Catalog response item:
-
-```json
-{
-  "id": "session_history",
-  "display_name": "Session history",
-  "description": "Search recent 143 sessions for this repository.",
-  "category": "context",
-  "max_access_level": "read",
-  "risk": "medium",
-  "scope": "repository",
-  "requirements": [],
-  "default_config": {
-    "max_age_days": 30,
-    "raw_messages": false
-  },
-  "availability": {
-    "state": "available",
-    "reasons": []
-  }
-}
-```
+Catalog response items include `id`, `display_name`, `description`,
+`category`, `max_access_level`, `risk`, `scope`, `requirements`,
+`default_config`, and `availability`.
 
 Expose `capability_snapshot` on session detail and automation run detail.
 Session lists may omit it.
@@ -381,8 +400,26 @@ Primary errors:
 - `INVALID_CAPABILITY_ACCESS`
 - `INVALID_CAPABILITY_CONFIG`
 - `CAPABILITY_UNAVAILABLE`
+- `CAPABILITY_APPROVAL_REQUIRED`
+- `CAPABILITY_DENIED`
 - `FORBIDDEN`
 - `UPDATE_CAPABILITIES_FAILED`
+
+Internal capability request body:
+
+```json
+{
+  "capability_id": "session_history",
+  "access_level": "read",
+  "reason": "Compare this AGENTS.md update against prior failed automation runs.",
+  "thread_id": "uuid"
+}
+```
+
+Implementation should reuse `session_human_input_requests`, not create a new
+approval table. Use `request_kind = "action_choice"` for context capability
+requests and `request_kind = "tool_approval"` when the requested capability
+enables an external write/publish action.
 
 ### Internal Session-History Tool
 
@@ -403,37 +440,31 @@ Authorization:
 Search params: `q`, `status`, `created_after`, `created_before`,
 `changed_path`, `failure_category`, `limit` default 10 max 50, `cursor`.
 
-Search returns summaries first:
+Search returns summaries first: `id`, `title`, `status`, `origin`,
+`result_summary`, `failure_category`, `changed_paths`, and `meta.next_cursor`.
 
-```json
-{
-  "data": [
-    {
-      "id": "uuid",
-      "title": "Fix flaky webhook test",
-      "status": "failed",
-      "origin": "automation",
-      "result_summary": "Tests still failed due to shared clock state.",
-      "failure_category": "test_failure",
-      "changed_paths": ["internal/webhooks/retry_test.go"]
-    }
-  ],
-  "meta": {
-    "next_cursor": "opaque"
-  }
-}
-```
+### 143-Tools And Registry Policy
 
-### Tool Registry Policy
+Capability snapshots control `143-tools` registration and env injection. Do
+not replace the existing CLI or duplicate tool definitions:
 
-Capability snapshots control CLI/tool registration and env injection.
+- Keep `BuildRegistryFromEnv` as the source of provider defaults and credential
+  registration.
+- Keep `BuildRegistryFromOrg` for server-proxied local-agent tools.
+- Keep `ToolRegistry.ListTools`, `ToolRegistry.CallTool`, and `cliPathForTool`
+  as the shared CLI/MCP command contract.
+- Add a capability-aware `ToolSource` wrapper that filters `ListTools()` and
+  blocks `CallTool()` for disallowed tool names.
+- Preserve existing per-tool flag defaults from `ToolSchema.Default`; capability
+  config may bound limits but should not redefine normal command defaults.
+- `143-tools --help` remains the runtime source of truth for agents.
 
 ```go
 type ToolCapabilityPolicy struct {
-    CapabilityIDs map[models.AgentCapabilityID]bool
+    Capabilities []models.AgentCapabilitySnapshotItem
 }
 
-func BuildRegistryFromEnvWithPolicy(logger io.Writer, policy ToolCapabilityPolicy) *integration.Registry
+func NewCapabilityFilteredToolSource(base ToolSource, policy ToolCapabilityPolicy) ToolSource
 ```
 
 | Capability | Tool namespace examples |
@@ -452,12 +483,30 @@ func BuildRegistryFromEnvWithPolicy(logger io.Writer, policy ToolCapabilityPolic
 If a provider has read and write methods in one namespace, register only the
 methods allowed by the snapshot.
 
+Always register a 143-owned `capability` namespace when `INTERNAL_API_TOKEN`
+and `INTERNAL_API_URL` are available:
+
+| Command | Purpose |
+| --- | --- |
+| `143-tools capability list` | Show the current snapshot and available requestable capabilities. |
+| `143-tools capability request` | Create the human-input approval request described above. |
+
+The capability namespace is a meta-tool. It should not grant access itself; it
+only asks the backend to create a session approval request.
+
+Runtime constraint: direct env-backed sandbox tools cannot gain provider
+credentials that were omitted at launch. Approved grants that need new env vars
+must resume through a continuation/restart that refreshes env injection, or use
+a server-backed internal API path that keeps credentials server-side.
+
 ### Validation Rules
 
 - Unknown capability IDs are rejected.
 - Access level cannot exceed the catalog definition.
 - Disabled grants are omitted from snapshots.
 - Repository-scoped capabilities require a repository in v1.
+- In-session capability requests require an active internal session token and
+  cannot update org defaults or automation policies.
 - `production_diagnostics` requires connected providers and bounded defaults.
 - `eval_authoring` requires an eval-bootstrap launch or admin-approved eval
   automation template.
@@ -466,48 +515,9 @@ methods allowed by the snapshot.
 
 ### Frontend Types
 
-Add shared frontend types in `frontend/src/lib/types.ts`.
-
-```ts
-export type AgentCapabilityID =
-  | "repo_context"
-  | "pr_history"
-  | "session_history"
-  | "review_feedback"
-  | "ci_history"
-  | "issue_sources"
-  | "team_docs"
-  | "production_diagnostics"
-  | "external_comments"
-  | "project_proposals"
-  | "eval_authoring"
-  | "publishing";
-
-export type AgentCapabilityAccessLevel = "read" | "write" | "publish";
-export type AgentCapabilityRisk = "low" | "medium" | "high";
-export type AgentCapabilityScope = "repository" | "org" | "integration";
-
-export interface AgentCapabilityGrant {
-  id?: string;
-  policy_id?: string;
-  capability_id: AgentCapabilityID;
-  access_level: AgentCapabilityAccessLevel;
-  enabled: boolean;
-  config: Record<string, unknown>;
-}
-
-export interface AgentCapabilitySnapshotItem {
-  id: AgentCapabilityID;
-  display_name: string;
-  access_level: AgentCapabilityAccessLevel;
-  risk: AgentCapabilityRisk;
-  scope: AgentCapabilityScope;
-  config: Record<string, unknown>;
-}
-```
-
-Extend `Session`, `Automation`, and `AutomationRun` with the relevant
-capability grant/snapshot fields.
+Add shared types in `frontend/src/lib/types.ts` that mirror the Go grant and
+snapshot structs. Extend `Session`, `Automation`, and `AutomationRun` with the
+relevant capability grant/snapshot fields.
 
 ### Audit And Tests
 
@@ -517,6 +527,8 @@ Audit events:
 - `automation.capabilities.updated`
 - `agent.capability.used`
 - `agent.capability.denied`
+- `agent.capability.grant_requested`
+- `agent.capability.grant_approved`
 
 Audit details include capability IDs, access level, automation ID, run ID,
 session ID, and counts. Never include raw transcripts, logs, comments, docs, or
@@ -531,6 +543,9 @@ Required tests:
 - snapshot persistence tests for sessions and automation runs,
 - internal session-history authorization tests,
 - registry policy tests proving disabled capabilities hide tools,
+- direct-call tests proving filtered `CallTool()` rejects hidden tools,
+- `143-tools capability request` tests proving approval is required before new
+  namespaces/actions appear,
 - Settings -> Coding Agents UI tests,
 - automation capability-sheet and high-risk confirmation tests.
 
@@ -557,9 +572,12 @@ npm run build
 6. Wire automation create/update and automation run snapshots.
 7. Add catalog API and response fields.
 8. Add settings UI, automation capability sheet, and template defaults.
-9. Add capability-filtered env/tool registry policy.
-10. Add `session-history` internal API and CLI namespace.
-11. Add session/run detail snapshot rendering and audit events.
+9. Add capability-filtered env/tool registry policy around the existing
+   `143-tools` registry.
+10. Add `143-tools capability list/request` backed by existing human-input
+    approvals.
+11. Add `session-history` internal API and CLI namespace.
+12. Add session/run detail snapshot rendering and audit events.
 
 ### Open Questions
 
