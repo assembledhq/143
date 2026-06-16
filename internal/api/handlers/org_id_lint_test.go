@@ -62,6 +62,8 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalSessionTabsHandler.SendMessage": "internal sandbox API, uses claims.OrgID and claims.SessionID",
 		"InternalSessionTabsHandler.Messages":    "internal sandbox API, uses claims.OrgID and claims.SessionID",
 		"InternalPreviewHandler.AuthCheck":       "internal worker deploy compatibility probe; validates signed target-node token and reads no org-scoped data",
+		"InternalSandboxAuthHandler.Acquire":     "internal worker RPC, uses signed token claims.OrgID plus claims.SessionID and holder id",
+		"InternalSandboxAuthHandler.Release":     "internal worker RPC, uses signed token claims.OrgID plus claims.SessionID and holder id",
 
 		// Authenticated but legitimately no org-scoped data access.
 		"AuthHandler.Me":                       "returns user from context only",

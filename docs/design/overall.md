@@ -71,7 +71,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 ### Runtime Plane
 
 - Workers run coding-agent jobs, continuation turns, preview starts, ingestion syncs, PM planning, automations, and repair work.
-- Sandboxes are the permission boundary for agent execution. They run with resource limits, gVisor isolation in production, controlled network policy, and per-session GitHub credential access through host-managed helpers rather than long-lived tokens in the container environment.
+- Sandboxes are the permission boundary for agent execution. They run with resource limits, gVisor isolation in production, controlled network policy, and per-session GitHub credential access through a worker-owned auth broker rather than long-lived tokens in the container environment.
 - The sandbox image installs the supported coding-agent CLIs, including Codex, Claude Code, OpenCode, Amp, and Pi. Runtime credentials are resolved from ordered personal/team auth stacks with health and rate-limit state tracked separately from credential config.
 - Long-running sessions survive routine deploys through durable session executors, leases, checkpointed recovery, snapshots, and worker drain/spin-down controls. See [implemented/82-durable-session-executors.md](implemented/82-durable-session-executors.md).
 - Multiple agent tabs can run inside one shared session sandbox when they should share a branch and filesystem. Independent PR streams should remain separate sessions. See [implemented/88-shared-sandbox-thread-runtimes.md](implemented/88-shared-sandbox-thread-runtimes.md).
