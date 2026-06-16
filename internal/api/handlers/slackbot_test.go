@@ -188,6 +188,105 @@ func TestSlackbotHandler_InteractionsPersistsAndEnqueues(t *testing.T) {
 	require.Equal(t, "V123", interactionPayload.ViewID, "interaction payload should include view id for modal updates")
 }
 
+func TestSlackbotHandler_SignedFixtureSmoke(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		endpoint        string
+		body            []byte
+		call            func(*SlackbotHandler, http.ResponseWriter, *http.Request)
+		expectedJobType string
+		expectedEvent   models.SlackInboundEventType
+	}{
+		{
+			name:            "events api app mention",
+			endpoint:        "/api/v1/webhooks/slack/events",
+			body:            []byte(`{"type":"event_callback","team_id":"T123","api_app_id":"A123","event_id":"Ev-smoke","event":{"type":"app_mention","channel":"C123","user":"U999","text":"<@U143> fix this","ts":"1710000001.000000"}}`),
+			call:            (*SlackbotHandler).Events,
+			expectedJobType: "slack_start_or_continue_session",
+			expectedEvent:   models.SlackInboundEventTypeAppMention,
+		},
+		{
+			name:            "slash command",
+			endpoint:        "/api/v1/webhooks/slack/commands",
+			body:            []byte("team_id=T123&api_app_id=A123&channel_id=C123&user_id=U999&command=%2F143&text=fix+this&trigger_id=trig-smoke"),
+			call:            (*SlackbotHandler).Commands,
+			expectedJobType: "slack_start_or_continue_session",
+			expectedEvent:   models.SlackInboundEventTypeSlashCommand,
+		},
+		{
+			name:            "interaction callback",
+			endpoint:        "/api/v1/webhooks/slack/interactions",
+			body:            []byte("payload=" + url.QueryEscape(`{"type":"block_actions","api_app_id":"A123","trigger_id":"trig-smoke","team":{"id":"T123"},"user":{"id":"U999"},"channel":{"id":"C123"},"message":{"ts":"1710000001.000000"},"actions":[{"action_id":"slack_open_session","value":"session-1"}]}`)),
+			call:            (*SlackbotHandler).Interactions,
+			expectedJobType: "slack_handle_interaction",
+			expectedEvent:   models.SlackInboundEventTypeInteraction,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			installationID := uuid.New()
+			inbound := &slackbotInboundStoreStub{}
+			jobs := &slackbotJobStoreStub{}
+			handler := NewSlackbotHandler(SlackbotHandlerConfig{SigningSecret: "secret"},
+				&slackbotInstallStoreStub{install: models.SlackInstallation{ID: installationID, OrgID: orgID, TeamID: "T123", APIAppID: "A123", BotUserID: "U143", Status: models.SlackInstallationStatusActive}},
+				inbound,
+				jobs,
+			)
+			req := signedSlackRequest(t, tt.body, "secret", time.Now())
+			req.URL.Path = tt.endpoint
+			rr := httptest.NewRecorder()
+
+			tt.call(handler, rr, req)
+
+			require.Equal(t, http.StatusOK, rr.Code, "signed Slack fixture should be acknowledged")
+			require.Equal(t, tt.expectedJobType, jobs.jobType, "signed Slack fixture should enqueue expected job type")
+			require.Equal(t, tt.expectedEvent, inbound.event.EventType, "signed Slack fixture should persist expected event type")
+		})
+	}
+}
+
+func TestSanitizeSlackStoredPayloadRedactsPrivateFields(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"token":"legacy",
+		"authed_users":["U1"],
+		"authorizations":[{"user_id":"U1"}],
+		"event":{"type":"message","channel_type":"im","channel":"D123","text":"secret customer details"}
+	}`)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(sanitizeSlackStoredPayload(raw), &got), "sanitized payload should remain valid JSON")
+	require.Equal(t, "[redacted]", got["token"], "legacy verification token should be redacted")
+	require.Equal(t, "[redacted]", got["authed_users"], "transient authed users should be redacted")
+	require.Equal(t, "[redacted]", got["authorizations"], "transient authorization envelope should be redacted")
+	event, ok := got["event"].(map[string]any)
+	require.True(t, ok, "sanitized payload should preserve event object")
+	require.Equal(t, "[redacted]", event["text"], "DM event text should not be retained in raw Slack payload storage")
+}
+
+func TestSanitizeSlackStoredPayloadFormPayloadReturnsJSON(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`token=legacy&trigger_id=trig-1&type=block_actions&payload=` + url.QueryEscape(`{"ok":true,"trigger_id":"nested-trig","response_url":"https://hooks.slack.com/actions/1"}`))
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(sanitizeSlackStoredPayload(raw), &got), "sanitized form payload should be valid JSON")
+	require.Equal(t, "[redacted]", got["token"], "legacy form token should be redacted")
+	require.Equal(t, "[redacted]", got["trigger_id"], "trigger id should be redacted")
+	require.Equal(t, "block_actions", got["type"], "non-secret form fields should be preserved")
+	payload, ok := got["payload"].(map[string]any)
+	require.True(t, ok, "nested Slack form payload should be parsed before storage")
+	require.Equal(t, "[redacted]", payload["trigger_id"], "nested trigger id should be redacted")
+	require.Equal(t, "[redacted]", payload["response_url"], "nested response URL should be redacted")
+}
+
 func TestSlackbotHandler_InteractionsUsesViewCallbackIDForModalSubmissions(t *testing.T) {
 	t.Parallel()
 
@@ -288,7 +387,9 @@ func TestSlackbotHandler_PersistsSanitizedSlackPayloads(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "command endpoint should acknowledge valid Slack commands")
 	require.NotContains(t, string(inbound.event.Payload), "hooks.slack.com", "stored Slack command payload should redact response_url")
 	require.NotContains(t, string(inbound.event.Payload), "trig-1", "stored Slack command payload should redact trigger_id")
-	require.Contains(t, string(inbound.event.Payload), "fix+this", "stored Slack command payload should preserve non-secret command context")
+	var stored map[string]any
+	require.NoError(t, json.Unmarshal(inbound.event.Payload, &stored), "stored Slack command payload should be valid JSON")
+	require.Equal(t, "fix this", stored["text"], "stored Slack command payload should preserve non-secret command context")
 }
 
 func signedSlackRequest(t *testing.T, body []byte, secret string, now time.Time) *http.Request {

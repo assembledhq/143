@@ -223,9 +223,11 @@ type Config struct {
 	// to the legacy GITHUB_TOKEN env-var injection.
 	SandboxAuthSocketDir string `env:"SANDBOX_AUTH_SOCKET_DIR" envDefault:"/var/run/143/sandbox-auth"`
 	// Data retention
-	DataRetentionWebhookDays int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
-	DataRetentionLogsDays    int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`
-	DataRetentionJobsDays    int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
+	DataRetentionWebhookDays              int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
+	DataRetentionLogsDays                 int `env:"DATA_RETENTION_LOGS_DAYS"    envDefault:"90"`
+	DataRetentionJobsDays                 int `env:"DATA_RETENTION_JOBS_DAYS"    envDefault:"30"`
+	DataRetentionSlackInboundPayloadDays  int `env:"DATA_RETENTION_SLACK_INBOUND_PAYLOAD_DAYS" envDefault:"14"`
+	DataRetentionSlackInboundPayloadBatch int `env:"DATA_RETENTION_SLACK_INBOUND_PAYLOAD_BATCH" envDefault:"1000"`
 
 	// Upload storage (images/files attached to session messages)
 	UploadStorageDir string        `env:"UPLOAD_STORAGE_DIR"      envDefault:".data/uploads"`
@@ -626,8 +628,8 @@ func (c *Config) SentryEnvironmentOrDefault() string {
 // minimum strength requirements when running in production.
 func (c *Config) ValidateSecrets() error {
 	// Retention day validation applies in all environments.
-	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
-		return errors.New("DATA_RETENTION_*_DAYS, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")
+	if c.DataRetentionWebhookDays < 0 || c.DataRetentionLogsDays < 0 || c.DataRetentionJobsDays < 0 || c.DataRetentionSlackInboundPayloadDays < 0 || c.DataRetentionSlackInboundPayloadBatch < 0 || c.PreviewDependencyCacheRetentionDays < 0 || c.PreviewDependencyCacheKeepNewestPerRepo < 0 {
+		return errors.New("DATA_RETENTION_* values, PREVIEW_DEPENDENCY_CACHE_RETENTION_DAYS, and PREVIEW_DEPENDENCY_CACHE_KEEP_NEWEST_PER_REPO values must not be negative")
 	}
 
 	if c.Env != "production" {
