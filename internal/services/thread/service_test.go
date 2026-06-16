@@ -3337,3 +3337,159 @@ func TestService_GetLogs(t *testing.T) {
 		})
 	}
 }
+
+// --- mockTranscriptStore ---
+
+type mockTranscriptStore struct {
+	listWindowFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
+}
+
+func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+	if m.listWindowFn != nil {
+		return m.listWindowFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionTranscriptWindow{}, nil
+}
+
+// newServiceWithTranscript builds a Service with all default mocks and wires
+// the given TranscriptStore via SetTranscriptStore. Pass nil to leave the
+// transcript store unset (simulates a misconfigured service).
+func newServiceWithTranscript(t *testing.T, ts TranscriptStore) (*Service, *mockThreadStore) {
+	t.Helper()
+	threadStore := &mockThreadStore{}
+	svc := NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
+	if ts != nil {
+		svc.SetTranscriptStore(ts)
+	}
+	return svc, threadStore
+}
+
+func TestService_GetTranscriptWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	opts := db.SessionTranscriptWindowOptions{}
+
+	tests := []struct {
+		name         string
+		setup        func(threadStore *mockThreadStore, ts *mockTranscriptStore)
+		useNilStore  bool
+		wantErr      bool
+		wantNotFound bool
+		wantContains string
+		wantHasOlder bool
+		wantStatus   models.ThreadStatus
+	}{
+		{
+			name: "thread not found",
+			setup: func(threadStore *mockThreadStore, _ *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			wantErr:      true,
+			wantNotFound: true,
+		},
+		{
+			name: "thread belongs to different session",
+			setup: func(threadStore *mockThreadStore, _ *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: uuid.New(), // different session
+						OrgID:     orgID,
+					}, nil
+				}
+			},
+			wantErr:      true,
+			wantNotFound: true, // visibleThreadInSession returns ErrThreadNotFound for session mismatch
+		},
+		{
+			name:        "transcript store not configured",
+			useNilStore: true,
+			setup: func(threadStore *mockThreadStore, _ *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+					}, nil
+				}
+			},
+			wantErr:      true,
+			wantContains: "not configured",
+		},
+		{
+			name: "store returns error",
+			setup: func(threadStore *mockThreadStore, ts *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+				storeErr := fmt.Errorf("db connection lost")
+				ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, _ db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+					return db.SessionTranscriptWindow{}, storeErr
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "success",
+			setup: func(threadStore *mockThreadStore, ts *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+				ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, _ db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+					return db.SessionTranscriptWindow{HasOlder: true}, nil
+				}
+			},
+			wantErr:      false,
+			wantHasOlder: true,
+			wantStatus:   models.ThreadStatusRunning,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := &mockTranscriptStore{}
+			var svc *Service
+			var threadStore *mockThreadStore
+			if tt.useNilStore {
+				threadStore = &mockThreadStore{}
+				svc = NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
+				// intentionally do NOT call svc.SetTranscriptStore
+			} else {
+				svc, threadStore = newServiceWithTranscript(t, ts)
+			}
+			tt.setup(threadStore, ts)
+
+			result, err := svc.GetTranscriptWindow(context.Background(), orgID, sessionID, threadID, opts)
+			if tt.wantErr {
+				require.Error(t, err, "expected an error")
+				if tt.wantNotFound {
+					require.True(t, errors.Is(err, ErrThreadNotFound), "expected ErrThreadNotFound, got: %v", err)
+				}
+				if tt.wantContains != "" {
+					require.Contains(t, err.Error(), tt.wantContains)
+				}
+				return
+			}
+			require.NoError(t, err, "unexpected error")
+			require.Equal(t, tt.wantHasOlder, result.Window.HasOlder, "HasOlder should match")
+			require.Equal(t, tt.wantStatus, result.ThreadStatus, "ThreadStatus should match")
+		})
+	}
+}

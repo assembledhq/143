@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorText } from "@/components/ui/error-notice";
 import { api } from "@/lib/api";
+import { formatPreviewStatus } from "@/lib/preview-types";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
@@ -61,7 +62,7 @@ export function PullRequestPreviewContent({
 
   const preview = previewQuery.data?.data;
   const title = `${owner}/${repo}#${number}`;
-  const status = preview?.status.replaceAll("_", " ") ?? "Loading";
+  const status = preview?.status ? formatPreviewStatus(preview.status) : "Loading";
   const canStartLatest = preview?.target_id || preview?.preview_id;
   const isExpired = preview?.status === "expired";
   const launch = preview?.launch;
@@ -140,7 +141,7 @@ export function PullRequestPreviewContent({
                   </div>
                   <div>
                     <p className="text-muted-foreground">Phase</p>
-                    <p className="font-medium text-foreground">{preview.current_phase?.replaceAll("_", " ") ?? status}</p>
+                    <p className="font-medium text-foreground">{preview.current_phase ? formatPreviewStatus(preview.current_phase) : status}</p>
                   </div>
                 </div>
 
@@ -171,7 +172,7 @@ export function PullRequestPreviewContent({
                       {(preview.services ?? []).map((service) => (
                         <div key={service.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
                           <span className="truncate">{service.service_name}</span>
-                          <Badge variant={service.status === "ready" ? "default" : "secondary"}>{service.status.replaceAll("_", " ")}</Badge>
+                          <Badge variant={service.status === "ready" ? "default" : "secondary"}>{formatPreviewStatus(service.status)}</Badge>
                         </div>
                       ))}
                     </div>
@@ -180,7 +181,7 @@ export function PullRequestPreviewContent({
                       {(preview.infrastructure ?? []).map((infra) => (
                         <div key={infra.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
                           <span className="truncate">{infra.infra_name}</span>
-                          <Badge variant={infra.status === "healthy" ? "default" : "secondary"}>{infra.status.replaceAll("_", " ")}</Badge>
+                          <Badge variant={infra.status === "healthy" ? "default" : "secondary"}>{formatPreviewStatus(infra.status)}</Badge>
                         </div>
                       ))}
                     </div>

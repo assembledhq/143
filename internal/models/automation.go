@@ -41,18 +41,19 @@ type Automation struct {
 	// Migration 93 dropped the chk_automations_timezone_interval DB CHECK so
 	// interval rows can now carry non-UTC zones; writers must still set
 	// timezone='UTC' only when meaningful.
-	Timezone         string          `db:"timezone"        json:"timezone"`
-	NextRunAt        *time.Time      `db:"next_run_at"     json:"next_run_at,omitempty"`
-	LastRunAt        *time.Time      `db:"last_run_at"     json:"last_run_at,omitempty"`
-	Enabled          bool            `db:"enabled"         json:"enabled"`
-	CreatedBy        *uuid.UUID      `db:"created_by"      json:"created_by,omitempty"`
-	PausedBy         *uuid.UUID      `db:"paused_by"       json:"paused_by,omitempty"`
-	PausedAt         *time.Time      `db:"paused_at"       json:"paused_at,omitempty"`
-	Priority         int             `db:"priority"        json:"priority"`
-	ExternalMetadata json.RawMessage `db:"external_metadata" json:"metadata,omitempty"`
-	CreatedAt        time.Time       `db:"created_at"      json:"created_at"`
-	UpdatedAt        time.Time       `db:"updated_at"      json:"updated_at"`
-	DeletedAt        *time.Time      `db:"deleted_at"      json:"-"`
+	Timezone            string                  `db:"timezone"        json:"timezone"`
+	GitHubEventTriggers []AutomationGitHubEvent `db:"github_event_triggers" json:"github_event_triggers,omitempty"`
+	NextRunAt           *time.Time              `db:"next_run_at"     json:"next_run_at,omitempty"`
+	LastRunAt           *time.Time              `db:"last_run_at"     json:"last_run_at,omitempty"`
+	Enabled             bool                    `db:"enabled"         json:"enabled"`
+	CreatedBy           *uuid.UUID              `db:"created_by"      json:"created_by,omitempty"`
+	PausedBy            *uuid.UUID              `db:"paused_by"       json:"paused_by,omitempty"`
+	PausedAt            *time.Time              `db:"paused_at"       json:"paused_at,omitempty"`
+	Priority            int                     `db:"priority"        json:"priority"`
+	ExternalMetadata    json.RawMessage         `db:"external_metadata" json:"metadata,omitempty"`
+	CreatedAt           time.Time               `db:"created_at"      json:"created_at"`
+	UpdatedAt           time.Time               `db:"updated_at"      json:"updated_at"`
+	DeletedAt           *time.Time              `db:"deleted_at"      json:"-"`
 }
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
@@ -139,14 +140,36 @@ type AutomationTriggeredBy string
 const (
 	AutomationTriggeredBySchedule AutomationTriggeredBy = "schedule"
 	AutomationTriggeredByManual   AutomationTriggeredBy = "manual"
+	AutomationTriggeredByGitHub   AutomationTriggeredBy = "github"
 )
 
 func (t AutomationTriggeredBy) Validate() error {
 	switch t {
-	case AutomationTriggeredBySchedule, AutomationTriggeredByManual:
+	case AutomationTriggeredBySchedule, AutomationTriggeredByManual, AutomationTriggeredByGitHub:
 		return nil
 	default:
 		return fmt.Errorf("invalid automation triggered_by: %q", t)
+	}
+}
+
+type AutomationGitHubEvent string
+
+const (
+	AutomationGitHubEventPullRequestOpened               AutomationGitHubEvent = "github.pull_request.opened"
+	AutomationGitHubEventIssueCommentCreated             AutomationGitHubEvent = "github.issue_comment.created"
+	AutomationGitHubEventPullRequestReviewSubmitted      AutomationGitHubEvent = "github.pull_request_review.submitted"
+	AutomationGitHubEventPullRequestReviewCommentCreated AutomationGitHubEvent = "github.pull_request_review_comment.created"
+)
+
+func (e AutomationGitHubEvent) Validate() error {
+	switch e {
+	case AutomationGitHubEventPullRequestOpened,
+		AutomationGitHubEventIssueCommentCreated,
+		AutomationGitHubEventPullRequestReviewSubmitted,
+		AutomationGitHubEventPullRequestReviewCommentCreated:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation github event: %q", e)
 	}
 }
 

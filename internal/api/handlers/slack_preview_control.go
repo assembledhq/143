@@ -28,6 +28,10 @@ func NewSlackPreviewControl(previewHandler *PreviewHandler, branchPreviewHandler
 	}
 }
 
+func slackPreviewSourceID(repositoryID uuid.UUID, branch, commitSHA, configName string) string {
+	return fmt.Sprintf("slack:%s:%s:%s:%s", repositoryID, strings.TrimSpace(branch), strings.TrimSpace(commitSHA), strings.TrimSpace(configName))
+}
+
 func (c *SlackPreviewControl) CreatePreviewForSlack(ctx context.Context, orgID uuid.UUID, target models.SlackPreviewTarget, actor models.SlackActor) (models.PreviewInstance, error) {
 	if c == nil {
 		return models.PreviewInstance{}, fmt.Errorf("preview control is not configured")
@@ -76,14 +80,13 @@ func (c *SlackPreviewControl) branchPreviewTarget(ctx context.Context, orgID uui
 		if target.RepositoryID == uuid.Nil {
 			return SlackBranchPreviewTarget{}, fmt.Errorf("repository_id is required for Slack %s preview", target.Kind)
 		}
-		sourceID := fmt.Sprintf("slack:%s:%s:%s:%s", target.RepositoryID, strings.TrimSpace(target.Branch), strings.TrimSpace(target.CommitSHA), strings.TrimSpace(target.ConfigName))
 		return SlackBranchPreviewTarget{
 			RepositoryID:      target.RepositoryID,
 			Branch:            target.Branch,
 			CommitSHA:         target.CommitSHA,
 			PreviewConfigName: target.ConfigName,
 			SourceType:        models.PreviewSourceTypeManual,
-			SourceID:          sourceID,
+			SourceID:          slackPreviewSourceID(target.RepositoryID, target.Branch, target.CommitSHA, target.ConfigName),
 		}, nil
 	case models.SlackPreviewTargetPullRequest:
 		if c.pullRequests == nil || c.repos == nil {

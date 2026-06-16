@@ -1342,7 +1342,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, deployText, "STATIC_EGRESS_WORKER_HOSTS", "deploy should support centralized per-worker static egress config from production secrets")
 	require.NotContains(t, deployText, "<node-id>:<host>@<wg-address>@<private-key>", "static egress worker host maps should use the simpler host@wg-address@private-key format")
 	probePullIndex := strings.Index(deployText, `docker pull \"$static_egress_probe_image\"`)
-	reconcileIndex := strings.Index(deployText, "if ! run_worker_host_reconcile")
+	reconcileIndex := strings.Index(deployText, `run_worker_host_reconcile 2>&1 | tee "$reconcile_log"`)
 	require.NotEqual(t, -1, probePullIndex, "worker deploys should pre-pull the configured static egress verifier image")
 	require.NotEqual(t, -1, reconcileIndex, "worker deploys should reconcile worker host invariants")
 	require.Less(t, probePullIndex, reconcileIndex, "worker deploys should pull the configured static egress verifier image before root-side static egress verification")

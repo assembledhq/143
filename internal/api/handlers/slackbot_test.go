@@ -274,13 +274,17 @@ func TestSanitizeSlackStoredPayloadRedactsPrivateFields(t *testing.T) {
 func TestSanitizeSlackStoredPayloadFormPayloadReturnsJSON(t *testing.T) {
 	t.Parallel()
 
-	raw := []byte(`token=legacy&trigger_id=trig-1&type=block_actions&payload=%7B%22ok%22%3Atrue%7D`)
+	raw := []byte(`token=legacy&trigger_id=trig-1&type=block_actions&payload=` + url.QueryEscape(`{"ok":true,"trigger_id":"nested-trig","response_url":"https://hooks.slack.com/actions/1"}`))
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(sanitizeSlackStoredPayload(raw), &got), "sanitized form payload should be valid JSON")
 	require.Equal(t, "[redacted]", got["token"], "legacy form token should be redacted")
 	require.Equal(t, "[redacted]", got["trigger_id"], "trigger id should be redacted")
 	require.Equal(t, "block_actions", got["type"], "non-secret form fields should be preserved")
+	payload, ok := got["payload"].(map[string]any)
+	require.True(t, ok, "nested Slack form payload should be parsed before storage")
+	require.Equal(t, "[redacted]", payload["trigger_id"], "nested trigger id should be redacted")
+	require.Equal(t, "[redacted]", payload["response_url"], "nested response URL should be redacted")
 }
 
 func TestSlackbotHandler_InteractionsUsesViewCallbackIDForModalSubmissions(t *testing.T) {

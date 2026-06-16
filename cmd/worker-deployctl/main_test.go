@@ -102,10 +102,11 @@ func TestProbePreviewRPCAuthNodes_UsesBoundedConcurrency(t *testing.T) {
 	client := &http.Client{Transport: roundTripper}
 
 	start := time.Now()
-	checked, err := probePreviewRPCAuthNodes(nodes, keyring, time.Second, 6, client)
+	checked, skipped, err := probePreviewRPCAuthNodes(nodes, keyring, time.Second, 6, client)
 	elapsed := time.Since(start)
 
 	require.NoError(t, err, "probePreviewRPCAuthNodes should accept healthy nodes")
+	require.Empty(t, skipped, "probePreviewRPCAuthNodes should not skip reachable nodes")
 	require.Equal(t, expected, checked, "probePreviewRPCAuthNodes should report checked nodes in input order")
 	require.GreaterOrEqual(t, atomic.LoadInt32(&roundTripper.maxInFlight), int32(2), "probePreviewRPCAuthNodes should send more than one probe at a time")
 	require.Less(t, elapsed, 500*time.Millisecond, "probePreviewRPCAuthNodes should not serialize per-node latency")
@@ -137,10 +138,17 @@ func TestProbePreviewRPCAuthNodes_SkipsUnreachableNodes(t *testing.T) {
 		keyring: keyring,
 	}}
 
-	checked, err := probePreviewRPCAuthNodes(nodes, keyring, 20*time.Millisecond, 2, client)
+	checked, skipped, err := probePreviewRPCAuthNodes(nodes, keyring, 20*time.Millisecond, 2, client)
 
 	require.NoError(t, err, "probePreviewRPCAuthNodes should not fail deploy compatibility on unreachable workers")
 	require.Empty(t, checked, "probePreviewRPCAuthNodes should not mark timed-out nodes as checked")
+	require.Len(t, skipped, 2, "probePreviewRPCAuthNodes should record tolerated unreachable nodes")
+	skippedByID := make(map[string]skippedPreviewAuthNode, len(skipped))
+	for _, s := range skipped {
+		skippedByID[s.ID] = s
+	}
+	require.False(t, skippedByID["worker-slow"].Active, "a draining node should be recorded as non-active")
+	require.True(t, skippedByID["worker-fast"].Active, "a stale-but-active node should be recorded as active so --fail-on-skipped can escalate it")
 }
 
 func TestProbePreviewRPCAuthNodes_FailsOnFreshActiveUnreachableNode(t *testing.T) {
@@ -160,7 +168,7 @@ func TestProbePreviewRPCAuthNodes_FailsOnFreshActiveUnreachableNode(t *testing.T
 		keyring: keyring,
 	}}
 
-	_, err = probePreviewRPCAuthNodes(nodes, keyring, 20*time.Millisecond, 1, client)
+	_, _, err = probePreviewRPCAuthNodes(nodes, keyring, 20*time.Millisecond, 1, client)
 
 	require.Error(t, err, "probePreviewRPCAuthNodes should fail when a fresh active worker cannot answer")
 	require.Contains(t, err.Error(), "preview RPC auth-check unreachable", "probePreviewRPCAuthNodes should identify the unreachable worker")
@@ -183,7 +191,7 @@ func TestProbePreviewRPCAuthNodes_FailsOnAuthRejection(t *testing.T) {
 		statusByHost: map[string]int{"worker-rejects.internal": http.StatusUnauthorized},
 	}}
 
-	_, err = probePreviewRPCAuthNodes(nodes, keyring, time.Second, 1, client)
+	_, _, err = probePreviewRPCAuthNodes(nodes, keyring, time.Second, 1, client)
 
 	require.Error(t, err, "probePreviewRPCAuthNodes should fail when a worker rejects the signed token")
 	require.Contains(t, err.Error(), "status=401", "probePreviewRPCAuthNodes should include the rejection status")
@@ -218,4 +226,43 @@ func TestSelectPreviewAuthProbeNodesFiltersByNodeID(t *testing.T) {
 	_, err = selectPreviewAuthProbeNodes(nodes, "missing-worker")
 	require.Error(t, err, "selectPreviewAuthProbeNodes should reject an unknown node id")
 	require.Contains(t, err.Error(), "missing-worker", "selectPreviewAuthProbeNodes should name the missing node")
+}
+
+func TestPreviewAuthNodeSkipReason(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	cases := []struct {
+		name         string
+		node         previewAuthProbeNode
+		wantTolerate bool
+	}{
+		{
+			name:         "active and fresh is not tolerated",
+			node:         previewAuthProbeNode{Status: models.NodeStatusActive, LastHeartbeatAt: now},
+			wantTolerate: false,
+		},
+		{
+			name:         "active but stale is tolerated",
+			node:         previewAuthProbeNode{Status: models.NodeStatusActive, LastHeartbeatAt: now.Add(-previewAuthFreshHeartbeatWindow - time.Minute)},
+			wantTolerate: true,
+		},
+		{
+			name:         "draining is tolerated",
+			node:         previewAuthProbeNode{Status: models.NodeStatusDraining, LastHeartbeatAt: now},
+			wantTolerate: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reason, tolerate := previewAuthNodeSkipReason(tc.node, now)
+			require.Equal(t, tc.wantTolerate, tolerate, "tolerate decision should match expectation")
+			if tolerate {
+				require.NotEmpty(t, reason, "a tolerated node should carry a human reason")
+			} else {
+				require.Empty(t, reason, "a non-tolerated node should not carry a reason")
+			}
+		})
+	}
 }

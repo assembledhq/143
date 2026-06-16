@@ -451,6 +451,19 @@ func sanitizeSlackStoredPayload(raw []byte) json.RawMessage {
 		}
 		encoded := make(map[string]any, len(values))
 		for key, vals := range values {
+			if _, ok := slackStoredPayloadSecretKeys[key]; ok {
+				encoded[key] = "[redacted]"
+				continue
+			}
+			if key == "payload" && len(vals) == 1 {
+				var nested any
+				if err := json.Unmarshal([]byte(vals[0]), &nested); err == nil {
+					sanitizeSlackJSONValue(nested)
+					redactSlackDMEventText(nested)
+					encoded[key] = nested
+					continue
+				}
+			}
 			if len(vals) == 1 {
 				encoded[key] = vals[0]
 				continue

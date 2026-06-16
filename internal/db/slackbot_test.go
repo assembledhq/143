@@ -125,7 +125,7 @@ func TestSlackSessionLinkStore_ClaimTeamSession(t *testing.T) {
 	now := time.Now()
 	store := NewSlackSessionLinkStore(mock)
 
-	mock.ExpectQuery(`(?s)INSERT INTO slack_session_claims .*UPDATE slack_session_links`).
+	mock.ExpectQuery(`(?s)UPDATE slack_session_links .*INSERT INTO slack_session_claims`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "slack_session_link_id", "claimed_by_user_id", "claimed_by_slack_user_id", "claimed_at",

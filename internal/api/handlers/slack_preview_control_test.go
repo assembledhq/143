@@ -67,3 +67,16 @@ func TestSlackPreviewControl_BranchPreviewTargetForRepositoryKinds(t *testing.T)
 		})
 	}
 }
+
+func TestSlackPreviewSourceIDIncludesResolvedCommit(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+
+	withoutHead := slackPreviewSourceID(repoID, "main", "", "")
+	withHead := slackPreviewSourceID(repoID, "main", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "web")
+
+	require.NotEqual(t, withoutHead, withHead, "Slack branch preview source IDs should change after the branch head is resolved")
+	require.Contains(t, withHead, ":aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:", "Slack branch preview source IDs should include the resolved commit")
+	require.Contains(t, withHead, ":web", "Slack branch preview source IDs should include the resolved preview config")
+}

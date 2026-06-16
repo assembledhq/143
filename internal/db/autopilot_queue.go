@@ -67,6 +67,11 @@ type autopilotQueueDBRow struct {
 	PRURL                  sql.NullString
 	PRStatus               sql.NullString
 	PRMergedAt             sql.NullTime
+	PRHeadSHA              sql.NullString
+	PreviewTargetID        sql.NullString
+	PreviewID              sql.NullString
+	PreviewStatus          sql.NullString
+	PreviewCommitSHA       sql.NullString
 	SortScore              float64   `db:"sort_score"`
 	ImpactScore            float64   `db:"impact_score"`
 	EaseScore              float64   `db:"ease_score"`
@@ -125,6 +130,11 @@ func (s *AutopilotQueueStore) ListQueue(ctx context.Context, orgID uuid.UUID, fi
 			&row.PRURL,
 			&row.PRStatus,
 			&row.PRMergedAt,
+			&row.PRHeadSHA,
+			&row.PreviewTargetID,
+			&row.PreviewID,
+			&row.PreviewStatus,
+			&row.PreviewCommitSHA,
 			&row.SortScore,
 			&row.ImpactScore,
 			&row.EaseScore,
@@ -295,6 +305,11 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 				latest.pr_url,
 				latest.pr_status,
 				latest.pr_merged_at,
+				latest.pr_head_sha,
+				preview.preview_target_id,
+				preview.preview_id,
+				preview.preview_status,
+				preview.preview_commit_sha,
 				COALESCE(ps.score, (
 					(i.affected_customer_count::float * 2)
 					+ CASE i.severity WHEN 'critical' THEN 30 WHEN 'high' THEN 20 WHEN 'medium' THEN 10 ELSE 0 END
@@ -320,11 +335,13 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 					pr.github_pr_number AS pr_number,
 					pr.github_pr_url AS pr_url,
 					pr.status AS pr_status,
-					pr.merged_at AS pr_merged_at
+					pr.merged_at AS pr_merged_at,
+					pr.github_repo AS pr_repo,
+					COALESCE(pr.head_sha, '') AS pr_head_sha
 				FROM session_issue_links sil
 				JOIN sessions s ON s.id = sil.session_id
 				LEFT JOIN LATERAL (
-					SELECT id, github_pr_number, github_pr_url, status, merged_at, updated_at
+					SELECT id, github_pr_number, github_pr_url, github_repo, status, merged_at, updated_at, head_sha
 					FROM pull_requests pr
 					WHERE pr.org_id = @org_id
 					  AND pr.session_id = s.id
@@ -346,6 +363,32 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 					s.id DESC
 				LIMIT 1
 			) latest ON true
+			LEFT JOIN LATERAL (
+				SELECT
+					target.id AS preview_target_id,
+					preview.id AS preview_id,
+					COALESCE(preview.status, 'target_created') AS preview_status,
+					target.commit_sha AS preview_commit_sha
+				FROM preview_targets target
+				LEFT JOIN LATERAL (
+					SELECT pi.id, pi.status, pi.created_at
+					FROM preview_instances pi
+					WHERE pi.org_id = @org_id
+					  AND pi.preview_target_id = target.id
+					ORDER BY pi.created_at DESC, pi.id DESC
+					LIMIT 1
+				) preview ON true
+				WHERE latest.pr_id IS NOT NULL
+				  AND target.org_id = @org_id
+				  AND target.repository_id = i.repository_id
+				  AND target.source_type = 'pull_request'
+				  AND (
+				      target.source_id = (latest.pr_repo || '#' || latest.pr_number::text)
+				      OR target.source_id LIKE (latest.pr_repo || '#' || latest.pr_number::text || '@%%')
+				  )
+				ORDER BY target.created_at DESC, target.id DESC
+				LIMIT 1
+			) preview ON true
 			WHERE %s
 		),
 		projected AS (
@@ -407,6 +450,12 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 			i.pr_url,
 			i.pr_status,
 			i.pr_merged_at,
+			i.pr_head_sha,
+			i.preview_target_id,
+			i.preview_id,
+			i.preview_url,
+			i.preview_status,
+			i.preview_commit_sha,
 			i.sort_score,
 			i.impact_score,
 			i.ease_score,
@@ -484,6 +533,32 @@ func (r autopilotQueueDBRow) toModel() models.AutopilotQueueRow {
 			URL:      r.PRURL.String,
 			Status:   models.PullRequestStatus(r.PRStatus.String),
 			MergedAt: mergedAt,
+		}
+	}
+	if r.PreviewTargetID.Valid {
+		if targetID, err := uuid.Parse(r.PreviewTargetID.String); err == nil {
+			preview := &models.AutopilotPreviewRef{
+				TargetID: targetID,
+				Status:   models.AutopilotPreviewStatusTargetCreated,
+			}
+			if r.PreviewID.Valid {
+				if id, parseErr := uuid.Parse(r.PreviewID.String); parseErr == nil {
+					preview.PreviewID = &id
+				}
+			}
+			if r.PreviewStatus.Valid && strings.TrimSpace(r.PreviewStatus.String) != "" {
+				preview.Status = models.AutopilotPreviewStatus(r.PreviewStatus.String)
+			}
+			if r.PreviewCommitSHA.Valid {
+				preview.CommitSHA = strings.TrimSpace(r.PreviewCommitSHA.String)
+			}
+			if r.PRHeadSHA.Valid {
+				preview.LatestCommitSHA = strings.TrimSpace(r.PRHeadSHA.String)
+			}
+			preview.NewCommitsAvailable = preview.CommitSHA != "" &&
+				preview.LatestCommitSHA != "" &&
+				preview.CommitSHA != preview.LatestCommitSHA
+			row.LatestPreview = preview
 		}
 	}
 	row.DisplayRunState, row.AvailableAction, row.ActionDisabledReason = deriveAutopilotRunStateAction(r)

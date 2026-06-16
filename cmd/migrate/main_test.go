@@ -1,8 +1,10 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -86,4 +88,44 @@ func TestMigrationVersionsAreUnique(t *testing.T) {
 		}
 		seen[key] = base
 	}
+}
+
+func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
+	t.Parallel()
+
+	files, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.sql"))
+	require.NoError(t, err, "should glob migration files without error")
+
+	for _, path := range files {
+		path := path
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			t.Parallel()
+
+			contents, err := os.ReadFile(path)
+			require.NoError(t, err, "migration file should be readable")
+			sql := stripSQLLineComments(string(contents))
+			require.NotContains(
+				t,
+				strings.ToUpper(sql),
+				"CREATE INDEX CONCURRENTLY",
+				"migration files run inside a transaction and must not create indexes concurrently",
+			)
+			require.NotContains(
+				t,
+				strings.ToUpper(sql),
+				"DROP INDEX CONCURRENTLY",
+				"migration files run inside a transaction and must not drop indexes concurrently",
+			)
+		})
+	}
+}
+
+func stripSQLLineComments(contents string) string {
+	lines := strings.Split(contents, "\n")
+	for i, line := range lines {
+		if idx := strings.Index(line, "--"); idx >= 0 {
+			lines[i] = line[:idx]
+		}
+	}
+	return strings.Join(lines, "\n")
 }

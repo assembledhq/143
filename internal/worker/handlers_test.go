@@ -656,6 +656,82 @@ func TestSlackHumanInputDeliveryTargetRespectsSensitivity(t *testing.T) {
 	}
 }
 
+func TestSlackHumanInputAllowsNotificationFanout(t *testing.T) {
+	t.Parallel()
+
+	assignedUserID := uuid.New()
+	tests := []struct {
+		name     string
+		req      models.HumanInputRequest
+		expected bool
+	}{
+		{
+			name:     "default team request may fan out",
+			req:      models.HumanInputRequest{},
+			expected: true,
+		},
+		{
+			name: "explicit team thread request may fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: true,
+		},
+		{
+			name: "personal request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityPersonal,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: false,
+		},
+		{
+			name: "sensitive request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivitySensitive,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: false,
+		},
+		{
+			name: "dm preferred request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelSlackDM,
+			},
+			expected: false,
+		},
+		{
+			name: "web preferred request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelWeb,
+			},
+			expected: false,
+		},
+		{
+			name: "assigned request must not fan out",
+			req: models.HumanInputRequest{
+				AssignedUserID:   &assignedUserID,
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackHumanInputAllowsNotificationFanout(tt.req)
+
+			require.Equal(t, tt.expected, got, "human-input notification fanout should respect sensitivity and delivery target")
+		})
+	}
+}
+
 func TestSlackTeamSessionLabel(t *testing.T) {
 	t.Parallel()
 
@@ -4921,6 +4997,7 @@ func automationRowColumns() []string {
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
+		"github_event_triggers",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
@@ -5008,6 +5085,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5100,6 +5178,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5236,6 +5315,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, false, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5290,6 +5370,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5363,6 +5444,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &clickerID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5442,6 +5524,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5513,6 +5596,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))

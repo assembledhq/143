@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -42,6 +43,7 @@ type ThreadService interface {
 	RetryInboxEntry(ctx context.Context, orgID, sessionID, threadID, entryID uuid.UUID, allowUnknownDelivery bool) (models.ThreadInboxEntry, error)
 	ForkThread(ctx context.Context, input thread.ForkInput) (thread.ForkResult, error)
 	RevertThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, userID *uuid.UUID) (thread.ForkResult, error)
+	GetTranscriptWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (thread.TranscriptWindowResult, error)
 }
 
 type SessionThreadHandler struct {
@@ -859,4 +861,305 @@ func parseTurnNumbers(raw string) []int {
 	}
 	sort.Ints(turnNumbers)
 	return turnNumbers
+}
+
+// GetThreadTranscript handles GET /sessions/{id}/threads/{tid}/transcript
+func (h *SessionThreadHandler) GetThreadTranscript(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	threadID, err := uuid.Parse(chi.URLParam(r, "tid"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
+		return
+	}
+
+	opts := db.SessionTranscriptWindowOptions{LimitTurns: db.DefaultTranscriptLimitTurns}
+	query := r.URL.Query()
+
+	// Parse position
+	position := strings.TrimSpace(query.Get("position"))
+	switch position {
+	case "", "latest":
+		opts.Position = models.TranscriptWindowPositionLatest
+	case "around":
+		opts.Position = models.TranscriptWindowPositionAround
+	default:
+		writeError(w, r, http.StatusBadRequest, "INVALID_POSITION", "position must be 'latest' or 'around'; use before= or after= cursor params for older/newer pages")
+		return
+	}
+
+	// Parse before/after cursors
+	if before := strings.TrimSpace(query.Get("before")); before != "" {
+		cursor, err := models.DecodeTranscriptCursor(before, orgID, threadID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid before cursor")
+			return
+		}
+		opts.Before = &cursor
+		opts.Position = models.TranscriptWindowPositionOlder
+	}
+	if after := strings.TrimSpace(query.Get("after")); after != "" {
+		cursor, err := models.DecodeTranscriptCursor(after, orgID, threadID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "invalid after cursor")
+			return
+		}
+		opts.After = &cursor
+		opts.Position = models.TranscriptWindowPositionNewer
+	}
+	if opts.Before != nil && opts.After != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CURSOR", "before and after cannot be combined")
+		return
+	}
+
+	// Parse around anchors (priority: anchor_entry_id > anchor_message_id > anchor_turn_number)
+	opts.AnchorEntryID = strings.TrimSpace(query.Get("anchor_entry_id"))
+	if rawAnchorMsg := strings.TrimSpace(query.Get("anchor_message_id")); rawAnchorMsg != "" {
+		anchorID, err := parsePositiveInt64(rawAnchorMsg)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ANCHOR", "invalid anchor_message_id")
+			return
+		}
+		opts.AnchorMessageID = anchorID
+	}
+	if rawTurn := strings.TrimSpace(query.Get("anchor_turn_number")); rawTurn != "" {
+		turn, err := parsePositiveInt(rawTurn)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ANCHOR", "invalid anchor_turn_number")
+			return
+		}
+		opts.AnchorTurnNumber = &turn
+	}
+	if opts.Position == models.TranscriptWindowPositionAround {
+		if opts.AnchorEntryID == "" && opts.AnchorMessageID == 0 && opts.AnchorTurnNumber == nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ANCHOR", "position=around requires anchor_entry_id, anchor_message_id, or anchor_turn_number")
+			return
+		}
+	}
+
+	// Parse limit_turns
+	if rawLimit := strings.TrimSpace(query.Get("limit_turns")); rawLimit != "" {
+		limit, err := parsePositiveInt(rawLimit)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "invalid limit_turns")
+			return
+		}
+		opts.LimitTurns = limit
+	}
+	if rawInclude := strings.TrimSpace(query.Get("include")); rawInclude != "" {
+		include, err := db.ParseTranscriptInclude(rawInclude)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_INCLUDE", "invalid include")
+			return
+		}
+		opts.Include = include
+	}
+
+	result, err := h.svc.GetTranscriptWindow(r.Context(), orgID, sessionID, threadID, opts)
+	if err != nil {
+		if errors.Is(err, thread.ErrThreadNotFound) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "TRANSCRIPT_FAILED", "failed to load transcript window", err)
+		return
+	}
+
+	resp := buildTranscriptWindowResponse(result, orgID, threadID)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildTranscriptEntry converts a raw store row to a SessionTranscriptEntry.
+func buildTranscriptEntry(row db.SessionTranscriptRawRow) models.SessionTranscriptEntry {
+	entry := models.SessionTranscriptEntry{
+		Kind:      row.EntryKindHint,
+		CreatedAt: row.EntryTime,
+	}
+
+	switch {
+	case row.Message != nil:
+		msg := row.Message
+		msgID := msg.ID
+		entry.ID = "msg_" + strconv.FormatInt(msgID, 10)
+		entry.MessageID = &msgID
+		entry.Role = msg.Role
+
+		// Content truncation at SessionLogPreviewBytes (8192).
+		fullContent := msg.Content
+		fullContentBytes := len([]byte(fullContent))
+		truncated := fullContentBytes > models.SessionLogPreviewBytes
+		content := fullContent
+		if truncated {
+			content = truncateToValidUTF8(fullContent, models.SessionLogPreviewBytes)
+		}
+		entry.Content = content
+		entry.ContentTruncated = truncated
+		entry.ContentBytes = fullContentBytes
+		entry.ContentChars = utf8RuneCount(fullContent)
+		entry.Message = msg
+
+	case row.Log != nil:
+		log := row.Log
+		logID := log.ID
+		logResp := models.NewSessionLogResponse(*log)
+		entry.Level = log.Level
+
+		if row.EntryKindHint == models.TranscriptEntryKindToolUse {
+			entry.ID = "tuse_" + strconv.FormatInt(logID, 10)
+			// Extract tool name from metadata.
+			var meta struct {
+				ToolName string `json:"tool_name"`
+				Tool     string `json:"tool"`
+			}
+			if len(log.Metadata) > 0 {
+				_ = json.Unmarshal(log.Metadata, &meta)
+			}
+			entry.ToolName = firstNonEmptyTranscriptValue(meta.ToolName, meta.Tool)
+			entry.Summary = oneLineTranscriptSummary(logResp.Message)
+		} else if row.EntryKindHint == models.TranscriptEntryKindToolResult {
+			entry.ID = "tres_" + strconv.FormatInt(logID, 10)
+			var meta struct {
+				ToolName string `json:"tool_name"`
+				Tool     string `json:"tool"`
+			}
+			if len(log.Metadata) > 0 {
+				_ = json.Unmarshal(log.Metadata, &meta)
+			}
+			entry.ToolName = firstNonEmptyTranscriptValue(meta.ToolName, meta.Tool)
+			entry.Summary = oneLineTranscriptSummary(logResp.Message)
+			entry.ContentTruncated = logResp.MessageTruncated
+			entry.ContentBytes = logResp.MessageBytes
+			entry.ContentChars = logResp.MessageChars
+		} else {
+			entry.ID = "log_" + strconv.FormatInt(logID, 10)
+			entry.Content = logResp.Message
+			entry.ContentTruncated = logResp.MessageTruncated
+			entry.ContentBytes = logResp.MessageBytes
+			entry.ContentChars = logResp.MessageChars
+		}
+		entry.LogID = &logID
+		entry.Log = &logResp
+
+	case row.HumanInput != nil:
+		hir := row.HumanInput
+		reqID := hir.ID
+		entry.ID = "hiq_" + reqID.String()
+		entry.RequestID = &reqID
+		entry.HumanInput = hir
+	}
+
+	return entry
+}
+
+// buildTranscriptWindowResponse groups raw rows into turns and builds the full
+// API response.
+func buildTranscriptWindowResponse(result thread.TranscriptWindowResult, orgID, threadID uuid.UUID) models.SessionTranscriptWindowResponse {
+	// Group rows by turn_number preserving order.
+	type turnAccum struct {
+		turnNumber int
+		entries    []models.SessionTranscriptEntry
+		startedAt  time.Time
+		endedAt    time.Time
+	}
+
+	var turnOrder []int
+	turnMap := make(map[int]*turnAccum)
+
+	for _, row := range result.Window.Rows {
+		t, ok := turnMap[row.TurnNumber]
+		if !ok {
+			turnOrder = append(turnOrder, row.TurnNumber)
+			t = &turnAccum{
+				turnNumber: row.TurnNumber,
+				startedAt:  row.EntryTime,
+				endedAt:    row.EntryTime,
+			}
+			turnMap[row.TurnNumber] = t
+		}
+		if row.EntryTime.Before(t.startedAt) {
+			t.startedAt = row.EntryTime
+		}
+		if row.EntryTime.After(t.endedAt) {
+			t.endedAt = row.EntryTime
+		}
+		t.entries = append(t.entries, buildTranscriptEntry(row))
+	}
+
+	turns := make([]models.SessionTranscriptTurn, 0, len(turnOrder))
+	for _, tn := range turnOrder {
+		accum := turnMap[tn]
+		turn := models.SessionTranscriptTurn{
+			TurnNumber: accum.turnNumber,
+			StartedAt:  accum.startedAt,
+			Entries:    accum.entries,
+		}
+		if !accum.endedAt.IsZero() && accum.endedAt != accum.startedAt {
+			endedAt := accum.endedAt
+			turn.EndedAt = &endedAt
+		}
+		turns = append(turns, turn)
+	}
+
+	meta := models.SessionTranscriptWindowMeta{
+		Position:                 result.Window.Position,
+		HasOlder:                 result.Window.HasOlder,
+		NextOlderCursor:          result.Window.OlderCursor,
+		HasNewer:                 result.Window.HasNewer,
+		NextNewerCursor:          result.Window.NewerCursor,
+		AnchorEntryID:            result.Window.AnchorEntryID,
+		AnchorFound:              result.Window.AnchorFound,
+		LatestAssistantEntryID:   result.Window.LatestAssistantEntryID,
+		LatestAssistantMessageID: result.Window.LatestAssistantMessageID,
+		LiveEdgeEntryID:          result.Window.LiveEdgeEntryID,
+		LiveEdgeMessageID:        result.Window.LiveEdgeMessageID,
+		ThreadStatus:             result.ThreadStatus,
+	}
+
+	return models.SessionTranscriptWindowResponse{
+		Data: turns,
+		Meta: meta,
+	}
+}
+
+func firstNonEmptyTranscriptValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func oneLineTranscriptSummary(message string) string {
+	line := strings.TrimSpace(strings.ReplaceAll(message, "\r\n", "\n"))
+	if idx := strings.Index(line, "\n"); idx >= 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
+	const maxSummaryRunes = 160
+	runes := []rune(line)
+	if len(runes) > maxSummaryRunes {
+		return string(runes[:maxSummaryRunes]) + "..."
+	}
+	return line
+}
+
+func utf8RuneCount(s string) int {
+	return utf8.RuneCountInString(s)
+}
+
+// truncateToValidUTF8 truncates s to at most maxBytes bytes while keeping valid UTF-8.
+func truncateToValidUTF8(s string, maxBytes int) string {
+	b := []byte(s)
+	if len(b) <= maxBytes {
+		return s
+	}
+	b = b[:maxBytes]
+	for !utf8.Valid(b) {
+		b = b[:len(b)-1]
+	}
+	return string(b)
 }

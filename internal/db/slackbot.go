@@ -768,21 +768,7 @@ func (s *SlackSessionLinkStore) Upsert(ctx context.Context, link *models.SlackSe
 
 func (s *SlackSessionLinkStore) ClaimTeamSession(ctx context.Context, orgID, linkID, claimedByUserID uuid.UUID, claimedBySlackUserID string) (models.SlackSessionClaim, error) {
 	rows, err := s.db.Query(ctx, `
-		WITH claim AS (
-			INSERT INTO slack_session_claims (
-				org_id, slack_session_link_id, claimed_by_user_id, claimed_by_slack_user_id
-			)
-			VALUES (
-				@org_id, @slack_session_link_id, @claimed_by_user_id, @claimed_by_slack_user_id
-			)
-			ON CONFLICT (org_id, slack_session_link_id)
-			DO UPDATE SET
-				claimed_by_user_id = EXCLUDED.claimed_by_user_id,
-				claimed_by_slack_user_id = EXCLUDED.claimed_by_slack_user_id,
-				claimed_at = now()
-			RETURNING id, org_id, slack_session_link_id, claimed_by_user_id, claimed_by_slack_user_id, claimed_at
-		),
-		updated_link AS (
+		WITH updated_link AS (
 			UPDATE slack_session_links
 			SET mapped_user_id = @claimed_by_user_id,
 			    slack_user_id = @claimed_by_slack_user_id,
@@ -790,12 +776,24 @@ func (s *SlackSessionLinkStore) ClaimTeamSession(ctx context.Context, orgID, lin
 			    updated_at = now()
 			WHERE org_id = @org_id
 			  AND id = @slack_session_link_id
-			RETURNING id
+			RETURNING id, org_id
+		),
+		claim AS (
+			INSERT INTO slack_session_claims (
+				org_id, slack_session_link_id, claimed_by_user_id, claimed_by_slack_user_id
+			)
+			SELECT org_id, id, @claimed_by_user_id, @claimed_by_slack_user_id
+			FROM updated_link
+			ON CONFLICT (org_id, slack_session_link_id)
+			DO UPDATE SET
+				claimed_by_user_id = EXCLUDED.claimed_by_user_id,
+				claimed_by_slack_user_id = EXCLUDED.claimed_by_slack_user_id,
+				claimed_at = now()
+			RETURNING id, org_id, slack_session_link_id, claimed_by_user_id, claimed_by_slack_user_id, claimed_at
 		)
 		SELECT claim.id, claim.org_id, claim.slack_session_link_id, claim.claimed_by_user_id,
 			claim.claimed_by_slack_user_id, claim.claimed_at
-		FROM claim
-		JOIN updated_link ON true`,
+		FROM claim`,
 		pgx.NamedArgs{
 			"org_id":                   orgID,
 			"slack_session_link_id":    linkID,

@@ -2856,14 +2856,14 @@ func slackNotificationEventMatches(events []string, eventKind string) bool {
 }
 
 type slackNotificationFanoutInput struct {
-	EventKind      string
-	Title          string
-	Body           string
-	SessionID      *uuid.UUID
-	PreviewID      *uuid.UUID
-	PullRequestID  *uuid.UUID
-	PullRequestURL string
-	AutomationID   *uuid.UUID
+	EventKind       string
+	Title           string
+	Body            string
+	SessionID       *uuid.UUID
+	PreviewID       *uuid.UUID
+	PullRequestID   *uuid.UUID
+	PullRequestURL  string
+	AutomationID    *uuid.UUID
 	AutomationRunID *uuid.UUID
 }
 
@@ -3276,13 +3276,31 @@ func enqueueSlackHumanInputsIfPending(ctx context.Context, stores *Stores, logge
 		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "slack_deliver_human_input", payload, 4, &dedupeKey); err != nil {
 			logger.Warn().Err(err).Str("human_input_request_id", req.ID.String()).Msg("failed to enqueue Slack human-input delivery")
 		}
-		enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-			EventKind: string(models.SlackNotificationHumanInputRequested),
-			Title:     "143 needs your response",
-			Body:      strings.TrimSpace(req.Title),
-			SessionID: &sessionID,
-		})
+		if slackHumanInputAllowsNotificationFanout(req) {
+			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+				EventKind: string(models.SlackNotificationHumanInputRequested),
+				Title:     "143 needs your response",
+				Body:      strings.TrimSpace(req.Title),
+				SessionID: &sessionID,
+			})
+		}
 	}
+}
+
+func slackHumanInputAllowsNotificationFanout(req models.HumanInputRequest) bool {
+	if req.AssignedUserID != nil {
+		return false
+	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
+	}
+	if req.Sensitivity != models.HumanInputSensitivityTeam {
+		return false
+	}
+	return req.PreferredChannel == models.HumanInputPreferredChannelSlackThread
 }
 
 func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {

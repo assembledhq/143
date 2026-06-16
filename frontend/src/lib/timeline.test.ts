@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildTimeline, flattenTimelineResponse } from "./timeline";
-import type { SessionMessage, SessionLog } from "./types";
+import { buildTimeline, flattenTimelineResponse, flattenTranscriptWindows } from "./timeline";
+import type { SessionMessage, SessionLog, SessionTranscriptTurn, HumanInputRequest } from "./types";
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
   return {
@@ -302,5 +302,75 @@ describe("flattenTimelineResponse", () => {
     expect(flattened.messages).toEqual([]);
     expect(flattened.logs).toEqual([]);
     expect(flattened.humanInputs).toEqual([request]);
+  });
+});
+
+describe("flattenTranscriptWindows", () => {
+  const humanInput: HumanInputRequest = {
+    id: "hir-1",
+    org_id: "org-1",
+    session_id: "session-1",
+    turn_number: 1,
+    agent_type: "claude_code",
+    request_kind: "action_choice",
+    status: "answered",
+    title: "Choose next action",
+    body: "What next?",
+    choices: [],
+    created_at: "2026-01-01T00:00:30Z",
+  };
+
+  it("unwraps the embedded message/log/human-input records from each turn", () => {
+    const message = makeMessage({ id: 1, created_at: "2026-01-01T00:00:00Z", role: "user", content: "hi" });
+    const toolUse = makeLog({ id: 10, created_at: "2026-01-01T00:00:10Z", level: "tool_use" });
+    const turns: SessionTranscriptTurn[] = [
+      {
+        turn_number: 1,
+        started_at: message.created_at,
+        entries: [
+          { id: "msg_1", kind: "message", created_at: message.created_at, message_id: 1, message },
+          { id: "tuse_10", kind: "tool_use", created_at: toolUse.created_at, log_id: 10, log: toolUse },
+          { id: "hiq_hir-1", kind: "human_input", created_at: humanInput.created_at, human_input: humanInput },
+        ],
+      },
+    ];
+
+    const { messages, logs, humanInputs } = flattenTranscriptWindows(turns);
+
+    expect(messages).toEqual([message]);
+    expect(logs).toEqual([toolUse]);
+    expect(humanInputs).toEqual([humanInput]);
+  });
+
+  it("de-duplicates records that repeat across overlapping turns/pages", () => {
+    const message = makeMessage({ id: 1, created_at: "2026-01-01T00:00:00Z" });
+    const log = makeLog({ id: 10, created_at: "2026-01-01T00:00:10Z", level: "output" });
+    const entry = {
+      message: { id: "msg_1", kind: "message" as const, created_at: message.created_at, message_id: 1, message },
+      log: { id: "log_10", kind: "log" as const, created_at: log.created_at, log_id: 10, log },
+    };
+    const turns: SessionTranscriptTurn[] = [
+      { turn_number: 1, started_at: message.created_at, entries: [entry.message, entry.log] },
+      { turn_number: 1, started_at: message.created_at, entries: [entry.message, entry.log] },
+    ];
+
+    const { messages, logs } = flattenTranscriptWindows(turns);
+
+    expect(messages.map((m) => m.id)).toEqual([1]);
+    expect(logs.map((l) => l.id)).toEqual([10]);
+  });
+
+  it("skips entries that carry no embedded record and tolerates an empty input", () => {
+    const turns: SessionTranscriptTurn[] = [
+      {
+        turn_number: 2,
+        started_at: "2026-01-01T00:01:00Z",
+        // e.g. a milestone/checkpoint marker with only a summary, no record.
+        entries: [{ id: "milestone_1", kind: "milestone", created_at: "2026-01-01T00:01:00Z", summary: "Plan approved" }],
+      },
+    ];
+
+    expect(flattenTranscriptWindows(turns)).toEqual({ messages: [], logs: [], humanInputs: [] });
+    expect(flattenTranscriptWindows(undefined)).toEqual({ messages: [], logs: [], humanInputs: [] });
   });
 });
