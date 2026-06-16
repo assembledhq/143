@@ -27,18 +27,20 @@ func TestSlackInboundEventStore_CreateReceivedUsesPartialConflictPredicate(t *te
 	userID := "U123"
 	eventTS := "1710000001.000000"
 	inboundID := uuid.New()
+	webhookDeliveryID := uuid.New()
 	store := NewSlackInboundEventStore(mock)
 
 	mock.ExpectQuery(`ON CONFLICT \(org_id, slack_event_id\) WHERE slack_event_id IS NOT NULL DO NOTHING`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "slack_installation_id", "slack_event_id", "slack_team_id", "event_type",
+			"id", "org_id", "webhook_delivery_id", "slack_installation_id", "slack_event_id", "slack_team_id", "event_type",
 			"channel_id", "user_id", "event_ts", "payload", "status", "job_id", "error", "received_at", "processed_at",
 		}).AddRow(
-			inboundID, orgID, installationID, &eventID, "T123", models.SlackInboundEventTypeAppMention,
+			inboundID, orgID, &webhookDeliveryID, installationID, &eventID, "T123", models.SlackInboundEventTypeAppMention,
 			&channelID, &userID, &eventTS, json.RawMessage(`{"type":"event_callback"}`),
 			models.SlackInboundEventStatusReceived, nil, nil, time.Now(), nil,
 		))
@@ -49,12 +51,70 @@ func TestSlackInboundEventStore_CreateReceivedUsesPartialConflictPredicate(t *te
 		SlackEventID:        &eventID,
 		SlackTeamID:         "T123",
 		EventType:           models.SlackInboundEventTypeAppMention,
+		WebhookDeliveryID:   &webhookDeliveryID,
 		Payload:             json.RawMessage(`{"type":"event_callback"}`),
 	})
 
 	require.NoError(t, err, "CreateReceived should insert inbound event")
 	require.True(t, inserted, "CreateReceived should report inserted event")
 	require.NoError(t, mock.ExpectationsWereMet(), "CreateReceived should use the partial unique-index conflict predicate")
+}
+
+func TestSlackInboundEventStore_CreateReceivedReturnsExistingDuplicateForRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	webhookDeliveryID := uuid.New()
+	inboundID := uuid.New()
+	eventID := "Ev-retry"
+	channelID := "C123"
+	userID := "U123"
+	eventTS := "1710000001.000000"
+	now := time.Now()
+	store := NewSlackInboundEventStore(mock)
+
+	mock.ExpectQuery(`ON CONFLICT \(org_id, slack_event_id\) WHERE slack_event_id IS NOT NULL DO NOTHING`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "webhook_delivery_id", "slack_installation_id", "slack_event_id", "slack_team_id", "event_type",
+			"channel_id", "user_id", "event_ts", "payload", "status", "job_id", "error", "received_at", "processed_at",
+		}))
+	mock.ExpectQuery(`WHERE org_id = @org_id\s+AND slack_event_id = @slack_event_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "webhook_delivery_id", "slack_installation_id", "slack_event_id", "slack_team_id", "event_type",
+			"channel_id", "user_id", "event_ts", "payload", "status", "job_id", "error", "received_at", "processed_at",
+		}).AddRow(
+			inboundID, orgID, &webhookDeliveryID, installationID, &eventID, "T123", models.SlackInboundEventTypeAppMention,
+			&channelID, &userID, &eventTS, json.RawMessage(`{"type":"event_callback"}`),
+			models.SlackInboundEventStatusFailed, nil, nil, now, nil,
+		))
+
+	event := &models.SlackInboundEvent{
+		OrgID:               orgID,
+		SlackInstallationID: installationID,
+		SlackEventID:        &eventID,
+		SlackTeamID:         "T123",
+		EventType:           models.SlackInboundEventTypeAppMention,
+		WebhookDeliveryID:   &webhookDeliveryID,
+		Payload:             json.RawMessage(`{"type":"event_callback"}`),
+	}
+	inserted, err := store.CreateReceived(context.Background(), event)
+
+	require.NoError(t, err, "CreateReceived should load an existing duplicate event for provider retry")
+	require.False(t, inserted, "CreateReceived should report duplicate when the row already exists")
+	require.Equal(t, inboundID, event.ID, "CreateReceived should hydrate the existing inbound event id")
+	require.Equal(t, orgID, event.OrgID, "CreateReceived should preserve org-scoped duplicate lookup")
+	require.NoError(t, mock.ExpectationsWereMet(), "CreateReceived should satisfy expected SQL")
 }
 
 func TestSlackInboundEventStore_RedactPayloadsOlderThan(t *testing.T) {

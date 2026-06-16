@@ -188,6 +188,68 @@ func TestIntegrationHandler_GetSlackHealthReportsMissingScopes(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "GetSlackHealth should satisfy expected SQL")
 }
 
+func TestIntegrationHandler_GetSlackHealthReportsRecentCallbackFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	deliveryID := uuid.New()
+	slackDeliveryID := "Ev-failed"
+	errMessage := "insert slack inbound event: constraint failed"
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM slack_installations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", append([]string(nil), requiredSlackBotScopes...), models.SlackInstallationStatusActive, nil, now,
+			&now, now, now,
+		))
+	mock.ExpectQuery(`WHERE org_id = @org_id\s+AND provider = @provider\s+AND status = 'failed'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "provider", "delivery_id", "event_type",
+			"signature_valid", "received_at", "processed_at", "status", "attempts",
+			"error", "payload", "headers", "created_at",
+		}).AddRow(
+			deliveryID, orgID, integrationID, "slack", &slackDeliveryID, "app_mention",
+			boolPtr(true), now, &now, "failed", 1,
+			&errMessage, json.RawMessage(`{"type":"event_callback"}`), nil, now,
+		))
+
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test"}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackInstallationStore(db.NewSlackInstallationStore(mock)),
+	)
+	handler.webhookDeliveryStore = db.NewWebhookDeliveryStore(mock)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/health", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlackHealth(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "GetSlackHealth should return health for connected Slack")
+	var resp models.SingleResponse[models.SlackInstallationHealth]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "GetSlackHealth response should decode")
+	require.Len(t, resp.Data.RecentCallbackFailures, 1, "health should include recent failed Slack callbacks")
+	require.Equal(t, slackDeliveryID, *resp.Data.RecentCallbackFailures[0].DeliveryID, "health should expose failed Slack delivery id")
+	require.Contains(t, resp.Data.Symptoms, "recent_callback_failures", "health should include a callback failure symptom")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetSlackHealth should satisfy expected SQL")
+}
+
 func TestIntegrationHandler_ListSlackChannelsReturnsBotManagementFields(t *testing.T) {
 	t.Parallel()
 
@@ -4230,4 +4292,8 @@ func TestSlackChannelSettingsPatchRequestApplyPreservesOmittedFields(t *testing.
 	require.NotNil(t, settings.NotificationPreset, "Apply should keep notification preset pointer")
 	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "Apply should update provided notification preset")
 	require.JSONEq(t, `{"events":["preview.ready"]}`, string(settings.NotificationSubscriptions), "Apply should preserve omitted notification subscriptions")
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

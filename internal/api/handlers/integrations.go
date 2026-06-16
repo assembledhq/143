@@ -238,6 +238,7 @@ type IntegrationHandler struct {
 	slackUserInfoClient    slackUserInfoClient
 	slackAuthTestClient    slackAuthTestClient
 	slackbotMetrics        *metrics.SlackbotMetrics
+	webhookDeliveryStore   *db.WebhookDeliveryStore
 
 	// PM context auto-trigger (nil-safe: disabled if not configured)
 	pmAutoTriggerJobs   pmAutoTriggerJobStore
@@ -464,6 +465,12 @@ func WithSlackUserInfoClient(client slackUserInfoClient) IntegrationHandlerOptio
 func WithSlackbotMetrics(metrics *metrics.SlackbotMetrics) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.slackbotMetrics = metrics
+	}
+}
+
+func WithWebhookDeliveryStore(store *db.WebhookDeliveryStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.webhookDeliveryStore = store
 	}
 }
 
@@ -2315,6 +2322,25 @@ func (h *IntegrationHandler) GetSlackHealth(w http.ResponseWriter, r *http.Reque
 	if installation.LastEventAt == nil {
 		health.Symptoms = append(health.Symptoms, "no_events_observed_check_event_subscriptions_and_signing_secret")
 	}
+	if h.webhookDeliveryStore != nil {
+		failures, lookupErr := h.webhookDeliveryStore.ListRecentFailures(r.Context(), orgID, "slack", time.Now().UTC().Add(-24*time.Hour), 5)
+		if lookupErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "SLACK_HEALTH_FAILED", "failed to load slack callback health", lookupErr)
+			return
+		}
+		for _, failure := range failures {
+			health.RecentCallbackFailures = append(health.RecentCallbackFailures, models.SlackCallbackFailure{
+				ID:         failure.ID,
+				DeliveryID: failure.DeliveryID,
+				EventType:  failure.EventType,
+				Error:      failure.Error,
+				ReceivedAt: failure.ReceivedAt,
+			})
+		}
+		if len(health.RecentCallbackFailures) > 0 {
+			health.Symptoms = append(health.Symptoms, "recent_callback_failures")
+		}
+	}
 	if h.integrationStore != nil {
 		if integration, lookupErr := h.integrationStore.GetByOrgAndProvider(r.Context(), orgID, models.IntegrationProviderSlack); lookupErr == nil {
 			if authErr := readAuthErrorFromConfig(integration.Config); authErr != nil {
@@ -2352,7 +2378,7 @@ func (h *IntegrationHandler) GetSlackHealth(w http.ResponseWriter, r *http.Reque
 			h.slackbotMetrics.RecordMissingScope(r.Context(), scope)
 		}
 	}
-	if health.AuthOK {
+	if health.AuthOK && len(health.RecentCallbackFailures) == 0 {
 		h.slackbotMetrics.RecordInstallHealth(r.Context(), "ok")
 	} else {
 		h.slackbotMetrics.RecordInstallHealth(r.Context(), "unhealthy")
