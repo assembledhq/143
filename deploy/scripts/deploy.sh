@@ -676,7 +676,7 @@ if [ "$ROLE" = "worker" ]; then
       echo "ERROR: reconcile-worker-host.sh failed on $HOST. This is NOT a sudoers problem"
       echo "  (the deploy sudo grant ran); the underlying reconcile error is printed above."
       echo "  Common cause: a leaked docker network endpoint holding sandbox-dns's pinned IP"
-      echo "  (\"Address already in use\"). reconcile-worker-host.sh now self-heals that on retry;"
+      echo "  (\"Address already in use\"). reconcile-worker-host.sh retries leaked-endpoint cleanup;"
       echo "  if it persists, on the host run: docker network inspect 143-sandbox, then"
       echo "  docker network disconnect -f 143-sandbox <stale-endpoint>, and re-run the deploy."
       echo "  If instead you see an SSH 'Permission denied (publickey)', run: make sync-keys APPLY=true"
