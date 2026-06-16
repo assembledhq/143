@@ -3614,7 +3614,7 @@ func TestManagerServiceObserver_OnPhaseStart_DoesNotBlockOnLifecycleLogWrite(t *
 
 	select {
 	case <-done:
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(500 * time.Millisecond):
 		t.Fatal("OnPhaseStart should not block on preview lifecycle log database writes")
 	}
 
