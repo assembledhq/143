@@ -86,6 +86,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionQuestionStore := db.NewSessionQuestionStore(pool)
 	sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
 	slackInstallationStore := db.NewSlackInstallationStore(pool)
+	slackOrgSelectionStore := db.NewSlackOrgSelectionStore(pool)
 	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
 	sessionAttributionStore := db.NewSessionAttributionStore(pool)
 	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
@@ -262,6 +263,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 	)
 	slackbotHandler.SetLogger(logger)
+	slackbotHandler.SetOrgSelectionStore(slackOrgSelectionStore)
 	slackbotHandler.SetWebhookDeliveries(webhookDeliveryStore)
 	if slackMetrics != nil {
 		slackbotHandler.SetMetrics(slackMetrics)
