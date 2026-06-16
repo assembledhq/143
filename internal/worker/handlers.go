@@ -382,6 +382,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
 	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
+	if stores.Previews != nil {
+		w.Register(models.JobTypeBackfillPreviewGroups, newBackfillPreviewGroupsHandler(stores, logger))
+	}
 	if services != nil && services.Linear != nil {
 		w.Register("prepare_linear_primary", newPrepareLinearPrimaryHandler(services.Linear, logger))
 		w.Register("link_linear_issue", newLinkLinearIssueHandler(services.Linear, logger))
@@ -8290,6 +8293,35 @@ func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobH
 			Int64("deleted", deleted).
 			Msg("audit retention cleanup complete")
 
+		return nil
+	}
+}
+
+// backfill_preview_groups handler links existing preview_targets rows that have
+// no preview_group_id to their correct preview_groups row. The job is safe to
+// run multiple times; targets that are already linked are skipped.
+func newBackfillPreviewGroupsHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var p struct {
+			BatchSize int `json:"batch_size"`
+		}
+		if len(payload) > 0 {
+			if err := json.Unmarshal(payload, &p); err != nil {
+				return &FatalError{Err: fmt.Errorf("unmarshal backfill_preview_groups payload: %w", err)}
+			}
+		}
+		orgID, ok := jobOrgIDFromContext(ctx)
+		if !ok {
+			return &FatalError{Err: fmt.Errorf("backfill_preview_groups: missing org_id in job context")}
+		}
+		total, err := stores.Previews.BackfillPreviewGroups(ctx, orgID, p.BatchSize)
+		if err != nil {
+			return fmt.Errorf("backfill preview groups: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Int("targets_linked", total).
+			Msg("backfill_preview_groups completed")
 		return nil
 	}
 }
