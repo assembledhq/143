@@ -1,10 +1,14 @@
 package handlers
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -99,4 +103,24 @@ func TestWriteError(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code, "should return expected status code")
 	require.Contains(t, w.Body.String(), "BAD_REQUEST", "should contain error code")
 	require.Contains(t, w.Body.String(), "something went wrong", "should contain error message")
+}
+
+func TestWriteErrorLogsWrappedRootError(t *testing.T) {
+	t.Parallel()
+
+	var logBuffer bytes.Buffer
+	logger := zerolog.New(&logBuffer)
+	rootErr := errors.New("insert slack inbound event: constraint failed")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/slack/events", nil)
+	r = r.WithContext(logger.WithContext(r.Context()))
+
+	writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack event", rootErr)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "writeError should return expected status code")
+	var logEvent map[string]any
+	require.NoError(t, json.Unmarshal(logBuffer.Bytes(), &logEvent), "writeError should emit a structured log event")
+	require.Equal(t, "error", logEvent["level"], "5xx writeError should log at error level")
+	require.Equal(t, "SLACK_EVENT_PERSIST_FAILED", logEvent["code"], "writeError should include stable API error code")
+	require.Contains(t, logEvent["error"], "constraint failed", "writeError should include the wrapped root error")
 }
