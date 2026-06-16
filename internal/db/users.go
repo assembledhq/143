@@ -245,6 +245,24 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, 
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+// GetByOrgAndEmail resolves a single org member by an email that may be their
+// primary, GitHub noreply, or one of their secondary emails. Nothing enforces
+// that an address is unique across users within an org (a secondary email could
+// collide with another member's primary), so the match is deterministically
+// tie-broken: a primary-email match wins over a github-noreply match, which
+// wins over a secondary-email match, and `created_at` (then `id`) breaks any
+// remaining tie so the same caller always resolves to the same user.
+//
+// secondary_emails are stored pre-lowercased by AddSecondaryEmail, so the array
+// comparison below compares against already-lowercased elements rather than
+// re-lowering each element.
+//
+// No dedicated email index is needed: the org_id predicate is served by
+// idx_users_org_id, which bounds the scan to a single org's members (a small
+// set), and the OR over the three email columns is then evaluated within that
+// subset. This lookup runs at session-creation frequency, so adding expression
+// or GIN indexes here would cost write amplification on every users write for a
+// scan the planner would not choose anyway.
 func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email string) (models.User, error) {
 	query := fmt.Sprintf(`
 		SELECT %s
@@ -252,7 +270,13 @@ func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email
 		WHERE org_id = @org_id
 		  AND (LOWER(email) = LOWER(@email)
 		       OR LOWER(github_noreply_email) = LOWER(@email)
-		       OR LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))`, userSelectColumns)
+		       OR LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))
+		ORDER BY
+		  (LOWER(email) = LOWER(@email)) DESC,
+		  (LOWER(github_noreply_email) = LOWER(@email)) DESC,
+		  created_at ASC,
+		  id ASC
+		LIMIT 1`, userSelectColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
 	if err != nil {
