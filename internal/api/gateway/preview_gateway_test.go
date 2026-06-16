@@ -407,8 +407,14 @@ func TestActivityHeartbeatScriptWatchesForSessionExpiry(t *testing.T) {
 	// the gateway's 401 PREVIEW_SESSION_EXPIRED status, and it must surface an
 	// in-app reconnect overlay with a button. A regression here reintroduces the
 	// silent blank-screen-on-expiry failure mode.
-	require.Contains(t, activityHeartbeatScript, `fetch("/__143_heartbeat`,
-		"heartbeat must use fetch so it can observe the expiry status code")
+	require.Contains(t, activityHeartbeatScript, "window.fetch.bind(window)",
+		"heartbeat must capture native fetch at init so app fetch wrappers cannot hide the 401")
+	require.Contains(t, activityHeartbeatScript, "nativeFetch(url",
+		"heartbeat must probe via the captured native fetch")
+	require.Contains(t, activityHeartbeatScript, "/__143_heartbeat?t=",
+		"heartbeat must hit the gateway heartbeat endpoint")
+	require.Contains(t, activityHeartbeatScript, "new Image().src = url",
+		"heartbeat must fall back to an Image keep-alive when fetch is unavailable")
 	require.Contains(t, activityHeartbeatScript, "resp.status === 401",
 		"heartbeat must react to the gateway's 401 expiry signal")
 	require.Contains(t, activityHeartbeatScript, "__143-preview-reconnect",

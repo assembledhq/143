@@ -1421,15 +1421,29 @@ const activityHeartbeatScript = `
   var expired = false;
   var countdownTimer = null;
 
+  // Capture the native fetch at init, before the previewed app's bundles run.
+  // Apps that wrap window.fetch with an auth interceptor often throw or redirect
+  // on 401, which would hide the expiry signal from us; binding it now keeps the
+  // watchdog reading the real response status.
+  var nativeFetch = (window.fetch && window.fetch.bind(window)) || null;
+
   function reconnect() {
     // A top-level reload re-issues a navigation request, so the gateway serves
     // the full control overlay (status, logs, Restart + auto-reconnect).
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
     window.location.reload();
   }
 
   function sendHeartbeat() {
     if (expired) return;
-    fetch("/__143_heartbeat?t=" + Date.now(), {
+    var url = "/__143_heartbeat?t=" + Date.now();
+    if (!nativeFetch) {
+      // Pre-fetch browsers: keep the idle timer alive but we cannot read a
+      // status, so expiry recovery is unavailable (a reload still works).
+      new Image().src = url;
+      return;
+    }
+    nativeFetch(url, {
       cache: "no-store",
       credentials: "same-origin"
     }).then(function(resp) {
