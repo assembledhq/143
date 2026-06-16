@@ -280,6 +280,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		Credentials:         credentialStore,
 		AuditLogs:           db.NewAuditLogStore(pool),
 		Organizations:       orgStore,
+		Users:               db.NewUserStore(pool),
 		SessionLogs:         sessionLogStore,
 		EvalTasks:           db.NewEvalTaskStore(pool),
 		EvalRuns:            db.NewEvalRunStore(pool),

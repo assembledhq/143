@@ -21,6 +21,10 @@ type emitOnceRetryClient struct {
 	err error
 }
 
+var linearAgentUserColumns = []string{
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at",
+}
+
 func (c *emitOnceRetryClient) AgentActivityCreate(context.Context, linear.AgentActivityInput) (linear.AgentActivityResult, error) {
 	return linear.AgentActivityResult{}, c.err
 }
@@ -86,6 +90,94 @@ func TestBuildAgentSession_FallsBackToIdentifierWhenTitleEmpty(t *testing.T) {
 	require.NotNil(t, session.Title)
 	require.Equal(t, "ACS-42", *session.Title,
 		"empty title falls back to identifier so the sessions list never shows a blank row")
+}
+
+func TestApplyLinearCreatorAttribution(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		fetched    *linear.FetchedIssue
+		setupMock  func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time)
+		expectUser bool
+		expectErr  bool
+	}{
+		{
+			name: "sets triggering user from matching Linear creator email",
+			fetched: &linear.FetchedIssue{
+				CreatorEmail: "Creator@Example.com",
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
+						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
+					))
+			},
+			expectUser: true,
+		},
+		{
+			name:    "leaves system fallback when Linear creator email is absent",
+			fetched: &linear.FetchedIssue{},
+		},
+		{
+			name: "leaves system fallback when creator email has no org user",
+			fetched: &linear.FetchedIssue{
+				CreatorEmail: "external@example.com",
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns))
+			},
+		},
+		{
+			name: "propagates infrastructure DB error rather than silently skipping attribution",
+			fetched: &linear.FetchedIssue{
+				CreatorEmail: "creator@example.com",
+			},
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnError(errors.New("connection reset by peer"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create pgx mock")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			userID := uuid.New()
+			now := time.Now()
+			if tt.setupMock != nil {
+				tt.setupMock(mock, orgID, userID, now)
+			}
+			session := &models.Session{OrgID: orgID}
+
+			err = applyLinearCreatorAttribution(context.Background(), db.NewUserStore(mock), session, tt.fetched, zerolog.Nop())
+
+			if tt.expectErr {
+				require.Error(t, err, "infrastructure DB errors should propagate so the job can be retried")
+				require.Nil(t, session.TriggeredByUserID, "failed attribution should leave the session without a triggering user")
+			} else {
+				require.NoError(t, err, "not-found and missing-email cases should never fail session creation")
+				if tt.expectUser {
+					require.NotNil(t, session.TriggeredByUserID, "matched creator should populate the session triggering user")
+					require.Equal(t, userID, *session.TriggeredByUserID, "matched creator should become the session triggering user")
+				} else {
+					require.Nil(t, session.TriggeredByUserID, "unmatched creator should leave the session attributed to the system fallback")
+				}
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestResolveLinearAgentSessionAgentType(t *testing.T) {

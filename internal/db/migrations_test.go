@@ -65,6 +65,23 @@ func TestRemoveGeminiCLIMigrationKeepsHistoricalSessionsReadable(t *testing.T) {
 		"migration should normalize saved automation config away from gemini_cli")
 }
 
+func TestUsersSecondaryEmailsMigrationIsExpandOnly(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000191_users_secondary_emails.up.sql")
+	require.NoError(t, err, "test should read the users secondary emails migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "ALTER TABLE users ADD COLUMN secondary_emails text[];",
+		"migration should add secondary_emails as a nullable expand-only column")
+	require.NotContains(t, sql, "UPDATE users",
+		"migration should not backfill users in the schema migration")
+	require.NotContains(t, sql, "SET DEFAULT",
+		"migration should not set a default that can require table-wide validation")
+	require.NotContains(t, sql, "SET NOT NULL",
+		"migration should leave secondary_emails nullable and let queries coalesce null arrays")
+}
+
 func TestMigrationsAllowBuilderRole(t *testing.T) {
 	t.Parallel()
 

@@ -465,6 +465,131 @@ func TestHandleLinearAgentCreatedResolvesRepoByTeamKey(t *testing.T) {
 		"created handler should resolve linear_team_repo_mappings using the Linear team key, not the opaque team id")
 }
 
+func TestHandleLinearAgentCreatedMapsCreatorEmailToSessionTrigger(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	integrationID := uuid.New()
+	repoID := uuid.New()
+	issueID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	creatorID := uuid.New()
+	now := time.Now().UTC()
+	client := &linearAgentCreatedFetchClient{issue: &linear.FetchedIssue{
+		ID:           "875be557-a8c3-487a-99aa-7da091e427f2",
+		Identifier:   "VIR-139",
+		Title:        "Map Linear agent sessions to the issue creator",
+		TeamID:       "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+		TeamKey:      "VIR",
+		TeamName:     "Virtuous Cycle",
+		ProjectID:    "9df3176d-eba4-484b-9022-84633d529358",
+		Description:  "Linear agent sessions should not always look like System started them.",
+		CreatorEmail: "Creator@Example.com",
+	}}
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, linear_agent_session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_1",
+			"875be557-a8c3-487a-99aa-7da091e427f2", "VIR-139",
+			"", "lin_creator_1",
+			nil, "pending", &now,
+			now, now,
+		))
+	mock.ExpectQuery("(?s)SELECT.*FROM linear_team_repo_mappings.*ORDER BY").
+		WithArgs(orgID, "VIR", "9df3176d-eba4-484b-9022-84633d529358").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "linear_team_id", "linear_project_id",
+			"repository_id", "default_branch", "priority",
+			"created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, "VIR", nil,
+			repoID, "", 0, now, now,
+		))
+	mock.ExpectQuery("INSERT INTO issues").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
+			AddRow(issueID, now, now))
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+		WithArgs(orgID, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
+			creatorID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
+		))
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("INSERT INTO sessions").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), &creatorID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).
+			AddRow(sessionID, now, now))
+	mock.ExpectQuery("INSERT INTO session_threads").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
+	mock.ExpectExec("INSERT INTO session_issue_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), now))
+	mock.ExpectExec("UPDATE linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("stop after session insert"))
+	mock.ExpectRollback()
+
+	err = handleLinearAgentCreated(context.Background(), LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Issues:   db.NewIssueStore(mock),
+			Sessions: db.NewSessionStore(mock),
+			Users:    db.NewUserStore(mock),
+		},
+		RepoResolver: linear.NewAgentRepoResolver(db.NewLinearTeamRepoMappingStore(mock), nil, nil),
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			return client, nil
+		},
+	}, db.NewLinearAgentSessionStore(mock), nil, linearAgentEventPayload{
+		OrgID:                orgID.String(),
+		AgentSessionRowID:    rowID.String(),
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "875be557-a8c3-487a-99aa-7da091e427f2",
+	}, zerolog.Nop())
+	require.Error(t, err, "test should stop after proving the mapped creator is written to sessions")
+	require.Contains(t, err.Error(), "attach session", "handler should reach the transactional bridge attach after creating the session")
+	require.NoError(t, mock.ExpectationsWereMet(),
+		"created handler should look up the Linear creator email inside the org and pass that user as triggered_by_user_id")
+}
+
 func TestHandleLinearAgentCreatedReemitsBootstrapBeforeIssueFetch(t *testing.T) {
 	t.Parallel()
 
