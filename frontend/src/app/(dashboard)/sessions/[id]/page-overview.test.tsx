@@ -170,7 +170,13 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    expect(screen.getByText('assembledhq/143 · 143/feature-session-details')).toBeInTheDocument();
+    const repoBranchRow = screen.getByTestId('session-overview-repo-branch');
+    expect(repoBranchRow).toHaveTextContent('assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).not.toHaveTextContent(/feature-session-details\s*·/);
+
+    const metadataRow = screen.getByTestId('session-overview-timing');
+    expect(metadataRow).not.toHaveTextContent('assembledhq/143');
+    expect(metadataRow).toHaveTextContent(/Completed/);
   });
 
   it('renders the session Linear chip as an outbound link when only linear_identifier_hint is available', async () => {
