@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -401,6 +402,25 @@ func TestSessionExecutorBindsIncludeStaticEgressCapabilityMount(t *testing.T) {
 	require.Equal(t, expected, sessionExecutorBinds(), "session executors should mount every host resource needed for sandbox creation")
 }
 
+func TestSessionExecutorIDFromEnv(t *testing.T) {
+	t.Setenv("SESSION_EXECUTOR_ID", "")
+	id, ok, err := sessionExecutorIDFromEnv()
+	require.NoError(t, err, "empty SESSION_EXECUTOR_ID should not error")
+	require.False(t, ok, "empty SESSION_EXECUTOR_ID should report no session executor")
+	require.Equal(t, uuid.Nil, id, "empty SESSION_EXECUTOR_ID should return nil uuid")
+
+	t.Setenv("SESSION_EXECUTOR_ID", "2af66543-71df-4d0c-911c-f2c77accaf4b")
+	id, ok, err = sessionExecutorIDFromEnv()
+	require.NoError(t, err, "valid SESSION_EXECUTOR_ID should parse")
+	require.True(t, ok, "valid SESSION_EXECUTOR_ID should report session executor mode")
+	require.Equal(t, "2af66543-71df-4d0c-911c-f2c77accaf4b", id.String(), "valid SESSION_EXECUTOR_ID should return parsed uuid")
+
+	t.Setenv("SESSION_EXECUTOR_ID", "not-a-uuid")
+	_, ok, err = sessionExecutorIDFromEnv()
+	require.Error(t, err, "invalid SESSION_EXECUTOR_ID should error")
+	require.True(t, ok, "invalid non-empty SESSION_EXECUTOR_ID should still report executor intent")
+}
+
 func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -435,6 +455,37 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
 	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
+}
+
+func TestMainRegistersInternalSandboxAuthBrokerBeforeWorkers(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup ordering regression test")
+
+	body := string(src)
+	registerBroker := strings.Index(body, "registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker")
+	startWorkers := strings.Index(body, "processWorkers = startProcessWorkers(")
+	require.NotEqual(t, -1, registerBroker, "startup should register internal sandbox auth broker routes")
+	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
+	require.Less(t, registerBroker, startWorkers, "internal sandbox auth broker routes must exist before session executors can be launched")
+}
+
+func TestBuildServicesSessionExecutorUsesRemoteSandboxAuthBroker(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for sandbox auth broker wiring regression test")
+
+	body := string(src)
+	roleDetect := strings.Index(body, "sessionExecutorIDFromEnv()")
+	remoteClient := strings.Index(body, "sandboxauth.NewRemoteBrokerClient")
+	localServer := strings.Index(body, "sandboxauth.NewServer")
+	require.NotEqual(t, -1, roleDetect, "buildServices should detect session executor role")
+	require.NotEqual(t, -1, remoteClient, "session executors should use the remote sandbox auth broker client")
+	require.NotEqual(t, -1, localServer, "long-lived workers should still construct the local socket server")
+	require.Less(t, roleDetect, remoteClient, "session executor role detection should happen before constructing the remote broker client")
+	require.Less(t, remoteClient, localServer, "session executor branch should avoid falling through to local socket server construction")
 }
 
 func TestBuildServicesWiresLinearAgentWorkerDepsWithoutFeatureFlagGate(t *testing.T) {

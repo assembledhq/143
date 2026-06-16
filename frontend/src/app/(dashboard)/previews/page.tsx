@@ -220,40 +220,135 @@ function SectionRows({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {previews.map((preview) => (
-              <TableRow key={preview.preview_group_id}>
-                <TableCell>
+            {previews.map((preview) => {
+              const sourceHref = safeExternalUrl(preview.source_url);
+              const previewHref = safeExternalUrl(preview.preview_url);
+              return (
+                <TableRow key={preview.preview_group_id}>
+                  <TableCell>
+                    <Link
+                      href={previewDetailHref(preview)}
+                      className="font-medium text-foreground hover:underline"
+                    >
+                      {previewDisplayName(preview)}
+                    </Link>
+                    <p className="text-xs text-muted-foreground">
+                      {preview.repository_full_name || preview.repository_id} ·{" "}
+                      {preview.pinned ? "Pinned · " : ""}
+                      {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    {sourceHref ? (
+                      <a
+                        href={sourceHref}
+                        className="inline-flex items-center gap-1 text-sm text-foreground hover:underline"
+                      >
+                        {sourceLabel(preview)}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : (
+                      <span className="text-sm text-foreground">
+                        {sourceLabel(preview)}
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
+                          ? "destructive"
+                          : preview.status === "ready"
+                            ? "default"
+                            : "secondary"
+                      }
+                    >
+                      {statusLabel(preview)}
+                    </Badge>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {preview.freshness === "outdated"
+                        ? `running ${preview.running_commit_sha?.slice(0, 8) || "unknown"}, branch is ${preview.latest_commit_sha?.slice(0, 8) || "unknown"}`
+                        : scope === "resumable" && preview.resume_estimate_seconds
+                        ? `resumes in ~${preview.resume_estimate_seconds}s`
+                        : scope === "recent"
+                          ? stoppedReasonLabel(preview.stopped_reason)
+                          : preview.expires_at
+                            ? `expires ${relativeTime(preview.expires_at)}`
+                            : preview.current_phase || ""}
+                    </p>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex justify-end gap-2">
+                      {previewHref ? (
+                        <Button asChild size="sm">
+                          <a
+                            href={previewHref}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                            Open
+                          </a>
+                        </Button>
+                      ) : null}
+                      {canMutate && scope === "running" && preview.current_preview_id ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onStop(preview)}
+                        >
+                          <Square className="h-4 w-4" />
+                          Stop
+                        </Button>
+                      ) : null}
+                      {canMutate && scope === "resumable" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onRestart(preview)}
+                        >
+                          <Play className="h-4 w-4" />
+                          Resume
+                        </Button>
+                      ) : null}
+                      {canMutate && scope !== "running" ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onStartLatest(preview)}
+                        >
+                          <RotateCw className="h-4 w-4" />
+                          Start latest
+                        </Button>
+                      ) : null}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      <div className="grid gap-3 md:hidden">
+        {previews.map((preview) => {
+          const previewHref = safeExternalUrl(preview.preview_url);
+          return (
+            <Card key={preview.preview_group_id}>
+              <CardContent className="space-y-3 py-4">
+                <div className="min-w-0">
                   <Link
                     href={previewDetailHref(preview)}
-                    className="font-medium text-foreground hover:underline"
+                    className="block truncate font-medium text-foreground"
                   >
                     {previewDisplayName(preview)}
                   </Link>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="truncate text-sm text-muted-foreground">
                     {preview.repository_full_name || preview.repository_id} ·{" "}
-                    {preview.pinned ? "Pinned · " : ""}
-                    {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
+                    {sourceLabel(preview)}
                   </p>
-                </TableCell>
-                <TableCell>
-                  {preview.source_url ? (
-                    <a
-                      href={
-                        safeExternalUrl(preview.source_url) ??
-                        preview.source_url
-                      }
-                      className="inline-flex items-center gap-1 text-sm text-foreground hover:underline"
-                    >
-                      {sourceLabel(preview)}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  ) : (
-                    <span className="text-sm text-foreground">
-                      {sourceLabel(preview)}
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell>
+                </div>
+                <div className="flex items-center justify-between gap-2">
                   <Badge
                     variant={
                       preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
@@ -265,155 +360,58 @@ function SectionRows({
                   >
                     {statusLabel(preview)}
                   </Badge>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {preview.freshness === "outdated"
-                      ? `running ${preview.running_commit_sha?.slice(0, 8) || "unknown"}, branch is ${preview.latest_commit_sha?.slice(0, 8) || "unknown"}`
-                      : scope === "resumable" && preview.resume_estimate_seconds
-                      ? `resumes in ~${preview.resume_estimate_seconds}s`
-                      : scope === "recent"
-                        ? stoppedReasonLabel(preview.stopped_reason)
-                        : preview.expires_at
-                          ? `expires ${relativeTime(preview.expires_at)}`
-                          : preview.current_phase || ""}
-                  </p>
-                </TableCell>
-                <TableCell>
-                  <div className="flex justify-end gap-2">
-                    {preview.preview_url ? (
-                      <Button asChild size="sm">
-                        <a
-                          href={
-                            safeExternalUrl(preview.preview_url) ??
-                            preview.preview_url
-                          }
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          Open
-                        </a>
-                      </Button>
-                    ) : null}
-                    {canMutate && scope === "running" && preview.current_preview_id ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onStop(preview)}
+                  <span className="text-xs text-muted-foreground">
+                    {relativeTime(preview.created_at)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {previewHref ? (
+                    <Button asChild size="sm">
+                      <a
+                        href={previewHref}
+                        target="_blank"
+                        rel="noreferrer"
                       >
-                        <Square className="h-4 w-4" />
-                        Stop
-                      </Button>
-                    ) : null}
-                    {canMutate && scope === "resumable" ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onRestart(preview)}
-                      >
-                        <Play className="h-4 w-4" />
-                        Resume
-                      </Button>
-                    ) : null}
-                    {canMutate && scope !== "running" ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => onStartLatest(preview)}
-                      >
-                        <RotateCw className="h-4 w-4" />
-                        Start latest
-                      </Button>
-                    ) : null}
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <div className="grid gap-3 md:hidden">
-        {previews.map((preview) => (
-          <Card key={preview.preview_group_id}>
-            <CardContent className="space-y-3 py-4">
-              <div className="min-w-0">
-                <Link
-                  href={previewDetailHref(preview)}
-                  className="block truncate font-medium text-foreground"
-                >
-                  {previewDisplayName(preview)}
-                </Link>
-                <p className="truncate text-sm text-muted-foreground">
-                  {preview.repository_full_name || preview.repository_id} ·{" "}
-                  {sourceLabel(preview)}
-                </p>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <Badge
-                  variant={
-                    preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
-                      ? "destructive"
-                      : preview.status === "ready"
-                        ? "default"
-                        : "secondary"
-                  }
-                >
-                  {statusLabel(preview)}
-                </Badge>
-                <span className="text-xs text-muted-foreground">
-                  {relativeTime(preview.created_at)}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {preview.preview_url ? (
-                  <Button asChild size="sm">
-                    <a
-                      href={
-                        safeExternalUrl(preview.preview_url) ??
-                        preview.preview_url
-                      }
-                      target="_blank"
-                      rel="noreferrer"
+                        <ExternalLink className="h-4 w-4" />
+                        Open
+                      </a>
+                    </Button>
+                  ) : null}
+                  {canMutate && scope === "running" && preview.current_preview_id ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onStop(preview)}
                     >
-                      <ExternalLink className="h-4 w-4" />
-                      Open
-                    </a>
-                  </Button>
-                ) : null}
-                {canMutate && scope === "running" && preview.current_preview_id ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onStop(preview)}
-                  >
-                    <Square className="h-4 w-4" />
-                    Stop
-                  </Button>
-                ) : null}
-                {canMutate && scope === "resumable" ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onRestart(preview)}
-                  >
-                    <Play className="h-4 w-4" />
-                    Resume
-                  </Button>
-                ) : null}
-                {canMutate && scope !== "running" ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onStartLatest(preview)}
-                  >
-                    <RotateCw className="h-4 w-4" />
-                    Start latest
-                  </Button>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+                      <Square className="h-4 w-4" />
+                      Stop
+                    </Button>
+                  ) : null}
+                  {canMutate && scope === "resumable" ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onRestart(preview)}
+                    >
+                      <Play className="h-4 w-4" />
+                      Resume
+                    </Button>
+                  ) : null}
+                  {canMutate && scope !== "running" ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onStartLatest(preview)}
+                    >
+                      <RotateCw className="h-4 w-4" />
+                      Start latest
+                    </Button>
+                  ) : null}
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
     </>
   );

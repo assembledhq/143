@@ -5,7 +5,7 @@ import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionMessage, SessionReviewComment, SessionThread, SingleResponse, ListResponse } from '@/lib/types';
+import type { Session, SessionMessage, SessionReviewComment, SessionThread, SingleResponse, ListResponse, User } from '@/lib/types';
 import {
   installSessionDetailPageTestHooks,
   changeFieldValue,
@@ -94,6 +94,114 @@ describe('SessionDetailPage review mode and mobile diff', () => {
     await user.hover(toggleButton.parentElement as HTMLElement);
 
     expect(await screen.findByRole('tooltip', { name: 'File tree required during review' })).toBeInTheDocument();
+  });
+
+  it('opens desktop review mode in full screen when the user saved that diff preference', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            settings: { diff_viewer_full_screen: true },
+          },
+        } satisfies SingleResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+
+    expect(await screen.findByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+  });
+
+  it('persists desktop diff full screen toggles as user settings merge patches', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const settingsPatches: unknown[] = [];
+
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
+    server.use(
+      http.patch('/api/v1/auth/me/settings', async ({ request }) => {
+        const body = await request.json() as NonNullable<User['settings']>;
+        settingsPatches.push(body);
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            settings: body,
+          },
+        } satisfies SingleResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    await user.click(await screen.findByRole('button', { name: 'Enter full screen' }));
+
+    await waitFor(() => {
+      expect(settingsPatches).toEqual([{ diff_viewer_full_screen: true }]);
+    });
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+  });
+
+  it('persists exiting desktop diff full screen with Escape', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const settingsPatches: unknown[] = [];
+
+    mockSessionDetailWithLazyDiff(sessionWithDiff);
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            settings: { diff_viewer_full_screen: true },
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.patch('/api/v1/auth/me/settings', async ({ request }) => {
+        const body = await request.json() as NonNullable<User['settings']>;
+        settingsPatches.push(body);
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            settings: body,
+          },
+        } satisfies SingleResponse<User>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    expect(await screen.findByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(settingsPatches).toEqual([{ diff_viewer_full_screen: false }]);
+    });
+    expect(screen.getByRole('button', { name: 'Enter full screen' })).toBeInTheDocument();
   });
 
   it('opens the mobile diff view immediately when the chat files-changed summary is clicked', async () => {

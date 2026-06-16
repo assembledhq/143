@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
 )
@@ -24,7 +25,8 @@ import (
 // It uses TxStarter because stop operations need transactional consistency
 // (stop preview + revoke all access sessions atomically).
 type PreviewStore struct {
-	db TxStarter
+	db     TxStarter
+	logger zerolog.Logger
 }
 
 // PreviewHealthSample is a platform-wide preview lifecycle snapshot for ops
@@ -40,7 +42,12 @@ type PreviewHealthSample struct {
 
 // NewPreviewStore creates a new PreviewStore.
 func NewPreviewStore(db TxStarter) *PreviewStore {
-	return &PreviewStore{db: db}
+	return &PreviewStore{db: db, logger: zerolog.Nop()}
+}
+
+// lint:allow-no-orgid reason="logger configuration helper reads no tenant data"
+func (s *PreviewStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
 }
 
 // Configured reports whether the store has a backing database handle.
@@ -58,7 +65,7 @@ func (s *PreviewStore) Begin(ctx context.Context) (pgx.Tx, error) {
 // WithTx returns a new PreviewStore that uses the given transaction.
 // lint:allow-no-orgid reason="transaction helper; org scoping is enforced by the wrapped queries"
 func (s *PreviewStore) WithTx(tx pgx.Tx) *PreviewStore {
-	return &PreviewStore{db: tx}
+	return &PreviewStore{db: tx, logger: s.logger}
 }
 
 // activeStatusFilter is the SQL IN clause for active preview statuses.
@@ -1361,7 +1368,13 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 	}
 	rows := tag.RowsAffected()
 	if rows > 0 {
-		_ = s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status)
+		if err := s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("preview_id", id.String()).
+				Str("status", string(status)).
+				Msg("failed to sync preview group status")
+		}
 	}
 	return rows, nil
 }
@@ -1428,7 +1441,13 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	}
 	rows := tag.RowsAffected()
 	if rows > 0 {
-		_ = s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status)
+		if err := s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("preview_id", id.String()).
+				Str("status", string(status)).
+				Msg("failed to sync preview group status")
+		}
 	}
 	return rows, nil
 }

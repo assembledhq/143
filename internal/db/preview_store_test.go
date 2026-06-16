@@ -659,11 +659,13 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 		name      string
 		rows      int64
 		execErr   error
+		syncErr   error
 		expectErr bool
 	}{
 		{name: "updates successfully", rows: 1},
 		{name: "not found returns error", rows: 0, expectErr: true},
 		{name: "update error returns error", execErr: errors.New("db down"), expectErr: true},
+		{name: "group sync error is best effort", rows: 1, syncErr: errors.New("group sync failed")},
 	}
 
 	for _, tt := range tests {
@@ -671,7 +673,7 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 			t.Parallel()
 
 			mock, err := pgxmock.NewPool()
-			require.NoError(t, err)
+			require.NoError(t, err, "pgxmock pool should be created")
 			defer mock.Close()
 
 			store := NewPreviewStore(mock)
@@ -680,14 +682,20 @@ func TestPreviewStore_UpdatePreviewStatus(t *testing.T) {
 				WithArgs(previewAnyArgs(5)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
+			if tt.rows > 0 && tt.execErr == nil {
+				mock.ExpectExec("UPDATE preview_groups pg").
+					WithArgs(previewAnyArgs(3)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1)).
+					WillReturnError(tt.syncErr)
+			}
 
 			err = store.UpdatePreviewStatus(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
 			if tt.expectErr {
-				require.Error(t, err)
+				require.Error(t, err, "UpdatePreviewStatus should return expected errors")
 			} else {
-				require.NoError(t, err)
+				require.NoError(t, err, "UpdatePreviewStatus should update preview status")
 			}
-			require.NoError(t, mock.ExpectationsWereMet())
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }
@@ -1171,7 +1179,7 @@ func TestPreviewStore_CountPreviewCurrentIndexScopes_OrgFilterApplied(t *testing
 	orgID := uuid.New()
 
 	// The query should include org_id as a parameter; pgxmock verifies the arg count.
-	mock.ExpectQuery("SELECT[\\s\\S]+COUNT\\(\\*\\) FILTER").
+	mock.ExpectQuery("SELECT[\\s\\S]+COUNT\\(\\*\\) FILTER[\\s\\S]+latest\\.base_commit_sha <> pg\\.latest_commit_sha[\\s\\S]+AS attention").
 		WithArgs(previewAnyArgs(4)...).
 		WillReturnRows(pgxmock.NewRows([]string{"running", "resumable", "attention", "recent"}).AddRow(2, 1, 0, 3))
 
@@ -1182,6 +1190,14 @@ func TestPreviewStore_CountPreviewCurrentIndexScopes_OrgFilterApplied(t *testing
 	require.Equal(t, 0, counts["attention"], "should return attention count")
 	require.Equal(t, 3, counts["recent"], "should return recent count")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations including org_id param should be met")
+}
+
+func TestPreviewCurrentScopePredicate_AttentionIncludesOutdatedFreshness(t *testing.T) {
+	t.Parallel()
+
+	predicate := previewCurrentScopePredicate("attention")
+
+	require.Contains(t, predicate, "latest.base_commit_sha <> pg.latest_commit_sha", "attention scope should include running previews behind the latest known branch head")
 }
 
 func TestPreviewStore_ListPreviewCurrentIndex_AttentionScopeFilters(t *testing.T) {
@@ -1573,12 +1589,14 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_NonTerminal(t *testing.T) {
 		name      string
 		rows      int64
 		execErr   error
+		syncErr   error
 		expected  bool
 		expectErr bool
 	}{
 		{name: "updates active preview", rows: 1, expected: true},
 		{name: "already terminal returns false", rows: 0, expected: false},
 		{name: "update error returns error", execErr: errors.New("db down"), expectErr: true},
+		{name: "group sync error is best effort", rows: 1, syncErr: errors.New("group sync failed"), expected: true},
 	}
 
 	for _, tt := range tests {
@@ -1595,11 +1613,17 @@ func TestPreviewStore_UpdatePreviewStatusIfActive_NonTerminal(t *testing.T) {
 				WithArgs(previewAnyArgs(5)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows)).
 				WillReturnError(tt.execErr)
+			if tt.rows > 0 && tt.execErr == nil {
+				mock.ExpectExec("UPDATE preview_groups pg").
+					WithArgs(previewAnyArgs(3)...).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1)).
+					WillReturnError(tt.syncErr)
+			}
 
 			updated, err := store.UpdatePreviewStatusIfActive(context.Background(), uuid.New(), uuid.New(), models.PreviewStatusReady, "")
 			if tt.expectErr {
 				require.Error(t, err, "conditional non-terminal update should return database errors")
-				require.False(t, updated, "conditional non-terminal update should not report updates on error")
+				require.False(t, updated, "conditional non-terminal update should not report success on error")
 			} else {
 				require.NoError(t, err, "conditional non-terminal update should not error")
 				require.Equal(t, tt.expected, updated, "conditional non-terminal update should report whether the row changed")

@@ -213,7 +213,7 @@ func (s *PreviewStore) UpsertPreviewGroupStatus(ctx context.Context, orgID uuid.
 }
 
 func (s *PreviewStore) syncPreviewGroupStatusForPreview(ctx context.Context, orgID, previewID uuid.UUID, status models.PreviewStatus) error {
-	tag, err := s.db.Exec(ctx, `
+	_, err := s.db.Exec(ctx, `
 		UPDATE preview_groups pg
 		SET current_status = @status, last_activity_at = now()
 		FROM preview_targets target
@@ -227,7 +227,6 @@ func (s *PreviewStore) syncPreviewGroupStatusForPreview(ctx context.Context, org
 	if err != nil {
 		return fmt.Errorf("sync preview group status for preview: %w", err)
 	}
-	_ = tag
 	return nil
 }
 
@@ -372,15 +371,15 @@ func (s *PreviewStore) ListPreviewCurrentIndex(ctx context.Context, orgID uuid.U
 }
 
 func (s *PreviewStore) CountPreviewCurrentIndexScopes(ctx context.Context, orgID uuid.UUID, filters PreviewCurrentIndexFilters) (map[string]int, error) {
-	rows, err := s.db.Query(ctx, `
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT
 			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) IN ('starting', 'ready', 'partially_ready', 'unhealthy', 'recycling'))::int AS running,
 			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) = 'warm')::int AS resumable,
-			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) IN ('failed', 'unavailable', 'blocked', 'capacity_blocked', 'config_invalid', 'outdated') OR pg.latest_commit_sha = '')::int AS attention,
+			COUNT(*) FILTER (WHERE %s)::int AS attention,
 			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) IN ('stopped', 'expired', 'failed', 'unavailable') AND pg.last_activity_at >= now() - interval '7 days')::int AS recent
 		FROM preview_groups pg
 		LEFT JOIN LATERAL (
-			SELECT status::text
+			SELECT status::text, base_commit_sha
 			FROM preview_instances
 			WHERE org_id = pg.org_id AND preview_target_id = pg.current_target_id
 			ORDER BY created_at DESC
@@ -389,7 +388,7 @@ func (s *PreviewStore) CountPreviewCurrentIndexScopes(ctx context.Context, orgID
 		WHERE pg.org_id = @org_id
 		  AND (@repository_id::uuid IS NULL OR pg.repository_id = @repository_id)
 		  AND (@pinned::boolean IS NULL OR pg.pinned = @pinned)
-		  AND (@q = '' OR pg.branch ILIKE '%' || @q || '%' OR pg.source_id ILIKE '%' || @q || '%')`,
+		  AND (@q = '' OR pg.branch ILIKE '%%' || @q || '%%' OR pg.source_id ILIKE '%%' || @q || '%%')`, previewCurrentAttentionPredicate()),
 		pgx.NamedArgs{
 			"org_id":        orgID,
 			"repository_id": filters.RepositoryID,
@@ -489,12 +488,23 @@ func previewCurrentScopePredicate(scope string) string {
 	case "resumable":
 		return "COALESCE(latest.status, pg.current_status) = 'warm'"
 	case "attention":
-		return "(COALESCE(latest.status, pg.current_status) IN ('failed', 'unavailable', 'blocked', 'capacity_blocked', 'config_invalid', 'outdated') OR pg.latest_commit_sha = '')"
+		return previewCurrentAttentionPredicate()
 	case "recent":
 		return "COALESCE(latest.status, pg.current_status) IN ('stopped', 'expired', 'failed', 'unavailable') AND pg.last_activity_at >= now() - interval '7 days'"
 	default:
 		return "TRUE"
 	}
+}
+
+func previewCurrentAttentionPredicate() string {
+	return `(COALESCE(latest.status, pg.current_status) IN ('failed', 'unavailable', 'blocked', 'capacity_blocked', 'config_invalid', 'outdated')
+		OR pg.latest_commit_sha = ''
+		OR (
+			pg.pinned = false
+			AND pg.latest_commit_sha <> ''
+			AND COALESCE(latest.base_commit_sha, '') <> ''
+			AND latest.base_commit_sha <> pg.latest_commit_sha
+		))`
 }
 
 func previewCurrentSummaryQuery(extraPredicate, suffix string) string {

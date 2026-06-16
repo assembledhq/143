@@ -1745,17 +1745,16 @@ func (h *BranchPreviewHandler) CurrentHistory(w http.ResponseWriter, r *http.Req
 }
 
 func (h *BranchPreviewHandler) StartLatestCurrent(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.OrgIDFromContext(r.Context())
-	h.startCurrent(w, r, false)
+	orgID := middleware.OrgIDFromContext(r.Context())
+	h.startCurrent(w, r, orgID, false)
 }
 
 func (h *BranchPreviewHandler) RestartCurrent(w http.ResponseWriter, r *http.Request) {
-	_ = middleware.OrgIDFromContext(r.Context())
-	h.startCurrent(w, r, true)
+	orgID := middleware.OrgIDFromContext(r.Context())
+	h.startCurrent(w, r, orgID, true)
 }
 
-func (h *BranchPreviewHandler) startCurrent(w http.ResponseWriter, r *http.Request, restart bool) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+func (h *BranchPreviewHandler) startCurrent(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, restart bool) {
 	user := middleware.UserFromContext(r.Context())
 	userID, ok := previewRequestUserID(r.Context(), user)
 	if !ok {

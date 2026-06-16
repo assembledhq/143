@@ -496,6 +496,37 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not render unsafe external preview or source URLs as links", async () => {
+    installPreviewHandlers({
+      running: [
+        preview({
+          preview_group_id: "unsafe-group",
+          branch: "feature/unsafe-url",
+          source_type: "api",
+          source_url: "javascript:alert(1)",
+          preview_url: "javascript:alert(2)",
+        }),
+      ],
+    });
+
+    renderWithProviders(<PreviewsPage />);
+
+    const runningSection = await screen.findByRole("region", {
+      name: /running/i,
+    });
+    expect(
+      within(runningSection).queryByRole("link", { name: /open/i }),
+    ).not.toBeInTheDocument();
+    const unsafeLinks = within(runningSection)
+      .queryAllByRole("link")
+      .filter((link) =>
+        (link as HTMLAnchorElement)
+          .getAttribute("href")
+          ?.startsWith("javascript:"),
+      );
+    expect(unsafeLinks).toHaveLength(0);
+  });
+
   it("renders Pinned indicator in row subtitle for pinned previews", async () => {
     installPreviewHandlers({
       running: [
