@@ -11,13 +11,16 @@ import (
 )
 
 const (
-	defaultDatabaseURL = "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable"
-	defaultTimeout     = 60 * time.Second
-	pollInterval       = time.Second
+	defaultTimeout = 60 * time.Second
+	pollInterval   = time.Second
 )
 
 func main() {
-	dbURL := databaseURLFromEnv()
+	dbURL, err := databaseURLFromEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 	timeout, err := timeoutFromEnv()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid WAIT_POSTGRES_TIMEOUT: %v\n", err)
@@ -30,15 +33,15 @@ func main() {
 	fmt.Println("Postgres is ready.")
 }
 
-func databaseURLFromEnv() string {
+func databaseURLFromEnv() (string, error) {
 	return databaseURLFromLookup(os.Getenv)
 }
 
-func databaseURLFromLookup(getenv func(string) string) string {
+func databaseURLFromLookup(getenv func(string) string) (string, error) {
 	if dbURL := getenv("DATABASE_URL"); dbURL != "" {
-		return dbURL
+		return dbURL, nil
 	}
-	return defaultDatabaseURL
+	return "", errors.New("DATABASE_URL is required")
 }
 
 func timeoutFromEnv() (time.Duration, error) {
