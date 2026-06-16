@@ -2,7 +2,7 @@
 
 > **Status:** Implemented | **Last reviewed:** 2026-06-16
 >
-> **Builds on:** [../future/101-slackbot-implementation-plan.md](../future/101-slackbot-implementation-plan.md)
+> **Builds on:** [101-slackbot-implementation-plan.md](101-slackbot-implementation-plan.md)
 
 Slack callbacks use the shared webhook-ingress durability pattern: verify the
 external request, resolve it to an org installation, durably record the generic
