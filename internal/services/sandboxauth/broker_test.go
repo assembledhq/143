@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -155,29 +154,6 @@ func TestBroker_ReleaseUnknownHolderDoesNotCloseActiveSocket(t *testing.T) {
 	require.NoError(t, broker.Release(context.Background(), orgID, sessionID, holder), "known holder release should close the socket")
 }
 
-func TestBroker_SweepPreservesActiveLeases(t *testing.T) {
-	t.Parallel()
-
-	broker, orgID, sessionID, _, _ := newBrokerTestDeps(t)
-	holder := uuid.New()
-	socketPath, err := broker.Acquire(context.Background(), orgID, sessionID, holder)
-	require.NoError(t, err, "acquire should open a sandbox auth listener")
-
-	socketDir := filepath.Dir(filepath.Dir(socketPath))
-	staleSessionID := uuid.New()
-	staleDir := filepath.Join(socketDir, staleSessionID.String())
-	require.NoError(t, os.MkdirAll(staleDir, 0o750), "test should create a stale session dir")
-	require.NoError(t, os.WriteFile(filepath.Join(staleDir, SocketFileName), []byte("stale"), 0o600), "test should create a stale socket artifact")
-
-	broker.SweepStaleSessionDirs(map[uuid.UUID]struct{}{})
-
-	_, err = os.Stat(filepath.Dir(socketPath))
-	require.NoError(t, err, "sweep should preserve active broker session dirs even when keep is empty")
-	_, err = os.Stat(staleDir)
-	require.True(t, errors.Is(err, os.ErrNotExist), "sweep should remove unleased stale session dirs")
-	require.NoError(t, broker.Release(context.Background(), orgID, sessionID, holder), "release should close the active socket after sweep")
-}
-
 type countingBrokerServer struct {
 	mu          sync.Mutex
 	listenCalls int
@@ -200,8 +176,6 @@ func (s *countingBrokerServer) Close(uuid.UUID) {
 }
 
 func (s *countingBrokerServer) Shutdown() {}
-
-func (s *countingBrokerServer) SweepStaleSessionDirs(map[uuid.UUID]struct{}) {}
 
 func (s *countingBrokerServer) counts() (int, int) {
 	s.mu.Lock()

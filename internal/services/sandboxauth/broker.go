@@ -15,7 +15,6 @@ type brokerSocketServer interface {
 	Listen(ctx context.Context, sessionID uuid.UUID, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (socketPath string, err error)
 	Close(sessionID uuid.UUID)
 	Shutdown()
-	SweepStaleSessionDirs(keep map[uuid.UUID]struct{})
 }
 
 type BrokerSessionStore interface {
@@ -252,22 +251,6 @@ func (b *Broker) Shutdown() {
 	b.active = make(map[uuid.UUID]*brokerEntry)
 	b.mu.Unlock()
 	b.server.Shutdown()
-}
-
-func (b *Broker) SweepStaleSessionDirs(keep map[uuid.UUID]struct{}) {
-	if b == nil || b.server == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	merged := make(map[uuid.UUID]struct{}, len(keep)+len(b.active))
-	for id := range keep {
-		merged[id] = struct{}{}
-	}
-	for id := range b.active {
-		merged[id] = struct{}{}
-	}
-	b.server.SweepStaleSessionDirs(merged)
 }
 
 func (b *Broker) attachExisting(orgID, sessionID, holderID uuid.UUID) (string, bool, error) {
