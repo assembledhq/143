@@ -230,10 +230,13 @@ export function DiffToolbar({
           )}
           {/* View mode toggle */}
           <div className="flex items-center rounded-md border border-border bg-muted/30">
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => onViewModeChange("unified")}
               className={cn(
-                "flex items-center gap-1 px-2 py-1 text-xs rounded-l-md transition-colors",
+                "h-auto rounded-l-md rounded-r-none px-2 py-1 text-xs",
                 viewMode === "unified"
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
@@ -241,11 +244,14 @@ export function DiffToolbar({
             >
               <Rows3 className="h-3 w-3" />
               Unified
-            </button>
-            <button
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => onViewModeChange("split")}
               className={cn(
-                "flex items-center gap-1 px-2 py-1 text-xs rounded-r-md transition-colors",
+                "h-auto rounded-l-none rounded-r-md px-2 py-1 text-xs",
                 viewMode === "split"
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
@@ -253,7 +259,7 @@ export function DiffToolbar({
             >
               <Columns2 className="h-3 w-3" />
               Split
-            </button>
+            </Button>
           </div>
 
           {onToggleFullScreen && (
@@ -302,12 +308,16 @@ export function DiffToolbar({
             className="h-8 flex-1 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
           />
           {searchQuery && (
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => onSearchChange("")}
-              className="text-muted-foreground hover:text-foreground"
+              className="h-8 w-8 px-0 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
             >
               <X className="h-3 w-3" />
-            </button>
+            </Button>
           )}
         </div>
       )}
