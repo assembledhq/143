@@ -412,12 +412,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		event     models.AutomationGitHubEvent
-		withPR    bool
-		run       func(*testing.T, *PRService, uuid.UUID, int64, string)
-		wantActor string
-		wantBody  string
+		name            string
+		event           models.AutomationGitHubEvent
+		withPR          bool
+		run             func(*testing.T, *PRService, uuid.UUID, int64, string)
+		wantActor       string
+		wantBody        string
+		wantEventID     string
+		wantGroupID     string
+		wantBaseBranch  string
 	}{
 		{
 			name:   "pull request opened",
@@ -434,8 +437,100 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.PR.Body = "Please review"
 				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "opened PR webhook should not fail")
 			},
-			wantActor: "octocat",
-			wantBody:  "Add checkout\n\nPlease review",
+			wantActor:   "octocat",
+			wantBody:    "Add checkout\n\nPlease review",
+			wantEventID: "pull_request:opened:42",
+		},
+		{
+			name:   "pull request updated",
+			event:  models.AutomationGitHubEventPullRequestUpdated,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestEvent{Action: "synchronize", Number: 42, OwnerOrgID: &orgID}
+				event.Sender.Login = "octocat"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PR.Title = "Add checkout"
+				event.PR.Body = "New commits"
+				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "updated PR webhook should not fail")
+			},
+			wantActor:   "octocat",
+			wantBody:    "Add checkout\n\nNew commits",
+			wantEventID: "pull_request:synchronize:42",
+		},
+		{
+			name:   "pull request merged",
+			event:  models.AutomationGitHubEventPullRequestMerged,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				event := PullRequestEvent{Action: "closed", Number: 42, OwnerOrgID: &orgID}
+				event.Sender.Login = "octocat"
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.PR.Merged = true
+				event.PR.HTMLURL = "https://github.com/acme/app/pull/42"
+				event.PR.Title = "Add checkout"
+				event.PR.Body = "Merged"
+				require.NoError(t, svc.HandlePullRequestEvent(context.Background(), event), "merged PR webhook should not fail")
+			},
+			wantActor:   "octocat",
+			wantBody:    "Add checkout\n\nMerged",
+			wantEventID: "pull_request:closed:42",
+		},
+		{
+			name:   "check suite completed",
+			event:  models.AutomationGitHubEventCheckSuiteCompleted,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				conclusion := "success"
+				event := CheckSuiteEvent{Action: "completed", OwnerOrgID: &orgID}
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.CheckSuite.Conclusion = &conclusion
+				event.CheckSuite.PullRequests = append(event.CheckSuite.PullRequests, struct {
+					Number int `json:"number"`
+					Base   struct {
+						Ref string `json:"ref"`
+					} `json:"base"`
+				}{Number: 42, Base: struct {
+					Ref string `json:"ref"`
+				}{Ref: "main"}})
+				require.NoError(t, svc.HandleCheckSuiteEvent(context.Background(), event), "check suite webhook should not fail")
+			},
+			wantActor:      "github",
+			wantBody:       "Checks completed: success",
+			wantBaseBranch: "main",
+		},
+		{
+			name:   "check run completed",
+			event:  models.AutomationGitHubEventCheckRunCompleted,
+			withPR: true,
+			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
+				t.Helper()
+				conclusion := "failure"
+				event := CheckRunEvent{Action: "completed", OwnerOrgID: &orgID}
+				event.Repository.ID = githubRepoID
+				event.Repository.FullName = fullName
+				event.CheckRun.ID = 777
+				event.CheckRun.Conclusion = &conclusion
+				event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, struct {
+					Number int `json:"number"`
+					Base   struct {
+						Ref string `json:"ref"`
+					} `json:"base"`
+				}{Number: 42, Base: struct {
+					Ref string `json:"ref"`
+				}{Ref: "release"}})
+				require.NoError(t, svc.HandleCheckRunEvent(context.Background(), event), "check run webhook should not fail")
+			},
+			wantActor:      "github",
+			wantBody:       "Check run completed: failure",
+			wantEventID:    "check_run:777",
+			wantBaseBranch: "release",
 		},
 		{
 			name:  "issue comment on pull request",
@@ -448,11 +543,13 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.Repository.FullName = fullName
 				event.Issue.Number = 42
 				event.Issue.PullRequest = &struct{}{}
+				event.Comment.ID = 901
 				event.Comment.Body = "Can you handle this?"
 				require.NoError(t, svc.HandleIssueCommentEvent(context.Background(), event), "PR issue_comment webhook should not fail")
 			},
-			wantActor: "commenter",
-			wantBody:  "Can you handle this?",
+			wantActor:   "commenter",
+			wantBody:    "Can you handle this?",
+			wantEventID: "issue_comment:901",
 		},
 		{
 			name:   "pull request review submitted",
@@ -465,12 +562,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PullRequest.Number = 42
+				event.Review.ID = 902
 				event.Review.State = "commented"
 				event.Review.Body = "Looks close"
 				require.NoError(t, svc.HandlePullRequestReviewEvent(context.Background(), event), "review webhook should not fail")
 			},
-			wantActor: "reviewer",
-			wantBody:  "Looks close",
+			wantActor:   "reviewer",
+			wantBody:    "Looks close",
+			wantEventID: "review:902",
+			wantGroupID: "review:902",
 		},
 		{
 			name:   "inline pull request review comment",
@@ -483,11 +583,16 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.PullRequest.Number = 42
+				event.Comment.ID = 903
+				event.Comment.PullRequestReviewID = 902
+				event.Comment.Path = "src/app.ts"
 				event.Comment.Body = "Please adjust this line"
 				require.NoError(t, svc.HandlePullRequestReviewCommentEvent(context.Background(), event), "review comment webhook should not fail")
 			},
-			wantActor: "inline-reviewer",
-			wantBody:  "Please adjust this line",
+			wantActor:   "inline-reviewer",
+			wantBody:    "Please adjust this line",
+			wantEventID: "review_comment:903",
+			wantGroupID: "review:902",
 		},
 	}
 
@@ -524,6 +629,9 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			require.Equal(t, 42, triggerer.calls[0].PullRequestNumber, "automation trigger should include PR number")
 			require.Equal(t, tt.wantActor, triggerer.calls[0].Actor, "automation trigger should include GitHub actor")
 			require.Equal(t, tt.wantBody, triggerer.calls[0].Body, "automation trigger should include event text")
+			require.Equal(t, tt.wantEventID, triggerer.calls[0].EventID, "automation trigger should include expected event id")
+			require.Equal(t, tt.wantGroupID, triggerer.calls[0].DedupeGroupID, "automation trigger should include expected dedupe group id")
+			require.Equal(t, tt.wantBaseBranch, triggerer.calls[0].BaseBranch, "automation trigger should include base branch from check event payload")
 			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
 			require.NoError(t, prMock.ExpectationsWereMet(), "pull request expectations should be met")
 		})
@@ -2113,9 +2221,12 @@ func TestHandleCheckSuiteEvent_Success(t *testing.T) {
 	conclusion := "success"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
-	event.CheckSuite.PullRequests = []struct {
+	event.CheckSuite.PullRequests = append(event.CheckSuite.PullRequests, struct {
 		Number int `json:"number"`
-	}{{Number: 42}}
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 42})
 	event.Repository.FullName = "testorg/testrepo"
 
 	err := svc.HandleCheckSuiteEvent(context.Background(), event)
@@ -2155,9 +2266,12 @@ func TestHandleCheckSuiteEvent_Failure(t *testing.T) {
 	conclusion := "failure"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
-	event.CheckSuite.PullRequests = []struct {
+	event.CheckSuite.PullRequests = append(event.CheckSuite.PullRequests, struct {
 		Number int `json:"number"`
-	}{{Number: 42}}
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 42})
 	event.Repository.FullName = "testorg/testrepo"
 
 	err := svc.HandleCheckSuiteEvent(context.Background(), event)
@@ -2200,9 +2314,12 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	event := CheckRunEvent{Action: "completed"}
 	event.Repository.FullName = "testorg/testrepo"
-	event.CheckRun.PullRequests = []struct {
+	event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, struct {
 		Number int `json:"number"`
-	}{{Number: 42}}
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 42})
 
 	err := svc.HandleCheckRunEvent(context.Background(), event)
 	require.NoError(t, err, "HandleCheckRunEvent should enqueue a health sync for completed check runs")
@@ -2229,9 +2346,12 @@ func TestHandleCheckSuiteEvent_PRNotFound(t *testing.T) {
 	conclusion := "success"
 	event := CheckSuiteEvent{Action: "completed"}
 	event.CheckSuite.Conclusion = &conclusion
-	event.CheckSuite.PullRequests = []struct {
+	event.CheckSuite.PullRequests = append(event.CheckSuite.PullRequests, struct {
 		Number int `json:"number"`
-	}{{Number: 99}}
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 99})
 	event.Repository.FullName = "testorg/testrepo"
 
 	err := svc.HandleCheckSuiteEvent(context.Background(), event)
