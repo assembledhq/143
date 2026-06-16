@@ -134,9 +134,6 @@ func (f *fakeInternalThreadService) RevertThread(context.Context, uuid.UUID, uui
 func (f *fakeInternalThreadService) GetTranscriptWindow(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, db.SessionTranscriptWindowOptions) (thread.TranscriptWindowResult, error) {
 	panic("not implemented")
 }
-func (f *fakeInternalThreadService) SearchTranscript(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, db.SessionTranscriptSearchOptions) (thread.TranscriptSearchResult, error) {
-	panic("not implemented")
-}
 
 func TestInternalSessionTabsHandler_List(t *testing.T) {
 	t.Parallel()
