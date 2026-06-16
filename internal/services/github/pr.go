@@ -326,6 +326,11 @@ const (
 	// and this error fires when even the lease check fails (a true concurrent
 	// write between ls-remote and push).
 	PushRejectedPRMessage = "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session."
+	// SandboxAuthUnavailablePRMessage is shown when 143 cannot prepare the
+	// sandbox credential socket needed for git push. Keep it distinct from the
+	// GitHub permissions fallback because these failures are often runtime or
+	// auth-broker setup issues rather than user/repo access problems.
+	SandboxAuthUnavailablePRMessage = "143 could not prepare GitHub credentials for this push."
 )
 
 // WaitForPostPRSnapshotUploads blocks until every in-flight post-PR snapshot
@@ -378,6 +383,11 @@ var ErrNoChanges = errors.New("no changes to push")
 // failures so the worker can surface a targeted user-facing message instead
 // of the catch-all "Check GitHub access or repo permissions" fallback.
 var ErrPushRejected = errors.New("git push rejected by remote")
+
+// ErrSandboxAuthUnavailable is returned when the host cannot prepare the
+// sandbox credential socket used by git-credential. This is a 143 runtime/auth
+// setup issue, not proof that the user lacks GitHub repository access.
+var ErrSandboxAuthUnavailable = errors.New("sandbox auth unavailable")
 
 // identityResolver returns a resolver wired with the PRService's current
 // dependencies. Lazily built on first use and cached; any Set* mutator
@@ -1147,10 +1157,10 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // or URL. The sandbox snapshot already has
 // `credential.helper=!143-tools git-credential` baked into .git/config (set by
 // git-bootstrap during the original agent run); we open a fresh listener
-// keyed by a per-push UUID and bind-mount it into the container so the helper
-// resolves to a live token. Using a per-push UUID (rather than the session
-// ID) avoids kicking the agent run's listener — important when a preview
-// hold is keeping the agent's container alive across turns.
+// lease and bind-mount it into the container so the helper resolves to a live
+// token. The sandbox auth API is keyed by session ID; the lease client
+// generates holder IDs internally so concurrent session users do not close
+// each other's listener.
 //
 // pushResult captures what pushSessionBranch produced on a successful push:
 // the new HEAD SHA from the remote (parsed from the script's stdout sentinel),
@@ -1174,7 +1184,7 @@ func (s *PRService) pushSessionBranch(
 	snapshotKey, branchName, commitMsg, authorName, authorEmail string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
-		return nil, fmt.Errorf("PRService: sandbox auth socket not configured")
+		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
 	}
 
 	cfg := agent.DefaultSandboxConfig()
@@ -1190,15 +1200,13 @@ func (s *PRService) pushSessionBranch(
 		cfg.WorkDir = fmt.Sprintf("%s/%s", cfg.HomeDir, slug)
 	}
 
-	// Open a per-push credential listener. Keyed by a fresh UUID so it can't
-	// collide with the agent run's listener (still active when a preview is
-	// holding the original container alive across turns).
-	pushID := uuid.New()
-	socketPath, err := s.sandboxAuth.Listen(ctx, pushID, run, repo, orgSettings)
+	// Open a credential listener lease for this session. The lease-backed auth
+	// server keeps this independent from any still-active agent listener.
+	socketPath, err := s.sandboxAuth.Listen(ctx, run.ID, run, repo, orgSettings)
 	if err != nil {
-		return nil, fmt.Errorf("open sandbox auth socket: %w", err)
+		return nil, fmt.Errorf("%w: open sandbox auth socket: %w", ErrSandboxAuthUnavailable, err)
 	}
-	defer s.sandboxAuth.Close(pushID)
+	defer s.sandboxAuth.Close(run.ID)
 	cfg.AuthSocketPath = socketPath
 	cfg.Env[sandboxauth.SocketEnvVar] = sandboxauth.SandboxSocketPath
 	// GitNameEnvVar / GitEmailEnvVar are intentionally NOT set: those are
