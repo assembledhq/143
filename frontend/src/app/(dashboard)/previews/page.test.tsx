@@ -9,7 +9,7 @@ import {
 } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import PreviewsPage from "./page";
-import type { BranchPreviewResponse, PreviewListMeta } from "@/lib/types";
+import type { PreviewCurrentResponse, PreviewListMeta } from "@/lib/types";
 
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
@@ -50,38 +50,48 @@ const repositories = [
 ];
 
 const meta: PreviewListMeta = {
-  counts: { running: 1, resumable: 1, recent: 1 },
+  counts: { running: 1, resumable: 1, attention: 0, recent: 1 },
   pool: { user_active: 1, user_max: 4, auto_active: 2, auto_max: 6 },
 };
 
 function preview(
-  overrides: Partial<BranchPreviewResponse>,
-): BranchPreviewResponse {
+  overrides: Partial<PreviewCurrentResponse>,
+): PreviewCurrentResponse {
   return {
-    target_id: "target-1",
-    preview_id: "preview-1",
+    preview_group_id: "group-1",
+    current_target_id: "target-1",
+    current_preview_id: "preview-1",
     repository_id: "repo-1",
     repository_full_name: "assembledhq/143",
+    group_kind: "branch",
     branch: "feature/checkout",
-    commit_sha: "0123456789abcdef",
+    latest_commit_sha: "0123456789abcdef",
+    running_commit_sha: "0123456789abcdef",
     source_type: "manual",
     status: "ready",
+    freshness: "current",
     stable_url: "https://app.143.dev/previews/target-1",
     preview_url: "https://preview.143.dev",
+    pinned: false,
     created_at: "2026-06-10T12:00:00Z",
+    last_activity_at: "2026-06-10T12:00:00Z",
+    attempt_count: 1,
+    target_count: 1,
+    resumable: false,
+    launch: { action: "open", primary_label: "Open" },
     ...overrides,
   };
 }
 
 function installPreviewHandlers(
-  byScope: Record<string, BranchPreviewResponse[]>,
+  byScope: Record<string, PreviewCurrentResponse[]>,
   requests: string[] = [],
 ) {
   server.use(
     http.get("*/api/v1/repositories", () =>
       HttpResponse.json({ data: repositories, meta: {} }),
     ),
-    http.get("*/api/v1/previews", ({ request }) => {
+    http.get("*/api/v1/previews/current", ({ request }) => {
       const url = new URL(request.url);
       const scope = url.searchParams.get("scope") ?? "recent";
       requests.push(url.search);
@@ -126,23 +136,29 @@ describe("PreviewsPage", () => {
     installPreviewHandlers({
       running: [
         preview({
-          target_id: "running-target",
-          preview_id: "running-preview",
+          preview_group_id: "running-group",
+          current_target_id: "running-target",
+          current_preview_id: "running-preview",
           branch: "feature/live-preview",
           source_type: "pull_request",
+          group_kind: "pull_request",
+          pull_request_number: 42,
           source_id: "assembledhq/143#42",
           source_url: "https://github.com/assembledhq/143/pull/42",
         }),
       ],
       resumable: [
         preview({
-          target_id: "warm-target",
-          preview_id: "warm-preview",
+          preview_group_id: "warm-group",
+          current_target_id: "warm-target",
+          current_preview_id: "warm-preview",
           repository_id: "repo-2",
           repository_full_name: "assembledhq/docs",
           branch: "feature/warm-link",
           status: "stopped",
           source_type: "pull_request",
+          group_kind: "pull_request",
+          pull_request_number: 17,
           source_id: "assembledhq/docs#17",
           stopped_reason: "warm_policy",
           resumable: true,
@@ -152,8 +168,9 @@ describe("PreviewsPage", () => {
       ],
       recent: [
         preview({
-          target_id: "recent-target",
-          preview_id: "recent-preview",
+          preview_group_id: "recent-group",
+          current_target_id: "recent-target",
+          current_preview_id: "recent-preview",
           branch: "fix/startup-error",
           status: "failed",
           stopped_reason: "error",
@@ -168,7 +185,7 @@ describe("PreviewsPage", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "Previews" }),
     ).toBeInTheDocument();
-    expect(await screen.findAllByText("feature/live-preview")).toHaveLength(2);
+    expect(await screen.findAllByText("PR #42 - feature/live-preview")).toHaveLength(2);
     expect(
       screen.getByRole("heading", { level: 2, name: "Running (1)" }),
     ).toBeInTheDocument();
@@ -179,13 +196,13 @@ describe("PreviewsPage", () => {
       screen.getByRole("heading", { level: 2, name: "Recent (1)" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Pool: 3 of 10 previews")).toBeInTheDocument();
-    expect(screen.getAllByText("feature/warm-link")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("PR #17 - feature/warm-link")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Ready")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Failed")[0]).toBeInTheDocument();
     expect(screen.getByText("resumes in ~30s")).toBeInTheDocument();
     expect(screen.getByText("stopped after error")).toBeInTheDocument();
-    expect(screen.getAllByText("assembledhq/docs · PR #17")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("PR #17")[0]).toBeInTheDocument();
   });
 
   it("sends scoped filters and wires stop, resume, and start-latest actions", async () => {
@@ -193,11 +210,12 @@ describe("PreviewsPage", () => {
     const mutationPaths: string[] = [];
     installPreviewHandlers(
       {
-        running: [preview({ target_id: "running-target", preview_id: "running-preview" })],
+        running: [preview({ preview_group_id: "running-group", current_target_id: "running-target", current_preview_id: "running-preview" })],
         resumable: [
           preview({
-            target_id: "warm-target",
-            preview_id: "warm-preview",
+            preview_group_id: "warm-group",
+            current_target_id: "warm-target",
+            current_preview_id: "warm-preview",
             branch: "feature/warm-link",
             status: "stopped",
             preview_url: undefined,
@@ -205,8 +223,9 @@ describe("PreviewsPage", () => {
         ],
         recent: [
           preview({
-            target_id: "recent-target",
-            preview_id: "recent-preview",
+            preview_group_id: "recent-group",
+            current_target_id: "recent-target",
+            current_preview_id: "recent-preview",
             branch: "fix/startup-error",
             status: "failed",
             preview_url: undefined,
@@ -216,15 +235,15 @@ describe("PreviewsPage", () => {
       listRequests,
     );
     server.use(
-      http.post("*/api/v1/previews/:id/stop", ({ request }) => {
+      http.post("*/api/v1/previews/current/:id/stop", ({ request }) => {
         mutationPaths.push(new URL(request.url).pathname);
         return HttpResponse.json({ data: preview({}) });
       }),
-      http.post("*/api/v1/previews/:id/restart", ({ request }) => {
+      http.post("*/api/v1/previews/current/:id/restart", ({ request }) => {
         mutationPaths.push(new URL(request.url).pathname);
         return HttpResponse.json({ data: preview({}) });
       }),
-      http.post("*/api/v1/previews/:id/start-latest", ({ request }) => {
+      http.post("*/api/v1/previews/current/:id/start-latest", ({ request }) => {
         mutationPaths.push(new URL(request.url).pathname);
         return HttpResponse.json({ data: preview({}) });
       }),
@@ -244,6 +263,7 @@ describe("PreviewsPage", () => {
         expect.arrayContaining([
           expect.stringContaining("scope=running"),
           expect.stringContaining("scope=resumable"),
+          expect.stringContaining("scope=attention"),
           expect.stringContaining("scope=recent"),
           expect.stringContaining("repository_id=repo-2"),
           expect.stringContaining("q=warm"),
@@ -260,9 +280,9 @@ describe("PreviewsPage", () => {
     await waitFor(() => {
       expect(mutationPaths).toEqual(
         expect.arrayContaining([
-          "/api/v1/previews/running-preview/stop",
-          "/api/v1/previews/warm-preview/restart",
-          "/api/v1/previews/warm-preview/start-latest",
+          "/api/v1/previews/current/running-group/stop",
+          "/api/v1/previews/current/warm-group/restart",
+          "/api/v1/previews/current/warm-group/start-latest",
         ]),
       );
     });
@@ -305,8 +325,8 @@ describe("PreviewsPage", () => {
         createRequests.push(await request.json());
         return HttpResponse.json({
           data: preview({
-            target_id: "target-created",
-            preview_id: "preview-created",
+            current_target_id: "target-created",
+            current_preview_id: "preview-created",
             repository_id: "repo-1",
             branch: "feature/session-input-branch",
           }),
@@ -352,7 +372,7 @@ describe("PreviewsPage", () => {
       http.get("*/api/v1/repositories", () =>
         HttpResponse.json({ data: repositories, meta: {} }),
       ),
-      http.get("*/api/v1/previews", async () => {
+      http.get("*/api/v1/previews/current", async () => {
         await previewsReleased.promise;
         return HttpResponse.json({ data: [], meta });
       }),
@@ -374,7 +394,7 @@ describe("PreviewsPage", () => {
       http.get("*/api/v1/repositories", () =>
         HttpResponse.json({ data: repositories, meta: {} }),
       ),
-      http.get("*/api/v1/previews", () =>
+      http.get("*/api/v1/previews/current", () =>
         HttpResponse.json(
           {
             error: {
@@ -390,7 +410,7 @@ describe("PreviewsPage", () => {
     renderWithProviders(<PreviewsPage />);
 
     expect(await screen.findAllByText("Failed to load previews.")).toHaveLength(
-      3,
+      4,
     );
     expect(screen.queryByText("No previews yet")).not.toBeInTheDocument();
     expect(screen.queryByText("Loading previews...")).not.toBeInTheDocument();
@@ -412,7 +432,7 @@ describe("PreviewsPage", () => {
       http.get("*/api/v1/repositories", () =>
         HttpResponse.json({ data: repositories, meta: {} }),
       ),
-      http.get("*/api/v1/previews", ({ request }) => {
+      http.get("*/api/v1/previews/current", ({ request }) => {
         const url = new URL(request.url);
         if (failing) {
           failedRequests.push(url.search);
@@ -450,12 +470,121 @@ describe("PreviewsPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("renders Out of date badge and running-vs-head SHA detail for outdated rows", async () => {
+    installPreviewHandlers({
+      attention: [
+        preview({
+          preview_group_id: "outdated-group",
+          branch: "feature/stale",
+          status: "ready",
+          freshness: "outdated",
+          running_commit_sha: "aabb1122",
+          latest_commit_sha: "ccdd3344",
+          preview_url: "https://preview.143.dev",
+        }),
+      ],
+    });
+
+    renderWithProviders(<PreviewsPage />);
+
+    const attentionSection = await screen.findByRole("region", {
+      name: /needs attention/i,
+    });
+    expect(within(attentionSection).getAllByText("Out of date")[0]).toBeInTheDocument();
+    expect(
+      within(attentionSection).getAllByText(/running aabb1122, branch is ccdd3344/)[0],
+    ).toBeInTheDocument();
+  });
+
+  it("does not render unsafe external preview or source URLs as links", async () => {
+    installPreviewHandlers({
+      running: [
+        preview({
+          preview_group_id: "unsafe-group",
+          branch: "feature/unsafe-url",
+          source_type: "api",
+          source_url: "javascript:alert(1)",
+          preview_url: "javascript:alert(2)",
+        }),
+      ],
+    });
+
+    renderWithProviders(<PreviewsPage />);
+
+    const runningSection = await screen.findByRole("region", {
+      name: /running/i,
+    });
+    expect(
+      within(runningSection).queryByRole("link", { name: /open/i }),
+    ).not.toBeInTheDocument();
+    const unsafeLinks = within(runningSection)
+      .queryAllByRole("link")
+      .filter((link) =>
+        (link as HTMLAnchorElement)
+          .getAttribute("href")
+          ?.startsWith("javascript:"),
+      );
+    expect(unsafeLinks).toHaveLength(0);
+  });
+
+  it("renders Pinned indicator in row subtitle for pinned previews", async () => {
+    installPreviewHandlers({
+      running: [
+        preview({
+          preview_group_id: "pinned-group",
+          branch: "feature/pinned-commit",
+          pinned: true,
+          running_commit_sha: "deadbeef",
+        }),
+      ],
+    });
+
+    renderWithProviders(<PreviewsPage />);
+
+    const runningSection = await screen.findByRole("region", {
+      name: /running/i,
+    });
+    expect(
+      within(runningSection).getAllByText(/Pinned ·/)[0],
+    ).toBeInTheDocument();
+  });
+
+  it("renders the attention section with failed previews sorted before stopped ones", async () => {
+    installPreviewHandlers({
+      attention: [
+        preview({
+          preview_group_id: "stopped-group",
+          branch: "feature/stopped",
+          status: "stopped",
+          freshness: "unknown",
+          preview_url: undefined,
+        }),
+        preview({
+          preview_group_id: "failed-group",
+          branch: "feature/failed",
+          status: "failed",
+          freshness: "current",
+          stopped_reason: "error",
+          preview_url: undefined,
+        }),
+      ],
+    });
+
+    renderWithProviders(<PreviewsPage />);
+
+    const attentionSection = await screen.findByRole("region", {
+      name: /needs attention/i,
+    });
+    expect(within(attentionSection).getAllByText("Failed")[0]).toBeInTheDocument();
+    expect(within(attentionSection).getAllByText("Needs attention")[0]).toBeInTheDocument();
+  });
+
   it("keeps mobile stacked row metadata available alongside the desktop table", async () => {
     installPreviewHandlers({
       running: [],
       resumable: [
         preview({
-          target_id: "warm-target",
+          current_target_id: "warm-target",
           branch: "feature/mobile-warm",
           repository_full_name: "assembledhq/docs",
           source_type: "pull_request",

@@ -85,7 +85,13 @@ var prTestPullRequestColumns = []string{
 var prTestPreviewTargetColumns = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha",
 	"preview_config_name", "resolved_config_digest", "source_type", "source_id", "source_url",
-	"created_by_user_id", "request_id", "created_at",
+	"created_by_user_id", "request_id", "preview_group_id", "created_at",
+}
+
+var prTestPreviewGroupColumns = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
 }
 
 var prTestPreviewLinkColumns = []string{
@@ -2359,9 +2365,25 @@ func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 			pgxmock.NewRows(prTestPreviewTargetColumns).AddRow(
 				targetID, orgID, repoID, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345",
 				"", "", string(models.PreviewSourceTypePullRequest), "owner/repo#42@abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42",
-				userID, nil, now,
+				userID, nil, nil, now,
 			),
 		)
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	prNumber := 42
+	mock.ExpectQuery("INSERT INTO preview_groups").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPreviewGroupColumns).AddRow(
+				uuid.New(), orgID, repoID, models.PreviewGroupKindPullRequest, "143/abc123/changes", "", &prNumber,
+				models.PreviewSourceTypePullRequest, "owner/repo#42", "https://github.com/owner/repo/pull/42", &targetID,
+				"abc1234567890abcdef1234567890abcdef12345", "target_created", false, &userID, now, now,
+			),
+		)
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(

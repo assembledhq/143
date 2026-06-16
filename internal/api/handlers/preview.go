@@ -945,6 +945,15 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 		}
 	}
 	worker, err := h.workerSelector.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, &session, repoID, cachePlacements, reqs)
+	var deadOwnerErr *preview.LiveSessionWorkerOwnerNotRoutableError
+	if errors.As(err, &deadOwnerErr) {
+		refreshed, recoveryErr := h.clearDeadLiveSessionPreviewOwner(ctx, orgID, session, deadOwnerErr)
+		if recoveryErr != nil {
+			return nil, 0, recoveryErr
+		}
+		session = refreshed
+		worker, err = h.workerSelector.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, &session, repoID, cachePlacements, reqs)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):
@@ -960,6 +969,60 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 		return nil, 0, asyncErr
 	}
 	return instance, http.StatusAccepted, nil
+}
+
+func (h *PreviewHandler) clearDeadLiveSessionPreviewOwner(ctx context.Context, orgID uuid.UUID, session models.Session, ownerErr *preview.LiveSessionWorkerOwnerNotRoutableError) (models.Session, *previewHTTPError) {
+	containerID := ""
+	workerNodeID := ""
+	if ownerErr != nil {
+		containerID = ownerErr.ContainerID
+		workerNodeID = ownerErr.WorkerNodeID
+	}
+	if containerID == "" && session.ContainerID != nil {
+		containerID = *session.ContainerID
+	}
+	if workerNodeID == "" && session.WorkerNodeID != nil {
+		workerNodeID = *session.WorkerNodeID
+	}
+	if containerID == "" {
+		return session, newPreviewHTTPError(
+			http.StatusInternalServerError,
+			"PREVIEW_STALE_SANDBOX_CLEAR_FAILED",
+			"failed to clear stale preview sandbox ownership",
+			fmt.Errorf("stale live session owner is missing container id"),
+		)
+	}
+
+	cleared, err := h.sessionStore.ClearContainerID(ctx, orgID, session.ID, containerID)
+	if err != nil {
+		return session, newPreviewHTTPError(
+			http.StatusInternalServerError,
+			"PREVIEW_STALE_SANDBOX_CLEAR_FAILED",
+			"failed to clear stale preview sandbox ownership",
+			err,
+		)
+	}
+	log := h.logger.With().
+		Str("session_id", session.ID.String()).
+		Str("container_id", containerID).
+		Str("worker_node_id", workerNodeID).
+		Logger()
+	if cleared {
+		log.Warn().Msg("cleared stale preview live-session worker ownership before worker selection retry")
+	} else {
+		log.Info().Msg("stale preview live-session worker ownership clear lost CAS; refetching before worker selection retry")
+	}
+
+	refreshed, err := h.sessionStore.GetByID(ctx, orgID, session.ID)
+	if err != nil {
+		return session, newPreviewHTTPError(
+			http.StatusInternalServerError,
+			"PREVIEW_STALE_SANDBOX_REFRESH_FAILED",
+			"failed to refresh session after clearing stale preview sandbox ownership",
+			err,
+		)
+	}
+	return refreshed, nil
 }
 
 func previewNoWorkersMessage(reqs preview.WorkerSelectionRequirements) string {
