@@ -10,10 +10,22 @@ import (
 func TestDatabaseURLFromEnv(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "postgres://example", databaseURLFromLookup(func(key string) string {
+	actual, err := databaseURLFromLookup(func(key string) string {
 		require.Equal(t, "DATABASE_URL", key, "databaseURLFromLookup should read the database URL env var")
 		return "postgres://example"
-	}), "databaseURLFromLookup should prefer DATABASE_URL")
+	})
+	require.NoError(t, err, "databaseURLFromLookup should accept DATABASE_URL")
+	require.Equal(t, "postgres://example", actual, "databaseURLFromLookup should prefer DATABASE_URL")
+}
+
+func TestDatabaseURLFromEnvRequiresValue(t *testing.T) {
+	t.Parallel()
+
+	_, err := databaseURLFromLookup(func(key string) string {
+		require.Equal(t, "DATABASE_URL", key, "databaseURLFromLookup should read the database URL env var")
+		return ""
+	})
+	require.Error(t, err, "databaseURLFromLookup should require DATABASE_URL")
 }
 
 func TestTimeoutFromEnv(t *testing.T) {
