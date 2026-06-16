@@ -107,9 +107,12 @@ const (
 	PreviewLaunchActionResume      PreviewLaunchAction = "resume"
 	PreviewLaunchActionStart       PreviewLaunchAction = "start"
 	PreviewLaunchActionStartLatest PreviewLaunchAction = "start_latest"
+	PreviewLaunchActionRestart     PreviewLaunchAction = "restart"
 	PreviewLaunchActionRetry       PreviewLaunchAction = "retry"
+	PreviewLaunchActionCancel      PreviewLaunchAction = "cancel"
 	PreviewLaunchActionBlocked     PreviewLaunchAction = "blocked"
 	PreviewLaunchActionClosed      PreviewLaunchAction = "closed"
+	PreviewLaunchActionNone        PreviewLaunchAction = "none"
 )
 
 func (a PreviewLaunchAction) Validate() error {
@@ -119,12 +122,63 @@ func (a PreviewLaunchAction) Validate() error {
 		PreviewLaunchActionResume,
 		PreviewLaunchActionStart,
 		PreviewLaunchActionStartLatest,
+		PreviewLaunchActionRestart,
 		PreviewLaunchActionRetry,
+		PreviewLaunchActionCancel,
 		PreviewLaunchActionBlocked,
-		PreviewLaunchActionClosed:
+		PreviewLaunchActionClosed,
+		PreviewLaunchActionNone:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewLaunchAction: %q", a)
+	}
+}
+
+// PreviewGroupKind describes the user-facing grouping for the current preview index.
+type PreviewGroupKind string
+
+const (
+	PreviewGroupKindPullRequest PreviewGroupKind = "pull_request"
+	PreviewGroupKindBranch      PreviewGroupKind = "branch"
+	PreviewGroupKindSource      PreviewGroupKind = "source"
+	PreviewGroupKindSession     PreviewGroupKind = "session"
+	PreviewGroupKindPinned      PreviewGroupKind = "pinned"
+)
+
+func (k PreviewGroupKind) Validate() error {
+	switch k {
+	case PreviewGroupKindPullRequest,
+		PreviewGroupKindBranch,
+		PreviewGroupKindSource,
+		PreviewGroupKindSession,
+		PreviewGroupKindPinned:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewGroupKind: %q", k)
+	}
+}
+
+// PreviewCurrentFreshness describes whether a grouped branch/PR preview is at
+// the latest known head. It is intentionally distinct from PreviewFreshness,
+// which is the session-preview freshness payload.
+type PreviewCurrentFreshness string
+
+const (
+	PreviewCurrentFreshnessCurrent  PreviewCurrentFreshness = "current"
+	PreviewCurrentFreshnessOutdated PreviewCurrentFreshness = "outdated"
+	PreviewCurrentFreshnessUnknown  PreviewCurrentFreshness = "unknown"
+	PreviewCurrentFreshnessPinned   PreviewCurrentFreshness = "pinned"
+)
+
+func (f PreviewCurrentFreshness) Validate() error {
+	switch f {
+	case PreviewCurrentFreshnessCurrent,
+		PreviewCurrentFreshnessOutdated,
+		PreviewCurrentFreshnessUnknown,
+		PreviewCurrentFreshnessPinned:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewCurrentFreshness: %q", f)
 	}
 }
 
