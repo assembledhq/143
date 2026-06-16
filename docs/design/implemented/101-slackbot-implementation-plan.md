@@ -5,7 +5,7 @@
 > model
 > **Last reviewed:** 2026-06-15
 >
-> **Builds on:** [92-slackbot-product-surface.md](92-slackbot-product-surface.md)
+> **Builds on:** [../future/92-slackbot-product-surface.md](../future/92-slackbot-product-surface.md)
 
 ## Purpose
 
@@ -1067,5 +1067,5 @@ Operational:
 8. Add retention controls and keep multi-org retargeting as an explicit
    follow-up before expanding enterprise workspace behavior.
 
-Each phase should update [92-slackbot-product-surface.md](92-slackbot-product-surface.md)
+Each phase should update [../future/92-slackbot-product-surface.md](../future/92-slackbot-product-surface.md)
 when implementation status changes.
