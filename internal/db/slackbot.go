@@ -15,6 +15,8 @@ type SlackInstallationStore struct {
 	db DBTX
 }
 
+var ErrAmbiguousSlackInstallation = errors.New("multiple active Slack installations match team/app")
+
 func NewSlackInstallationStore(db DBTX) *SlackInstallationStore {
 	return &SlackInstallationStore{db: db}
 }
@@ -79,10 +81,40 @@ func (s *SlackInstallationStore) GetActiveByTeamApp(ctx context.Context, teamID,
 		  AND api_app_id = @api_app_id
 		  AND status = 'active'
 		ORDER BY updated_at DESC
-		LIMIT 1`,
+		LIMIT 2`,
 		pgx.NamedArgs{"team_id": teamID, "api_app_id": apiAppID})
 	if err != nil {
 		return models.SlackInstallation{}, fmt.Errorf("query slack installation: %w", err)
+	}
+	installs, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.SlackInstallation])
+	if err != nil {
+		return models.SlackInstallation{}, fmt.Errorf("scan slack installations: %w", err)
+	}
+	switch len(installs) {
+	case 0:
+		return models.SlackInstallation{}, pgx.ErrNoRows
+	case 1:
+		return installs[0], nil
+	default:
+		return models.SlackInstallation{}, ErrAmbiguousSlackInstallation
+	}
+}
+
+func (s *SlackInstallationStore) GetActiveByOrgTeamApp(ctx context.Context, orgID uuid.UUID, teamID, apiAppID string) (models.SlackInstallation, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, integration_id, team_id, team_name, enterprise_id, api_app_id,
+			bot_user_id, bot_id, scope, status, installed_by_user_id, installed_at,
+			last_event_at, created_at, updated_at
+		FROM slack_installations
+		WHERE org_id = @org_id
+		  AND team_id = @team_id
+		  AND api_app_id = @api_app_id
+		  AND status = 'active'
+		ORDER BY updated_at DESC
+		LIMIT 1`,
+		pgx.NamedArgs{"org_id": orgID, "team_id": teamID, "api_app_id": apiAppID})
+	if err != nil {
+		return models.SlackInstallation{}, fmt.Errorf("query slack installation by org/team/app: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackInstallation])
 }
@@ -105,6 +137,20 @@ func (s *SlackInstallationStore) MarkDisconnected(ctx context.Context, orgID, in
 	return err
 }
 
+// MarkDisconnectedByTeamApp handles Slack app_uninstalled callbacks, which are
+// scoped to the Slack workspace/app rather than one selected 143 org.
+// lint:allow-no-orgid reason="Slack app uninstall is a workspace/app callback and must disconnect all matching org installs"
+func (s *SlackInstallationStore) MarkDisconnectedByTeamApp(ctx context.Context, teamID, apiAppID string) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE slack_installations
+		SET status = 'disconnected', updated_at = now()
+		WHERE team_id = @team_id
+		  AND api_app_id = @api_app_id
+		  AND status = 'active'`,
+		pgx.NamedArgs{"team_id": teamID, "api_app_id": apiAppID})
+	return err
+}
+
 func (s *SlackInstallationStore) GetActiveByOrg(ctx context.Context, orgID uuid.UUID) (models.SlackInstallation, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, org_id, integration_id, team_id, team_name, enterprise_id, api_app_id,
@@ -119,6 +165,66 @@ func (s *SlackInstallationStore) GetActiveByOrg(ctx context.Context, orgID uuid.
 		return models.SlackInstallation{}, fmt.Errorf("query active slack installation: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackInstallation])
+}
+
+type SlackOrgSelectionStore struct {
+	db DBTX
+}
+
+func NewSlackOrgSelectionStore(db DBTX) *SlackOrgSelectionStore {
+	return &SlackOrgSelectionStore{db: db}
+}
+
+func (s *SlackOrgSelectionStore) Upsert(ctx context.Context, selection *models.SlackOrgSelection) error {
+	rows, err := s.db.Query(ctx, `
+		INSERT INTO slack_org_selections (
+			org_id, slack_installation_id, slack_team_id, api_app_id, slack_user_id
+		)
+		VALUES (
+			@org_id, @slack_installation_id, @slack_team_id, @api_app_id, @slack_user_id
+		)
+		ON CONFLICT (slack_team_id, api_app_id, slack_user_id)
+		DO UPDATE SET
+			org_id = EXCLUDED.org_id,
+			slack_installation_id = EXCLUDED.slack_installation_id,
+			selected_at = now(),
+			updated_at = now()
+		RETURNING id, org_id, slack_installation_id, slack_team_id, api_app_id, slack_user_id,
+			selected_at, created_at, updated_at`,
+		pgx.NamedArgs{
+			"org_id":                selection.OrgID,
+			"slack_installation_id": selection.SlackInstallationID,
+			"slack_team_id":         selection.SlackTeamID,
+			"api_app_id":            selection.APIAppID,
+			"slack_user_id":         selection.SlackUserID,
+		})
+	if err != nil {
+		return fmt.Errorf("upsert slack org selection: %w", err)
+	}
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackOrgSelection])
+	if err != nil {
+		return fmt.Errorf("scan slack org selection: %w", err)
+	}
+	*selection = updated
+	return nil
+}
+
+// GetBySlackUser resolves a Slack callback to the user's selected 143 org before
+// request-auth org context exists.
+// lint:allow-no-orgid reason="pre-auth Slack callback resolves selected org from signed Slack team/app/user identifiers"
+func (s *SlackOrgSelectionStore) GetBySlackUser(ctx context.Context, teamID, apiAppID, slackUserID string) (models.SlackOrgSelection, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, slack_installation_id, slack_team_id, api_app_id, slack_user_id,
+			selected_at, created_at, updated_at
+		FROM slack_org_selections
+		WHERE slack_team_id = @slack_team_id
+		  AND api_app_id = @api_app_id
+		  AND slack_user_id = @slack_user_id`,
+		pgx.NamedArgs{"slack_team_id": teamID, "api_app_id": apiAppID, "slack_user_id": slackUserID})
+	if err != nil {
+		return models.SlackOrgSelection{}, fmt.Errorf("query slack org selection: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackOrgSelection])
 }
 
 type SlackBotSettingsStore struct {

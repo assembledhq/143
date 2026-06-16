@@ -69,6 +69,25 @@ func (s fakeGitHubOrgRosterService) ListOrgMembers(ctx context.Context, installa
 	return s.members, nil
 }
 
+type fakeSlackPreviewControl struct {
+	target models.SlackPreviewTarget
+	actor  models.SlackActor
+	err    error
+}
+
+func (f *fakeSlackPreviewControl) CreatePreviewForSlack(ctx context.Context, orgID uuid.UUID, target models.SlackPreviewTarget, actor models.SlackActor) (models.PreviewInstance, error) {
+	f.target = target
+	f.actor = actor
+	if f.err != nil {
+		return models.PreviewInstance{}, f.err
+	}
+	return models.PreviewInstance{ID: uuid.New(), OrgID: orgID}, nil
+}
+
+func (f *fakeSlackPreviewControl) OpenPreviewURL(ctx context.Context, orgID, previewID uuid.UUID, actor models.SlackActor) (string, error) {
+	return "", nil
+}
+
 type fakeHTTPStatusError struct {
 	status int
 }
@@ -254,8 +273,10 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 		expected  bool
 	}{
 		{name: "balanced includes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: true},
+		{name: "balanced includes preview failed", preset: &balanced, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
 		{name: "balanced excludes preview stale", preset: &balanced, eventKind: string(models.SlackNotificationPreviewStale), expected: false},
 		{name: "quiet includes human input", preset: &quiet, eventKind: string(models.SlackNotificationHumanInputRequested), expected: true},
+		{name: "quiet includes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
 		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
 	}
@@ -552,18 +573,98 @@ func TestSlackMissingContextHelpers(t *testing.T) {
 	t.Parallel()
 
 	sessionID := uuid.New()
+	repoID := uuid.New()
 	view := slackMissingContextModal("preview_target", slackActionValue(map[string]string{
 		"org_id":     uuid.New().String(),
 		"session_id": sessionID.String(),
 		"kind":       "preview_target",
-	}))
+	}), []slackMissingContextOption{{
+		Text:  "assembledhq/143 on main",
+		Value: slackActionValue(map[string]string{"repository_id": repoID.String(), "branch": "main"}),
+	}})
 
 	require.Equal(t, "slack_missing_context_modal", view.CallbackID, "missing-context modal should submit to the shared handler")
 	require.Contains(t, slackBlockIDs(view.Blocks), "context_value", "missing-context modal should collect the selected context value")
-	require.Equal(t, "external_select", slackModalInputType(view.Blocks, "context_value"), "preview missing-context modal should use a structured selector")
+	require.Equal(t, "static_select", slackModalInputType(view.Blocks, "context_value"), "preview missing-context modal should use structured static options")
+	blocksJSON, err := json.Marshal(view.Blocks)
+	require.NoError(t, err, "missing-context modal blocks should marshal")
+	require.Contains(t, string(blocksJSON), repoID.String(), "preview target options should carry the repository id for direct preview creation")
 	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "preview_target"}}), "preview target should block vague preview work")
 	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "pull_request"}}), "missing PR should block vague PR repair work")
 	require.False(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "repository"}}), "missing repository alone should not block answer-only or exploratory work")
+}
+
+func TestSlackMissingContextModalCreatesPreviewFromStructuredTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	installationID := uuid.New()
+	now := time.Now()
+	previewControl := &fakeSlackPreviewControl{}
+	stores := &Stores{
+		SlackUserLinks: db.NewSlackUserLinkStore(mock),
+		Memberships:    db.NewOrganizationMembershipStore(mock),
+	}
+	targetValue := slackActionValue(map[string]string{
+		"repository_id": repoID.String(),
+		"branch":        "main",
+		"display":       "assembledhq/143@main",
+	})
+	metadata := slackActionValue(map[string]string{
+		"org_id":     orgID.String(),
+		"session_id": sessionID.String(),
+		"kind":       "preview_target",
+	})
+	rawPayload, err := json.Marshal(map[string]any{
+		"view": map[string]any{
+			"private_metadata": metadata,
+			"state": map[string]any{
+				"values": map[string]any{
+					"context_value": map[string]any{
+						"value": map[string]any{
+							"selected_option": map[string]any{"value": targetValue},
+						},
+					},
+				},
+			},
+		},
+	})
+	require.NoError(t, err, "test Slack modal payload should marshal")
+
+	mock.ExpectQuery(`FROM slack_user_links`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "user_id", "slack_team_id", "slack_user_id",
+			"slack_email", "slack_display_name", "source", "linked_at", "created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, installationID, &userID, "T123", "U123", nil, "Eng User",
+			models.SlackUserLinkSourceSelfLinked, &now, now, now,
+		))
+	mock.ExpectQuery(`FROM organization_memberships`).
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
+			AddRow(userID, orgID, models.RoleMember, now))
+
+	err = handleSlackMissingContextModal(context.Background(), stores, &Services{SlackPreviewControl: previewControl}, nil, models.SlackInteractionJobPayload{
+		OrgID:      orgID.String(),
+		TeamID:     "T123",
+		UserID:     "U123",
+		RawPayload: rawPayload,
+	})
+
+	require.NoError(t, err, "structured preview target modal should create a preview directly")
+	require.Equal(t, models.SlackPreviewTargetBranch, previewControl.target.Kind, "structured preview target should create a branch preview")
+	require.Equal(t, repoID, previewControl.target.RepositoryID, "structured preview target should pass repository id to preview control")
+	require.Equal(t, "main", previewControl.target.Branch, "structured preview target should pass branch to preview control")
+	require.Equal(t, userID, previewControl.actor.UserID, "preview actor should be the linked 143 user")
+	require.NoError(t, mock.ExpectationsWereMet(), "direct preview modal should satisfy auth SQL expectations")
 }
 
 func TestRenderSlackHumanInputUsesLifecycleCopy(t *testing.T) {

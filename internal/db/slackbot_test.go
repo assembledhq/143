@@ -79,6 +79,140 @@ func TestSlackInboundEventStore_RedactPayloadsOlderThan(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "RedactPayloadsOlderThan should satisfy expected SQL")
 }
 
+func TestSlackInstallationStore_GetActiveByOrgTeamAppScopesByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	store := NewSlackInstallationStore(mock)
+
+	mock.ExpectQuery(`WHERE org_id = @org_id\s+AND team_id = @team_id\s+AND api_app_id = @api_app_id\s+AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Eng", nil, "A123",
+			"U143", "B143", []string{"chat:write"}, models.SlackInstallationStatusActive, nil, now,
+			nil, now, now,
+		))
+
+	installation, err := store.GetActiveByOrgTeamApp(context.Background(), orgID, "T123", "A123")
+
+	require.NoError(t, err, "GetActiveByOrgTeamApp should return the selected org installation")
+	require.Equal(t, orgID, installation.OrgID, "GetActiveByOrgTeamApp should scope by org")
+	require.Equal(t, installationID, installation.ID, "GetActiveByOrgTeamApp should return the selected installation")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetActiveByOrgTeamApp should satisfy expected SQL")
+}
+
+func TestSlackInstallationStore_GetActiveByTeamAppRejectsAmbiguousInstalls(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	otherOrgID := uuid.New()
+	installationID := uuid.New()
+	otherInstallationID := uuid.New()
+	integrationID := uuid.New()
+	otherIntegrationID := uuid.New()
+	now := time.Now()
+	store := NewSlackInstallationStore(mock)
+
+	mock.ExpectQuery(`WHERE team_id = @team_id\s+AND api_app_id = @api_app_id\s+AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).
+			AddRow(
+				installationID, orgID, integrationID, "T123", "Eng", nil, "A123",
+				"U143", "B143", []string{"chat:write"}, models.SlackInstallationStatusActive, nil, now,
+				nil, now, now,
+			).
+			AddRow(
+				otherInstallationID, otherOrgID, otherIntegrationID, "T123", "Eng", nil, "A123",
+				"U143", "B143", []string{"chat:write"}, models.SlackInstallationStatusActive, nil, now,
+				nil, now, now,
+			))
+
+	_, err = store.GetActiveByTeamApp(context.Background(), "T123", "A123")
+
+	require.ErrorIs(t, err, ErrAmbiguousSlackInstallation, "GetActiveByTeamApp should reject ambiguous active installs")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetActiveByTeamApp should satisfy expected SQL")
+}
+
+func TestSlackInstallationStore_MarkDisconnectedByTeamAppUpdatesAllActiveInstalls(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewSlackInstallationStore(mock)
+
+	mock.ExpectExec(`UPDATE slack_installations\s+SET status = 'disconnected', updated_at = now\(\)\s+WHERE team_id = @team_id\s+AND api_app_id = @api_app_id\s+AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	err = store.MarkDisconnectedByTeamApp(context.Background(), "T123", "A123")
+
+	require.NoError(t, err, "MarkDisconnectedByTeamApp should disconnect active installs for the Slack workspace app")
+	require.NoError(t, mock.ExpectationsWereMet(), "MarkDisconnectedByTeamApp should satisfy expected SQL")
+}
+
+func TestSlackOrgSelectionStore_UpsertAndGetBySlackUser(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	selectionID := uuid.New()
+	now := time.Now()
+	store := NewSlackOrgSelectionStore(mock)
+	selection := &models.SlackOrgSelection{
+		OrgID:               orgID,
+		SlackInstallationID: installationID,
+		SlackTeamID:         "T123",
+		APIAppID:            "A123",
+		SlackUserID:         "U123",
+	}
+
+	mock.ExpectQuery(`INSERT INTO slack_org_selections`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "slack_team_id", "api_app_id", "slack_user_id",
+			"selected_at", "created_at", "updated_at",
+		}).AddRow(selectionID, orgID, installationID, "T123", "A123", "U123", now, now, now))
+	mock.ExpectQuery(`WHERE slack_team_id = @slack_team_id\s+AND api_app_id = @api_app_id\s+AND slack_user_id = @slack_user_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "slack_team_id", "api_app_id", "slack_user_id",
+			"selected_at", "created_at", "updated_at",
+		}).AddRow(selectionID, orgID, installationID, "T123", "A123", "U123", now, now, now))
+
+	require.NoError(t, store.Upsert(context.Background(), selection), "Upsert should persist the Slack user's selected org")
+	got, err := store.GetBySlackUser(context.Background(), "T123", "A123", "U123")
+
+	require.NoError(t, err, "GetBySlackUser should resolve the selected org for the Slack user")
+	require.Equal(t, orgID, got.OrgID, "GetBySlackUser should return the selected org")
+	require.Equal(t, installationID, got.SlackInstallationID, "GetBySlackUser should return the selected installation")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack org selection store should satisfy expected SQL")
+}
+
 func TestSlackUserLinkStore_GetByUserScopesByOrgAndTeam(t *testing.T) {
 	t.Parallel()
 

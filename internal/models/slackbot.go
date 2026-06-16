@@ -103,6 +103,18 @@ type SlackInstallation struct {
 	UpdatedAt         time.Time               `db:"updated_at" json:"updated_at"`
 }
 
+type SlackOrgSelection struct {
+	ID                  uuid.UUID `db:"id" json:"id"`
+	OrgID               uuid.UUID `db:"org_id" json:"org_id"`
+	SlackInstallationID uuid.UUID `db:"slack_installation_id" json:"slack_installation_id"`
+	SlackTeamID         string    `db:"slack_team_id" json:"slack_team_id"`
+	APIAppID            string    `db:"api_app_id" json:"api_app_id"`
+	SlackUserID         string    `db:"slack_user_id" json:"slack_user_id"`
+	SelectedAt          time.Time `db:"selected_at" json:"selected_at"`
+	CreatedAt           time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time `db:"updated_at" json:"updated_at"`
+}
+
 type SlackInstallationHealth struct {
 	Installation    SlackInstallation     `json:"installation"`
 	RequiredScopes  []string              `json:"required_scopes"`
@@ -409,21 +421,21 @@ type SlackDeliverHumanInputJobPayload struct {
 }
 
 type SlackSendNotificationJobPayload struct {
-	OrgID           string `json:"org_id"`
-	NotificationID  string `json:"notification_id,omitempty"`
-	Kind            string `json:"kind"`
-	TeamID          string `json:"team_id"`
-	ChannelID       string `json:"channel_id,omitempty"`
-	SlackUserID     string `json:"slack_user_id,omitempty"`
-	ThreadTS        string `json:"thread_ts,omitempty"`
-	Title           string `json:"title"`
-	Body            string `json:"body"`
-	SessionID       string `json:"session_id,omitempty"`
-	AutomationID    string `json:"automation_id,omitempty"`
-	AutomationRunID string `json:"automation_run_id,omitempty"`
-	PullRequestID   string `json:"pull_request_id,omitempty"`
-	PullRequestURL  string `json:"pull_request_url,omitempty"`
-	PreviewID       string `json:"preview_id,omitempty"`
+	OrgID              string `json:"org_id"`
+	NotificationID     string `json:"notification_id,omitempty"`
+	Kind               string `json:"kind"`
+	TeamID             string `json:"team_id"`
+	ChannelID          string `json:"channel_id,omitempty"`
+	SlackUserID        string `json:"slack_user_id,omitempty"`
+	ThreadTS           string `json:"thread_ts,omitempty"`
+	Title              string `json:"title"`
+	Body               string `json:"body"`
+	SessionID          string `json:"session_id,omitempty"`
+	AutomationID       string `json:"automation_id,omitempty"`
+	AutomationRunID    string `json:"automation_run_id,omitempty"`
+	PullRequestID      string `json:"pull_request_id,omitempty"`
+	PullRequestURL     string `json:"pull_request_url,omitempty"`
+	PreviewID          string `json:"preview_id,omitempty"`
 	ActorUserID        string `json:"actor_user_id,omitempty"`
 	NotificationPreset string `json:"notification_preset,omitempty"`
 }

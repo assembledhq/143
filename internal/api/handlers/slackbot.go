@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -29,8 +31,14 @@ type SlackbotHandlerConfig struct {
 
 type SlackbotInstallationStore interface {
 	GetActiveByTeamApp(ctx context.Context, teamID, apiAppID string) (models.SlackInstallation, error)
+	GetActiveByOrgTeamApp(ctx context.Context, orgID uuid.UUID, teamID, apiAppID string) (models.SlackInstallation, error)
 	MarkLastEvent(ctx context.Context, orgID, installationID uuid.UUID) error
 	MarkDisconnected(ctx context.Context, orgID, installationID uuid.UUID) error
+	MarkDisconnectedByTeamApp(ctx context.Context, teamID, apiAppID string) error
+}
+
+type SlackbotOrgSelectionStore interface {
+	GetBySlackUser(ctx context.Context, teamID, apiAppID, slackUserID string) (models.SlackOrgSelection, error)
 }
 
 type SlackbotInboundEventStore interface {
@@ -45,6 +53,7 @@ type SlackbotJobStore interface {
 type SlackbotHandler struct {
 	cfg           SlackbotHandlerConfig
 	installations SlackbotInstallationStore
+	orgSelections SlackbotOrgSelectionStore
 	inbound       SlackbotInboundEventStore
 	jobs          SlackbotJobStore
 	logger        zerolog.Logger
@@ -69,6 +78,10 @@ func (h *SlackbotHandler) SetLogger(logger zerolog.Logger) {
 
 func (h *SlackbotHandler) SetMetrics(metrics *metrics.SlackbotMetrics) {
 	h.metrics = metrics
+}
+
+func (h *SlackbotHandler) SetOrgSelectionStore(store SlackbotOrgSelectionStore) {
+	h.orgSelections = store
 }
 
 func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
@@ -99,17 +112,28 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	install, err := h.installations.GetActiveByTeamApp(r.Context(), envelope.TeamID, envelope.APIAppID)
+	eventType := envelope.Event.Type
+	if envelope.Event.ChannelType == "im" && eventType == "message" {
+		eventType = string(models.SlackInboundEventTypeMessageIM)
+	}
+	if models.SlackInboundEventType(eventType) == models.SlackInboundEventTypeAppUninstalled ||
+		models.SlackInboundEventType(eventType) == models.SlackInboundEventTypeAppUninstalledTeam {
+		if err := h.installations.MarkDisconnectedByTeamApp(r.Context(), envelope.TeamID, envelope.APIAppID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "SLACK_DISCONNECT_FAILED", "failed to mark Slack installations disconnected", err)
+			return
+		}
+		h.metrics.RecordInboundEvent(r.Context(), eventType, "received")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	install, err := h.resolveInstallation(r.Context(), envelope.TeamID, envelope.APIAppID, envelope.Event.User)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "SLACK_INSTALLATION_NOT_FOUND", "slack installation not found")
 		return
 	}
 	if err := h.installations.MarkLastEvent(r.Context(), install.OrgID, install.ID); err != nil {
 		h.logger.Warn().Err(err).Str("team_id", envelope.TeamID).Msg("failed to update Slack installation last_event_at")
-	}
-	eventType := envelope.Event.Type
-	if envelope.Event.ChannelType == "im" && eventType == "message" {
-		eventType = string(models.SlackInboundEventTypeMessageIM)
 	}
 	h.metrics.RecordInboundEvent(r.Context(), eventType, "received")
 	if h.shouldIgnoreEvent(install, envelope.Event) {
@@ -187,11 +211,6 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 		if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
 			h.logger.Warn().Err(err).Str("slack_event_id", envelope.EventID).Msg("failed to mark Slack event enqueued")
 		}
-	case models.SlackInboundEventTypeAppUninstalled, models.SlackInboundEventTypeAppUninstalledTeam:
-		if err := h.installations.MarkDisconnected(r.Context(), install.OrgID, install.ID); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "SLACK_DISCONNECT_FAILED", "failed to mark Slack installation disconnected", err)
-			return
-		}
 	case models.SlackInboundEventTypeAppRateLimited:
 		h.metrics.RecordRateLimit(r.Context(), "events_api")
 		h.logger.Warn().Str("team_id", envelope.TeamID).Msg("Slack app rate limited events delivery")
@@ -243,13 +262,13 @@ func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
 	}
 	teamID := values.Get("team_id")
 	apiAppID := values.Get("api_app_id")
-	install, err := h.installations.GetActiveByTeamApp(r.Context(), teamID, apiAppID)
+	userID := values.Get("user_id")
+	install, err := h.resolveInstallation(r.Context(), teamID, apiAppID, userID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "SLACK_INSTALLATION_NOT_FOUND", "slack installation not found")
 		return
 	}
 	channelID := values.Get("channel_id")
-	userID := values.Get("user_id")
 	triggerID := values.Get("trigger_id")
 	eventID := "command:" + teamID + ":" + channelID + ":" + userID + ":" + values.Get("command") + ":" + triggerID
 	inbound := &models.SlackInboundEvent{
@@ -323,7 +342,7 @@ func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "failed to parse Slack interaction payload")
 		return
 	}
-	install, err := h.installations.GetActiveByTeamApp(r.Context(), interaction.Team.ID, interaction.APIAppID)
+	install, err := h.resolveInstallation(r.Context(), interaction.Team.ID, interaction.APIAppID, interaction.User.ID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "SLACK_INSTALLATION_NOT_FOUND", "slack installation not found")
 		return
@@ -378,6 +397,27 @@ func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *SlackbotHandler) resolveInstallation(ctx context.Context, teamID, apiAppID, slackUserID string) (models.SlackInstallation, error) {
+	if h.installations == nil {
+		return models.SlackInstallation{}, fmt.Errorf("slack installation store is not configured")
+	}
+	if h.orgSelections != nil && strings.TrimSpace(slackUserID) != "" {
+		selection, err := h.orgSelections.GetBySlackUser(ctx, teamID, apiAppID, slackUserID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return models.SlackInstallation{}, fmt.Errorf("resolve slack org selection: %w", err)
+			}
+		} else if selection.OrgID != uuid.Nil {
+			install, err := h.installations.GetActiveByOrgTeamApp(ctx, selection.OrgID, teamID, apiAppID)
+			if err != nil {
+				return models.SlackInstallation{}, fmt.Errorf("resolve selected slack installation: %w", err)
+			}
+			return install, nil
+		}
+	}
+	return h.installations.GetActiveByTeamApp(ctx, teamID, apiAppID)
 }
 
 func (h *SlackbotHandler) readAndVerify(w http.ResponseWriter, r *http.Request) ([]byte, bool) {

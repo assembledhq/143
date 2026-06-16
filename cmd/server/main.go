@@ -487,6 +487,7 @@ func main() {
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
 			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
