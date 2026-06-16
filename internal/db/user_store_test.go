@@ -187,6 +187,142 @@ func TestUserStore_GetByEmail(t *testing.T) {
 	}
 }
 
+func TestUserStore_GetByOrgAndEmail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		lookupEmail string
+		setupMock   func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time)
+		expectErr   bool
+	}{
+		{
+			name:        "returns org user when primary email matches case insensitively",
+			lookupEmail: "Creator@Example.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns org user when github noreply email matches",
+			lookupEmail: "12345+alice@users.noreply.github.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				noreply := "12345+alice@users.noreply.github.com"
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, &noreply, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns org user when secondary email matches",
+			lookupEmail: "alice@company.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, nil, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns error when no org user matches either email column",
+			lookupEmail: "unknown@example.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(userColumns))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			orgID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, userID, orgID, now)
+
+			user, err := store.GetByOrgAndEmail(context.Background(), orgID, tt.lookupEmail)
+			if tt.expectErr {
+				require.Error(t, err, "GetByOrgAndEmail should return an error when the org has no matching user")
+				return
+			}
+			require.NoError(t, err, "GetByOrgAndEmail should return the matching org user")
+			require.Equal(t, userID, user.ID, "GetByOrgAndEmail should return the expected user ID")
+			require.Equal(t, orgID, user.OrgID, "GetByOrgAndEmail should keep the lookup scoped to the requested org")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestUserStore_AddSecondaryEmail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID)
+		expectErr bool
+	}{
+		{
+			name: "appends new lowercase email when not already present",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "returns error when database exec fails",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			orgID := uuid.New()
+			tt.setupMock(mock, userID, orgID)
+
+			err = store.AddSecondaryEmail(context.Background(), orgID, userID, "Work@Example.com")
+			if tt.expectErr {
+				require.Error(t, err, "AddSecondaryEmail should return an error on DB failure")
+				return
+			}
+			require.NoError(t, err, "AddSecondaryEmail should succeed when DB exec succeeds")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestUserStore_GetByGoogleID(t *testing.T) {
 	t.Parallel()
 

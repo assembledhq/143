@@ -671,6 +671,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 				func(ctx context.Context, userStore *db.UserStore, invitedUser *models.User) error {
 					return userStore.UpsertFromGitHub(ctx, invitedUser)
 				},
+				inv.Email,
 			)
 			if claimErr != nil {
 				writeError(w, r, claimErr.status, claimErr.code, claimErr.message)
@@ -920,6 +921,7 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 				func(ctx context.Context, userStore *db.UserStore, invitedUser *models.User) error {
 					return userStore.UpsertFromGoogle(ctx, invitedUser)
 				},
+				inv.Email,
 			)
 			if claimErr != nil {
 				writeError(w, r, claimErr.status, claimErr.code, claimErr.message)
@@ -1913,6 +1915,7 @@ func (h *AuthHandler) acceptInvitationAndUpsertUser(
 	invitationID uuid.UUID,
 	user *models.User,
 	upsert oauthUserUpsertFunc,
+	invitationEmail *string,
 ) (*models.User, string, *invitationError, error) {
 	if h.pool == nil {
 		return nil, "", nil, fmt.Errorf("auth handler pool is not configured")
@@ -1948,6 +1951,16 @@ func (h *AuthHandler) acceptInvitationAndUpsertUser(
 	// the caller's role from the GrantAtLeast below instead.
 	if err := upsert(ctx, txUserStore, user); err != nil {
 		return nil, "", nil, fmt.Errorf("upsert invited oauth user: %w", err)
+	}
+
+	// If the invite was sent to a different address than the OAuth provider's
+	// primary email (common when users sign up via GitHub with a personal
+	// address), record the invite email as a secondary so that lookups by
+	// work email (e.g. Linear creator attribution) still resolve correctly.
+	if invitationEmail != nil && !strings.EqualFold(*invitationEmail, user.Email) {
+		if err := txUserStore.AddSecondaryEmail(ctx, user.OrgID, user.ID, *invitationEmail); err != nil {
+			return nil, "", nil, fmt.Errorf("record invite email as secondary: %w", err)
+		}
 	}
 
 	effectiveRole, err := db.NewOrganizationMembershipStore(tx).GrantAtLeast(ctx, user.ID, user.OrgID, user.Role)

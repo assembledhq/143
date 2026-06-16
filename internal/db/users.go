@@ -245,6 +245,45 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, 
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email string) (models.User, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM users
+		WHERE org_id = @org_id
+		  AND (LOWER(email) = LOWER(@email)
+		       OR LOWER(github_noreply_email) = LOWER(@email)
+		       OR LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))`, userSelectColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
+	if err != nil {
+		return models.User{}, fmt.Errorf("query user by org and email: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
+// AddSecondaryEmail appends email (lowercased) to the user's secondary_emails
+// array if it is not already present. Callers use this to record an invite
+// email that differs from the OAuth provider's primary email, so that a later
+// lookup by that invite address still resolves to the correct user.
+func (s *UserStore) AddSecondaryEmail(ctx context.Context, orgID, userID uuid.UUID, email string) error {
+	query := `
+		UPDATE users
+		SET secondary_emails = array_append(COALESCE(secondary_emails, '{}'::text[]), LOWER(@email))
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND NOT (LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     userID,
+		"org_id": orgID,
+		"email":  email,
+	})
+	if err != nil {
+		return fmt.Errorf("add secondary email: %w", err)
+	}
+	return nil
+}
+
 // GetByGoogleID looks up a user by Google subject ID.
 // lint:allow-no-orgid reason="pre-auth login lookup; Google subject id is globally unique"
 func (s *UserStore) GetByGoogleID(ctx context.Context, googleID string) (models.User, error) {

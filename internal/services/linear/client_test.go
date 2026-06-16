@@ -75,6 +75,7 @@ func TestGraphQLClientFetchIssue(t *testing.T) {
 					"state": {"id": "state-1", "name": "In Progress", "type": "started"},
 					"priority": 2,
 					"assignee": {"name": "Ada"},
+					"creator": {"email": "creator@example.com"},
 					"team": {"id": "team-1", "key": "ACS", "name": "Core", "organization": {"urlKey": "acme"}},
 					"comments": {"nodes": [
 						{"body": "first", "user": {"name": "Grace"}, "createdAt": "2026-04-27T10:11:12Z"},
@@ -101,6 +102,7 @@ func TestGraphQLClientFetchIssue(t *testing.T) {
 		StateType:     "started",
 		Priority:      "high",
 		AssigneeName:  "Ada",
+		CreatorEmail:  "creator@example.com",
 		TeamID:        "team-1",
 		TeamKey:       "ACS",
 		TeamName:      "Core",
@@ -125,6 +127,35 @@ func TestGraphQLClientFetchIssueNotFound(t *testing.T) {
 	require.Error(t, err, "FetchIssue should fail when Linear returns no issue")
 	require.Nil(t, issue, "FetchIssue should not return a partial issue on miss")
 	require.Contains(t, err.Error(), "ACS-404", "FetchIssue error should include the missing identifier")
+}
+
+func TestGraphQLClientFetchIssueNullCreator(t *testing.T) {
+	t.Parallel()
+
+	client := newGraphQLClientForTest(t, func(t *testing.T, req linearGraphQLRequest, w http.ResponseWriter) {
+		writeGraphQLResponse(t, w, `{
+			"data": {
+				"issue": {
+					"id": "issue-2",
+					"identifier": "ACS-124",
+					"title": "Bot-created issue",
+					"description": "",
+					"url": "https://linear.app/acme/issue/ACS-124",
+					"state": {"id": "state-1", "name": "Todo", "type": "unstarted"},
+					"priority": 0,
+					"assignee": {"name": ""},
+					"creator": null,
+					"team": {"id": "team-1", "key": "ACS", "name": "Core", "organization": {"urlKey": "acme"}},
+					"comments": {"nodes": []},
+					"attachments": {"nodes": []}
+				}
+			}
+		}`)
+	})
+
+	issue, err := client.FetchIssue(context.Background(), "ACS-124")
+	require.NoError(t, err, "FetchIssue should succeed when creator is null")
+	require.Empty(t, issue.CreatorEmail, "FetchIssue should leave CreatorEmail empty when Linear returns null creator")
 }
 
 func TestGraphQLClientListTeamKeys(t *testing.T) {
