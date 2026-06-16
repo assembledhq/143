@@ -149,18 +149,32 @@ ensure_static_egress_dns() {
 
   # Fresh SSH provisioning verifies static egress before the full worker
   # compose stack is started, so make the pinned sandbox DNS IP available
-  # without starting the worker service early.
-  #
-  # Try a normal graceful recreate first (least disruptive to sandbox DNS); only
-  # if it fails do we force-clear the leaked endpoints and retry once, so
-  # healthy hosts never pay an extra DNS blip.
+  # without starting the worker service early. Routine reconciliation must not
+  # force a rebuild: recreating sandbox-dns briefly frees the pinned resolver
+  # IPs, and an active worker can race in with a new sandbox container that
+  # claims them before DNS starts.
   (
     cd "$compose_dir"
-    if ! docker compose -f "$compose_file" up -d --build --no-deps sandbox-dns; then
-      echo "sandbox-dns recreate failed; clearing leaked sandbox-dns network endpoints and retrying once..." >&2
-      clear_sandbox_dns_endpoints
-      docker compose -f "$compose_file" up -d --build --no-deps sandbox-dns
+    if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
+      docker compose -f "$compose_file" build sandbox-dns
     fi
+
+    if docker compose -f "$compose_file" up -d --no-deps sandbox-dns; then
+      exit 0
+    fi
+
+    echo "sandbox-dns start failed; clearing leaked sandbox-dns network endpoints and retrying..." >&2
+    for attempt in 1 2 3; do
+      clear_sandbox_dns_endpoints
+      sweep_stopped_worker_run_containers
+      if docker compose -f "$compose_file" up -d --no-deps sandbox-dns; then
+        exit 0
+      fi
+      if [ "$attempt" != "3" ]; then
+        sleep 1
+      fi
+    done
+    exit 1
   )
 }
 
