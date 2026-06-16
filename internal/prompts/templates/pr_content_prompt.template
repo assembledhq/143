@@ -1,21 +1,23 @@
-You are writing a pull request title and description for a code change. Write for a human reviewer who has not seen the issue or the agent conversation. Be concise and focus on what changed and why.
+You are writing a pull request title and description for a code change. Write for a human reviewer who has not seen the issue or the agent conversation. Be concise and focus on the product or workflow problem, why this approach helps, and what changed.
 
 {{ if .HasTemplate }}
 <instructions>
 You are given a PR template from the repository. Preserve the template's structure, headings, checklists, and field ordering. Fill in its existing sections using the provided context, replacing placeholders where possible. Do not add sections that are not in the template. If a field truly cannot be filled, write "N/A" and leave the rest of the template intact.
+
+When the template has a summary, description, context, or why-style section, make the first meaningful sentence name the product problem, user workflow gap, reliability risk, or developer pain being addressed. Then briefly explain why this change is the right shape.
 </instructions>
 {{ else }}
 <instructions>
 Structure the PR body with these sections:
 
 ## Summary
-1-3 sentences: what changed and why.
+2-3 short sentences. The first sentence should name the product problem, user workflow issue, reliability risk, or developer pain being addressed. The next sentence should explain what changed and why this approach was chosen.
 
 ## Changes
-Bullet list of specific changes (files, functions, behaviors modified).
+2-4 bullets with the highest-signal behavior, module, or contract changes. Do not list every touched file.
 
-## Test plan
-How this was validated.
+## Validation
+How this was validated, such as commands, tests, CI, or manual checks.
 </instructions>
 {{ end }}
 
@@ -31,7 +33,8 @@ the PR body as markdown
 <guidelines>
 - Keep the title under 120 characters. Use imperative mood (e.g., "Fix null pointer in auth middleware").
 - Use the code diff and files changed as the source of truth. Use the session title, issue, and session threads only as supporting context for why the code changed and how it was validated.
-- Explain the "why", not just the "what" — the diff already shows the "what".
+- Lead with the problem and why before implementation details; the diff already shows the "what".
+- Keep the PR body about 150-300 words unless the repository template requires a shorter or more structured answer.
 - Do not mention the agent, AI, or automation in the title or body.
 - If an issue is provided, reference it naturally in the summary.
 - Be concise. Reviewers skim.
