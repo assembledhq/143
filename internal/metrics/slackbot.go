@@ -14,6 +14,12 @@ type SlackbotMetrics struct {
 	SlackAPIFailuresTotal   otelmetric.Int64Counter
 	InteractionActionsTotal otelmetric.Int64Counter
 	RateLimitsTotal         otelmetric.Int64Counter
+	DroppedUpdatesTotal     otelmetric.Int64Counter
+	DedupeHitsTotal         otelmetric.Int64Counter
+	InstallHealthTotal      otelmetric.Int64Counter
+	MissingScopesTotal      otelmetric.Int64Counter
+	SignatureFailuresTotal  otelmetric.Int64Counter
+	CallbackLatency         otelmetric.Float64Histogram
 	MessageUpdateLatency    otelmetric.Float64Histogram
 }
 
@@ -46,6 +52,34 @@ func NewSlackbotMetrics() (*SlackbotMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	droppedUpdates, err := meter.Int64Counter("slackbot.dropped_updates")
+	if err != nil {
+		return nil, err
+	}
+	dedupeHits, err := meter.Int64Counter("slackbot.dedupe_hits")
+	if err != nil {
+		return nil, err
+	}
+	installHealth, err := meter.Int64Counter("slackbot.install_health")
+	if err != nil {
+		return nil, err
+	}
+	missingScopes, err := meter.Int64Counter("slackbot.missing_scopes")
+	if err != nil {
+		return nil, err
+	}
+	signatureFailures, err := meter.Int64Counter("slackbot.signature_failures")
+	if err != nil {
+		return nil, err
+	}
+	callbackLatency, err := meter.Float64Histogram("slackbot.callback_latency_ms",
+		otelmetric.WithDescription("Latency for inbound Slack callbacks"),
+		otelmetric.WithUnit("ms"),
+		otelmetric.WithExplicitBucketBoundaries(25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+	)
+	if err != nil {
+		return nil, err
+	}
 	updateLatency, err := meter.Float64Histogram("slackbot.message_update_latency_ms",
 		otelmetric.WithDescription("Latency for Slack message update API calls"),
 		otelmetric.WithUnit("ms"),
@@ -61,6 +95,12 @@ func NewSlackbotMetrics() (*SlackbotMetrics, error) {
 		SlackAPIFailuresTotal:   failures,
 		InteractionActionsTotal: actions,
 		RateLimitsTotal:         rateLimits,
+		DroppedUpdatesTotal:     droppedUpdates,
+		DedupeHitsTotal:         dedupeHits,
+		InstallHealthTotal:      installHealth,
+		MissingScopesTotal:      missingScopes,
+		SignatureFailuresTotal:  signatureFailures,
+		CallbackLatency:         callbackLatency,
 		MessageUpdateLatency:    updateLatency,
 	}, nil
 }
@@ -105,6 +145,48 @@ func (m *SlackbotMetrics) RecordRateLimit(ctx context.Context, source string) {
 		return
 	}
 	m.RateLimitsTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("source", source)))
+}
+
+func (m *SlackbotMetrics) RecordDroppedUpdate(ctx context.Context, updateKind, reason string) {
+	if m == nil {
+		return
+	}
+	m.DroppedUpdatesTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("update_kind", updateKind), attrString("reason", reason)))
+}
+
+func (m *SlackbotMetrics) RecordDedupeHit(ctx context.Context, source string) {
+	if m == nil {
+		return
+	}
+	m.DedupeHitsTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("source", source)))
+}
+
+func (m *SlackbotMetrics) RecordInstallHealth(ctx context.Context, status string) {
+	if m == nil {
+		return
+	}
+	m.InstallHealthTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("status", status)))
+}
+
+func (m *SlackbotMetrics) RecordMissingScope(ctx context.Context, scope string) {
+	if m == nil {
+		return
+	}
+	m.MissingScopesTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("scope", scope)))
+}
+
+func (m *SlackbotMetrics) RecordSignatureFailure(ctx context.Context, reason string) {
+	if m == nil {
+		return
+	}
+	m.SignatureFailuresTotal.Add(ctx, 1, otelmetric.WithAttributes(attrString("reason", reason)))
+}
+
+func (m *SlackbotMetrics) RecordCallbackLatency(ctx context.Context, callbackType, outcome string, latencyMS float64) {
+	if m == nil {
+		return
+	}
+	m.CallbackLatency.Record(ctx, latencyMS, otelmetric.WithAttributes(attrString("callback_type", callbackType), attrString("outcome", outcome)))
 }
 
 func (m *SlackbotMetrics) RecordMessageUpdateLatency(ctx context.Context, method, outcome string, latencyMS float64) {

@@ -487,6 +487,7 @@ func main() {
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
 			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
@@ -508,6 +509,7 @@ func main() {
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
 					var prewarmDependencyCache preview.PreviewPathCache
 					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
@@ -532,6 +534,7 @@ func main() {
 						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					var slackBranchPreviewHandler *handlers.BranchPreviewHandler
 					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
 						autoPreviewNodeStore := db.NewNodeStore(pool)
 						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
@@ -541,7 +544,24 @@ func main() {
 						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
 						services.AutoPreviewStarter = branchPreviewHandler
+						slackBranchPreviewHandler = branchPreviewHandler
 					}
+					slackPreviewNodeStore := db.NewNodeStore(pool)
+					slackPreviewSelector := preview.NewWorkerSelectorWithOptions(slackPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+						PreferredRegion:      cfg.NodeRegion,
+					})
+					previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+					if keyringErr != nil {
+						logger.Warn().Err(keyringErr).Msg("failed to initialize preview RPC keyring for Slack preview control; worker RPC auth disabled")
+						previewRPCKeyring = auth.PreviewTokenKeyring{}
+					}
+					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
+					slackPreviewHandler.SetJobStore(jobStore)
+					slackPreviewHandler.SetWorkerRuntime(slackPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID)
+					slackPreviewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
+					slackPreviewHandler.SetSandboxCapacityGate(sandboxCapacity)
+					services.SlackPreviewControl = handlers.NewSlackPreviewControl(slackPreviewHandler, slackBranchPreviewHandler, pullRequestStore, repoStore, cfg.FrontendURL)
 					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
 					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
 				}
@@ -565,9 +585,11 @@ func main() {
 					"Fix the missing dependencies, or set MODE=api to disable the in-process worker.")
 		}
 		retentionCfg := worker.DataRetentionConfig{
-			WebhookDays: cfg.DataRetentionWebhookDays,
-			LogsDays:    cfg.DataRetentionLogsDays,
-			JobsDays:    cfg.DataRetentionJobsDays,
+			WebhookDays:              cfg.DataRetentionWebhookDays,
+			LogsDays:                 cfg.DataRetentionLogsDays,
+			JobsDays:                 cfg.DataRetentionJobsDays,
+			SlackInboundPayloadDays:  cfg.DataRetentionSlackInboundPayloadDays,
+			SlackInboundPayloadBatch: cfg.DataRetentionSlackInboundPayloadBatch,
 		}
 
 		if sandboxCapacity != nil && services.SandboxGC != nil {
@@ -1091,6 +1113,24 @@ func canBuildServices(cfg *config.Config, logger zerolog.Logger) bool {
 	return true
 }
 
+type internalSandboxAuthRouter interface {
+	Post(pattern string, h http.HandlerFunc)
+}
+
+func registerInternalSandboxAuthRoutes(router internalSandboxAuthRouter, broker handlers.InternalSandboxAuthBroker, cfg *config.Config, logger zerolog.Logger) {
+	if router == nil || broker == nil || cfg == nil {
+		return
+	}
+	keyring, err := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+	if err != nil {
+		logger.Warn().Err(err).Msg("sandbox auth: preview RPC keyring is not configured; internal sandbox auth RPC unavailable")
+		return
+	}
+	handler := handlers.NewInternalSandboxAuthHandler(broker, cfg.NodeID, keyring, logger)
+	router.Post("/internal/sandbox-auth/acquire", handler.Acquire)
+	router.Post("/internal/sandbox-auth/release", handler.Release)
+}
+
 func validateSessionExecutorStartupConfig(cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is required")
@@ -1142,6 +1182,18 @@ func sessionExecutorBinds() []string {
 		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 		"/etc/143:/etc/143:ro",
 	}
+}
+
+func sessionExecutorIDFromEnv() (uuid.UUID, bool, error) {
+	raw := strings.TrimSpace(os.Getenv("SESSION_EXECUTOR_ID"))
+	if raw == "" {
+		return uuid.Nil, false, nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, true, fmt.Errorf("parse SESSION_EXECUTOR_ID: %w", err)
+	}
+	return id, true, nil
 }
 
 func sessionExecutorGroupAddFromEnv() []string {
@@ -1327,21 +1379,55 @@ func buildServices(
 	}
 	identityResolver.SetUsers(userStore)
 	identityResolver.SetIntegrations(integrationStore)
-	var sandboxAuthServer *sandboxauth.Server
+	var (
+		sandboxAuthBroker       *sandboxauth.Broker
+		orchestratorSandboxAuth agent.SandboxAuthServer
+		prSandboxAuth           agent.SandboxAuthServer
+	)
 	if cfg.SandboxAuthSocketDir != "" {
-		if cfg.Env == "production" {
-			if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
-				logger.Error().
-					Err(err).
-					Str("socket_dir", cfg.SandboxAuthSocketDir).
-					Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+		if executorID, ok, err := sessionExecutorIDFromEnv(); err != nil {
+			logger.Error().Err(err).Msg("sandbox auth: invalid session executor id — worker services disabled")
+			return nil
+		} else if ok {
+			if strings.TrimSpace(cfg.PreviewInternalBaseURL) == "" {
+				logger.Error().Msg("sandbox auth: PREVIEW_INTERNAL_BASE_URL is required for session executor remote broker access")
 				return nil
 			}
+			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+			if keyringErr != nil {
+				logger.Error().Err(keyringErr).Msg("sandbox auth: preview RPC keyring is required for session executor remote broker access")
+				return nil
+			}
+			orchestratorSandboxAuth = sandboxauth.NewRemoteBrokerClient(sandboxauth.RemoteBrokerClientConfig{
+				BaseURL:  cfg.PreviewInternalBaseURL,
+				NodeID:   cfg.NodeID,
+				HolderID: executorID,
+				Keyring:  previewRPCKeyring,
+				Logger:   logger,
+			})
+			prSandboxAuth = orchestratorSandboxAuth
+			logger.Info().
+				Str("worker_base_url", cfg.PreviewInternalBaseURL).
+				Str("executor_id", executorID.String()).
+				Msg("sandbox auth: session executor will use worker-owned remote broker")
+		} else {
+			if cfg.Env == "production" {
+				if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
+					logger.Error().
+						Err(err).
+						Str("socket_dir", cfg.SandboxAuthSocketDir).
+						Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+					return nil
+				}
+			}
+			sandboxAuthServer := sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+			sandboxAuthBroker = sandboxauth.NewBroker(sandboxAuthServer, sessionStore, repoStore, orgStore, logger)
+			orchestratorSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-orchestrator", logger)
+			prSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-pr", logger)
+			logger.Info().
+				Str("socket_dir", cfg.SandboxAuthSocketDir).
+				Msg("sandbox auth: worker-owned credential socket broker enabled")
 		}
-		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
-		logger.Info().
-			Str("socket_dir", cfg.SandboxAuthSocketDir).
-			Msg("sandbox auth: per-session credential socket bridge enabled")
 	} else {
 		logger.Warn().
 			Msg("sandbox auth: SANDBOX_AUTH_SOCKET_DIR is empty; per-session credential socket disabled — sandbox `git push` will require GITHUB_TOKEN env fallback")
@@ -1387,7 +1473,7 @@ func buildServices(
 		ThreadCancels:      threadCancelRegistry,
 		OrgSettingsCache:   orgSettingsCache,
 		IdentityResolver:   identityResolver,
-		SandboxAuth:        sandboxAuthServer,
+		SandboxAuth:        orchestratorSandboxAuth,
 		Users:              userStore,
 		EvalBootstraps:     evalBootstrapStore,
 		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
@@ -1406,7 +1492,7 @@ func buildServices(
 		prService,
 		sandboxProvider,
 		snapshotStore,
-		sandboxAuthServer,
+		prSandboxAuth,
 		integrationStore,
 		userCredentialStore,
 		appUserAuthSvc,
@@ -1414,6 +1500,8 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
+		redisClient,
+		logger,
 	)
 
 	// Failure analysis service.
@@ -1568,26 +1656,27 @@ func buildServices(
 	}
 
 	svc := &worker.Services{
-		Orchestrator:    orchestrator,
-		PR:              prService,
-		Failure:         failureSvc,
-		SandboxProvider: sandboxProvider,
-		ProjectTasks:    projectTaskUpdater,
-		AutomationRuns:  automationRunUpdater,
-		Prioritization:  prioritizationSvc,
-		PM:              pmSvc,
-		SlackSummarizer: slackSummarizer,
-		LLM:             llmClient,
-		GitHub:          ghSvc,
-		GitHubOrgRoster: ghSvc,
-		Snapshots:       snapshotStore,
-		TitleService:    titleService,
-		Linear:          linearService,
-		SlackbotMetrics: workerSlackbotMetrics,
-		FrontendURL:     cfg.FrontendURL,
-		ReviewLoops:     reviewLoopSvc,
-		RuntimeSampler:  runtimeSampler,
-		SandboxGC:       sandboxGC,
+		Orchestrator:      orchestrator,
+		PR:                prService,
+		Failure:           failureSvc,
+		SandboxProvider:   sandboxProvider,
+		ProjectTasks:      projectTaskUpdater,
+		AutomationRuns:    automationRunUpdater,
+		Prioritization:    prioritizationSvc,
+		PM:                pmSvc,
+		SlackSummarizer:   slackSummarizer,
+		LLM:               llmClient,
+		GitHub:            ghSvc,
+		GitHubOrgRoster:   ghSvc,
+		Snapshots:         snapshotStore,
+		TitleService:      titleService,
+		Linear:            linearService,
+		SlackbotMetrics:   workerSlackbotMetrics,
+		FrontendURL:       cfg.FrontendURL,
+		ReviewLoops:       reviewLoopSvc,
+		RuntimeSampler:    runtimeSampler,
+		SandboxGC:         sandboxGC,
+		SandboxAuthBroker: sandboxAuthBroker,
 	}
 	configureSessionExecutorDispatch(svc, cfg, pool, dockerCli, jobStore, logger)
 
@@ -1622,12 +1711,12 @@ func buildServices(
 			Logger:  logger,
 		}
 	}
-	if sandboxAuthServer != nil {
+	if sandboxAuthBroker != nil {
 		// Capture by value: the closure outlives buildServices, but the
-		// *Server pointer is stable for the process lifetime.
-		s := sandboxAuthServer
-		svc.SandboxAuthShutdown = s.Shutdown
-		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
+		// *Broker pointer is stable for the process lifetime.
+		b := sandboxAuthBroker
+		svc.SandboxAuthShutdown = b.Shutdown
+		svc.SandboxAuthSweep = b.SweepStaleSessionDirs
 	}
 	return svc
 }
@@ -1657,6 +1746,8 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
+	redisClient *cache.Client,
+	logger zerolog.Logger,
 ) {
 	if prService == nil {
 		return
@@ -1670,4 +1761,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
+	prService.SetRedisClient(redisClient)
+	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }

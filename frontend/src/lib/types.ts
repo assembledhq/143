@@ -442,6 +442,7 @@ export interface SlackInstallationHealth {
     reason: string;
     at: string;
   };
+  symptoms?: string[];
 }
 
 export type GitHubRepositoryClaimStatus =

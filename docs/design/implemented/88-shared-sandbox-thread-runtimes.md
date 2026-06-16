@@ -1,6 +1,6 @@
 # Design: Shared Sandbox Thread Runtimes
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-27
+> **Status:** Implemented | **Last reviewed:** 2026-06-16
 >
 > **Related docs:** [overall.md](../overall.md), [68-sandbox-agent-tabs-and-threads.md](68-sandbox-agent-tabs-and-threads.md), [75-thread-runtime-handles-and-durable-inbox.md](../future/75-thread-runtime-handles-and-durable-inbox.md), [70-live-agent-command-handles.md](../future/70-live-agent-command-handles.md), [82-durable-session-executors.md](82-durable-session-executors.md), [60-agent-runtime-timeouts-and-checkpointed-shutdown.md](../future/60-agent-runtime-timeouts-and-checkpointed-shutdown.md), [44-sandbox-preview-server.md](44-sandbox-preview-server.md)
 
@@ -53,6 +53,9 @@ Implemented:
   generations, and terminal runtime status.
 - `session_sandbox_holders` stores leased holders for shared sandbox lifetime
   coordination.
+- sandbox GitHub auth sockets are leased through the worker-owned auth broker,
+  so one sibling runtime or executor finishing cannot close the shared
+  session socket while other holders still need `143-tools` GitHub auth.
 - thread message sends append durable inbox entries before worker enqueue when
   the thread service is wired with `ThreadInboxStore`.
 - same-thread sends to a running tab enqueue `deliver_thread_inbox` as a

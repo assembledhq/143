@@ -285,6 +285,8 @@ type PullRequestRepairRun struct {
 	ThreadID           *uuid.UUID                     `db:"thread_id" json:"thread_id,omitempty"`
 	ActionType         PullRequestRepairActionType    `db:"action_type" json:"action_type"`
 	HealthVersion      int64                          `db:"health_version" json:"health_version"`
+	HeadSHA            string                         `db:"head_sha" json:"head_sha,omitempty"`
+	BaseSHA            string                         `db:"base_sha" json:"base_sha,omitempty"`
 	WorkspaceMode      PullRequestRepairWorkspaceMode `db:"workspace_mode" json:"workspace_mode"`
 	Active             bool                           `db:"active" json:"active"`
 	ObsoletedByVersion *int64                         `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`

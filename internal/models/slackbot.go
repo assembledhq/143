@@ -49,11 +49,12 @@ const (
 	SlackInboundEventStatusEnqueued  SlackInboundEventStatus = "enqueued"
 	SlackInboundEventStatusProcessed SlackInboundEventStatus = "processed"
 	SlackInboundEventStatusFailed    SlackInboundEventStatus = "failed"
+	SlackInboundEventStatusIgnored   SlackInboundEventStatus = "ignored"
 )
 
 func (s SlackInboundEventStatus) Validate() error {
 	switch s {
-	case SlackInboundEventStatusReceived, SlackInboundEventStatusEnqueued, SlackInboundEventStatusProcessed, SlackInboundEventStatusFailed:
+	case SlackInboundEventStatusReceived, SlackInboundEventStatusEnqueued, SlackInboundEventStatusProcessed, SlackInboundEventStatusFailed, SlackInboundEventStatusIgnored:
 		return nil
 	default:
 		return fmt.Errorf("invalid SlackInboundEventStatus: %q", s)
@@ -104,13 +105,23 @@ type SlackInstallation struct {
 }
 
 type SlackInstallationHealth struct {
-	Installation    SlackInstallation     `json:"installation"`
-	RequiredScopes  []string              `json:"required_scopes"`
-	MissingScopes   []string              `json:"missing_scopes"`
-	LastEventAt     *time.Time            `json:"last_event_at,omitempty"`
-	LastAuthCheckAt *time.Time            `json:"last_auth_check_at,omitempty"`
-	AuthOK          bool                  `json:"auth_ok"`
-	AuthError       *IntegrationAuthError `json:"auth_error,omitempty"`
+	Installation           SlackInstallation      `json:"installation"`
+	RequiredScopes         []string               `json:"required_scopes"`
+	MissingScopes          []string               `json:"missing_scopes"`
+	LastEventAt            *time.Time             `json:"last_event_at,omitempty"`
+	LastAuthCheckAt        *time.Time             `json:"last_auth_check_at,omitempty"`
+	AuthOK                 bool                   `json:"auth_ok"`
+	AuthError              *IntegrationAuthError  `json:"auth_error,omitempty"`
+	Symptoms               []string               `json:"symptoms,omitempty"`
+	RecentCallbackFailures []SlackCallbackFailure `json:"recent_callback_failures,omitempty"`
+}
+
+type SlackCallbackFailure struct {
+	ID         uuid.UUID `json:"id"`
+	DeliveryID *string   `json:"delivery_id,omitempty"`
+	EventType  string    `json:"event_type"`
+	Error      *string   `json:"error,omitempty"`
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 type SlackUserLink struct {
@@ -217,6 +228,39 @@ func (s SlackNotificationPreset) Validate() error {
 	}
 }
 
+type SlackNotificationKind string
+
+const (
+	SlackNotificationSessionCompleted        SlackNotificationKind = "session.completed"
+	SlackNotificationSessionFailed           SlackNotificationKind = "session.failed"
+	SlackNotificationAutomationCompleted     SlackNotificationKind = "automation.run.completed"
+	SlackNotificationAutomationFailed        SlackNotificationKind = "automation.run.failed"
+	SlackNotificationAutomationFailureStreak SlackNotificationKind = "automation.run.failure_streak"
+	SlackNotificationPROpened                SlackNotificationKind = "pr.opened"
+	SlackNotificationPreviewReady            SlackNotificationKind = "preview.ready"
+	SlackNotificationPreviewFailed           SlackNotificationKind = "preview.failed"
+	SlackNotificationPreviewStale            SlackNotificationKind = "preview.stale"
+	SlackNotificationHumanInputRequested     SlackNotificationKind = "human_input.requested"
+)
+
+func (s SlackNotificationKind) Validate() error {
+	switch s {
+	case SlackNotificationSessionCompleted,
+		SlackNotificationSessionFailed,
+		SlackNotificationAutomationCompleted,
+		SlackNotificationAutomationFailed,
+		SlackNotificationAutomationFailureStreak,
+		SlackNotificationPROpened,
+		SlackNotificationPreviewReady,
+		SlackNotificationPreviewFailed,
+		SlackNotificationPreviewStale,
+		SlackNotificationHumanInputRequested:
+		return nil
+	default:
+		return fmt.Errorf("invalid SlackNotificationKind: %q", s)
+	}
+}
+
 type SlackBotSettings struct {
 	ID                        uuid.UUID               `db:"id" json:"id"`
 	OrgID                     uuid.UUID               `db:"org_id" json:"org_id"`
@@ -268,9 +312,19 @@ type SlackSessionLink struct {
 	UpdatedAt             time.Time  `db:"updated_at" json:"updated_at"`
 }
 
+type SlackSessionClaim struct {
+	ID                   uuid.UUID `db:"id" json:"id"`
+	OrgID                uuid.UUID `db:"org_id" json:"org_id"`
+	SlackSessionLinkID   uuid.UUID `db:"slack_session_link_id" json:"slack_session_link_id"`
+	ClaimedByUserID      uuid.UUID `db:"claimed_by_user_id" json:"claimed_by_user_id"`
+	ClaimedBySlackUserID string    `db:"claimed_by_slack_user_id" json:"claimed_by_slack_user_id"`
+	ClaimedAt            time.Time `db:"claimed_at" json:"claimed_at"`
+}
+
 type SlackInboundEvent struct {
 	ID                  uuid.UUID               `db:"id" json:"id"`
 	OrgID               uuid.UUID               `db:"org_id" json:"org_id"`
+	WebhookDeliveryID   *uuid.UUID              `db:"webhook_delivery_id" json:"webhook_delivery_id,omitempty"`
 	SlackInstallationID uuid.UUID               `db:"slack_installation_id" json:"slack_installation_id"`
 	SlackEventID        *string                 `db:"slack_event_id" json:"slack_event_id,omitempty"`
 	SlackTeamID         string                  `db:"slack_team_id" json:"slack_team_id"`
@@ -366,17 +420,62 @@ type SlackDeliverHumanInputJobPayload struct {
 }
 
 type SlackSendNotificationJobPayload struct {
-	OrgID          string `json:"org_id"`
-	NotificationID string `json:"notification_id,omitempty"`
-	Kind           string `json:"kind"`
-	TeamID         string `json:"team_id"`
-	ChannelID      string `json:"channel_id,omitempty"`
-	SlackUserID    string `json:"slack_user_id,omitempty"`
-	ThreadTS       string `json:"thread_ts,omitempty"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	SessionID      string `json:"session_id,omitempty"`
-	PreviewID      string `json:"preview_id,omitempty"`
+	OrgID              string `json:"org_id"`
+	NotificationID     string `json:"notification_id,omitempty"`
+	Kind               string `json:"kind"`
+	TeamID             string `json:"team_id"`
+	ChannelID          string `json:"channel_id,omitempty"`
+	SlackUserID        string `json:"slack_user_id,omitempty"`
+	ThreadTS           string `json:"thread_ts,omitempty"`
+	Title              string `json:"title"`
+	Body               string `json:"body"`
+	SessionID          string `json:"session_id,omitempty"`
+	AutomationID       string `json:"automation_id,omitempty"`
+	AutomationRunID    string `json:"automation_run_id,omitempty"`
+	PullRequestID      string `json:"pull_request_id,omitempty"`
+	PullRequestURL     string `json:"pull_request_url,omitempty"`
+	PreviewID          string `json:"preview_id,omitempty"`
+	ActorUserID        string `json:"actor_user_id,omitempty"`
+	NotificationPreset string `json:"notification_preset,omitempty"`
+}
+
+type SlackPreviewTargetKind string
+
+const (
+	SlackPreviewTargetSession     SlackPreviewTargetKind = "session"
+	SlackPreviewTargetPullRequest SlackPreviewTargetKind = "pull_request"
+	SlackPreviewTargetBranch      SlackPreviewTargetKind = "branch"
+	SlackPreviewTargetCommit      SlackPreviewTargetKind = "commit"
+	SlackPreviewTargetRepository  SlackPreviewTargetKind = "repository"
+)
+
+type SlackPreviewTarget struct {
+	Kind          SlackPreviewTargetKind `json:"kind"`
+	RepositoryID  uuid.UUID              `json:"repository_id"`
+	SessionID     *uuid.UUID             `json:"session_id,omitempty"`
+	PullRequestID *uuid.UUID             `json:"pull_request_id,omitempty"`
+	Branch        string                 `json:"branch,omitempty"`
+	CommitSHA     string                 `json:"commit_sha,omitempty"`
+	ConfigName    string                 `json:"config_name,omitempty"`
+}
+
+type SlackActor struct {
+	UserID      uuid.UUID `json:"user_id"`
+	SlackTeamID string    `json:"slack_team_id,omitempty"`
+	SlackUserID string    `json:"slack_user_id,omitempty"`
+}
+
+type SlackNotificationRenderInput struct {
+	Kind            SlackNotificationKind   `json:"kind"`
+	Preset          SlackNotificationPreset `json:"preset"`
+	Title           string                  `json:"title"`
+	Body            string                  `json:"body"`
+	SessionID       *uuid.UUID              `json:"session_id,omitempty"`
+	AutomationID    *uuid.UUID              `json:"automation_id,omitempty"`
+	AutomationRunID *uuid.UUID              `json:"automation_run_id,omitempty"`
+	PullRequestID   *uuid.UUID              `json:"pull_request_id,omitempty"`
+	PreviewID       *uuid.UUID              `json:"preview_id,omitempty"`
+	ActorUserID     *uuid.UUID              `json:"actor_user_id,omitempty"`
 }
 
 type SlackInteractionJobPayload struct {

@@ -52,6 +52,91 @@ func TestWebhookDeliveryStore_Create(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestWebhookDeliveryStore_CreateOrGetReportsInsertStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		duplicateStatus  string
+		expectedInserted bool
+		expectReplay     bool
+	}{
+		{
+			name:             "reports inserted delivery",
+			expectedInserted: true,
+		},
+		{
+			name:             "reports retryable failed duplicate",
+			duplicateStatus:  "failed",
+			expectedInserted: false,
+		},
+		{
+			name:            "reports terminal processed duplicate as replay",
+			duplicateStatus: "processed",
+			expectReplay:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create pgx mock")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			integrationID := uuid.New()
+			deliveryID := "slack-event-1"
+			now := time.Now()
+			delivery := &models.WebhookDelivery{
+				OrgID:         orgID,
+				IntegrationID: integrationID,
+				Provider:      "slack",
+				DeliveryID:    &deliveryID,
+				EventType:     "app_mention",
+				Status:        "received",
+				Payload:       json.RawMessage(`{"type":"event_callback"}`),
+			}
+
+			insertExpectation := mock.ExpectQuery("INSERT INTO webhook_deliveries").
+				WithArgs(
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				)
+			if tt.duplicateStatus == "" {
+				insertExpectation.WillReturnRows(
+					pgxmock.NewRows([]string{"id", "received_at", "created_at"}).
+						AddRow(uuid.New(), now, now),
+				)
+			} else {
+				insertExpectation.WillReturnError(&pgconn.PgError{Code: "23505", Message: "duplicate delivery"})
+				mock.ExpectQuery("SELECT id, org_id, integration_id").
+					WithArgs("slack", &deliveryID).
+					WillReturnRows(pgxmock.NewRows([]string{
+						"id", "org_id", "integration_id", "provider", "delivery_id", "event_type",
+						"signature_valid", "received_at", "processed_at", "status", "attempts",
+						"error", "payload", "headers", "created_at",
+					}).AddRow(
+						uuid.New(), orgID, integrationID, "slack", &deliveryID, "app_mention",
+						nil, now, nil, tt.duplicateStatus, 1,
+						nil, json.RawMessage(`{"type":"event_callback"}`), nil, now,
+					))
+			}
+
+			inserted, err := NewWebhookDeliveryStore(mock).CreateOrGet(context.Background(), delivery)
+			if tt.expectReplay {
+				require.True(t, errors.Is(err, ErrWebhookDeliveryReplay), "terminal duplicate should return replay sentinel")
+			} else {
+				require.NoError(t, err, "CreateOrGet should not return error for inserted or retryable delivery")
+				require.Equal(t, tt.expectedInserted, inserted, "CreateOrGet should report whether a new row was inserted")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestWebhookDeliveryStore_CreateDuplicateDeliveryStatusHandling(t *testing.T) {
 	t.Parallel()
 
@@ -179,6 +264,59 @@ func TestWebhookDeliveryStore_MarkProcessed(t *testing.T) {
 	}
 }
 
+func TestWebhookDeliveryStore_MarkIgnored(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewWebhookDeliveryStore(mock)
+	delivery := &models.WebhookDelivery{ID: uuid.New(), OrgID: uuid.New()}
+
+	mock.ExpectExec("UPDATE webhook_deliveries").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.MarkIgnored(context.Background(), delivery)
+	require.NoError(t, err, "MarkIgnored should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestWebhookDeliveryStore_ListRecentFailures(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	deliveryID := "Ev-failed"
+	errorMessage := "insert slack inbound event: boom"
+	now := time.Now()
+	store := NewWebhookDeliveryStore(mock)
+
+	mock.ExpectQuery(`WHERE org_id = @org_id\s+AND provider = @provider\s+AND status = 'failed'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "provider", "delivery_id", "event_type",
+			"signature_valid", "received_at", "processed_at", "status", "attempts",
+			"error", "payload", "headers", "created_at",
+		}).AddRow(
+			uuid.New(), orgID, integrationID, "slack", &deliveryID, "app_mention",
+			ptrBool(true), now, &now, "failed", 1,
+			&errorMessage, json.RawMessage(`{"type":"event_callback"}`), nil, now,
+		))
+
+	failures, err := store.ListRecentFailures(context.Background(), orgID, "slack", now.Add(-24*time.Hour), 5)
+
+	require.NoError(t, err, "ListRecentFailures should not return an error")
+	require.Len(t, failures, 1, "ListRecentFailures should return matching failed deliveries")
+	require.Equal(t, errorMessage, *failures[0].Error, "ListRecentFailures should include stored error message")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestWebhookDeliveryStore_DeleteExpired(t *testing.T) {
 	t.Parallel()
 
@@ -200,4 +338,8 @@ func TestWebhookDeliveryStore_DeleteExpired(t *testing.T) {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+func ptrBool(v bool) *bool {
+	return &v
 }

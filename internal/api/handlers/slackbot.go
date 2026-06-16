@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -42,14 +44,21 @@ type SlackbotJobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 }
 
+type SlackbotWebhookDeliveryStore interface {
+	CreateOrGet(ctx context.Context, delivery *models.WebhookDelivery) (bool, error)
+	MarkProcessed(ctx context.Context, delivery *models.WebhookDelivery, errMsg *string) error
+	MarkIgnored(ctx context.Context, delivery *models.WebhookDelivery) error
+}
+
 type SlackbotHandler struct {
-	cfg           SlackbotHandlerConfig
-	installations SlackbotInstallationStore
-	inbound       SlackbotInboundEventStore
-	jobs          SlackbotJobStore
-	logger        zerolog.Logger
-	metrics       *metrics.SlackbotMetrics
-	now           func() time.Time
+	cfg               SlackbotHandlerConfig
+	installations     SlackbotInstallationStore
+	inbound           SlackbotInboundEventStore
+	jobs              SlackbotJobStore
+	webhookDeliveries SlackbotWebhookDeliveryStore
+	logger            zerolog.Logger
+	metrics           *metrics.SlackbotMetrics
+	now               func() time.Time
 }
 
 func NewSlackbotHandler(cfg SlackbotHandlerConfig, installations SlackbotInstallationStore, inbound SlackbotInboundEventStore, jobs SlackbotJobStore) *SlackbotHandler {
@@ -71,14 +80,25 @@ func (h *SlackbotHandler) SetMetrics(metrics *metrics.SlackbotMetrics) {
 	h.metrics = metrics
 }
 
+func (h *SlackbotHandler) SetWebhookDeliveries(store SlackbotWebhookDeliveryStore) {
+	h.webhookDeliveries = store
+}
+
 func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
+	started := h.now()
+	outcome := "ok"
+	defer func() {
+		h.metrics.RecordCallbackLatency(r.Context(), "events_api", outcome, float64(h.now().Sub(started).Milliseconds()))
+	}()
 	body, ok := h.readAndVerify(w, r)
 	if !ok {
+		outcome = "invalid_signature"
 		return
 	}
 
 	var envelope slackEventEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
+		outcome = "invalid_input"
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse Slack event")
 		return
 	}
@@ -87,30 +107,41 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if envelope.Type != "event_callback" {
+		outcome = "ignored"
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
-	if h.installations == nil || h.inbound == nil || h.jobs == nil {
+	if h.installations == nil || h.inbound == nil || h.jobs == nil || h.webhookDeliveries == nil {
+		outcome = "persist_failed"
 		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
 		return
 	}
 
 	install, err := h.installations.GetActiveByTeamApp(r.Context(), envelope.TeamID, envelope.APIAppID)
 	if err != nil {
+		outcome = "installation_not_found"
 		writeError(w, r, http.StatusNotFound, "SLACK_INSTALLATION_NOT_FOUND", "slack installation not found")
 		return
 	}
 	if err := h.installations.MarkLastEvent(r.Context(), install.OrgID, install.ID); err != nil {
 		h.logger.Warn().Err(err).Str("team_id", envelope.TeamID).Msg("failed to update Slack installation last_event_at")
 	}
-	eventType := envelope.Event.Type
-	if envelope.Event.ChannelType == "im" && eventType == "message" {
-		eventType = string(models.SlackInboundEventTypeMessageIM)
+	eventType := normalizeSlackEventType(envelope.Event)
+	eventTypeValue := string(eventType)
+	h.metrics.RecordInboundEvent(r.Context(), eventTypeValue, "received")
+
+	delivery, deliveryInserted, terminalDuplicate, err := h.createSlackWebhookDelivery(r.Context(), r, install, slackEventsDeliveryID(envelope, eventTypeValue), eventTypeValue, body)
+	if err != nil {
+		outcome = "persist_failed"
+		h.metrics.RecordInboundEvent(r.Context(), eventTypeValue, "persist_failed")
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack event", err)
+		return
 	}
-	h.metrics.RecordInboundEvent(r.Context(), eventType, "received")
-	if h.shouldIgnoreEvent(install, envelope.Event) {
-		h.metrics.RecordInboundEvent(r.Context(), eventType, "ignored")
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+	if terminalDuplicate {
+		outcome = "duplicate"
+		h.metrics.RecordInboundEvent(r.Context(), eventTypeValue, "duplicate")
+		h.metrics.RecordDedupeHit(r.Context(), "events_api")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "duplicate"})
 		return
 	}
 
@@ -118,29 +149,56 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 	userID := stringPtrOrNil(envelope.Event.User)
 	eventTS := stringPtrOrNil(envelope.Event.TS)
 	slackEventID := stringPtrOrNil(envelope.EventID)
+	eventStatus := models.SlackInboundEventStatusReceived
+	if h.shouldIgnoreEvent(install, envelope.Event) || !slackEventIsActionable(eventType) {
+		eventStatus = models.SlackInboundEventStatusIgnored
+	}
 	inbound := &models.SlackInboundEvent{
 		OrgID:               install.OrgID,
+		WebhookDeliveryID:   &delivery.ID,
 		SlackInstallationID: install.ID,
 		SlackEventID:        slackEventID,
 		SlackTeamID:         envelope.TeamID,
-		EventType:           models.SlackInboundEventType(eventType),
+		EventType:           eventType,
 		ChannelID:           channelID,
 		UserID:              userID,
 		EventTS:             eventTS,
 		Payload:             sanitizeSlackStoredPayload(body),
+		Status:              eventStatus,
 	}
 	inserted, err := h.inbound.CreateReceived(r.Context(), inbound)
 	if err != nil {
+		outcome = "persist_failed"
+		h.metrics.RecordInboundEvent(r.Context(), eventTypeValue, "persist_failed")
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack event", err)
 		return
 	}
-	if !inserted {
-		h.metrics.RecordInboundEvent(r.Context(), eventType, "duplicate")
+	if eventStatus == models.SlackInboundEventStatusIgnored {
+		outcome = "ignored"
+		h.metrics.RecordInboundEvent(r.Context(), eventTypeValue, "ignored")
+		if err := h.markSlackWebhookDeliveryIgnored(r.Context(), delivery); err != nil {
+			outcome = "persist_failed"
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event ignored", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+		return
+	}
+	if !inserted && deliveryInserted {
+		outcome = "duplicate"
+		h.metrics.RecordInboundEvent(r.Context(), eventTypeValue, "duplicate")
+		h.metrics.RecordDedupeHit(r.Context(), "events_api")
+		if err := h.markSlackWebhookDeliveryProcessed(r.Context(), delivery); err != nil {
+			outcome = "persist_failed"
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event processed", err)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "duplicate"})
 		return
 	}
 
-	switch models.SlackInboundEventType(eventType) {
+	switch eventType {
 	case models.SlackInboundEventTypeAppMention, models.SlackInboundEventTypeMessageIM:
 		payload := models.SlackStartSessionJobPayload{
 			OrgID:               install.OrgID.String(),
@@ -152,19 +210,24 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 			MessageTS:           envelope.Event.TS,
 			SlackUserID:         envelope.Event.User,
 			Text:                envelope.Event.Text,
-			Source:              eventType,
+			Source:              eventTypeValue,
 			FileIDs:             slackEventFileIDs(envelope.Event),
 		}
-		dedupeKey := "slack_event:" + envelope.EventID
+		dedupeKey := "slack_event:" + slackEventsDeliveryID(envelope, eventTypeValue)
 		jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "agent", "slack_start_or_continue_session", payload, 5, &dedupeKey)
 		if err != nil {
+			outcome = "enqueue_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 			writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack event", err)
 			return
 		}
 		if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
-			h.logger.Warn().Err(err).Str("slack_event_id", envelope.EventID).Msg("failed to mark Slack event enqueued")
+			outcome = "persist_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event enqueued", err)
+			return
 		}
-		h.metrics.RecordSessionStart(r.Context(), eventType, "enqueued")
+		h.metrics.RecordSessionStart(r.Context(), eventTypeValue, "enqueued")
 	case models.SlackInboundEventTypeAppHomeOpened:
 		payload := map[string]string{
 			"org_id":                 install.OrgID.String(),
@@ -173,17 +236,24 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 			"team_id":                envelope.TeamID,
 			"slack_user_id":          envelope.Event.User,
 		}
-		dedupeKey := "slack_app_home:" + envelope.EventID
+		dedupeKey := "slack_app_home:" + slackEventsDeliveryID(envelope, eventTypeValue)
 		jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "default", "slack_sync_app_home", payload, 3, &dedupeKey)
 		if err != nil {
+			outcome = "enqueue_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 			writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack app home sync", err)
 			return
 		}
 		if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
-			h.logger.Warn().Err(err).Str("slack_event_id", envelope.EventID).Msg("failed to mark Slack event enqueued")
+			outcome = "persist_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event enqueued", err)
+			return
 		}
 	case models.SlackInboundEventTypeAppUninstalled, models.SlackInboundEventTypeAppUninstalledTeam:
 		if err := h.installations.MarkDisconnected(r.Context(), install.OrgID, install.ID); err != nil {
+			outcome = "persist_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 			writeError(w, r, http.StatusInternalServerError, "SLACK_DISCONNECT_FAILED", "failed to mark Slack installation disconnected", err)
 			return
 		}
@@ -201,34 +271,58 @@ func (h *SlackbotHandler) Events(w http.ResponseWriter, r *http.Request) {
 			ActionID:            "slack_member_joined_channel",
 			RawPayload:          body,
 		}
-		dedupeKey := "slack_member_joined:" + envelope.EventID
+		dedupeKey := "slack_member_joined:" + slackEventsDeliveryID(envelope, eventTypeValue)
 		jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "default", "slack_handle_interaction", payload, 3, &dedupeKey)
 		if err != nil {
+			outcome = "enqueue_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 			writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack channel setup", err)
 			return
 		}
 		if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
-			h.logger.Warn().Err(err).Str("slack_event_id", envelope.EventID).Msg("failed to mark Slack event enqueued")
+			outcome = "persist_failed"
+			h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event enqueued", err)
+			return
 		}
 	default:
+		outcome = "ignored"
+		if err := h.markSlackWebhookDeliveryIgnored(r.Context(), delivery); err != nil {
+			outcome = "persist_failed"
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event ignored", err)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
 
+	if err := h.markSlackWebhookDeliveryProcessed(r.Context(), delivery); err != nil {
+		outcome = "persist_failed"
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack event processed", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
+	started := h.now()
+	outcome := "ok"
+	defer func() {
+		h.metrics.RecordCallbackLatency(r.Context(), "slash_command", outcome, float64(h.now().Sub(started).Milliseconds()))
+	}()
 	body, ok := h.readAndVerify(w, r)
 	if !ok {
+		outcome = "invalid_signature"
 		return
 	}
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
+		outcome = "invalid_input"
 		writeError(w, r, http.StatusBadRequest, "INVALID_FORM", "failed to parse Slack command payload")
 		return
 	}
-	if h.installations == nil || h.inbound == nil || h.jobs == nil {
+	if h.installations == nil || h.inbound == nil || h.jobs == nil || h.webhookDeliveries == nil {
+		outcome = "persist_failed"
 		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
 		return
 	}
@@ -236,6 +330,7 @@ func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
 	apiAppID := values.Get("api_app_id")
 	install, err := h.installations.GetActiveByTeamApp(r.Context(), teamID, apiAppID)
 	if err != nil {
+		outcome = "installation_not_found"
 		writeError(w, r, http.StatusNotFound, "SLACK_INSTALLATION_NOT_FOUND", "slack installation not found")
 		return
 	}
@@ -243,8 +338,21 @@ func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
 	userID := values.Get("user_id")
 	triggerID := values.Get("trigger_id")
 	eventID := "command:" + teamID + ":" + channelID + ":" + userID + ":" + values.Get("command") + ":" + triggerID
+	delivery, deliveryInserted, terminalDuplicate, err := h.createSlackWebhookDelivery(r.Context(), r, install, eventID, string(models.SlackInboundEventTypeSlashCommand), body)
+	if err != nil {
+		outcome = "persist_failed"
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack command", err)
+		return
+	}
+	if terminalDuplicate {
+		outcome = "duplicate"
+		h.metrics.RecordDedupeHit(r.Context(), "slash_command")
+		writeJSON(w, http.StatusOK, map[string]string{"response_type": "ephemeral", "text": "Starting a 143 session for this Slack request..."})
+		return
+	}
 	inbound := &models.SlackInboundEvent{
 		OrgID:               install.OrgID,
+		WebhookDeliveryID:   &delivery.ID,
 		SlackInstallationID: install.ID,
 		SlackEventID:        &eventID,
 		SlackTeamID:         teamID,
@@ -255,61 +363,93 @@ func (h *SlackbotHandler) Commands(w http.ResponseWriter, r *http.Request) {
 	}
 	inserted, err := h.inbound.CreateReceived(r.Context(), inbound)
 	if err != nil {
+		outcome = "persist_failed"
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack command", err)
 		return
 	}
-	if inserted {
-		payload := models.SlackStartSessionJobPayload{
-			OrgID:               install.OrgID.String(),
-			SlackInboundEventID: inbound.ID.String(),
-			SlackInstallationID: install.ID.String(),
-			TeamID:              teamID,
-			ChannelID:           channelID,
-			ThreadTS:            values.Get("thread_ts"),
-			MessageTS:           triggerID,
-			SlackUserID:         userID,
-			Text:                values.Get("text"),
-			Source:              string(models.SlackInboundEventTypeSlashCommand),
-		}
-		dedupeKey := "slack_command:" + eventID
-		jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "agent", "slack_start_or_continue_session", payload, 5, &dedupeKey)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack command", err)
+	if !inserted && deliveryInserted {
+		outcome = "duplicate"
+		h.metrics.RecordDedupeHit(r.Context(), "slash_command")
+		if err := h.markSlackWebhookDeliveryProcessed(r.Context(), delivery); err != nil {
+			outcome = "persist_failed"
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack command processed", err)
 			return
 		}
-		if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
-			h.logger.Warn().Err(err).Str("slack_event_id", eventID).Msg("failed to mark Slack command enqueued")
-		}
+		writeJSON(w, http.StatusOK, map[string]string{"response_type": "ephemeral", "text": "Starting a 143 session for this Slack request..."})
+		return
+	}
+	payload := models.SlackStartSessionJobPayload{
+		OrgID:               install.OrgID.String(),
+		SlackInboundEventID: inbound.ID.String(),
+		SlackInstallationID: install.ID.String(),
+		TeamID:              teamID,
+		ChannelID:           channelID,
+		ThreadTS:            values.Get("thread_ts"),
+		MessageTS:           triggerID,
+		SlackUserID:         userID,
+		Text:                values.Get("text"),
+		Source:              string(models.SlackInboundEventTypeSlashCommand),
+	}
+	dedupeKey := "slack_command:" + eventID
+	jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "agent", "slack_start_or_continue_session", payload, 5, &dedupeKey)
+	if err != nil {
+		outcome = "enqueue_failed"
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+		writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack command", err)
+		return
+	}
+	if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
+		outcome = "persist_failed"
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack command enqueued", err)
+		return
+	}
+	if err := h.markSlackWebhookDeliveryProcessed(r.Context(), delivery); err != nil {
+		outcome = "persist_failed"
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack command processed", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"response_type": "ephemeral", "text": "Starting a 143 session for this Slack request..."})
 }
 
 func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
+	started := h.now()
+	outcome := "ok"
+	defer func() {
+		h.metrics.RecordCallbackLatency(r.Context(), "interaction", outcome, float64(h.now().Sub(started).Milliseconds()))
+	}()
 	body, ok := h.readAndVerify(w, r)
 	if !ok {
+		outcome = "invalid_signature"
 		return
 	}
 	values, err := url.ParseQuery(string(body))
 	if err != nil {
+		outcome = "invalid_input"
 		writeError(w, r, http.StatusBadRequest, "INVALID_FORM", "failed to parse Slack interaction payload")
 		return
 	}
 	payload := values.Get("payload")
 	if payload == "" {
+		outcome = "invalid_input"
 		writeError(w, r, http.StatusBadRequest, "MISSING_PAYLOAD", "Slack interaction payload is required")
 		return
 	}
-	if h.installations == nil || h.inbound == nil || h.jobs == nil {
+	if h.installations == nil || h.inbound == nil || h.jobs == nil || h.webhookDeliveries == nil {
+		outcome = "persist_failed"
 		writeError(w, r, http.StatusServiceUnavailable, "SLACKBOT_NOT_CONFIGURED", "slackbot is not configured")
 		return
 	}
 	var interaction slackInteractionPayload
 	if err := json.Unmarshal([]byte(payload), &interaction); err != nil {
+		outcome = "invalid_input"
 		writeError(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "failed to parse Slack interaction payload")
 		return
 	}
 	install, err := h.installations.GetActiveByTeamApp(r.Context(), interaction.Team.ID, interaction.APIAppID)
 	if err != nil {
+		outcome = "installation_not_found"
 		writeError(w, r, http.StatusNotFound, "SLACK_INSTALLATION_NOT_FOUND", "slack installation not found")
 		return
 	}
@@ -317,9 +457,22 @@ func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
 	callbackID := firstNonEmpty(interaction.CallbackID, interaction.View.CallbackID)
 	h.metrics.RecordInteractionAction(r.Context(), actionID, "received")
 	eventID := "interaction:" + interaction.Team.ID + ":" + interaction.User.ID + ":" + callbackID + ":" + actionID + ":" + interaction.Message.TS + ":" + interaction.View.ID
+	delivery, deliveryInserted, terminalDuplicate, err := h.createSlackWebhookDelivery(r.Context(), r, install, eventID, string(models.SlackInboundEventTypeInteraction), body)
+	if err != nil {
+		outcome = "persist_failed"
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack interaction", err)
+		return
+	}
+	if terminalDuplicate {
+		outcome = "duplicate"
+		h.metrics.RecordDedupeHit(r.Context(), "interaction")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
 	rawPayload := json.RawMessage(payload)
 	inbound := &models.SlackInboundEvent{
 		OrgID:               install.OrgID,
+		WebhookDeliveryID:   &delivery.ID,
 		SlackInstallationID: install.ID,
 		SlackEventID:        &eventID,
 		SlackTeamID:         interaction.Team.ID,
@@ -331,36 +484,162 @@ func (h *SlackbotHandler) Interactions(w http.ResponseWriter, r *http.Request) {
 	}
 	inserted, err := h.inbound.CreateReceived(r.Context(), inbound)
 	if err != nil {
+		outcome = "persist_failed"
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
 		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to persist Slack interaction", err)
 		return
 	}
-	if inserted {
-		jobPayload := models.SlackInteractionJobPayload{
-			OrgID:               install.OrgID.String(),
-			SlackInboundEventID: inbound.ID.String(),
-			SlackInstallationID: install.ID.String(),
-			TeamID:              interaction.Team.ID,
-			ChannelID:           interaction.Channel.ID,
-			UserID:              interaction.User.ID,
-			ActionID:            actionID,
-			CallbackID:          callbackID,
-			Value:               value,
-			TriggerID:           interaction.TriggerID,
-			ViewID:              interaction.View.ID,
-			MessageTS:           interaction.Message.TS,
-			RawPayload:          sanitizeSlackStoredPayload(rawPayload),
-		}
-		dedupeKey := "slack_interaction:" + eventID
-		jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "default", "slack_handle_interaction", jobPayload, 5, &dedupeKey)
-		if err != nil {
-			writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack interaction", err)
+	if !inserted && deliveryInserted {
+		outcome = "duplicate"
+		h.metrics.RecordDedupeHit(r.Context(), "interaction")
+		if err := h.markSlackWebhookDeliveryProcessed(r.Context(), delivery); err != nil {
+			outcome = "persist_failed"
+			writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack interaction processed", err)
 			return
 		}
-		if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
-			h.logger.Warn().Err(err).Str("slack_event_id", eventID).Msg("failed to mark Slack interaction enqueued")
-		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	jobPayload := models.SlackInteractionJobPayload{
+		OrgID:               install.OrgID.String(),
+		SlackInboundEventID: inbound.ID.String(),
+		SlackInstallationID: install.ID.String(),
+		TeamID:              interaction.Team.ID,
+		ChannelID:           interaction.Channel.ID,
+		UserID:              interaction.User.ID,
+		ActionID:            actionID,
+		CallbackID:          callbackID,
+		Value:               value,
+		TriggerID:           interaction.TriggerID,
+		ViewID:              interaction.View.ID,
+		MessageTS:           interaction.Message.TS,
+		RawPayload:          sanitizeSlackStoredPayload(rawPayload),
+	}
+	dedupeKey := "slack_interaction:" + eventID
+	jobID, err := h.jobs.Enqueue(r.Context(), install.OrgID, "default", "slack_handle_interaction", jobPayload, 5, &dedupeKey)
+	if err != nil {
+		outcome = "enqueue_failed"
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+		writeError(w, r, http.StatusInternalServerError, "SLACK_JOB_ENQUEUE_FAILED", "failed to enqueue Slack interaction", err)
+		return
+	}
+	if err := h.inbound.MarkEnqueued(r.Context(), install.OrgID, inbound.ID, jobID); err != nil {
+		outcome = "persist_failed"
+		h.markSlackWebhookDeliveryFailed(r.Context(), delivery, err)
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack interaction enqueued", err)
+		return
+	}
+	if err := h.markSlackWebhookDeliveryProcessed(r.Context(), delivery); err != nil {
+		outcome = "persist_failed"
+		writeError(w, r, http.StatusInternalServerError, "SLACK_EVENT_PERSIST_FAILED", "failed to mark Slack interaction processed", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *SlackbotHandler) createSlackWebhookDelivery(ctx context.Context, r *http.Request, install models.SlackInstallation, deliveryID string, eventType string, body []byte) (*models.WebhookDelivery, bool, bool, error) {
+	signatureValid := true
+	delivery := &models.WebhookDelivery{
+		OrgID:          install.OrgID,
+		IntegrationID:  install.IntegrationID,
+		Provider:       "slack",
+		DeliveryID:     stringPtrOrNil(deliveryID),
+		EventType:      eventType,
+		SignatureValid: &signatureValid,
+		Payload:        sanitizeSlackStoredPayload(body),
+		Headers:        sanitizeSlackStoredHeaders(r.Header),
+		Status:         "received",
+	}
+	inserted, err := h.webhookDeliveries.CreateOrGet(ctx, delivery)
+	if err != nil {
+		if errors.Is(err, db.ErrWebhookDeliveryReplay) && slackWebhookDeliveryTerminal(delivery.Status) {
+			return delivery, false, true, nil
+		}
+		return nil, false, false, err
+	}
+	if !inserted && slackWebhookDeliveryTerminal(delivery.Status) {
+		return delivery, false, true, nil
+	}
+	return delivery, inserted, false, nil
+}
+
+func (h *SlackbotHandler) markSlackWebhookDeliveryProcessed(ctx context.Context, delivery *models.WebhookDelivery) error {
+	if delivery == nil || h.webhookDeliveries == nil {
+		return nil
+	}
+	return h.webhookDeliveries.MarkProcessed(ctx, delivery, nil)
+}
+
+func (h *SlackbotHandler) markSlackWebhookDeliveryIgnored(ctx context.Context, delivery *models.WebhookDelivery) error {
+	if delivery == nil || h.webhookDeliveries == nil {
+		return nil
+	}
+	return h.webhookDeliveries.MarkIgnored(ctx, delivery)
+}
+
+func (h *SlackbotHandler) markSlackWebhookDeliveryFailed(ctx context.Context, delivery *models.WebhookDelivery, cause error) {
+	if delivery == nil || h.webhookDeliveries == nil || cause == nil {
+		return
+	}
+	message := cause.Error()
+	if err := h.webhookDeliveries.MarkProcessed(ctx, delivery, &message); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("webhook_delivery_id", delivery.ID.String()).Msg("failed to mark Slack webhook delivery failed")
+	}
+}
+
+func slackWebhookDeliveryTerminal(status string) bool {
+	return status == "processed" || status == "ignored"
+}
+
+func normalizeSlackEventType(event slackInnerEvent) models.SlackInboundEventType {
+	if event.ChannelType == "im" && event.Type == "message" {
+		return models.SlackInboundEventTypeMessageIM
+	}
+	return models.SlackInboundEventType(event.Type)
+}
+
+func slackEventIsActionable(eventType models.SlackInboundEventType) bool {
+	switch eventType {
+	case models.SlackInboundEventTypeAppMention,
+		models.SlackInboundEventTypeMessageIM,
+		models.SlackInboundEventTypeAppHomeOpened,
+		models.SlackInboundEventTypeAppUninstalled,
+		models.SlackInboundEventTypeAppUninstalledTeam,
+		models.SlackInboundEventTypeAppRateLimited,
+		models.SlackInboundEventTypeMemberJoined:
+		return true
+	default:
+		return false
+	}
+}
+
+func slackEventsDeliveryID(envelope slackEventEnvelope, eventType string) string {
+	if envelope.EventID != "" {
+		return envelope.EventID
+	}
+	return "event:" + envelope.TeamID + ":" + envelope.APIAppID + ":" + eventType + ":" + envelope.Event.Channel + ":" + envelope.Event.TS
+}
+
+func sanitizeSlackStoredHeaders(headers http.Header) json.RawMessage {
+	stored := make(map[string]any)
+	for _, key := range []string{
+		"Content-Type",
+		"User-Agent",
+		"X-Slack-Request-Timestamp",
+		"X-Slack-Retry-Num",
+		"X-Slack-Retry-Reason",
+	} {
+		values := headers.Values(key)
+		if len(values) == 0 {
+			continue
+		}
+		stored[strings.ToLower(key)] = append([]string(nil), values...)
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return encoded
 }
 
 func (h *SlackbotHandler) readAndVerify(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -370,6 +649,7 @@ func (h *SlackbotHandler) readAndVerify(w http.ResponseWriter, r *http.Request) 
 		return nil, false
 	}
 	if !h.verifySignature(r, body) {
+		h.metrics.RecordSignatureFailure(r.Context(), "invalid")
 		writeError(w, r, http.StatusUnauthorized, "INVALID_SIGNATURE", "Slack signature verification failed")
 		return nil, false
 	}
@@ -423,20 +703,47 @@ func sanitizeSlackStoredPayload(raw []byte) json.RawMessage {
 	if len(raw) == 0 {
 		return nil
 	}
-	values, err := url.ParseQuery(string(raw))
-	if err == nil && len(values) > 0 {
+	rawString := string(raw)
+	values, err := url.ParseQuery(rawString)
+	if err == nil && len(values) > 0 && strings.Contains(rawString, "=") {
 		for key := range slackStoredPayloadSecretKeys {
 			if _, ok := values[key]; ok {
 				values.Set(key, "[redacted]")
 			}
 		}
-		return json.RawMessage(values.Encode())
+		encoded := make(map[string]any, len(values))
+		for key, vals := range values {
+			if _, ok := slackStoredPayloadSecretKeys[key]; ok {
+				encoded[key] = "[redacted]"
+				continue
+			}
+			if key == "payload" && len(vals) == 1 {
+				var nested any
+				if err := json.Unmarshal([]byte(vals[0]), &nested); err == nil {
+					sanitizeSlackJSONValue(nested)
+					redactSlackDMEventText(nested)
+					encoded[key] = nested
+					continue
+				}
+			}
+			if len(vals) == 1 {
+				encoded[key] = vals[0]
+				continue
+			}
+			encoded[key] = vals
+		}
+		sanitized, marshalErr := json.Marshal(encoded)
+		if marshalErr != nil {
+			return json.RawMessage(`{}`)
+		}
+		return sanitized
 	}
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return json.RawMessage(raw)
 	}
 	sanitizeSlackJSONValue(decoded)
+	redactSlackDMEventText(decoded)
 	sanitized, err := json.Marshal(decoded)
 	if err != nil {
 		return json.RawMessage(raw)
@@ -445,9 +752,11 @@ func sanitizeSlackStoredPayload(raw []byte) json.RawMessage {
 }
 
 var slackStoredPayloadSecretKeys = map[string]struct{}{
-	"response_url": {},
-	"trigger_id":   {},
-	"token":        {},
+	"response_url":   {},
+	"trigger_id":     {},
+	"token":          {},
+	"authed_users":   {},
+	"authorizations": {},
 }
 
 func sanitizeSlackJSONValue(value any) {
@@ -464,6 +773,25 @@ func sanitizeSlackJSONValue(value any) {
 		for _, child := range v {
 			sanitizeSlackJSONValue(child)
 		}
+	}
+}
+
+func redactSlackDMEventText(value any) {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	event, ok := root["event"].(map[string]any)
+	if !ok {
+		return
+	}
+	channelType, _ := event["channel_type"].(string)
+	channelID, _ := event["channel"].(string)
+	if channelType != "im" && channelType != "mpim" && !strings.HasPrefix(channelID, "D") {
+		return
+	}
+	if _, ok := event["text"]; ok {
+		event["text"] = "[redacted]"
 	}
 }
 

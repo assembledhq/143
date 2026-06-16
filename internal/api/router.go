@@ -207,6 +207,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		repoHandler.SetPRService(prService)
 	}
+	slackMetrics, slackMetricsErr := metrics.NewSlackbotMetrics()
+	if slackMetricsErr != nil {
+		logger.Warn().Err(slackMetricsErr).Msg("failed to initialize Slackbot metrics")
+	}
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
@@ -219,6 +223,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSlackBotSettingsStore(slackBotSettingsStore),
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
+		handlers.WithSlackbotMetrics(slackMetrics),
+		handlers.WithWebhookDeliveryStore(webhookDeliveryStore),
 	}
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
@@ -256,10 +262,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 	)
 	slackbotHandler.SetLogger(logger)
-	if slackMetrics, err := metrics.NewSlackbotMetrics(); err == nil {
+	slackbotHandler.SetWebhookDeliveries(webhookDeliveryStore)
+	if slackMetrics != nil {
 		slackbotHandler.SetMetrics(slackMetrics)
-	} else {
-		logger.Warn().Err(err).Msg("failed to initialize Slackbot metrics")
 	}
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
@@ -826,6 +831,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Common middleware shared by both public/API routes and worker preview RPC.
 	r.Use(chiMiddleware.RequestID)
+	r.Use(middleware.LogContext(logger))
 	r.Use(middleware.Logging(logger, sentryReporter))
 	r.Use(middleware.Recoverer(logger, sentryReporter))
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))
