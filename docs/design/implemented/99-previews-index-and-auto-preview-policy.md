@@ -1,6 +1,6 @@
 # Design: Previews Index, Auto-Preview Policy, and Warm Resume
 
-> **Status:** Mostly Implemented; queue-at-cap remains | **Last reviewed:** 2026-06-11
+> **Status:** Implemented | **Last reviewed:** 2026-06-16
 
 ---
 
@@ -552,7 +552,7 @@ Starts immediately against MSW mocks of the A contract.
 - [x] E3. Job plumbing: add `initiator` (`user`/`api`/`auto_policy`) and `stop_after_ready` fields to `start_branch_preview`; auto-preview jobs run at lower priority.
 - [x] E4. Webhook handler: on PR `opened`/`reopened`/`synchronize` (non-draft, non-fork, default-branch target), evaluate policy → find-or-create target (`source_type='pull_request'`) → skip if an active instance exists → enqueue with `initiator='auto_policy'`, `stop_after_ready=(mode=='warm')`. On `synchronize`, stop the previous head's runtime with `warm_policy`. On `closed`, stop active runtimes with `pr_closed`. Redelivery idempotence via the existing target find-or-create + active-instance check.
 - [x] E5. Worker: honor `stop_after_ready` — wait for readiness, save snapshot, stop cleanly with `stopped_reason='warm_policy'`; pre-readiness failures record `failed` as today.
-- [ ] E6. Auto pool accounting: running auto-preview instances count against `preview_auto_pool_max_active`; `meta.pool.auto_*` in the list endpoint is live; metrics `preview_auto_builds_total{mode,result}` and `preview_auto_pool_saturation` are live. Remaining gap: true queue-at-cap behavior. The current implementation suppresses auto starts at cap and records `pool_full`; implementing queueing requires a deferred auto-preview start job that does not reserve a `preview_instance` until capacity is available.
+- [x] E6. Auto pool accounting: running auto-preview instances count against `preview_auto_pool_max_active`; `meta.pool.auto_*` in the list endpoint is live; metrics `preview_auto_builds_total{mode,result}` and `preview_auto_pool_saturation` are live. Queue-at-cap behavior is implemented through a deferred `auto_preview_deferred` job that does not reserve a `preview_instance` until capacity is available and retries with backoff while the auto pool remains full.
 - [x] E7. Settings UI: add tab structure to `/settings/previews` (**Auto-preview** first; existing Secrets and API tokens content moves into tabs unchanged). Auto-preview tab: policy table with per-row three-option segmented control, autosave-per-row with the Runtime-settings indicator, pool-size input writing `preview_auto_pool_max_active` through the existing org-settings PATCH. Page tests including mobile stacked layout are implemented.
 - [x] E8. Enable `on` mode last (it is the same pipeline with `stop_after_ready=false`): verify idle-TTL reclaim degrades an `on` preview to resumable (D's derivation picks it up), then remove any temporary gating.
 
