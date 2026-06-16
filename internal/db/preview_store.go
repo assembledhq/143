@@ -45,7 +45,7 @@ func NewPreviewStore(db TxStarter) *PreviewStore {
 	return &PreviewStore{db: db, logger: zerolog.Nop()}
 }
 
-// lint:allow-no-orgid reason="logger configuration helper reads no tenant data"
+// SetLogger replaces the store logger. lint:allow-no-orgid reason="logger configuration helper reads no tenant data"
 func (s *PreviewStore) SetLogger(logger zerolog.Logger) {
 	s.logger = logger
 }
