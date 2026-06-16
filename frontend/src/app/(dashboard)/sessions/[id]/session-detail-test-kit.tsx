@@ -11,7 +11,51 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NuqsTestingAdapter } from 'nuqs/adapters/testing';
 import { server } from '@/test/mocks/server';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionDiff, SingleResponse } from '@/lib/types';
+import type {
+  Session,
+  SessionDiff,
+  SingleResponse,
+  SessionMessage,
+  SessionLog,
+  SessionTranscriptEntry,
+  SessionTranscriptTurn,
+  SessionTranscriptWindowResponse,
+  SessionTranscriptWindowMeta,
+} from '@/lib/types';
+
+// Builds a /transcript window response from flat message + log fixtures,
+// embedding the full record on each entry exactly as the production
+// SessionTranscriptWindowResponse contract requires. Logs are classified into
+// tool_use / tool_result / log entries; entries are grouped and sorted by turn.
+export function makeTranscriptWindow(
+  messages: SessionMessage[],
+  logs: SessionLog[],
+  meta: Partial<SessionTranscriptWindowMeta> = {},
+): SessionTranscriptWindowResponse {
+  const byTurn = new Map<number, SessionTranscriptEntry[]>();
+  const order: number[] = [];
+  const push = (turn: number, e: SessionTranscriptEntry) => {
+    if (!byTurn.has(turn)) {
+      byTurn.set(turn, []);
+      order.push(turn);
+    }
+    byTurn.get(turn)!.push(e);
+  };
+  for (const m of messages) {
+    push(m.turn_number, { id: `msg_${m.id}`, kind: 'message', created_at: m.created_at, message_id: m.id, role: m.role, content: m.content, message: m });
+  }
+  for (const l of logs) {
+    const kind = l.level === 'tool_use' ? 'tool_use' : (l.metadata as { type?: string } | null)?.type === 'tool_result' ? 'tool_result' : 'log';
+    const prefix = kind === 'tool_use' ? 'tuse' : kind === 'tool_result' ? 'tres' : 'log';
+    push(l.turn_number, { id: `${prefix}_${l.id}`, kind, created_at: l.created_at, log_id: l.id, level: l.level, log: l });
+  }
+  order.sort((a, b) => a - b);
+  const data: SessionTranscriptTurn[] = order.map((tn) => {
+    const entries = byTurn.get(tn)!.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return { turn_number: tn, started_at: entries[0]?.created_at ?? '', entries };
+  });
+  return { data, meta: { position: 'latest', has_older: false, has_newer: false, thread_status: 'idle', ...meta } };
+}
 
 export function sessionWithoutRawDiff(session: Session): Session {
   const copy = { ...session };

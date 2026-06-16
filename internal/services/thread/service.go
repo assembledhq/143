@@ -153,7 +153,6 @@ type LogStore interface {
 // window endpoint.
 type TranscriptStore interface {
 	ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
-	SearchThread(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) ([]db.SessionTranscriptSearchMatch, error)
 }
 
 // JobStore defines the job DB operations needed by the thread service.
@@ -272,11 +271,6 @@ type MessageWindowResult struct {
 // TranscriptWindowResult wraps the store result with thread status.
 type TranscriptWindowResult struct {
 	Window       db.SessionTranscriptWindow
-	ThreadStatus models.ThreadStatus
-}
-
-type TranscriptSearchResult struct {
-	Matches      []db.SessionTranscriptSearchMatch
 	ThreadStatus models.ThreadStatus
 }
 
@@ -1582,23 +1576,4 @@ func (s *Service) GetTranscriptWindow(ctx context.Context, orgID, sessionID, thr
 		return TranscriptWindowResult{}, fmt.Errorf("list transcript window: %w", err)
 	}
 	return TranscriptWindowResult{Window: window, ThreadStatus: thread.Status}, nil
-}
-
-func (s *Service) SearchTranscript(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionTranscriptSearchOptions) (TranscriptSearchResult, error) {
-	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
-	if err != nil {
-		return TranscriptSearchResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
-	}
-	thread, err = visibleThreadInSession(thread, sessionID)
-	if err != nil {
-		return TranscriptSearchResult{}, err
-	}
-	if s.transcriptStore == nil {
-		return TranscriptSearchResult{}, fmt.Errorf("transcript store not configured")
-	}
-	matches, err := s.transcriptStore.SearchThread(ctx, orgID, threadID, opts)
-	if err != nil {
-		return TranscriptSearchResult{}, fmt.Errorf("search transcript: %w", err)
-	}
-	return TranscriptSearchResult{Matches: matches, ThreadStatus: thread.Status}, nil
 }
