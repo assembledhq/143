@@ -55,24 +55,6 @@ export interface UserSettings {
   diff_viewer_full_screen?: boolean;
 }
 
-export interface ThreadMessageWindowMeta {
-  next_older_cursor?: string;
-  has_older: boolean;
-  next_newer_cursor?: string;
-  has_newer?: boolean;
-  anchor_message_id?: number;
-  anchor_found?: boolean;
-  latest_assistant_message_id?: number;
-  live_edge_message_id?: number;
-  window_position?: "latest" | "older" | "newer" | "around";
-  thread_status: ThreadStatus;
-}
-
-export interface ThreadMessageWindowResponse {
-  data: SessionMessage[];
-  meta: ThreadMessageWindowMeta;
-}
-
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
 // fields keep their stored value, null clears a field, and nested objects
 // merge per key. Send only the fields being changed — never a full settings
@@ -1061,6 +1043,63 @@ export interface HumanInputAnswerBody {
   answer_text?: string;
   selected_choice_ids?: string[];
   answer_payload?: unknown;
+}
+
+export type SessionTranscriptEntryKind =
+  | 'message'
+  | 'tool_use'
+  | 'tool_result'
+  | 'log'
+  | 'human_input'
+  | 'milestone'
+  | 'checkpoint';
+
+export interface SessionTranscriptEntry {
+  id: string;
+  kind: SessionTranscriptEntryKind;
+  created_at: string;
+  message_id?: number;
+  log_id?: number;
+  request_id?: string;
+  role?: 'user' | 'assistant';
+  level?: string;
+  content?: string;
+  content_truncated?: boolean;
+  content_bytes?: number;
+  content_chars?: number;
+  summary?: string;
+  tool_name?: string;
+  collapsed?: boolean;
+  message?: SessionMessage;
+  log?: SessionLog;
+  human_input?: HumanInputRequest;
+}
+
+export interface SessionTranscriptTurn {
+  turn_number: number;
+  started_at: string;
+  ended_at?: string;
+  entries: SessionTranscriptEntry[];
+}
+
+export interface SessionTranscriptWindowMeta {
+  position: 'latest' | 'older' | 'newer' | 'around';
+  has_older: boolean;
+  next_older_cursor?: string;
+  has_newer: boolean;
+  next_newer_cursor?: string;
+  anchor_entry_id?: string;
+  anchor_found?: boolean;
+  latest_assistant_entry_id?: string;
+  latest_assistant_message_id?: number;
+  live_edge_entry_id?: string;
+  live_edge_message_id?: number;
+  thread_status: ThreadStatus;
+}
+
+export interface SessionTranscriptWindowResponse {
+  data: SessionTranscriptTurn[];
+  meta: SessionTranscriptWindowMeta;
 }
 
 export interface PullRequest {
@@ -2366,6 +2405,11 @@ export interface UsageBreakdownRow {
 export type AutomationScheduleType = 'interval' | 'cron';
 export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
 export type AutomationIdentityScope = 'org' | 'personal';
+export type AutomationGitHubEvent =
+  | 'github.pull_request.opened'
+  | 'github.issue_comment.created'
+  | 'github.pull_request_review.submitted'
+  | 'github.pull_request_review_comment.created';
 
 export interface Automation {
   id: string;
@@ -2389,6 +2433,7 @@ export interface Automation {
   interval_unit?: 'hours' | 'days' | 'weeks';
   interval_run_at?: string;
   cron_expression?: string;
+  github_event_triggers?: AutomationGitHubEvent[];
   timezone: string;
   next_run_at?: string;
   last_run_at?: string;
@@ -2405,7 +2450,7 @@ export interface AutomationRun {
   id: string;
   automation_id: string;
   triggered_at: string;
-  triggered_by: 'schedule' | 'manual';
+  triggered_by: 'schedule' | 'manual' | 'github';
   triggered_by_user_id?: string;
   scheduled_time?: string;
   goal_snapshot: string;

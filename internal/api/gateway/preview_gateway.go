@@ -1180,6 +1180,10 @@ func shouldMarkRuntimeLostOnProxyError(err error) bool {
 		"i/o timeout",
 		"no such host",
 		"eof",
+		// Worker tore down the connection without responding: a dead pooled
+		// keep-alive conn, or a write racing the worker's close.
+		"server closed idle connection",
+		"broken pipe",
 	} {
 		if strings.Contains(lower, marker) {
 			return true

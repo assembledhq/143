@@ -212,6 +212,18 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			expectedBody: "pr_service_not_configured",
 		},
 		{
+			name:    "issue_comment event ignored when pr service not configured",
+			secret:  "test-secret",
+			event:   "issue_comment",
+			payload: `{"action":"created","issue":{"number":1},"comment":{"body":"hello"}}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusOK,
+			expectedBody: "pr_service_not_configured",
+		},
+		{
 			name:    "check_run event ignored when pr service not configured",
 			secret:  "test-secret",
 			event:   "check_run",
@@ -534,4 +546,42 @@ func TestWebhook_HandlePullRequestScopesLookupToActiveOwner(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "pull request webhook should be acknowledged")
 	require.Contains(t, rr.Body.String(), "processed", "pull request webhook should be processed")
 	require.NoError(t, mock.ExpectationsWereMet(), "webhook should scope pull request lookup to the active owner org")
+}
+
+func TestWebhook_HandleIssueComment_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	prService := ghservice.NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, zerolog.Nop())
+	handler := NewWebhookHandler(&config.Config{}, db.NewOrganizationStore(mock), db.NewUserStore(mock), db.NewRepositoryStore(mock), db.NewIntegrationStore(mock), prService)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(`{bad json`))
+	rr := httptest.NewRecorder()
+	handler.handleIssueComment(rr, req, []byte(`{bad json`))
+	require.Equal(t, http.StatusBadRequest, rr.Code, "handleIssueComment should reject malformed JSON")
+	require.Contains(t, rr.Body.String(), "INVALID_JSON", "handleIssueComment should encode the invalid JSON error")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestWebhook_HandleIssueComment_SkipsNonPRIssues(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	prService := ghservice.NewPRService(nil, db.NewPullRequestStore(mock), nil, nil, nil, nil, nil, zerolog.Nop())
+	handler := NewWebhookHandler(&config.Config{}, db.NewOrganizationStore(mock), db.NewUserStore(mock), db.NewRepositoryStore(mock), db.NewIntegrationStore(mock), prService)
+
+	// issue_comment on a plain issue (no pull_request field) — must be processed without DB lookups.
+	body := []byte(`{"action":"created","repository":{"id":0,"full_name":"acme/app"},"issue":{"number":7},"comment":{"body":"hi"},"sender":{"login":"alice"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+	handler.handleIssueComment(rr, req, body)
+	require.Equal(t, http.StatusOK, rr.Code, "issue_comment on non-PR issue should be processed silently")
+	require.Contains(t, rr.Body.String(), "processed", "issue_comment handler should report processed for non-PR issues")
+	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made for non-PR issue comments")
 }

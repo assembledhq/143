@@ -26,6 +26,7 @@ const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	icon_type, icon_value,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+	github_event_triggers,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, external_metadata, created_at, updated_at, deleted_at`
 
@@ -39,15 +40,42 @@ const maxDueAutomationsPerTick = 100
 
 func scanAutomation(row pgx.Row) (models.Automation, error) {
 	var a models.Automation
+	var githubEventTriggers []string
 	err := row.Scan(
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
 		&a.IconType, &a.IconValue,
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
 		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
+		&githubEventTriggers,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
 	)
+	if err == nil {
+		a.GitHubEventTriggers = automationGitHubEventsFromStrings(githubEventTriggers)
+	}
 	return a, err
+}
+
+func automationGitHubEventsFromStrings(events []string) []models.AutomationGitHubEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]models.AutomationGitHubEvent, 0, len(events))
+	for _, event := range events {
+		out = append(out, models.AutomationGitHubEvent(event))
+	}
+	return out
+}
+
+func automationGitHubEventsToStrings(events []models.AutomationGitHubEvent) []string {
+	if len(events) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		out = append(out, string(event))
+	}
+	return out
 }
 
 func scanAutomations(rows pgx.Rows) ([]models.Automation, error) {
@@ -69,12 +97,14 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 			identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+			github_event_triggers,
 			next_run_at, enabled, created_by, priority, external_metadata
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
 			@identity_scope, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
+			@github_event_triggers,
 			@next_run_at, @enabled, @created_by, @priority, @external_metadata
 		) RETURNING id, created_at, updated_at`
 	metadata := a.ExternalMetadata
@@ -83,34 +113,54 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 	}
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
-		"org_id":              a.OrgID,
-		"repository_id":       a.RepositoryID,
-		"name":                a.Name,
-		"goal":                a.Goal,
-		"scope":               a.Scope,
-		"icon_type":           a.IconType.OrDefault(),
-		"icon_value":          models.AutomationIconValueOrDefault(a.IconValue),
-		"agent_type":          a.AgentType,
-		"model_override":      a.ModelOverride,
-		"reasoning_effort":    a.ReasoningEffort,
-		"execution_mode":      a.ExecutionMode,
-		"max_concurrent":      a.MaxConcurrent,
-		"base_branch":         a.BaseBranch,
-		"identity_scope":      a.IdentityScope.OrDefault(),
-		"pre_pr_review_loops": a.PrePRReviewLoops,
-		"schedule_type":       a.ScheduleType,
-		"interval_value":      a.IntervalValue,
-		"interval_unit":       a.IntervalUnit,
-		"interval_run_at":     a.IntervalRunAt,
-		"cron_expression":     a.CronExpression,
-		"timezone":            a.Timezone,
-		"next_run_at":         a.NextRunAt,
-		"enabled":             a.Enabled,
-		"created_by":          a.CreatedBy,
-		"priority":            a.Priority,
-		"external_metadata":   metadata,
+		"org_id":                a.OrgID,
+		"repository_id":         a.RepositoryID,
+		"name":                  a.Name,
+		"goal":                  a.Goal,
+		"scope":                 a.Scope,
+		"icon_type":             a.IconType.OrDefault(),
+		"icon_value":            models.AutomationIconValueOrDefault(a.IconValue),
+		"agent_type":            a.AgentType,
+		"model_override":        a.ModelOverride,
+		"reasoning_effort":      a.ReasoningEffort,
+		"execution_mode":        a.ExecutionMode,
+		"max_concurrent":        a.MaxConcurrent,
+		"base_branch":           a.BaseBranch,
+		"identity_scope":        a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops":   a.PrePRReviewLoops,
+		"schedule_type":         a.ScheduleType,
+		"interval_value":        a.IntervalValue,
+		"interval_unit":         a.IntervalUnit,
+		"interval_run_at":       a.IntervalRunAt,
+		"cron_expression":       a.CronExpression,
+		"timezone":              a.Timezone,
+		"github_event_triggers": automationGitHubEventsToStrings(a.GitHubEventTriggers),
+		"next_run_at":           a.NextRunAt,
+		"enabled":               a.Enabled,
+		"created_by":            a.CreatedBy,
+		"priority":              a.Priority,
+		"external_metadata":     metadata,
 	})
 	return row.Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+}
+
+func (s *AutomationStore) ListEnabledByGitHubEvent(ctx context.Context, orgID, repositoryID uuid.UUID, event models.AutomationGitHubEvent) ([]models.Automation, error) {
+	query := fmt.Sprintf(`SELECT %s FROM automations WHERE org_id = @org_id
+		AND repository_id = @repository_id
+		AND enabled = true
+		AND deleted_at IS NULL
+		AND @event = ANY(github_event_triggers)
+		ORDER BY priority ASC, created_at ASC`, automationColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": repositoryID,
+		"event":         event,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query github event automations: %w", err)
+	}
+	defer rows.Close()
+	return scanAutomations(rows)
 }
 
 func (s *AutomationStore) GetByID(ctx context.Context, orgID, automationID uuid.UUID) (models.Automation, error) {
@@ -205,7 +255,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			pre_pr_review_loops = @pre_pr_review_loops,
 			schedule_type = @schedule_type, interval_value = @interval_value,
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
-			timezone = @timezone, next_run_at = @next_run_at,
+			timezone = @timezone, github_event_triggers = @github_event_triggers, next_run_at = @next_run_at,
 			enabled = @enabled, paused_by = @paused_by, paused_at = @paused_at,
 			priority = @priority, external_metadata = @external_metadata, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
@@ -215,34 +265,35 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 	}
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":                  a.ID,
-		"org_id":              a.OrgID,
-		"name":                a.Name,
-		"goal":                a.Goal,
-		"scope":               a.Scope,
-		"repository_id":       a.RepositoryID,
-		"icon_type":           a.IconType.OrDefault(),
-		"icon_value":          models.AutomationIconValueOrDefault(a.IconValue),
-		"agent_type":          a.AgentType,
-		"model_override":      a.ModelOverride,
-		"reasoning_effort":    a.ReasoningEffort,
-		"execution_mode":      a.ExecutionMode,
-		"max_concurrent":      a.MaxConcurrent,
-		"base_branch":         a.BaseBranch,
-		"identity_scope":      a.IdentityScope.OrDefault(),
-		"pre_pr_review_loops": a.PrePRReviewLoops,
-		"schedule_type":       a.ScheduleType,
-		"interval_value":      a.IntervalValue,
-		"interval_unit":       a.IntervalUnit,
-		"interval_run_at":     a.IntervalRunAt,
-		"cron_expression":     a.CronExpression,
-		"timezone":            a.Timezone,
-		"next_run_at":         a.NextRunAt,
-		"enabled":             a.Enabled,
-		"paused_by":           a.PausedBy,
-		"paused_at":           a.PausedAt,
-		"priority":            a.Priority,
-		"external_metadata":   metadata,
+		"id":                    a.ID,
+		"org_id":                a.OrgID,
+		"name":                  a.Name,
+		"goal":                  a.Goal,
+		"scope":                 a.Scope,
+		"repository_id":         a.RepositoryID,
+		"icon_type":             a.IconType.OrDefault(),
+		"icon_value":            models.AutomationIconValueOrDefault(a.IconValue),
+		"agent_type":            a.AgentType,
+		"model_override":        a.ModelOverride,
+		"reasoning_effort":      a.ReasoningEffort,
+		"execution_mode":        a.ExecutionMode,
+		"max_concurrent":        a.MaxConcurrent,
+		"base_branch":           a.BaseBranch,
+		"identity_scope":        a.IdentityScope.OrDefault(),
+		"pre_pr_review_loops":   a.PrePRReviewLoops,
+		"schedule_type":         a.ScheduleType,
+		"interval_value":        a.IntervalValue,
+		"interval_unit":         a.IntervalUnit,
+		"interval_run_at":       a.IntervalRunAt,
+		"cron_expression":       a.CronExpression,
+		"timezone":              a.Timezone,
+		"github_event_triggers": automationGitHubEventsToStrings(a.GitHubEventTriggers),
+		"next_run_at":           a.NextRunAt,
+		"enabled":               a.Enabled,
+		"paused_by":             a.PausedBy,
+		"paused_at":             a.PausedAt,
+		"priority":              a.Priority,
+		"external_metadata":     metadata,
 	})
 	return err
 }

@@ -110,7 +110,7 @@ import {
   buildPullRequestStreamURL,
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
-import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
+import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTranscriptWindows, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
 import { formatReviewMessage } from "@/lib/format-review-message";
 import {
   classifyPRSnapshotState,
@@ -135,7 +135,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadMessageWindowResponse, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -1942,13 +1942,6 @@ const BASE_SSE_RECONNECT_DELAY_MS = pollMs(1000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
-const THREAD_MESSAGE_WINDOW_LIMIT = 60;
-// First-paint logs window fetched in parallel with the message window, before
-// the loaded messages have resolved which exact turns are visible. Sized to
-// cover at least the turns a full message window can span (every turn carries
-// one or more messages, so 60 messages never span more than 60 turns).
-const THREAD_LOG_BOOTSTRAP_TURNS = THREAD_MESSAGE_WINDOW_LIMIT;
-const THREAD_LOG_BOOTSTRAP_TURNS_KEY = `latest:${THREAD_LOG_BOOTSTRAP_TURNS}`;
 // Sliding window for live SSE logs that may not be visible in persisted log
 // queries yet. The buffer lives in React Query so remounting the chat panel
 // cannot drop the transcript during the SSE-to-DB handoff.
@@ -1957,25 +1950,6 @@ const LIVE_LOG_MESSAGE_MAX_BYTES = 32 * 1024;
 
 function isNearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_THRESHOLD;
-}
-
-export function flattenThreadMessageWindows(
-  pages: ThreadMessageWindowResponse[] | undefined,
-): SessionMessage[] {
-  return pages?.slice().reverse().flatMap((page) => page.data ?? []) ?? [];
-}
-
-export function filterThreadLogsForLoadedMessages(
-  logs: SessionLog[],
-  messages: SessionMessage[],
-  extraTurnNumbers: number[] = [],
-): SessionLog[] {
-  if (messages.length === 0) return logs;
-  const loadedTurns = new Set(messages.map((message) => message.turn_number));
-  for (const turnNumber of extraTurnNumbers) {
-    loadedTurns.add(turnNumber);
-  }
-  return logs.filter((log) => loadedTurns.has(log.turn_number));
 }
 
 export function mergeSessionLogListResponse(
@@ -2040,49 +2014,101 @@ export function liveLogsForTimeline(includeLiveLogs: boolean, logs: SessionLog[]
   return includeLiveLogs ? logs : [];
 }
 
-export function mergeVisibleThreadLogs(
-  persisted: ListResponse<SessionLog> | undefined,
-  liveLogs: SessionLog[],
-  messages: SessionMessage[],
-  extraTurnNumbers: number[] = [],
-): SessionLog[] {
-  const persistedLogs = filterThreadLogsForLoadedMessages(
-    persisted?.data ?? [],
-    messages,
-    extraTurnNumbers,
-  );
-  return mergeSessionLogListResponse(
-    { data: persistedLogs, meta: persisted?.meta ?? {} },
-    liveLogs,
-  ).data;
-}
-
-function loadedTurnNumbers(messages: SessionMessage[]): number[] {
-  return Array.from(new Set(messages.map((message) => message.turn_number))).sort((a, b) => a - b);
-}
-
-export function getVisibleThreadLogTurns(messages: SessionMessage[], thread?: SessionThread): number[] {
-  const turns = new Set(loadedTurnNumbers(messages));
-  if (thread && thread.status !== "idle" && Number.isInteger(thread.current_turn) && thread.current_turn >= 0) {
-    turns.add(thread.current_turn + 1);
-  }
-  return Array.from(turns).sort((a, b) => a - b);
-}
-
-function threadMessageWindowQueryKey(sessionId: string, threadId: string, anchorMessageId?: number | null): readonly unknown[] {
-  return [...queryKeys.sessions.threadMessages(sessionId, threadId), "window", anchorMessageId ?? "latest"];
-}
-
-function threadLogsWindowQueryKey(sessionId: string, threadId: string, visibleTurnsKey: string): readonly unknown[] {
-  return [...queryKeys.sessions.threadLogs(sessionId, threadId), visibleTurnsKey];
-}
-
 function sessionLiveLogsQueryKey(sessionId: string): readonly unknown[] {
   return ["session", sessionId, "logs", "live"];
 }
 
 function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly unknown[] {
   return [...queryKeys.sessions.threadLogs(sessionId, threadId), "live"];
+}
+
+// Page parameter for the transcript window infinite query. The first page is
+// position="latest" (or "around" when restoring a saved anchor); subsequent
+// pages page backwards via `before` cursors. Newer turns are loaded separately
+// through newerThreadMessagePages, mirroring the legacy message-window flow.
+type TranscriptWindowPageParam =
+  | { position: "latest" }
+  | { position: "around"; anchorMessageId: number }
+  | { before: string };
+
+type TranscriptWindowInfiniteData = {
+  pages: SessionTranscriptWindowResponse[];
+  pageParams: unknown[];
+};
+
+function transcriptWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
+  return queryKeys.sessions.threadTranscript(sessionId, threadId);
+}
+
+function transcriptInitialPageParam(anchorMessageId?: number | null): TranscriptWindowPageParam {
+  return anchorMessageId != null
+    ? { position: "around", anchorMessageId }
+    : { position: "latest" };
+}
+
+// flattenTranscriptPages returns the turns of the infinite query (newest page
+// first → older pages) followed by manually-loaded newer pages, all in a single
+// flat list. Order does not matter for rendering: buildTimeline +
+// sortTimelineEntries re-sort everything by created_at.
+function flattenTranscriptPages(
+  pages: SessionTranscriptWindowResponse[] | undefined,
+  newerPages: SessionTranscriptWindowResponse[],
+): SessionTranscriptTurn[] {
+  const turns: SessionTranscriptTurn[] = [];
+  for (const page of pages ?? []) turns.push(...page.data);
+  for (const page of newerPages) turns.push(...page.data);
+  return turns;
+}
+
+// appendMessageToTranscriptCache injects a freshly-sent message into the first
+// (newest) cached transcript page so the optimistic message can be dropped from
+// local state without a flicker before the next /transcript refetch lands.
+function appendMessageToTranscriptCache(
+  previous: TranscriptWindowInfiniteData | undefined,
+  message: SessionMessage,
+  fallbackStatus: ThreadStatus,
+): TranscriptWindowInfiniteData {
+  const entry: SessionTranscriptEntry = {
+    id: `msg_${message.id}`,
+    kind: "message",
+    created_at: message.created_at,
+    message_id: message.id,
+    role: message.role,
+    content: message.content,
+    message,
+  };
+  const pages = previous?.pages ?? [];
+  if (pages.length === 0) {
+    return {
+      pages: [
+        {
+          data: [{ turn_number: message.turn_number, started_at: message.created_at, entries: [entry] }],
+          meta: { position: "latest", has_older: false, has_newer: false, thread_status: fallbackStatus, live_edge_message_id: message.id },
+        },
+      ],
+      pageParams: [{ position: "latest" }],
+    };
+  }
+  const firstPage = pages[0];
+  const turns = [...firstPage.data];
+  const turnIndex = turns.findIndex((turn) => turn.turn_number === message.turn_number);
+  if (turnIndex >= 0) {
+    const entries = turns[turnIndex].entries.filter((existing) => existing.message_id !== message.id);
+    turns[turnIndex] = { ...turns[turnIndex], entries: [...entries, entry] };
+  } else {
+    turns.push({ turn_number: message.turn_number, started_at: message.created_at, entries: [entry] });
+  }
+  return {
+    pages: [
+      {
+        ...firstPage,
+        data: turns,
+        meta: { ...firstPage.meta, live_edge_message_id: message.id },
+      },
+      ...pages.slice(1),
+    ],
+    pageParams: previous?.pageParams ?? [{ position: "latest" }],
+  };
 }
 
 type ChatPanelProps = {
@@ -2120,7 +2146,7 @@ function ChatPanel({
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
-  const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<ThreadMessageWindowResponse[]>([]);
+  const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<SessionTranscriptWindowResponse[]>([]);
   const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(false);
@@ -2150,60 +2176,42 @@ function ChatPanel({
     refetchInterval: isActive && !activeThreadId ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
-  const threadMessagesQuery = useInfiniteQuery({
-    queryKey: activeThreadId ? threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null) : ["session", sessionId, "thread", "none", "messages", "window"],
+  // Single transcript-window query feeding the legacy ChatTimeline. It replaces
+  // the previous two-query (messages + per-turn logs) coupling: the backend
+  // returns turns whose entries embed the full message/log/human-input records,
+  // which we flatten back into the {messages, logs} buildTimeline() expects.
+  // getNextPageParam pages backwards (older); newer turns load via
+  // newerThreadMessagePages, exactly as the message-window flow did.
+  const threadTranscriptQuery = useInfiniteQuery<
+    SessionTranscriptWindowResponse,
+    Error,
+    { pages: SessionTranscriptWindowResponse[]; pageParams: unknown[] },
+    readonly unknown[],
+    TranscriptWindowPageParam
+  >({
+    queryKey: activeThreadId ? transcriptWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "transcript"],
     queryFn: ({ pageParam }) =>
-      api.sessions.getThreadMessageWindow(
-        sessionId,
-        activeThreadId!,
-        pageParam
-          ? { before: pageParam as string, limit: THREAD_MESSAGE_WINDOW_LIMIT }
-          : initialThreadAnchorPosition
-            ? { position: "around", anchorMessageId: initialThreadAnchorPosition.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
-            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
-      ),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.meta.has_older ? lastPage.meta.next_older_cursor || undefined : undefined,
+      api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId!, pageParam),
+    initialPageParam: transcriptInitialPageParam(initialThreadAnchorPosition?.anchor.id ?? null),
+    getNextPageParam: (lastPage) =>
+      lastPage.meta.has_older && lastPage.meta.next_older_cursor
+        ? { before: lastPage.meta.next_older_cursor }
+        : undefined,
     enabled: !!activeThreadId && !!viewerScope,
     refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
   });
 
-  const threadMessages = useMemo(() => {
-    const messages = flattenThreadMessageWindows(threadMessagesQuery.data?.pages);
-    const seen = new Set(messages.map((message) => message.id));
-    for (const page of newerThreadMessagePages) {
-      for (const message of page.data ?? []) {
-        if (seen.has(message.id)) continue;
-        messages.push(message);
-        seen.add(message.id);
-      }
-    }
-    return messages;
-  }, [newerThreadMessagePages, threadMessagesQuery.data?.pages]);
-  const newestThreadWindow = newerThreadMessagePages.at(-1) ?? threadMessagesQuery.data?.pages[0];
+  const threadTranscriptTurns = useMemo(
+    () => flattenTranscriptPages(threadTranscriptQuery.data?.pages, newerThreadMessagePages),
+    [newerThreadMessagePages, threadTranscriptQuery.data?.pages],
+  );
+  const { messages: threadMessages, logs: threadTranscriptLogs } = useMemo(
+    () => flattenTranscriptWindows(threadTranscriptTurns),
+    [threadTranscriptTurns],
+  );
+  const newestThreadWindow = newerThreadMessagePages.at(-1) ?? threadTranscriptQuery.data?.pages[0];
   const hasNewerThreadMessages = !!activeThreadId && !!newestThreadWindow?.meta.has_newer;
   const nextNewerThreadCursor = newestThreadWindow?.meta.next_newer_cursor;
-  const visibleThreadLogTurns = useMemo(
-    () => getVisibleThreadLogTurns(threadMessages, activeThread),
-    [activeThread, threadMessages],
-  );
-  const visibleThreadLogTurnsKey = visibleThreadLogTurns.join(",");
-  // Until the message window resolves which turns are visible, fetch the
-  // thread's latest turns of logs instead of waiting — this runs in parallel
-  // with the messages fetch instead of serializing one round trip behind the
-  // other. Over-fetched turns are harmless: mergeVisibleThreadLogs filters
-  // persisted logs down to the turns of the loaded messages.
-  const threadLogsBootstrapMode = !threadMessagesQuery.isFetched;
-  const activeThreadLogsQueryKey = useMemo(
-    () => activeThreadId
-      ? threadLogsWindowQueryKey(
-          sessionId,
-          activeThreadId,
-          threadLogsBootstrapMode ? THREAD_LOG_BOOTSTRAP_TURNS_KEY : visibleThreadLogTurnsKey,
-        )
-      : ["session", sessionId, "thread", "none", "logs"] as const,
-    [activeThreadId, sessionId, threadLogsBootstrapMode, visibleThreadLogTurnsKey],
-  );
   const liveLogsQueryKey = useMemo(
     () => activeThreadId
       ? threadLiveLogsQueryKey(sessionId, activeThreadId)
@@ -2211,30 +2219,6 @@ function ChatPanel({
     [activeThreadId, sessionId],
   );
 
-  const threadLogsQuery = useQuery({
-    queryKey: activeThreadLogsQueryKey,
-    queryFn: () => api.sessions.getThreadLogs(
-      sessionId,
-      activeThreadId!,
-      threadLogsBootstrapMode
-        ? { latestTurns: THREAD_LOG_BOOTSTRAP_TURNS }
-        : visibleThreadLogTurns.length > 0 ? { turnNumbers: visibleThreadLogTurns } : {},
-    ),
-    enabled: !!activeThreadId,
-    // Carry the previous window across key changes within the same thread
-    // (bootstrap → precise turns, or the visible turn set growing) so tool
-    // entries don't blink out while the next window loads. Windows from a
-    // different thread must not carry over: their logs can share turn numbers
-    // with the new thread's messages and would survive the visible-turns
-    // filter.
-    placeholderData: (previousData, previousQuery) => {
-      if (!previousQuery || !activeThreadId) return undefined;
-      const threadScopedPrefix = queryKeys.sessions.threadLogs(sessionId, activeThreadId);
-      const previousPrefix = previousQuery.queryKey.slice(0, threadScopedPrefix.length);
-      return JSON.stringify(previousPrefix) === JSON.stringify(threadScopedPrefix) ? previousData : undefined;
-    },
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
-  });
   const liveLogsQuery = useQuery({
     queryKey: liveLogsQueryKey,
     queryFn: () => ({ data: [], meta: {} }) satisfies ListResponse<SessionLog>,
@@ -2267,13 +2251,17 @@ function ChatPanel({
     ? pendingHumanInputs.find((request) => !dismissedHumanInputIds.has(request.id))?.id ?? null
     : null;
 
+  const invalidateActiveThreadTranscript = useCallback(() => {
+    if (!activeThreadId) return;
+    queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
+  }, [activeThreadId, queryClient, sessionId]);
+
   const invalidateHumanInput = useCallback(() => {
     invalidateSessionHumanInputRequests(queryClient, sessionId);
     queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
     queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
     if (activeThreadId) {
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
     }
   }, [activeThreadId, queryClient, sessionId]);
 
@@ -2335,12 +2323,12 @@ function ChatPanel({
       liveLogsQuery.data?.data ?? [],
     );
     if (activeThreadId) {
-      const loadedThreadLogs = mergeVisibleThreadLogs(
-        threadLogsQuery.data,
+      // Logs already arrive scoped to the loaded turns inside the transcript
+      // window; merge the live SSE buffer on top, de-duplicating by id.
+      const loadedThreadLogs = mergeSessionLogListResponse(
+        { data: threadTranscriptLogs, meta: {} },
         visibleLiveLogs,
-        threadMessages,
-        visibleThreadLogTurns,
-      );
+      ).data;
       const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
         .filter((request) => request.thread_id === activeThreadId)
         .map((request) => ({ kind: "human_input" as const, data: request }));
@@ -2375,7 +2363,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThread, activeThreadId, optimisticMessages, threadMessages, threadLogsQuery.data, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, session.status, humanInputQuery.data?.data, visibleThreadLogTurns]);
+  }, [activeThread, activeThreadId, optimisticMessages, threadMessages, threadTranscriptLogs, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, session.status, humanInputQuery.data?.data]);
 
   const baseTimelineHumanInputIds = useMemo(() => {
     const humanInputIds = new Set<string>();
@@ -2397,7 +2385,7 @@ function ChatPanel({
     return sortTimelineEntries([...baseTimelineEntries, ...humanInputEntries]);
   }, [baseTimelineEntries, baseTimelineHumanInputIds, pendingHumanInputs]);
   const hasLoadedTimelineInputs = activeThreadId
-    ? threadMessagesQuery.isFetched && threadLogsQuery.isFetched
+    ? threadTranscriptQuery.isFetched
     : timelineQuery.isFetched && (!hasIssue || issueQuery.isFetched);
   // Skeleton only while we'd reasonably expect content: data still loading, or
   // the relevant scope is actively working. For a thread-scoped view, "working"
@@ -2485,20 +2473,64 @@ function ChatPanel({
     isNearBottomRef.current = true;
   }, []);
 
+  // Jump to the true bottom and keep it pinned across late layout growth. Lazy
+  // markdown/code/images expand a few frames after the first scroll, so a single
+  // scrollTop assignment can leave the view stranded above the real bottom.
+  // Re-scroll on successive animation frames until the scroll height stops
+  // changing (bounded so a perpetually-growing transcript can't loop forever).
+  const settleBottomRafRef = useRef<number | null>(null);
+  const settleScrollToBottom = useCallback(() => {
+    if (settleBottomRafRef.current != null) {
+      cancelAnimationFrame(settleBottomRafRef.current);
+      settleBottomRafRef.current = null;
+    }
+    scrollToLiveEdgePosition();
+    let lastHeight = scrollRef.current?.scrollHeight ?? -1;
+    let stableFrames = 0;
+    let frames = 0;
+    const step = () => {
+      const el = scrollRef.current;
+      if (!el || ++frames > 30) {
+        settleBottomRafRef.current = null;
+        return;
+      }
+      el.scrollTop = el.scrollHeight;
+      isNearBottomRef.current = true;
+      if (el.scrollHeight === lastHeight) {
+        stableFrames += 1;
+      } else {
+        stableFrames = 0;
+        lastHeight = el.scrollHeight;
+      }
+      if (stableFrames >= 3) {
+        settleBottomRafRef.current = null;
+        return;
+      }
+      settleBottomRafRef.current = requestAnimationFrame(step);
+    };
+    settleBottomRafRef.current = requestAnimationFrame(step);
+  }, [scrollToLiveEdgePosition]);
+
+  useEffect(() => () => {
+    if (settleBottomRafRef.current != null) {
+      cancelAnimationFrame(settleBottomRafRef.current);
+    }
+  }, []);
+
   const scrollToLiveEdge = useCallback(() => {
     cancelPendingInitialAnchorRestore();
     if (activeThreadId && hasNewerThreadMessages) {
       setIsFetchingNewerThreadMessages(true);
-      void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+      void api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId, {
         position: "latest",
-        limit: THREAD_MESSAGE_WINDOW_LIMIT,
       }).then((window) => {
-        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
-          threadMessageWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorPosition?.anchor.id ?? null),
-          { pages: [window], pageParams: [undefined] },
+        queryClient.setQueryData<TranscriptWindowInfiniteData>(
+          transcriptWindowQueryKey(sessionId, activeThreadId),
+          { pages: [window], pageParams: [{ position: "latest" }] },
         );
         setNewerThreadMessagePages([]);
-        requestAnimationFrame(scrollToLiveEdgePosition);
+        settleScrollToBottom();
+        setShowJumpToLatest(false);
       }).catch((error) => {
         toast.error(error instanceof ApiError ? error.message : "Failed to load latest messages");
       }).finally(() => {
@@ -2506,7 +2538,7 @@ function ChatPanel({
       });
       return;
     }
-    scrollToLiveEdgePosition();
+    settleScrollToBottom();
     const el = scrollRef.current;
     if (el) {
       if (saveScrollTimerRef.current) {
@@ -2516,7 +2548,7 @@ function ChatPanel({
       persistScrollPosition(el.scrollTop);
     }
     setShowJumpToLatest(false);
-  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, initialThreadAnchorPosition?.anchor.id, persistScrollPosition, queryClient, scrollToLiveEdgePosition, sessionId]);
+  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, persistScrollPosition, queryClient, settleScrollToBottom, sessionId]);
 
   const focusTranscript = useCallback(() => {
     scrollRef.current?.focus({ preventScroll: true });
@@ -2561,15 +2593,14 @@ function ChatPanel({
         scrollTop: el.scrollTop,
       };
     }
-    void threadMessagesQuery.fetchNextPage();
-  }, [threadMessagesQuery]);
+    void threadTranscriptQuery.fetchNextPage();
+  }, [threadTranscriptQuery]);
 
   const loadNewerThreadMessages = useCallback(() => {
     if (!activeThreadId || !nextNewerThreadCursor || isFetchingNewerThreadMessages) return;
     setIsFetchingNewerThreadMessages(true);
-    void api.sessions.getThreadMessageWindow(sessionId, activeThreadId, {
+    void api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId, {
       after: nextNewerThreadCursor,
-      limit: THREAD_MESSAGE_WINDOW_LIMIT,
     }).then((window) => {
       setNewerThreadMessagePages((pages) => [...pages, window]);
     }).catch((error) => {
@@ -2582,12 +2613,12 @@ function ChatPanel({
   useLayoutEffect(() => {
     const snapshot = olderMessagesPrependSnapshotRef.current;
     const el = scrollRef.current;
-    if (!snapshot || !el || threadMessagesQuery.isFetchingNextPage) {
+    if (!snapshot || !el || threadTranscriptQuery.isFetchingNextPage) {
       return;
     }
     olderMessagesPrependSnapshotRef.current = null;
     el.scrollTop = snapshot.scrollTop + (el.scrollHeight - snapshot.scrollHeight);
-  }, [threadMessages.length, threadMessagesQuery.isFetchingNextPage]);
+  }, [threadMessages.length, threadTranscriptQuery.isFetchingNextPage]);
 
   const getEntryContainerProps = useCallback(
     (_entry: TimelineEntry, index: number) =>
@@ -2735,14 +2766,14 @@ function ChatPanel({
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_CREATED, () => {
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+        invalidateActiveThreadTranscript();
       });
 
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_UPDATED, () => {
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         if (activeThreadId) {
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
       });
 
@@ -2759,8 +2790,7 @@ function ChatPanel({
           queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
           invalidateSessionHumanInputRequests(queryClient, sessionId);
           if (activeThreadId) {
-            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
-            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+            queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
           }
         }
       });
@@ -2777,8 +2807,7 @@ function ChatPanel({
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         invalidateSessionHumanInputRequests(queryClient, sessionId);
         if (activeThreadId) {
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
       });
 
@@ -2786,8 +2815,7 @@ function ChatPanel({
         eventSource?.close();
         queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
         if (activeThreadId) {
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(sessionId, activeThreadId) });
-          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(sessionId, activeThreadId) });
+          queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
 
         if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
@@ -2809,7 +2837,7 @@ function ChatPanel({
         clearTimeout(reconnectTimer.current);
       }
     };
-  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId, clearCurrentLiveLogs]);
+  }, [sessionId, apiBase, isActive, isDocumentVisible, mergeLogs, mergeSessionStatusUpdate, mergeThreadInboxUpdate, mergeThreadRuntimeUpdate, mergeWorkspaceGenerationUpdate, queryClient, activeThreadId, clearCurrentLiveLogs, invalidateActiveThreadTranscript]);
 
   // Track whether the user is scrolled near the bottom.
   const handleScroll = useCallback(() => {
@@ -2853,7 +2881,7 @@ function ChatPanel({
     const el = scrollRef.current;
     if (!el) return;
 
-    const firstThreadWindow = threadMessagesQuery.data?.pages[0];
+    const firstThreadWindow = threadTranscriptQuery.data?.pages[0];
     if (
       activeThreadId &&
       initialThreadAnchorPosition &&
@@ -2886,11 +2914,11 @@ function ChatPanel({
       const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
       if (
         activeThreadId &&
-        threadMessagesQuery.hasNextPage &&
-        !threadMessagesQuery.isFetchingNextPage &&
+        threadTranscriptQuery.hasNextPage &&
+        !threadTranscriptQuery.isFetchingNextPage &&
         anchor.scrollTop > maxScrollTop
       ) {
-        void threadMessagesQuery.fetchNextPage();
+        void threadTranscriptQuery.fetchNextPage();
         return;
       }
       el.scrollTop = anchor.scrollTop;
@@ -2911,7 +2939,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadMessagesQuery, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -2936,7 +2964,6 @@ function ChatPanel({
           </Button>
         </div>
       )}
-      {/* Unified timeline */}
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -2949,16 +2976,16 @@ function ChatPanel({
           <SessionTimelineSkeleton />
         ) : (
           <>
-            {activeThreadId && threadMessagesQuery.hasNextPage ? (
+            {activeThreadId && threadTranscriptQuery.hasNextPage ? (
               <div className="flex justify-center pb-2">
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={loadOlderThreadMessages}
-                  disabled={threadMessagesQuery.isFetchingNextPage}
+                  disabled={threadTranscriptQuery.isFetchingNextPage}
                 >
-                  {threadMessagesQuery.isFetchingNextPage ? (
+                  {threadTranscriptQuery.isFetchingNextPage ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <ArrowUp className="h-4 w-4" />
@@ -3452,17 +3479,19 @@ export function SessionDetailContent({ id }: { id: string }) {
     const storedThreadId = readStoredSessionActiveThread(window.localStorage, id, scope);
     if (!storedThreadId) return;
     const anchor = readStoredSessionAnchorPosition(window.localStorage, id, scope, storedThreadId);
+    // ChatPanel's transcript infinite query shares this exact key, so React
+    // Query dedupes against the in-flight prefetch.
     void queryClient.prefetchInfiniteQuery({
-      queryKey: threadMessageWindowQueryKey(id, storedThreadId, anchor?.anchor.id ?? null),
+      queryKey: transcriptWindowQueryKey(id, storedThreadId),
       queryFn: () =>
-        api.sessions.getThreadMessageWindow(
+        api.sessions.getThreadTranscriptWindow(
           id,
           storedThreadId,
           anchor
-            ? { position: "around", anchorMessageId: anchor.anchor.id, limit: THREAD_MESSAGE_WINDOW_LIMIT }
-            : { position: "latest", limit: THREAD_MESSAGE_WINDOW_LIMIT },
+            ? { position: "around", anchorMessageId: anchor.anchor.id }
+            : { position: "latest" },
         ),
-      initialPageParam: undefined as string | undefined,
+      initialPageParam: transcriptInitialPageParam(anchor?.anchor.id ?? null),
     });
   }, [id, queryClient, user]);
 
@@ -4711,38 +4740,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: ({ response, resolvedIDs }, vars, context) => {
       setOptimisticMessages((previous) => previous.filter((message) => message.client_id !== context?.optimisticMessageID));
       if (vars.activeThreadId) {
-        queryClient.setQueryData<{ pages: ThreadMessageWindowResponse[]; pageParams: unknown[] }>(
-          threadMessageWindowQueryKey(id, vars.activeThreadId),
-          (previous) => {
-            const pages = previous?.pages ?? [];
-            const firstPage = pages[0] ?? {
-              data: [],
-              meta: {
-                has_older: false,
-                thread_status: activeThread?.status ?? session?.status ?? "idle",
-              },
-            };
-            const existing = firstPage.data ?? [];
-            const responseKey = messageReconciliationKey(response.data);
-            const withoutDuplicate = existing.filter((message) =>
-              message.id !== response.data.id && messageReconciliationKey(message) !== responseKey
-            );
-            return {
-              pages: [
-                {
-                  ...firstPage,
-                  data: [...withoutDuplicate, response.data],
-                  meta: {
-                    ...firstPage.meta,
-                    live_edge_message_id: response.data.id,
-                    thread_status: activeThread?.status ?? firstPage.meta.thread_status,
-                  },
-                },
-                ...pages.slice(1),
-              ],
-              pageParams: previous?.pageParams ?? [undefined],
-            };
-          },
+        // Inject the confirmed message into the newest transcript page so the
+        // optimistic copy can be dropped without a gap; the next /transcript
+        // refetch (triggered by SSE/invalidations) supersedes this patch.
+        queryClient.setQueryData<TranscriptWindowInfiniteData>(
+          transcriptWindowQueryKey(id, vars.activeThreadId),
+          (previous) => appendMessageToTranscriptCache(previous, response.data, activeThread?.status ?? "idle"),
         );
       } else {
         queryClient.setQueryData<ListResponse<SessionTimelineEntry>>(
@@ -4775,8 +4778,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
       invalidateSessionHumanInputRequests(queryClient, id);
       if (vars.activeThreadId) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, vars.activeThreadId) });
-        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadLogs(id, vars.activeThreadId) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(id, vars.activeThreadId) });
       }
       // Backend resolved the attached review comments inside the same tx as
       // the message. Optimistically flip them to resolved=true in the cache
@@ -4949,7 +4951,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     mutationFn: (threadId: string) => api.sessions.revertThread(id, threadId),
     onSuccess: (_data, threadId) => {
       toast.success("Revert prepared — see the tab transcript for the patch");
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadMessages(id, threadId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(id, threadId) });
       queryClient.invalidateQueries({ queryKey: ["session", id] });
     },
     onError: (err) => {

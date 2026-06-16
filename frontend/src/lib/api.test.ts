@@ -376,101 +376,6 @@ describe('api client', () => {
       expect(result.data.status).toBe('running');
     });
 
-    it('fetches a thread message window with cursor params', async () => {
-      let capturedUrl: string | undefined;
-      const mockWindow = {
-        data: [{ id: 21, role: 'assistant', content: 'latest' }],
-        meta: {
-          next_older_cursor: '21',
-          has_older: true,
-          latest_assistant_message_id: 21,
-          live_edge_message_id: 21,
-          thread_status: 'idle',
-        },
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
-          capturedUrl = request.url;
-          return HttpResponse.json(mockWindow);
-        }),
-      );
-
-      const result = await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        before: '30',
-        limit: 25,
-      });
-
-      expect(result).toEqual(mockWindow);
-      expect(capturedUrl).toBeDefined();
-      const url = new URL(capturedUrl!);
-      expect(url.searchParams.get('before')).toBe('30');
-      expect(url.searchParams.get('limit')).toBe('25');
-    });
-
-    it('fetches thread message windows around anchors and after cursors', async () => {
-      const capturedUrls: string[] = [];
-      const mockWindow = {
-        data: [],
-        meta: {
-          has_older: false,
-          has_newer: false,
-          thread_status: 'idle',
-          window_position: 'around',
-        },
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
-          capturedUrls.push(request.url);
-          return HttpResponse.json(mockWindow);
-        }),
-      );
-
-      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        position: 'around',
-        anchorMessageId: 456,
-        limit: 80,
-      });
-      await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        after: '789',
-        limit: 40,
-      });
-
-      const aroundUrl = new URL(capturedUrls[0]!);
-      expect(aroundUrl.searchParams.get('position')).toBe('around');
-      expect(aroundUrl.searchParams.get('anchor_message_id')).toBe('456');
-      expect(aroundUrl.searchParams.get('limit')).toBe('80');
-
-      const afterUrl = new URL(capturedUrls[1]!);
-      expect(afterUrl.searchParams.get('after')).toBe('789');
-      expect(afterUrl.searchParams.get('limit')).toBe('40');
-    });
-
-    it('fetches thread logs only for loaded message turns', async () => {
-      let capturedUrl: string | undefined;
-      const mockLogs = {
-        data: [{ id: 101, level: 'output', message: 'latest turn', turn_number: 7 }],
-        meta: {},
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/logs', ({ request }) => {
-          capturedUrl = request.url;
-          return HttpResponse.json(mockLogs);
-        }),
-      );
-
-      const result = await api.sessions.getThreadLogs('session-abc', 'thread-1', {
-        turnNumbers: [7, 6, 7, 5],
-      });
-
-      expect(result).toEqual(mockLogs);
-      expect(capturedUrl).toBeDefined();
-      const url = new URL(capturedUrl!);
-      expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
-    });
-
     it('fetches session log detail by log id', async () => {
       let capturedUrl: string | undefined;
       const mockDetail = {
@@ -2066,6 +1971,129 @@ describe('api client', () => {
 
       await expect(api.repositories.previewSecretBundles.delete('repo-1', 'staging')).resolves.toBeUndefined();
       expect(capturedUrl).toContain('/api/v1/repositories/repo-1/preview-secret-bundles/staging');
+    });
+  });
+
+  describe('sessions.getThreadTranscriptWindow', () => {
+    it('fetches latest window with no extra params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { position: 'latest' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.pathname).toBe('/api/v1/sessions/sess-1/threads/thread-1/transcript');
+      expect(url.searchParams.get('position')).toBe('latest');
+      expect(url.searchParams.get('before')).toBeNull();
+      expect(url.searchParams.get('after')).toBeNull();
+    });
+
+    it('sends before cursor for older page', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'older', has_older: false, has_newer: true, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { before: 'cursor-abc' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('before')).toBe('cursor-abc');
+      expect(url.searchParams.get('after')).toBeNull();
+    });
+
+    it('sends after cursor for newer page', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'newer', has_older: true, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { after: 'cursor-xyz' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('after')).toBe('cursor-xyz');
+      expect(url.searchParams.get('before')).toBeNull();
+    });
+
+    it('sends all anchor params for around position', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'around', has_older: true, has_newer: true, anchor_found: true, anchor_entry_id: 'msg_42', thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', {
+        position: 'around',
+        anchorEntryId: 'msg_42',
+        anchorMessageId: 42,
+        anchorTurnNumber: 3,
+      });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('position')).toBe('around');
+      expect(url.searchParams.get('anchor_entry_id')).toBe('msg_42');
+      expect(url.searchParams.get('anchor_message_id')).toBe('42');
+      expect(url.searchParams.get('anchor_turn_number')).toBe('3');
+    });
+
+    it('sends limit_turns when specified', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { limitTurns: 5 });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('limit_turns')).toBe('5');
+    });
+
+    it('sends include filters when specified', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { include: ['messages', 'tools'] });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('include')).toBe('messages,tools');
+    });
+
+    it('omits null/undefined optional params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', {});
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('anchor_entry_id')).toBeNull();
+      expect(url.searchParams.get('anchor_message_id')).toBeNull();
+      expect(url.searchParams.get('anchor_turn_number')).toBeNull();
+      expect(url.searchParams.get('limit_turns')).toBeNull();
     });
   });
 });
