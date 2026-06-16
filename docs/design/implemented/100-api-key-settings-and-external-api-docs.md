@@ -4,14 +4,14 @@
 
 ## Context
 
-The general external API backend exists: org-scoped API clients own one or more `143_sk_` bearer tokens, tokens carry explicit scopes and optional repository allowlists, and bearer requests are checked against the route-to-scope map before reaching session, automation, and preview handlers. The implemented backend contract is documented in [implemented/94-external-api-sessions-automations.md](../implemented/94-external-api-sessions-automations.md).
+The general external API backend exists: org-scoped API clients own one or more `143_sk_` bearer tokens, tokens carry explicit scopes and optional repository allowlists, and bearer requests are checked against the route-to-scope map before reaching session, automation, and preview handlers. The implemented backend contract is documented in [94-external-api-sessions-automations.md](94-external-api-sessions-automations.md).
 
-Two gaps remain:
+This implementation closed two gaps:
 
-1. Admins have no first-party dashboard surface for issuing and rotating general API keys. The only visible token UI today is the legacy preview-token section in Preview settings.
-2. The Fumadocs external API page explains authentication basics and a few create examples, but it does not fully document API-client issuance, scopes, endpoint coverage, repository restrictions, idempotency coverage, or exact route behavior.
+1. Admins now have a first-party dashboard surface for issuing and rotating general API keys.
+2. The Fumadocs external API page now documents API-client issuance, scopes, endpoint coverage, repository restrictions, idempotency coverage, and exact route behavior.
 
-This design covers the missing Settings UI and public docs update. It does not redesign the existing backend auth model.
+This design covered the Settings UI and public docs update. It did not redesign the existing backend auth model.
 
 ## Goals
 
