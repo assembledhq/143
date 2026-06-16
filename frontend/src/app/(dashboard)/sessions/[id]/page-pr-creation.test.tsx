@@ -90,16 +90,17 @@ describe('SessionDetailPage PR creation', () => {
     expect(screen.getByText('5m 30s')).toBeInTheDocument();
   });
 
-  it('keeps the repo branch separator attached so duration does not start with an orphan dot', async () => {
+  it('keeps repository branch metadata separate so duration does not start with an orphan dot', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
 
-    const repoBranch = screen.getByText((_, element) =>
-      element?.tagName.toLowerCase() === 'span' &&
-      element.textContent === 'assembledhq/143 · 143/feature-session-details·' &&
-      element.querySelector('[aria-hidden="true"]')?.textContent === '·',
-    );
-    expect(repoBranch.nextElementSibling?.textContent).toMatch(/^5m 30s/);
+    const repoBranchRow = screen.getByTestId('session-overview-repo-branch');
+    expect(repoBranchRow).toHaveTextContent('assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).not.toHaveTextContent(/feature-session-details\s*·/);
+
+    const timingRow = screen.getByTestId('session-overview-timing');
+    expect(timingRow).not.toHaveTextContent('assembledhq/143');
+    expect(timingRow.textContent).toMatch(/^5m 30s/);
   });
 
   it('shows pass selector when session has diff_history with multiple passes', async () => {
