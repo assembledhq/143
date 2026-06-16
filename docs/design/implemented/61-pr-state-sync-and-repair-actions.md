@@ -643,7 +643,7 @@ Repair actions must be idempotent.
 
 Define a single active repair run per:
 
-- `(pull_request_id, action_type, health_version)`
+- `(pull_request_id, action_type, head_sha)`
 
 where `action_type` is one of:
 
@@ -652,29 +652,29 @@ where `action_type` is one of:
 
 Recommended behavior:
 
-1. compute a stable dedupe key from `(pull_request_id, action_type, health_version)`
+1. compute a stable dedupe key from `(pull_request_id, action_type, head_sha)`
 2. if a matching in-flight repair session already exists, return that existing session id
 3. otherwise create a new repair session and persist the dedupe key
-4. allow a new repair run when `health_version` changes, because the normalized PR state materially changed
-5. the current `health_version` is derived from the exact snapshot identity, which includes both `head_sha` and `base_sha`
+4. allow a new repair run when the PR head SHA changes, because the agent would otherwise be repairing a different branch state
+5. keep `health_version` on the row as provenance for the exact snapshot that launched the repair
 
 This prevents duplicate revision sessions from repeated clicks, retries, or concurrent operators.
 
 ### Repair identity decision
 
-Repair identity should be tied to **`health_version`**, not raw git SHAs alone.
+Repair identity should be tied to the PR branch **`head_sha`** for the selected action. `health_version` remains provenance for the exact normalized snapshot that launched the repair, but same-head health-version churn must not hide an in-flight repair or re-enable the same CTA.
 
 Reasoning:
 
-- the operator is acting on a normalized PR-health snapshot, not directly on a bare commit
-- the exact same `head_sha` can become materially different repair work when `base_sha` or mergeability changes
-- using `health_version` gives sync, SSE, and repair flows one canonical identity
+- the repair command changes the PR branch, so the head SHA is the branch-state identity that determines whether a second command would duplicate work
+- GitHub mergeability and check data can legitimately churn across health versions for the same head while the same repair turn is still running
+- using the current head SHA keeps the UI disabled until the branch actually changes or the repair session finishes
 
-The snapshot can still be derived from `head_sha + base_sha + normalized check state`, but the repair API should treat `health_version` as the action identity.
+The snapshot can still be derived from `head_sha + base_sha + normalized check state`, and repair rows should store both SHA fields plus `health_version` so launch provenance remains auditable.
 
 ### Superseded repair sessions
 
-When a newer `health_version` supersedes an in-flight repair session, the default behavior should be to **mark the older repair session obsolete, not auto-cancel it**.
+When a newer PR head SHA supersedes an in-flight repair session, the default behavior should be to **mark the older repair session obsolete, not auto-cancel it**. A newer `health_version` on the same head should keep the active repair visible.
 
 Recommended behavior:
 
