@@ -337,7 +337,7 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	}
 	if len(probes) > 0 {
 		var probeOut bytes.Buffer
-		probeCmd := fmt.Sprintf("cd %s && { %s; }", shellQuote(rootDir), strings.Join(probes, " "))
+		probeCmd := fmt.Sprintf("cd %s && { %s; }", shellQuote(rootDir), strings.Join(probes, "; "))
 		exitCode, err := c.executor.Exec(ctx, sb, probeCmd, &probeOut, io.Discard)
 		if err != nil {
 			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: probe effective paths exited %d: %w", exitCode, err)

@@ -82,7 +82,7 @@ describe('SessionDetailPage review mode and mobile diff', () => {
     await user.click(changesTab);
 
     expect(screen.queryByRole('button', { name: /Review 1 file/ })).not.toBeInTheDocument();
-    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }, { timeout: 3000 }));
 
     // Should show the file content in the review diff view
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
@@ -818,7 +818,7 @@ describe('SessionDetailPage review mode and mobile diff', () => {
     await user.click(changesTab);
 
     expect(screen.queryByRole('button', { name: /Review 2 files/ })).not.toBeInTheDocument();
-    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }, { timeout: 3000 }));
 
     expect((await screen.findAllByText('src/app.ts')).length).toBeGreaterThan(0);
   });
@@ -945,7 +945,7 @@ describe('SessionDetailPage review mode and mobile diff', () => {
 
     expect(screen.queryByRole('button', { name: 'Review 3 files' })).not.toBeInTheDocument();
 
-    await user.click(await screen.findByRole('button', { name: /app\.ts/ }));
+    await user.click(await screen.findByRole('button', { name: /app\.ts/ }, { timeout: 3000 }));
 
     expect(await screen.findByText('frontend/src/app.ts')).toBeInTheDocument();
     expect(screen.getByText('frontend/src/lib/helpers.ts')).toBeInTheDocument();

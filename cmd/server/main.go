@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/api"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
@@ -486,6 +487,7 @@ func main() {
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
 			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
@@ -531,6 +533,7 @@ func main() {
 						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					var slackBranchPreviewHandler *handlers.BranchPreviewHandler
 					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
 						autoPreviewNodeStore := db.NewNodeStore(pool)
 						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
@@ -540,7 +543,24 @@ func main() {
 						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
 						services.AutoPreviewStarter = branchPreviewHandler
+						slackBranchPreviewHandler = branchPreviewHandler
 					}
+					slackPreviewNodeStore := db.NewNodeStore(pool)
+					slackPreviewSelector := preview.NewWorkerSelectorWithOptions(slackPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+						PreferredRegion:      cfg.NodeRegion,
+					})
+					previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+					if keyringErr != nil {
+						logger.Warn().Err(keyringErr).Msg("failed to initialize preview RPC keyring for Slack preview control; worker RPC auth disabled")
+						previewRPCKeyring = auth.PreviewTokenKeyring{}
+					}
+					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
+					slackPreviewHandler.SetJobStore(jobStore)
+					slackPreviewHandler.SetWorkerRuntime(slackPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID)
+					slackPreviewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
+					slackPreviewHandler.SetSandboxCapacityGate(sandboxCapacity)
+					services.SlackPreviewControl = handlers.NewSlackPreviewControl(slackPreviewHandler, slackBranchPreviewHandler, pullRequestStore, repoStore, cfg.FrontendURL)
 					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
 					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
 				}
@@ -564,9 +584,11 @@ func main() {
 					"Fix the missing dependencies, or set MODE=api to disable the in-process worker.")
 		}
 		retentionCfg := worker.DataRetentionConfig{
-			WebhookDays: cfg.DataRetentionWebhookDays,
-			LogsDays:    cfg.DataRetentionLogsDays,
-			JobsDays:    cfg.DataRetentionJobsDays,
+			WebhookDays:              cfg.DataRetentionWebhookDays,
+			LogsDays:                 cfg.DataRetentionLogsDays,
+			JobsDays:                 cfg.DataRetentionJobsDays,
+			SlackInboundPayloadDays:  cfg.DataRetentionSlackInboundPayloadDays,
+			SlackInboundPayloadBatch: cfg.DataRetentionSlackInboundPayloadBatch,
 		}
 
 		if sandboxCapacity != nil && services.SandboxGC != nil {
@@ -666,6 +688,7 @@ func main() {
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
+		go worker.RunPreviewHealthSampler(ctx, db.NewPreviewStore(pool), logger, time.Minute)
 		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
@@ -687,7 +710,12 @@ func main() {
 				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 				PreferredRegion:      cfg.NodeRegion,
 			})
-			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+			if keyringErr != nil {
+				logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+				previewRPCKeyring = auth.PreviewTokenKeyring{}
+			}
+			client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
 			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
@@ -950,6 +978,7 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeR
 	}
 	if previewCapable {
 		metadata["preview_capable"] = true
+		metadata["preview_rpc_auth_check"] = true
 	}
 	if previewInternalBaseURL != "" {
 		metadata["preview_internal_base_url"] = previewInternalBaseURL
@@ -1406,6 +1435,8 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
+		redisClient,
+		logger,
 	)
 
 	// Failure analysis service.
@@ -1437,6 +1468,7 @@ func buildServices(
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
 	pmSvc.SetSessionLogStore(sessionLogStore)
+	pmSvc.SetSessionMessageStore(sessionMessageStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
@@ -1648,6 +1680,8 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
+	redisClient *cache.Client,
+	logger zerolog.Logger,
 ) {
 	if prService == nil {
 		return
@@ -1661,4 +1695,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
+	prService.SetRedisClient(redisClient)
+	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }

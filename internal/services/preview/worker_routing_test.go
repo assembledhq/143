@@ -30,6 +30,7 @@ func TestWorkerSelector_ResolveNode_AllowsDrainingWorker(t *testing.T) {
 	now := time.Now()
 	metadata, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-1.internal:8080",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -85,6 +86,7 @@ func TestParseWorkerNode(t *testing.T) {
 
 		metadata, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-1.internal:8080/",
 		})
 		require.NoError(t, err, "worker metadata should marshal")
@@ -117,10 +119,27 @@ func TestParseWorkerNode(t *testing.T) {
 		require.Contains(t, err.Error(), "not preview-capable", "parseWorkerNode should explain why the worker is rejected")
 	})
 
+	t.Run("rejects workers without verified preview rpc", func(t *testing.T) {
+		t.Parallel()
+
+		metadata, err := json.Marshal(WorkerNodeMetadata{
+			PreviewCapable:         true,
+			PreviewInternalBaseURL: "http://worker-1.internal:8080",
+		})
+		require.NoError(t, err, "worker metadata should marshal")
+
+		_, err = parseWorkerNode(models.Node{
+			ID:       "worker-1",
+			Metadata: metadata,
+		})
+		require.Error(t, err, "parseWorkerNode should reject workers whose preview RPC endpoint has not been verified")
+		require.Contains(t, err.Error(), "preview RPC endpoint is not verified", "parseWorkerNode should explain why the worker is rejected")
+	})
+
 	t.Run("rejects missing base url", func(t *testing.T) {
 		t.Parallel()
 
-		metadata, err := json.Marshal(WorkerNodeMetadata{PreviewCapable: true})
+		metadata, err := json.Marshal(WorkerNodeMetadata{PreviewCapable: true, PreviewRPCAuthCheck: true})
 		require.NoError(t, err, "worker metadata should marshal")
 
 		_, err = parseWorkerNode(models.Node{
@@ -142,6 +161,7 @@ func TestWorkerSelector_ResolveNode_RejectsUnroutableStatus(t *testing.T) {
 	now := time.Now()
 	metadata, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-1.internal:8080",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -186,6 +206,7 @@ func TestWorkerSelector_SelectStartNode(t *testing.T) {
 		now := time.Now().UTC()
 		metadata, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-1.internal:8080",
 		})
 		require.NoError(t, err, "should marshal worker metadata")
@@ -269,16 +290,19 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		now := time.Now().UTC()
 		workerOneMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-1.internal:8080",
 		})
 		require.NoError(t, err, "should marshal first worker metadata")
 		workerTwoMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-2.internal:8080",
 		})
 		require.NoError(t, err, "should marshal second worker metadata")
 		apiMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://api.internal:8080",
 		})
 		require.NoError(t, err, "should marshal api metadata")
@@ -314,6 +338,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		now := time.Now().UTC()
 		apiMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://api.internal:8080",
 		})
 		require.NoError(t, err, "should marshal api metadata")
@@ -340,11 +365,13 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		now := time.Now().UTC()
 		directOnlyMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-1.internal:8080",
 		})
 		require.NoError(t, err, "should marshal direct worker metadata")
 		staticMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-2.internal:8080",
 			StaticEgressCapable:    true,
 			StaticEgressPublicIP:   "203.0.113.10",
@@ -381,6 +408,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		now := time.Now().UTC()
 		staleMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-1.internal:8080",
 			StaticEgressCapable:    true,
 			StaticEgressPublicIP:   "198.51.100.20",
@@ -388,6 +416,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		require.NoError(t, err, "should marshal stale static egress worker metadata")
 		currentMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-2.internal:8080",
 			StaticEgressCapable:    true,
 			StaticEgressPublicIP:   "203.0.113.10",
@@ -424,6 +453,7 @@ func TestWorkerSelector_SelectLeastLoadedNodeExcept(t *testing.T) {
 		now := time.Now().UTC()
 		workerMeta, err := json.Marshal(WorkerNodeMetadata{
 			PreviewCapable:         true,
+			PreviewRPCAuthCheck:    true,
 			PreviewInternalBaseURL: "http://worker-1.internal:8080",
 		})
 		require.NoError(t, err, "should marshal worker metadata")
@@ -468,6 +498,7 @@ func TestWorkerSelector_HasStaticEgressCapableWorker(t *testing.T) {
 			metadata: []WorkerNodeMetadata{
 				{
 					PreviewCapable:         true,
+					PreviewRPCAuthCheck:    true,
 					PreviewInternalBaseURL: "http://worker-1.internal:8080",
 					StaticEgressCapable:    true,
 					StaticEgressPublicIP:   "198.51.100.20",
@@ -480,6 +511,7 @@ func TestWorkerSelector_HasStaticEgressCapableWorker(t *testing.T) {
 			metadata: []WorkerNodeMetadata{
 				{
 					PreviewCapable:         true,
+					PreviewRPCAuthCheck:    true,
 					PreviewInternalBaseURL: "http://worker-1.internal:8080",
 				},
 			},
@@ -680,6 +712,7 @@ func TestWorkerSelector_SelectCachePlacementWorkerBatchesCapacityChecks(t *testi
 	now := time.Now().UTC()
 	metadata, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker.internal:8080",
 	})
 	require.NoError(t, err, "worker metadata should marshal")
@@ -721,6 +754,7 @@ func TestWorkerSelector_SelectCachePlacementWorkerChoosesLeastLoadedHolder(t *te
 	now := time.Now().UTC()
 	metadata, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker.internal:8080",
 	})
 	require.NoError(t, err, "worker metadata should marshal")
@@ -763,6 +797,7 @@ func TestWorkerSelector_SelectStartNodeWithCachePlacementsUsesPackageManagerHold
 	now := time.Now().UTC()
 	metadata, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker.internal:8080",
 	})
 	require.NoError(t, err, "worker metadata should marshal")
@@ -809,17 +844,20 @@ func TestWorkerSelector_SelectLeastLoadedNodeInPreferredRegionIgnoresUnknownRegi
 	now := time.Now().UTC()
 	unknownMeta, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://unknown.internal:8080",
 	})
 	require.NoError(t, err, "unknown-region metadata should marshal")
 	westMeta, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://west.internal:8080",
 		Region:                 "us-west-2",
 	})
 	require.NoError(t, err, "west metadata should marshal")
 	eastMeta, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://east.internal:8080",
 		Region:                 "us-east-1",
 	})
@@ -858,6 +896,7 @@ func TestWorkerSelector_SelectStartNodeFallsBackToRecentRepoCacheHolder(t *testi
 	now := time.Now().UTC()
 	metadata, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-warm.internal:8080",
 	})
 	require.NoError(t, err, "worker metadata should marshal")
@@ -905,12 +944,14 @@ func TestWorkerSelector_SelectStartNodeWithPlacementPrefersRegionThenCrossRegion
 	now := time.Now().UTC()
 	eastMeta, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://east.internal:8080",
 		Region:                 "us-east-1",
 	})
 	require.NoError(t, err, "east metadata should marshal")
 	westMeta, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://west.internal:8080",
 		Region:                 "us-west-2",
 	})
@@ -988,6 +1029,7 @@ func TestWorkerSelector_SelectStartNodeWithPlacement_NoPreferredRegionWorkers(t 
 	// Only a west worker exists; preferred region is east.
 	westMeta, err := json.Marshal(WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://west.internal:8080",
 		Region:                 "us-west-2",
 	})

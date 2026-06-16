@@ -118,6 +118,9 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      - name: Wait for Postgres
+        run: go run ./cmd/wait-postgres
+
       - name: Run go vet and migrations
         run: |
           go run cmd/migrate/main.go up
@@ -302,6 +305,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Wait for Postgres
+        run: go run ./cmd/wait-postgres
 
       - name: Migrate up
         run: go run cmd/migrate/main.go up

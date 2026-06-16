@@ -364,7 +364,7 @@ func TestRuntimeHelpers_MapCheckpointCapabilitiesAndStopReasons(t *testing.T) {
 
 	require.Equal(t, models.CheckpointCapabilityFullResume, checkpointCapabilityForAgent(models.AgentTypeCodex), "Codex agents should support full resume checkpoints")
 	require.Equal(t, models.CheckpointCapabilityFullResume, checkpointCapabilityForAgent(models.AgentTypeClaudeCode), "Claude Code agents should support full resume checkpoints")
-	require.Equal(t, models.CheckpointCapabilityFullResume, checkpointCapabilityForAgent(models.AgentTypeGeminiCLI), "Gemini agents should support full resume checkpoints")
+	require.Equal(t, models.CheckpointCapabilityFullResume, checkpointCapabilityForAgent(models.AgentTypeOpenCode), "OpenCode agents should support full resume checkpoints")
 	require.Equal(t, models.CheckpointCapabilityFilesystemOnly, checkpointCapabilityForAgent(models.AgentTypeAmp), "Amp agents should only support filesystem checkpoints")
 	require.Equal(t, models.CheckpointCapabilityFilesystemOnly, checkpointCapabilityForAgent(models.AgentTypePi), "Pi agents should only support filesystem checkpoints")
 	require.Equal(t, models.CheckpointCapabilityNoDurable, checkpointCapabilityForAgent(models.AgentTypePMAgent), "non-checkpointed agents should default to no durable checkpoint support")

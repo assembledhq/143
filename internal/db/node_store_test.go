@@ -169,6 +169,47 @@ func TestNodeStore_ListActive(t *testing.T) {
 	})
 }
 
+func TestNodeStore_ListPreviewRPCProbeNodesRequiresAuthCheckCapability(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now().UTC()
+	metadata, err := json.Marshal(map[string]any{
+		"preview_capable":           true,
+		"preview_rpc_auth_check":    true,
+		"preview_internal_base_url": "http://worker-1:8080",
+	})
+	require.NoError(t, err, "metadata should marshal")
+
+	mock.ExpectQuery(`SELECT .+ FROM nodes[\s\S]+metadata->>'preview_rpc_auth_check' = 'true'[\s\S]+ORDER BY id ASC`).
+		WillReturnRows(
+			pgxmock.NewRows(nodeStoreTestCols).
+				AddRow("worker-1", "worker", "worker-1.internal", "active", "none", metadata, now, now, nil, nil, "", ""),
+		)
+
+	store := NewNodeStore(mock)
+	nodes, err := store.ListPreviewRPCProbeNodes(context.Background())
+	require.NoError(t, err, "ListPreviewRPCProbeNodes should return probe-capable nodes")
+	require.Equal(t, []models.Node{{
+		ID:                   "worker-1",
+		Mode:                 models.NodeModeWorker,
+		Host:                 "worker-1.internal",
+		Status:               models.NodeStatusActive,
+		DrainIntent:          models.DrainIntentNone,
+		Metadata:             metadata,
+		StartedAt:            now,
+		LastHeartbeatAt:      now,
+		DrainRequestedBy:     "",
+		DrainReason:          "",
+		DrainRequestedAt:     nil,
+		DrainBudgetExpiresAt: nil,
+	}}, nodes, "ListPreviewRPCProbeNodes should preserve matching node rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestNodeStore_WorkerHeartbeatHealth(t *testing.T) {
 	t.Parallel()
 

@@ -26,6 +26,7 @@ import (
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
+	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -233,8 +234,38 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := slackNotificationSubscriptionMatches(tt.raw, tt.eventKind, tt.automationID)
+			got := slackNotificationSubscriptionMatches(tt.raw, nil, tt.eventKind, tt.automationID)
 			require.Equal(t, tt.expected, got, "subscription matcher should return the expected decision")
+		})
+	}
+}
+
+func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
+	t.Parallel()
+
+	balanced := models.SlackNotificationPresetBalanced
+	quiet := models.SlackNotificationPresetQuiet
+	verbose := models.SlackNotificationPresetVerbose
+
+	tests := []struct {
+		name      string
+		preset    *models.SlackNotificationPreset
+		eventKind string
+		expected  bool
+	}{
+		{name: "balanced includes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: true},
+		{name: "balanced excludes preview stale", preset: &balanced, eventKind: string(models.SlackNotificationPreviewStale), expected: false},
+		{name: "quiet includes human input", preset: &quiet, eventKind: string(models.SlackNotificationHumanInputRequested), expected: true},
+		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
+		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackNotificationSubscriptionMatches(json.RawMessage(`{}`), tt.preset, tt.eventKind, nil)
+			require.Equal(t, tt.expected, got, "preset subscription matcher should return the expected decision")
 		})
 	}
 }
@@ -253,7 +284,7 @@ func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) 
 			settings: models.SlackChannelSettings{
 				SlackTeamID:               "T123",
 				SlackChannelID:            "C123",
-				ResponseVisibility:        "thread",
+				ResponseVisibility:        slackResponseVisibilityPtr(models.SlackResponseVisibilityThread),
 				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
 			},
 			expectedDests: []slackNotificationDestination{
@@ -266,7 +297,7 @@ func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) 
 			settings: models.SlackChannelSettings{
 				SlackTeamID:               "T123",
 				SlackChannelID:            "C123",
-				ResponseVisibility:        "dm",
+				ResponseVisibility:        slackResponseVisibilityPtr(models.SlackResponseVisibilityDM),
 				NotificationSubscriptions: json.RawMessage(fmt.Sprintf(`{"events":["session.completed"],"slack_user_ids":["%s"]}`, subscriber)),
 			},
 			expectedDests: []slackNotificationDestination{
@@ -284,6 +315,22 @@ func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) 
 			require.Equal(t, tt.expectedDests, got, "notification destinations should honor response visibility")
 		})
 	}
+}
+
+func TestRenderSlackNotificationUsesKindDefaultsAndActions(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	prID := uuid.New()
+	text, blocks := renderSlackNotification(&Services{FrontendURL: "https://143.test"}, models.SlackSendNotificationJobPayload{
+		Kind:          string(models.SlackNotificationPROpened),
+		SessionID:     sessionID.String(),
+		PullRequestID: prID.String(),
+	})
+
+	require.Contains(t, text, "Pull request opened", "notification should default the title from event kind")
+	require.Contains(t, text, "ready for review", "notification should default the body from event kind")
+	require.True(t, slackBlocksContainURLButton(blocks, "Review PR"), "PR notifications should include a review action")
 }
 
 func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
@@ -316,12 +363,54 @@ func TestDetectSlackContextReferencesClassifiesProductContext(t *testing.T) {
 	)
 
 	require.Equal(t, []slackContextReference{
-		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42"},
-		{Kind: slackReferenceKindIssue, Value: "ENG-123"},
-		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign"},
-		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123"},
-		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44"},
+		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42", Source: "message"},
+		{Kind: slackReferenceKindIssue, Value: "ENG-123", Source: "message"},
+		{Kind: slackReferenceKindBranch, Value: "jsmith/navbar-redesign", Source: "message"},
+		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123", Source: "thread"},
+		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44", Source: "thread"},
 	}, refs, "Slack context detection should preserve ordered typed references")
+}
+
+func TestSlackContextReferencesForSessionInput(t *testing.T) {
+	t.Parallel()
+
+	got := slackContextReferencesForSessionInput([]slackContextReference{
+		{Kind: slackReferenceKindFilePath, Value: "src/app.ts:44"},
+		{Kind: slackReferenceKindSentry, Value: "https://acme.sentry.io/issues/123"},
+		{Kind: slackReferenceKindPullRequest, Value: "https://github.com/acme/repo/pull/42"},
+	})
+
+	require.Equal(t, models.SessionInputReferences{
+		{Kind: models.SessionInputReferenceKindFile, Token: "@src/app.ts:44", Path: "src/app.ts:44", Display: "src/app.ts:44"},
+		{Kind: models.SessionInputReferenceKindApp, ID: "sentry", Display: "https://acme.sentry.io/issues/123"},
+		{Kind: models.SessionInputReferenceKindApp, ID: "github", Display: "https://github.com/acme/repo/pull/42"},
+	}, got, "Slack context references should persist as first-class session input references")
+}
+
+func TestSlackHomePersonalDefaultsBlock(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+	branch := "main"
+	settings := &models.SlackBotSettings{
+		DefaultRepositoryID: &repoID,
+		DefaultBranch:       &branch,
+		RoutingMode:         models.SlackRoutingModeStartWork,
+		ResponseVisibility:  models.SlackResponseVisibilityDM,
+		NotificationPreset:  models.SlackNotificationPresetVerbose,
+	}
+	repo := &models.Repository{ID: repoID, FullName: "acme/api"}
+
+	block := slackHomePersonalDefaultsBlock(settings, repo)
+
+	require.Equal(t, "section", block.Type, "personal defaults should render as a section")
+	require.NotNil(t, block.Text, "personal defaults should include text")
+	require.Contains(t, block.Text.Text, "*Personal defaults*", "personal defaults should have a clear heading")
+	require.Contains(t, block.Text.Text, "acme/api", "personal defaults should show the default repository")
+	require.Contains(t, block.Text.Text, "`main`", "personal defaults should show the default branch")
+	require.Contains(t, block.Text.Text, "Start work", "personal defaults should show the routing mode")
+	require.Contains(t, block.Text.Text, "DM", "personal defaults should show response visibility")
+	require.Contains(t, block.Text.Text, "Verbose", "personal defaults should show notification preset")
 }
 
 func TestSlackModalsUseInputLabels(t *testing.T) {
@@ -392,7 +481,7 @@ func TestRenderSlackFinalBlocksIncludesSpecializedOutcomeActions(t *testing.T) {
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
-	_, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+	_, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, models.SlackSessionLink{SessionID: sessionID}, slackSessionOutcomeDetails{
 		Session: models.Session{
 			ID:              sessionID,
 			PRCreationState: models.PRCreationStateFailed,
@@ -402,6 +491,245 @@ func TestRenderSlackFinalBlocksIncludesSpecializedOutcomeActions(t *testing.T) {
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_repair_pr"), "failed PR outcome should include a repair action")
 	require.True(t, slackBlocksContainAction(blocks, "slack_merge_pr"), "open PR outcome should include a merge action")
+	require.True(t, slackBlocksActionHasConfirm(blocks, "slack_merge_pr"), "merge action should require Slack confirmation")
+}
+
+func TestRenderSlackFinalBlocksRequiresConfirmationForCreatePR(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	snapshotKey := "snapshots/session.tar.zst"
+	_, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, models.SlackSessionLink{SessionID: sessionID}, slackSessionOutcomeDetails{
+		Session: models.Session{
+			ID:          sessionID,
+			Status:      models.SessionStatusCompleted,
+			SnapshotKey: &snapshotKey,
+		},
+	})
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_create_pr"), "completed Slack sessions with a snapshot should offer PR creation")
+	require.True(t, slackBlocksActionHasConfirm(blocks, "slack_create_pr"), "Slack PR creation should require confirmation")
+}
+
+func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	session := &models.Session{ID: sessionID, OrgID: orgID}
+
+	blocks := slackSessionAckBlocks(
+		context.Background(),
+		nil,
+		&Services{FrontendURL: "https://143.test"},
+		zerolog.Nop(),
+		orgID,
+		uuid.New(),
+		"T123",
+		"C123",
+		session,
+		"Starting a 143 session",
+		slackbotsvc.SlackSessionContextSummary{
+			RepositoryName: "acme/api",
+			Branch:         "main",
+			Missing: []slackbotsvc.MissingSlackContext{
+				{Kind: "preview_target", Reason: "Choose a preview target."},
+				{Kind: "pull_request", Reason: "Choose a pull request."},
+			},
+		},
+		slackbotsvc.SlackRoutingModeAnswerOnly,
+	)
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should let users correct channel repository defaults")
+	require.True(t, slackBlocksContainAction(blocks, "slack_start_work"), "answer-only ack should let users escalate into durable work")
+	require.True(t, slackBlocksContainAction(blocks, "slack_choose_preview_target"), "ack should offer a preview target selector when preview context is missing")
+	require.True(t, slackBlocksContainAction(blocks, "slack_choose_pull_request"), "ack should offer a PR selector when PR context is missing")
+	require.Contains(t, slackBlocksActionValue(blocks, "slack_start_work"), orgID.String(), "start-work action should carry org scope")
+}
+
+func TestSlackMissingContextHelpers(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	view := slackMissingContextModal("preview_target", slackActionValue(map[string]string{
+		"org_id":     uuid.New().String(),
+		"session_id": sessionID.String(),
+		"kind":       "preview_target",
+	}))
+
+	require.Equal(t, "slack_missing_context_modal", view.CallbackID, "missing-context modal should submit to the shared handler")
+	require.Contains(t, slackBlockIDs(view.Blocks), "context_value", "missing-context modal should collect the selected context value")
+	require.Equal(t, "external_select", slackModalInputType(view.Blocks, "context_value"), "preview missing-context modal should use a structured selector")
+	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "preview_target"}}), "preview target should block vague preview work")
+	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "pull_request"}}), "missing PR should block vague PR repair work")
+	require.False(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "repository"}}), "missing repository alone should not block answer-only or exploratory work")
+}
+
+func TestRenderSlackHumanInputUsesLifecycleCopy(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	text, blocks := renderSlackHumanInput(&Services{FrontendURL: "https://143.test"}, models.HumanInputRequest{
+		Title: "Approve deploy",
+		Body:  "Should I deploy this change?",
+		Choices: []models.HumanInputChoice{
+			{ID: "yes", Label: "Deploy"},
+			{ID: "no", Label: "Stop"},
+		},
+	}, sessionID)
+
+	require.Contains(t, text, "Approve deploy", "human-input notification should preserve the request title")
+	require.Contains(t, text, "Should I deploy this change?", "human-input notification should include the requested decision context")
+	require.Contains(t, text, "Answer in 143 or use a Slack action.", "human-input notification should preserve response guidance")
+	require.True(t, slackBlocksContainAction(blocks, "slack_answer_human_input"), "human-input blocks should keep Slack answer actions")
+}
+
+func TestRenderSlackHumanInputApprovalUsesApprovalSemantics(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	_, blocks := renderSlackHumanInput(&Services{FrontendURL: "https://143.test"}, models.HumanInputRequest{
+		ID:    uuid.New(),
+		Kind:  models.HumanInputRequestKindToolApproval,
+		Title: "Approve command",
+		Body:  "Run npm test?",
+		Choices: []models.HumanInputChoice{
+			{ID: "approve", Label: "Approve"},
+			{ID: "deny", Label: "Deny", Destructive: true},
+		},
+	}, sessionID)
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_approve_human_input"), "approval requests should use explicit approval action ids")
+	require.True(t, slackBlocksContainAction(blocks, "slack_deny_human_input"), "approval requests should use explicit denial action ids")
+	require.False(t, slackBlocksContainAction(blocks, "slack_answer_human_input_freeform"), "approval requests should not offer generic freeform Slack answers")
+}
+
+func TestSlackHumanInputDeliveryTargetRespectsSensitivity(t *testing.T) {
+	t.Parallel()
+
+	link := models.SlackSessionLink{SlackChannelID: "C123", SlackUserID: "U123"}
+	tests := []struct {
+		name            string
+		req             models.HumanInputRequest
+		dmChannelID     string
+		expectedChannel string
+		expectedThread  string
+		expectedPost    bool
+	}{
+		{
+			name:            "team request stays in thread",
+			req:             models.HumanInputRequest{Sensitivity: models.HumanInputSensitivityTeam, PreferredChannel: models.HumanInputPreferredChannelSlackThread},
+			expectedChannel: "C123",
+			expectedThread:  "1710000000.000000",
+			expectedPost:    true,
+		},
+		{
+			name:            "personal request posts to dm",
+			req:             models.HumanInputRequest{Sensitivity: models.HumanInputSensitivityPersonal, PreferredChannel: models.HumanInputPreferredChannelSlackThread},
+			dmChannelID:     "D123",
+			expectedChannel: "D123",
+			expectedPost:    true,
+		},
+		{
+			name:         "sensitive request without dm is not posted to channel",
+			req:          models.HumanInputRequest{Sensitivity: models.HumanInputSensitivitySensitive, PreferredChannel: models.HumanInputPreferredChannelSlackThread},
+			expectedPost: false,
+		},
+		{
+			name:         "web preferred request is not delivered to slack",
+			req:          models.HumanInputRequest{Sensitivity: models.HumanInputSensitivityTeam, PreferredChannel: models.HumanInputPreferredChannelWeb},
+			expectedPost: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			channelID, threadTS, shouldPost := slackHumanInputDeliveryTargetFromRequest(tt.req, link, "1710000000.000000", tt.dmChannelID)
+
+			require.Equal(t, tt.expectedChannel, channelID, "delivery target should choose the expected Slack channel")
+			require.Equal(t, tt.expectedThread, threadTS, "delivery target should choose the expected Slack thread")
+			require.Equal(t, tt.expectedPost, shouldPost, "delivery target should decide whether Slack may receive the request")
+		})
+	}
+}
+
+func TestSlackHumanInputAllowsNotificationFanout(t *testing.T) {
+	t.Parallel()
+
+	assignedUserID := uuid.New()
+	tests := []struct {
+		name     string
+		req      models.HumanInputRequest
+		expected bool
+	}{
+		{
+			name:     "default team request may fan out",
+			req:      models.HumanInputRequest{},
+			expected: true,
+		},
+		{
+			name: "explicit team thread request may fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: true,
+		},
+		{
+			name: "personal request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityPersonal,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: false,
+		},
+		{
+			name: "sensitive request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivitySensitive,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: false,
+		},
+		{
+			name: "dm preferred request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelSlackDM,
+			},
+			expected: false,
+		},
+		{
+			name: "web preferred request must not fan out",
+			req: models.HumanInputRequest{
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelWeb,
+			},
+			expected: false,
+		},
+		{
+			name: "assigned request must not fan out",
+			req: models.HumanInputRequest{
+				AssignedUserID:   &assignedUserID,
+				Sensitivity:      models.HumanInputSensitivityTeam,
+				PreferredChannel: models.HumanInputPreferredChannelSlackThread,
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := slackHumanInputAllowsNotificationFanout(tt.req)
+
+			require.Equal(t, tt.expected, got, "human-input notification fanout should respect sensitivity and delivery target")
+		})
+	}
 }
 
 func TestSlackTeamSessionLabel(t *testing.T) {
@@ -489,7 +817,7 @@ func TestRenderSlackFinalBlocksIncludesOutcomeActions(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	previewID := uuid.New()
-	text, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, slackSessionOutcomeDetails{
+	text, blocks := renderSlackFinalBlocks(&Services{FrontendURL: "https://143.test"}, "Done", orgID, sessionID, models.SlackSessionLink{SessionID: sessionID}, slackSessionOutcomeDetails{
 		Preview: &models.PreviewInstance{ID: previewID, Status: models.PreviewStatusReady},
 	})
 
@@ -529,6 +857,33 @@ func TestSlackHumanInputAuthorizationAllowsTeamSessionClaim(t *testing.T) {
 	require.Equal(t, userID, decision.AnsweredByUserID, "human input should be answered as the mapped 143 user")
 }
 
+func TestSlackHumanInputAuthorizationRejectsWrongAssignedUser(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	requestID := uuid.New()
+	mappedUserID := uuid.New()
+	assignedUserID := uuid.New()
+
+	_, err := authorizeSlackHumanInputAnswer(context.Background(), workerSlackHumanInputAuthStores{
+		userLinks:   workerSlackUserLinkLookup{link: models.SlackUserLink{UserID: &mappedUserID}},
+		memberships: workerSlackMembershipLookup{membership: models.OrganizationMembership{UserID: mappedUserID, OrgID: orgID, Role: models.RoleMember}},
+		requests: workerSlackHumanInputRequestLookup{req: models.HumanInputRequest{
+			ID:             requestID,
+			OrgID:          orgID,
+			SessionID:      sessionID,
+			AssignedUserID: &assignedUserID,
+		}},
+	}, orgID, sessionID, requestID, models.SlackInteractionJobPayload{
+		TeamID: "T123",
+		UserID: "U123",
+	})
+
+	require.Error(t, err, "assigned human-input requests should reject a different mapped Slack user")
+	require.Contains(t, err.Error(), "assigned to another user", "authorization error should explain assignment mismatch")
+}
+
 func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
 	ids := make([]string, 0, len(blocks))
 	for _, block := range blocks {
@@ -537,6 +892,21 @@ func slackBlockIDs(blocks []ingestion.SlackBlock) []string {
 		}
 	}
 	return ids
+}
+
+func slackModalInputType(blocks []ingestion.SlackBlock, blockID string) string {
+	for _, block := range blocks {
+		if block.BlockID != blockID {
+			continue
+		}
+		if block.Element == nil {
+			return ""
+		}
+		if v, ok := block.Element["type"].(string); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 func slackBlocksContainAction(blocks []ingestion.SlackBlock, actionID string) bool {
@@ -571,6 +941,32 @@ func slackBlocksActionValue(blocks []ingestion.SlackBlock, actionID string) stri
 	return ""
 }
 
+func slackBlocksActionHasConfirm(blocks []ingestion.SlackBlock, actionID string) bool {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			if element["action_id"] == actionID && element["confirm"] != nil {
+				return true
+			}
+		}
+		if block.Accessory != nil && block.Accessory["action_id"] == actionID && block.Accessory["confirm"] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func slackBlocksContainURLButton(blocks []ingestion.SlackBlock, label string) bool {
+	for _, block := range blocks {
+		for _, element := range block.Elements {
+			text, ok := element["text"].(map[string]string)
+			if ok && text["text"] == label && element["url"] != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type workerSlackSessionLinkLookup struct {
 	link models.SlackSessionLink
 	err  error
@@ -598,6 +994,18 @@ func (s workerSlackUserLinkLookup) GetBySlackUser(context.Context, uuid.UUID, st
 type workerSlackMembershipLookup struct {
 	membership models.OrganizationMembership
 	err        error
+}
+
+type workerSlackHumanInputRequestLookup struct {
+	req models.HumanInputRequest
+	err error
+}
+
+func (s workerSlackHumanInputRequestLookup) GetByID(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.HumanInputRequest, error) {
+	if s.err != nil {
+		return models.HumanInputRequest{}, s.err
+	}
+	return s.req, nil
 }
 
 func (s workerSlackMembershipLookup) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
@@ -1007,7 +1415,7 @@ func workerSessionNeedsPolicyDefaults(values []any) bool {
 		return false
 	}
 	switch agentType {
-	case "claude_code", "claude-code", "gemini_cli", "gemini-cli", "codex", "amp", "pi", "pm_agent":
+	case "claude_code", "claude-code", "codex", "amp", "pi", "opencode", "pm_agent":
 		return true
 	default:
 		return false
@@ -2782,14 +3190,15 @@ type mockPMService struct {
 }
 
 type stubPRService struct {
-	createPRFn                func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
-	createBranchFn            func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
-	pushChangesToPRFn         func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
-	syncPullRequestStateFn    func(context.Context, uuid.UUID, uuid.UUID) error
-	reconcilePullRequestFn    func(context.Context, uuid.UUID, int) error
-	enrichPullRequestHealthFn func(context.Context, uuid.UUID, uuid.UUID, int64) error
-	queueMergeWhenReadyFn     func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
-	processMergeWhenReadyFn   func(context.Context, uuid.UUID, uuid.UUID) error
+	createPRFn                     func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	createBranchFn                 func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
+	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
+	syncPullRequestStateFn         func(context.Context, uuid.UUID, uuid.UUID) error
+	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
+	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
+	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
+	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -2830,6 +3239,13 @@ func (s *stubPRService) ReconcilePullRequestState(ctx context.Context, orgID uui
 func (s *stubPRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {
 	if s.enrichPullRequestHealthFn != nil {
 		return s.enrichPullRequestHealthFn(ctx, orgID, pullRequestID, version)
+	}
+	return nil
+}
+
+func (s *stubPRService) CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error {
+	if s.completePullRequestRepairRunFn != nil {
+		return s.completePullRequestRepairRunFn(ctx, orgID, pullRequestID, repairRunID)
 	}
 	return nil
 }
@@ -4589,6 +5005,7 @@ func automationRowColumns() []string {
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
+		"github_event_triggers",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
@@ -4676,6 +5093,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -4768,6 +5186,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -4904,6 +5323,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, false, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -4958,6 +5378,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5031,6 +5452,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &clickerID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5110,6 +5532,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, &creatorID, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -5181,6 +5604,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			models.AutomationIconTypeEmoji, "⚙️",
 			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
+			[]string{},
 			nil, nil, true, nil, nil, nil,
 			50, []byte("{}"), now, now, nil,
 		))
@@ -6924,6 +7348,65 @@ func TestContinueSessionHandler_PassesPRRepairCommandOptions(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestContinueSessionHandler_CompletesPRRepairAfterSuccess(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	repairRunID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass PR repair metadata to the orchestrator")
+			require.NotNil(t, opts.PRRepair, "continue_session should decode PR repair metadata before completion")
+			return nil
+		},
+	}
+	var completed bool
+	prSvc := &stubPRService{
+		completePullRequestRepairRunFn: func(ctx context.Context, gotOrgID, gotPullRequestID, gotRepairRunID uuid.UUID) error {
+			completed = true
+			require.Equal(t, orgID, gotOrgID, "repair completion should use the payload org")
+			require.Equal(t, prID, gotPullRequestID, "repair completion should use the payload PR")
+			require.Equal(t, repairRunID, gotRepairRunID, "repair completion should use the payload repair run")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch, PR: prSvc}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":          sessionID.String(),
+		"org_id":              orgID.String(),
+		"pull_request_id":     prID.String(),
+		"repair_run_id":       repairRunID.String(),
+		"command_type":        "fix_tests",
+		"health_version":      12,
+		"head_sha":            "head-sha",
+		"workspace_mode":      "snapshot_continuation",
+		"pull_request_number": 42,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.NoError(t, err, "continue_session should succeed when repair completion notification succeeds")
+	require.True(t, completed, "continue_session should complete the linked PR repair run after a successful repair turn")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestContinueSessionHandler_StalePRHeadSyncsAndStops(t *testing.T) {
 	t.Parallel()
 
@@ -7466,7 +7949,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 	continuationErr := errors.New("sandbox hydrate failed")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -7479,7 +7962,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 	mock.ExpectExec("UPDATE session_threads SET status = @status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -7488,7 +7971,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
 			require.NotNil(t, opts, "continue_session should pass thread execution options to the orchestrator")
-			require.Equal(t, models.AgentTypeGeminiCLI, opts.AgentType, "thread execution should use the thread agent type")
+			require.Equal(t, models.AgentTypeOpenCode, opts.AgentType, "thread execution should use the thread agent type")
 			require.NotNil(t, opts.ModelOverride, "thread execution should include the thread model override")
 			require.Equal(t, threadModel, *opts.ModelOverride, "thread execution should use the thread model")
 			return continuationErr
@@ -7570,7 +8053,7 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 	continuationErr := errors.New("worker drain cancelled mid-turn")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -7583,7 +8066,7 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 	// The CRITICAL expectation: the UPDATE must still fire even though the
 	// handler's outer ctx is cancelled by the time the orchestrator returns.
@@ -7622,7 +8105,7 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 	cancelErr := fmt.Errorf("%w: %w", agent.ErrSessionCancelled, context.Canceled)
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -7635,7 +8118,7 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 
 	orch := &orchestratorServiceStub{
@@ -7667,7 +8150,7 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGemini25Flash
 
 	const sessionTurnBefore = 5
 	const expectedThreadTurnAfter = 2 // workerSessionThreadRow seeds current_turn=1, so +1=2.
@@ -7682,7 +8165,7 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeGeminiCLI, &threadModel, models.ThreadStatusRunning)...,
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
 		))
 	// CompleteTurn query: arg order follows the @placeholders in the SQL
 	// (current_turn, id, org_id). Pinning the literal value here is what
@@ -7891,6 +8374,33 @@ func TestDataRetentionHandler_SkipsZeroRetentionDays(t *testing.T) {
 	err := handler(context.Background(), "data_retention_cleanup", nil)
 	require.NoError(t, err, "handler should skip cleanup when retention days are 0")
 	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made")
+}
+
+func TestDataRetentionHandler_RedactsSlackInboundPayloadsByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	stores := &Stores{
+		Organizations:      db.NewOrganizationStore(mock),
+		SlackInboundEvents: db.NewSlackInboundEventStore(mock),
+	}
+	cfg := DataRetentionConfig{SlackInboundPayloadDays: 14, SlackInboundPayloadBatch: 25}
+
+	mock.ExpectQuery("SELECT id\\s+FROM organizations").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(orgID))
+	mock.ExpectExec("UPDATE slack_inbound_events").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	handler := newDataRetentionCleanupHandler(stores, cfg, zerolog.Nop())
+	err = handler(context.Background(), "data_retention_cleanup", nil)
+
+	require.NoError(t, err, "handler should redact Slack inbound payloads")
+	require.NoError(t, mock.ExpectationsWereMet(), "all retention SQL expectations should be met")
 }
 
 // --- Eval handler tests ---
@@ -8152,4 +8662,15 @@ func TestFinalizeSessionBackedEvalBootstrapLoadsPrimaryThread(t *testing.T) {
 	})
 
 	require.NoError(t, mock.ExpectationsWereMet(), "bootstrap finalizer should resolve the primary thread and update the bootstrap run")
+}
+
+func TestLegacyEvalRunAgentType(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, models.AgentTypeClaudeCode, legacyEvalRunAgentType("claude-opus-4-6"))
+	require.Equal(t, models.AgentTypeClaudeCode, legacyEvalRunAgentType("claude-sonnet-4-6"))
+	require.Equal(t, models.AgentTypeCodex, legacyEvalRunAgentType("codex"))
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelDeepSeekChat), "OpenCode models should dispatch to the OpenCode adapter")
 }

@@ -126,7 +126,18 @@ type pickKey struct {
 type pickRecord struct {
 	credID     uuid.UUID
 	credential *models.DecryptedCodingCredential
+	binding    runtimeCredentialBinding
 	at         time.Time
+}
+
+type runtimeCredentialBinding struct {
+	CredentialID      uuid.UUID
+	AgentType         models.AgentType
+	Provider          models.ProviderName
+	BackingProvider   models.ProviderName
+	EffectiveModel    string
+	CredentialScope   models.CodingCredentialScope
+	CredentialOwnerID *uuid.UUID
 }
 
 type credentialBlock struct {
@@ -319,7 +330,66 @@ func (e *AgentEnv) recordPickWithCredential(orgID uuid.UUID, userID *uuid.UUID, 
 	if len(e.recentPicks) >= pickTrackerMax {
 		e.evictOldestPickLocked()
 	}
-	e.recentPicks[key] = pickRecord{credID: credID, credential: cred, at: now}
+	e.recentPicks[key] = pickRecord{
+		credID:     credID,
+		credential: cred,
+		binding:    runtimeCredentialBindingForPick(provider, credID, cred),
+		at:         now,
+	}
+}
+
+func runtimeCredentialBindingForPick(provider models.ProviderName, credID uuid.UUID, cred *models.DecryptedCodingCredential) runtimeCredentialBinding {
+	binding := runtimeCredentialBinding{
+		CredentialID:    credID,
+		AgentType:       agentTypeForRuntimeProvider(provider),
+		Provider:        provider,
+		BackingProvider: provider,
+	}
+	if cred == nil {
+		return binding
+	}
+	binding.CredentialScope = cred.Scope().Label()
+	binding.CredentialOwnerID = cred.UserID
+	binding.Provider = cred.Provider
+	binding.AgentType = agentTypeForRuntimeProvider(cred.Provider)
+	binding.BackingProvider = cred.Provider
+	switch cfg := cred.Config.(type) {
+	case models.OpenCodeConfig:
+		binding.AgentType = models.AgentTypeOpenCode
+		binding.BackingProvider = cfg.NormalizedBackingProvider()
+		binding.EffectiveModel = cfg.Model
+	case models.GeminiConfig:
+		binding.EffectiveModel = cfg.Model
+	}
+	if binding.AgentType == "" {
+		binding.AgentType = agentTypeForRuntimeProvider(provider)
+	}
+	return binding
+}
+
+func agentTypeForRuntimeProvider(provider models.ProviderName) models.AgentType {
+	switch provider {
+	case models.ProviderOpenAI, models.ProviderOpenAISubscription:
+		return models.AgentTypeCodex
+	case models.ProviderAnthropic, models.ProviderAnthropicSubscription:
+		return models.AgentTypeClaudeCode
+	case models.ProviderAmp:
+		return models.AgentTypeAmp
+	case models.ProviderPi:
+		return models.AgentTypePi
+	case models.ProviderOpenCode:
+		return models.AgentTypeOpenCode
+	default:
+		return ""
+	}
+}
+
+func (e *AgentEnv) lookupRuntimeCredentialBinding(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (runtimeCredentialBinding, bool) {
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
+	if !ok || rec.binding.CredentialID == uuid.Nil {
+		return runtimeCredentialBinding{}, false
+	}
+	return rec.binding, true
 }
 
 func (e *AgentEnv) lookupRecentCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.DecryptedCodingCredential, bool) {
@@ -543,6 +613,10 @@ func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.De
 // leak across orgs in a multi-tenant deployment. Server-level LLM keys are
 // reserved for 143's own internal LLM calls via Config.LLMConfig().
 func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
+	return e.ResolveForModel(ctx, orgID, agentType, userID, "")
+}
+
+func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID, modelOverride string) map[string]string {
 	merged := make(map[string]string)
 
 	switch agentType {
@@ -585,18 +659,6 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 		// redundant and fails because gVisor doesn't support the
 		// unprivileged user namespaces that bwrap requires.
 		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
-	case models.AgentTypeGeminiCLI:
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
-		if gc, ok := cfg.(models.GeminiConfig); ok {
-			if gc.APIKey != "" {
-				merged["GEMINI_API_KEY"] = gc.APIKey
-			}
-			if gc.Model != "" {
-				merged["GEMINI_MODEL"] = gc.Model
-			}
-		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderGemini); ok {
-			setAuthBlockedEnv(merged, block)
-		}
 	case models.AgentTypeAmp:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
@@ -609,6 +671,19 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
 			merged["PI_API_KEY"] = pi.APIKey
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderPi); ok {
+			setAuthBlockedEnv(merged, block)
+		}
+	case models.AgentTypeOpenCode:
+		cfg := e.resolveOpenCodeProviderConfig(ctx, orgID, userID, modelOverride)
+		if oc, ok := cfg.(models.OpenCodeConfig); ok && oc.APIKey != "" {
+			if modelOverride != "" {
+				oc.Model = strings.TrimSpace(modelOverride)
+			} else {
+				oc.Model = e.effectiveOpenCodeModel(ctx, orgID, oc.Model)
+			}
+			applyOpenCodeEnv(merged, oc)
+			e.updateRuntimeCredentialBindingModel(orgID, userID, models.ProviderOpenCode, oc.Model)
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderOpenCode); ok {
 			setAuthBlockedEnv(merged, block)
 		}
 	}
@@ -680,7 +755,7 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
 	// Scoped to Amp and Pi only — these are non-secret runtime defaults
 	// (AMP_MODE, PI_MODEL, PI_MODEL_CUSTOM), while auth itself comes from the
-	// credential stores. For claude_code/codex/gemini_cli we keep the legacy
+	// credential stores. For claude_code/codex we keep the legacy
 	// behavior: provider creds come exclusively from resolveProviderConfig,
 	// and agent_config is treated as model-default metadata (validated,
 	// stored, but not injected here) — changing that would silently flip
@@ -735,8 +810,248 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 				Detail:    "missing PI_API_KEY: configure Pi under Settings → Default Agent or My settings before starting a session",
 			}
 		}
+	case models.AgentTypeOpenCode:
+		if !hasOpenCodeRuntimeKey(env) {
+			return &AuthError{
+				AgentType: agentType,
+				Detail:    "missing OpenCode credential: configure an explicit OpenCode API key under Settings → Default Agent or My settings before starting a session",
+			}
+		}
 	}
 	return nil
+}
+
+func applyOpenCodeEnv(env map[string]string, cfg models.OpenCodeConfig) {
+	backing := cfg.NormalizedBackingProvider()
+	env["OPENCODE_BACKING_PROVIDER"] = string(backing)
+	env["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
+	env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "true"
+	env["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
+	env["OPENCODE_PERMISSION"] = `{"permission":"allow"}`
+	if cfg.Model != "" {
+		env["OPENCODE_MODEL"] = cfg.Model
+	}
+	env["OPENCODE_CONFIG_CONTENT"] = openCodeRuntimeConfigContent(cfg)
+	switch backing {
+	case models.ProviderAnthropic:
+		env["ANTHROPIC_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["ANTHROPIC_BASE_URL"] = cfg.BaseURL
+		}
+	case models.ProviderOpenAI:
+		env["OPENAI_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["OPENAI_BASE_URL"] = cfg.BaseURL
+		}
+	case models.ProviderGemini:
+		env["GEMINI_API_KEY"] = cfg.APIKey
+	case models.ProviderOpenRouter:
+		env["OPENROUTER_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["OPENROUTER_BASE_URL"] = cfg.BaseURL
+		}
+	default:
+		env["OPENCODE_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["OPENCODE_BASE_URL"] = cfg.BaseURL
+		}
+	}
+}
+
+func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, credentialModel string) string {
+	if credentialModel != "" {
+		return credentialModel
+	}
+	return e.openCodeModelFromAgentConfig(ctx, orgID)
+}
+
+func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
+	selectionModel := strings.TrimSpace(modelOverride)
+	if selectionModel == "" {
+		selectionModel = e.openCodeModelFromAgentConfig(ctx, orgID)
+	}
+	targetBacking := openCodeBackingProviderForModel(selectionModel)
+	if targetBacking == "" {
+		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+	}
+	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, []models.ProviderName{models.ProviderOpenCode})
+	if !ok || !sawRows {
+		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+	}
+
+	rows := append([]models.DecryptedCodingCredential(nil), rowsByProvider[models.ProviderOpenCode]...)
+	sortCodingCredentialResolutionRows(rows)
+	sawMatchingRows := false
+	sawRateLimitedMatchingRows := false
+	for _, cred := range rows {
+		cfg, ok := cred.Config.(models.OpenCodeConfig)
+		if !ok || cfg.APIKey == "" {
+			continue
+		}
+		if cfg.NormalizedBackingProvider() != targetBacking {
+			continue
+		}
+		sawMatchingRows = true
+		if !credentialRunnableForModelAwarePick(cred) {
+			if cred.RateLimitedUntil != nil && cred.RateLimitedUntil.After(time.Now()) {
+				sawRateLimitedMatchingRows = true
+			}
+			continue
+		}
+		cfg.BackingProvider = cfg.NormalizedBackingProvider()
+		e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
+		return cfg
+	}
+
+	if sawRateLimitedMatchingRows {
+		e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(models.ProviderOpenCode, rowsByProvider, []models.ProviderName{models.ProviderOpenCode}))
+	} else if !sawMatchingRows {
+		e.recordCredentialBlock(orgID, userID, missingOpenCodeBackingBlock(targetBacking))
+	}
+	return nil
+}
+
+func (e *AgentEnv) openCodeModelFromAgentConfig(ctx context.Context, orgID uuid.UUID) string {
+	agentConfig, ok := e.loadAgentConfig(ctx, orgID, models.AgentTypeOpenCode)
+	if !ok {
+		return ""
+	}
+	envVars := agentConfig[string(models.AgentTypeOpenCode)]
+	if envVars == nil {
+		return ""
+	}
+	if custom := strings.TrimSpace(envVars["OPENCODE_MODEL_CUSTOM"]); custom != "" {
+		return custom
+	}
+	return strings.TrimSpace(envVars["OPENCODE_MODEL"])
+}
+
+func openCodeBackingProviderForModel(model string) models.ProviderName {
+	provider, _ := splitProviderModel(strings.TrimSpace(model))
+	switch provider {
+	case "anthropic":
+		return models.ProviderAnthropic
+	case "openai":
+		return models.ProviderOpenAI
+	case "google", "gemini":
+		return models.ProviderGemini
+	case "openrouter":
+		return models.ProviderOpenRouter
+	case "opencode":
+		return models.ProviderOpenCode
+	case "minimax", "moonshot", "qwen", "deepseek":
+		// These providers are not directly backed by a first-party API; they
+		// require an OpenRouter-backed OpenCode key to access.
+		return models.ProviderOpenRouter
+	default:
+		return ""
+	}
+}
+
+func credentialRunnableForModelAwarePick(cred models.DecryptedCodingCredential) bool {
+	if cred.Status != models.CodingCredentialStatusActive {
+		return false
+	}
+	return cred.RateLimitedUntil == nil || !cred.RateLimitedUntil.After(time.Now())
+}
+
+func missingOpenCodeBackingBlock(backing models.ProviderName) credentialBlock {
+	label := openCodeBackingProviderLabel(backing)
+	return credentialBlock{
+		provider: models.ProviderOpenCode,
+		detail:   fmt.Sprintf("missing OpenCode credential for %s. Add an OpenCode via %s auth or choose a model backed by an existing OpenCode key.", label, label),
+	}
+}
+
+func openCodeBackingProviderLabel(backing models.ProviderName) string {
+	switch backing {
+	case models.ProviderAnthropic:
+		return "Anthropic"
+	case models.ProviderOpenAI:
+		return "OpenAI"
+	case models.ProviderGemini:
+		return "Gemini"
+	case models.ProviderOpenRouter:
+		return "OpenRouter"
+	case models.ProviderOpenCode:
+		return "OpenCode native"
+	default:
+		return string(backing)
+	}
+}
+
+func (e *AgentEnv) updateRuntimeCredentialBindingModel(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, model string) {
+	if e == nil || model == "" {
+		return
+	}
+	key := pickKey{orgID: orgID, provider: provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.recentPicksMu.Lock()
+	defer e.recentPicksMu.Unlock()
+	rec, ok := e.recentPicks[key]
+	if !ok || time.Since(rec.at) > pickTrackerTTL {
+		if ok {
+			delete(e.recentPicks, key)
+		}
+		return
+	}
+	rec.binding.EffectiveModel = model
+	e.recentPicks[key] = rec
+}
+
+func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
+	type openCodeProviderConfig struct {
+		Options map[string]string `json:"options"`
+	}
+	type openCodeRuntimeConfig struct {
+		Schema     string                            `json:"$schema"`
+		Permission string                            `json:"permission"`
+		Model      string                            `json:"model,omitempty"`
+		Provider   map[string]openCodeProviderConfig `json:"provider,omitempty"`
+	}
+	providerID, apiKeyEnv := openCodeProviderConfigIDAndKey(cfg.NormalizedBackingProvider())
+	options := map[string]string{"apiKey": "{env:" + apiKeyEnv + "}"}
+	if cfg.BaseURL != "" {
+		options["baseURL"] = cfg.BaseURL
+	}
+	payload := openCodeRuntimeConfig{
+		Schema:     "https://opencode.ai/config.json",
+		Permission: "allow",
+		Model:      cfg.Model,
+		Provider: map[string]openCodeProviderConfig{
+			providerID: {Options: options},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return `{"permission":"allow"}`
+	}
+	return string(data)
+}
+
+func openCodeProviderConfigIDAndKey(provider models.ProviderName) (string, string) {
+	switch provider {
+	case models.ProviderAnthropic:
+		return "anthropic", "ANTHROPIC_API_KEY"
+	case models.ProviderOpenAI:
+		return "openai", "OPENAI_API_KEY"
+	case models.ProviderGemini:
+		return "google", "GEMINI_API_KEY"
+	case models.ProviderOpenRouter:
+		return "openrouter", "OPENROUTER_API_KEY"
+	default:
+		return "opencode", "OPENCODE_API_KEY"
+	}
+}
+
+func hasOpenCodeRuntimeKey(env map[string]string) bool {
+	return env["OPENCODE_API_KEY"] != "" ||
+		env["ANTHROPIC_API_KEY"] != "" ||
+		env["OPENAI_API_KEY"] != "" ||
+		env["GEMINI_API_KEY"] != "" ||
+		env["OPENROUTER_API_KEY"] != ""
 }
 
 func setAuthBlockedEnv(env map[string]string, block credentialBlock) {
@@ -998,6 +1313,8 @@ func agentLabelForProvider(provider models.ProviderName) string {
 		return "Amp"
 	case models.ProviderPi:
 		return "Pi"
+	case models.ProviderOpenCode:
+		return "OpenCode"
 	default:
 		return string(provider)
 	}
@@ -1133,6 +1450,13 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			return nil, false
 		}
 		return pi, true
+	case models.ProviderOpenCode:
+		openCode, ok := cfg.(models.OpenCodeConfig)
+		if !ok || openCode.APIKey == "" {
+			return nil, false
+		}
+		openCode.BackingProvider = openCode.NormalizedBackingProvider()
+		return openCode, true
 	default:
 		return nil, false
 	}

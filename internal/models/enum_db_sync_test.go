@@ -84,9 +84,9 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			SandboxStateSnapshotted, SandboxStateDestroyed,
 		),
 		"sessions_agent_type": toStrings(
-			AgentTypeClaudeCode, AgentTypeGeminiCLI,
+			AgentTypeClaudeCode,
 			AgentTypeCodex, AgentTypeAmp, AgentTypePi,
-			AgentTypePMAgent,
+			AgentTypeOpenCode, AgentTypePMAgent,
 		),
 		"session_threads_status": toStrings(
 			ThreadStatusPending, ThreadStatusRunning, ThreadStatusIdle,
@@ -102,6 +102,12 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			HumanInputRequestStatusPending, HumanInputRequestStatusAnswered,
 			HumanInputRequestStatusCancelled, HumanInputRequestStatusExpired,
 			HumanInputRequestStatusSuperseded,
+		),
+		"session_human_input_requests_sensitivity": toStrings(
+			HumanInputSensitivityTeam, HumanInputSensitivityPersonal, HumanInputSensitivitySensitive,
+		),
+		"session_human_input_requests_preferred_channel": toStrings(
+			HumanInputPreferredChannelSlackThread, HumanInputPreferredChannelSlackDM, HumanInputPreferredChannelWeb,
 		),
 		"session_executors_status": toStrings(
 			SessionExecutorStatusStarting, SessionExecutorStatusRunning,

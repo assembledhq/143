@@ -14,6 +14,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
+import { CopyButton } from "@/components/copy-button";
 import { HumanInputRequestCard } from "@/components/human-input-request-card";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
@@ -350,7 +351,7 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
+export const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), []);
@@ -498,11 +499,18 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
-          <TimestampLabel
-            dateStr={msg.created_at}
-            formatter={formatMessageTime}
-            className="block text-xs mt-1 text-white/70"
-          />
+          <div className="mt-1 flex items-center justify-end gap-1">
+            <TimestampLabel
+              dateStr={msg.created_at}
+              formatter={formatMessageTime}
+              className="block text-xs text-white/70"
+            />
+            <CopyButton
+              value={displayContent}
+              label="Copy prompt"
+              className="-mr-1 h-6 w-6 text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/40"
+            />
+          </div>
         </div>
       </div>
     );
@@ -514,11 +522,18 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
       {msg.attachments && msg.attachments.length > 0 && (
         <AttachmentGrid attachments={msg.attachments} />
       )}
-      <TimestampLabel
-        dateStr={msg.created_at}
-        formatter={formatMessageTime}
-        className="block text-xs mt-1 text-muted-foreground"
-      />
+      <div className="mt-1 flex items-center gap-1">
+        <TimestampLabel
+          dateStr={msg.created_at}
+          formatter={formatMessageTime}
+          className="block text-xs text-muted-foreground"
+        />
+        <CopyButton
+          value={msg.content}
+          label="Copy final response"
+          className="h-6 w-6 text-muted-foreground hover:text-foreground"
+        />
+      </div>
     </AssistantBubble>
   );
 });

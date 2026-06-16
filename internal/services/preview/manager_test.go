@@ -1,6 +1,7 @@
 package preview
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -157,7 +158,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
 var previewServiceTestCols = []string{
@@ -208,7 +209,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"docker", "worker-1", handle, "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", stringPtr("req-1"), "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil),
+		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
 		"",
 		false,
 	}
@@ -468,12 +469,29 @@ func TestGetStatus_Success(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInfraTestCols))
 
+	mock.ExpectQuery("SELECT EXTRACT\\(EPOCH FROM \\(ready_at - created_at\\)\\)::int AS startup_seconds").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"startup_seconds"}).
+				AddRow(21).
+				AddRow(23).
+				AddRow(25).
+				AddRow(31).
+				AddRow(42),
+		)
+
 	resp, err := mgr.GetStatus(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.Equal(t, previewID, resp.Instance.ID)
 	require.Equal(t, "https://"+previewID.String()+".preview.143.dev", resp.PreviewOrigin, "status response should expose the runtime preview origin")
 	require.Len(t, resp.Services, 1)
 	require.Len(t, resp.Infrastructure, 0)
+	require.Equal(t, &models.PreviewStartupEstimate{
+		Label:       "Usually ready in ~25s",
+		P50Seconds:  25,
+		SampleCount: 5,
+		Confidence:  "low",
+	}, resp.StartupEstimate, "status response should include a startup estimate when enough samples exist")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -921,18 +939,41 @@ func TestRecordAccess_Success(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
-	mgr := newTestManager(mock, &mockProvider{})
+	mgr := NewManager(ManagerConfig{
+		Store:              db.NewPreviewStore(mock),
+		Provider:           &mockProvider{},
+		Logger:             zerolog.Nop(),
+		PreviewIdleTimeout: 45 * time.Minute,
+	})
 
 	orgID := uuid.New()
 	previewID := uuid.New()
 
-	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at.+expires_at").
+		WithArgs(previewAnyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = mgr.RecordAccess(context.Background(), orgID, previewID)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRecordAccess_DefaultsPreviewIdleTimeout(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+
+	mock.ExpectExec("UPDATE preview_instances SET last_accessed_at.+expires_at").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = mgr.RecordAccess(context.Background(), uuid.New(), uuid.New())
+	require.NoError(t, err, "RecordAccess should use the default idle extension when not configured")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 // =============================================================================
@@ -2028,9 +2069,14 @@ func expectCreatePreviewInstance(mock pgxmock.PgxPoolIface, previewID, sessionID
 }
 
 func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface, previewID, sessionID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, revision *int64, revisionUpdatedAt *time.Time) {
-	args := previewAnyArgs(24)
+	args := previewAnyArgs(27)
 	args[22] = revision
 	args[23] = revisionUpdatedAt
+	args[24] = revision
+	args[25] = revisionUpdatedAt
+	if revision != nil {
+		args[26] = models.PreviewRuntimeRevisionSourceLaunch
+	}
 	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, status, "", now)
 	for i, column := range previewInstanceTestCols {
 		switch column {
@@ -2038,6 +2084,14 @@ func expectCreatePreviewInstanceWithWorkspaceRevision(mock pgxmock.PgxPoolIface,
 			row[i] = revision
 		case "source_workspace_revision_updated_at":
 			row[i] = revisionUpdatedAt
+		case "runtime_workspace_revision":
+			row[i] = revision
+		case "runtime_workspace_revision_updated_at":
+			row[i] = revisionUpdatedAt
+		case "runtime_workspace_revision_source":
+			if revision != nil {
+				row[i] = models.PreviewRuntimeRevisionSourceLaunch
+			}
 		}
 	}
 	mock.ExpectQuery("INSERT INTO preview_instances").
@@ -3363,6 +3417,57 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "install failure observer should persist an install preview log without touching service rows")
 }
 
+func TestManagerServiceObserver_OnInstallOutput_PersistsInstallLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "[install] npm ci: added 120 packages", json.RawMessage(`{"batched":true}`), time.Now()))
+
+	obs.OnInstallOutput("npm ci: added 120 packages")
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "install output should be persisted as preview install logs")
+}
+
+func TestManagerServiceObserver_OnPhaseStart_PersistsPreviewLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	mock.ExpectExec("UPDATE preview_instances SET current_phase").
+		WithArgs(pgx.NamedArgs{"id": previewID, "org_id": orgID, "phase": "dependency_cache_restore"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "preview startup phase started: dependency_cache_restore", json.RawMessage(`{}`), time.Now()))
+
+	obs.OnPhaseStart("dependency_cache_restore")
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "phase starts should be persisted as preview logs")
+}
+
 func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatuses(t *testing.T) {
 	t.Parallel()
 
@@ -3410,6 +3515,168 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 
 			obs.OnDependencyCacheRestore(tt.status, tt.cacheKey, tt.sizeBytes, nil)
 			require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist non-failure restore statuses")
+		})
+	}
+}
+
+func TestManagerServiceObserver_OnCacheRestore_EmitsPreviewHealthCacheEvent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	var logs bytes.Buffer
+	mgr := NewManager(ManagerConfig{
+		Store:    db.NewPreviewStore(mock),
+		Provider: &mockProvider{},
+		Logger:   zerolog.New(&logs),
+	})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	cacheKey := strings.Repeat("d", 64)
+
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+	obs.OnPackageManagerCacheRestore("restored", cacheKey, 512, nil)
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "cache restore observer should persist the preview log")
+
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "cache restore observer should emit a valid JSON log event")
+	require.Equal(t, "preview health: cache event", event["message"], "cache restore observer should use the canonical dashboard log message")
+	require.Equal(t, orgID.String(), event["org_id"], "cache restore event should include org id")
+	require.Equal(t, previewID.String(), event["preview_id"], "cache restore event should include preview id")
+	require.Equal(t, "package_manager", event["cache_kind"], "cache restore event should include cache kind")
+	require.Equal(t, "restore", event["operation"], "cache restore event should identify restore operations")
+	require.Equal(t, "restored", event["status"], "cache restore event should include restore status")
+	require.Equal(t, true, event["cache_hit"], "restored cache statuses should be classified as cache hits")
+	require.Equal(t, float64(1), event["cache_hit_value"], "restored cache statuses should include a numeric hit value for Grafana math")
+	require.Equal(t, float64(512), event["size_bytes"], "cache restore event should include cache size")
+}
+
+func TestManagerServiceObserver_OnPhaseStartAndEnd_PersistsLifecycleLogs(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+
+	mock.ExpectExec("UPDATE preview_instances SET current_phase").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	for i := 0; i < 2; i++ {
+		logID := uuid.New()
+		mock.ExpectQuery("INSERT INTO preview_logs").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{
+				"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+			}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+	}
+
+	obs.OnPhaseStart("install_command")
+	obs.OnPhaseEnd("install_command", nil)
+	obs.Close()
+	require.NoError(t, mock.ExpectationsWereMet(), "phase observer should persist start and completion logs")
+}
+
+func TestManagerServiceObserver_OnPhaseStart_DoesNotBlockOnLifecycleLogWrite(t *testing.T) {
+	t.Parallel()
+
+	blockingDB := &blockingPreviewLogDB{
+		queryStarted: make(chan struct{}),
+		releaseQuery: make(chan struct{}),
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:        db.NewPreviewStore(blockingDB),
+		Provider:     &mockProvider{},
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "worker-1",
+	})
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+
+	done := make(chan struct{})
+	go func() {
+		obs.OnPhaseStart("install_command")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("OnPhaseStart should not block on preview lifecycle log database writes")
+	}
+
+	select {
+	case <-blockingDB.queryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background preview lifecycle log writer should eventually attempt the database write")
+	}
+	close(blockingDB.releaseQuery)
+	obs.Close()
+}
+
+func TestManagerServiceObserver_OnCacheSave_PersistsSuccessfulStatuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		notify func(*managerServiceObserver, string)
+	}{
+		{
+			name: "dependency saved",
+			notify: func(obs *managerServiceObserver, cacheKey string) {
+				obs.OnDependencyCacheSave("saved", cacheKey, 123, nil)
+			},
+		},
+		{
+			name: "package manager saved",
+			notify: func(obs *managerServiceObserver, cacheKey string) {
+				obs.OnPackageManagerCacheSave("saved", cacheKey, 456, nil)
+			},
+		},
+		{
+			name: "build unchanged",
+			notify: func(obs *managerServiceObserver, cacheKey string) {
+				obs.OnBuildCacheSave("unchanged", cacheKey, 789, nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			mgr := newTestManager(mock, &mockProvider{})
+			orgID := uuid.New()
+			previewID := uuid.New()
+			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+			cacheKey := strings.Repeat("c", 64)
+
+			logID := uuid.New()
+			mock.ExpectQuery("INSERT INTO preview_logs").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+				}).AddRow(logID, previewID, orgID, "info", "install", "msg", json.RawMessage(`{}`), time.Now()))
+
+			tt.notify(obs, cacheKey)
+			require.NoError(t, mock.ExpectationsWereMet(), "successful cache save status should be persisted")
 		})
 	}
 }

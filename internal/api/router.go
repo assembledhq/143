@@ -21,6 +21,7 @@ import (
 	"github.com/assembledhq/143/internal/api/gateway"
 	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/crypto"
@@ -30,6 +31,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/domains"
@@ -54,6 +56,18 @@ const (
 	uploadMaxRequestBodyBytes = uploadMaxRequestBodyMiB << 20
 )
 
+func contextFromShutdown(shutdownCh <-chan struct{}) context.Context {
+	if shutdownCh == nil {
+		return context.Background()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-shutdownCh
+		cancel()
+	}()
+	return ctx
+}
+
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, sentryReporter observability.Reporter, codexAuthSvc *codexauth.Service, claudeCodeAuthSvc *claudecodeauth.Service, llmClient llm.Client, fileReader sandbox.FileReader, canceller handlers.SessionCanceller, threadCanceller *agent.ThreadCancelRegistry, previewProvider preview.PreviewCapableProvider, snapshotExecutor preview.SnapshotExecutor, sandboxProvider agent.SandboxProvider, sandboxCapacity *agent.SandboxCapacityGate, snapshotStore storage.SnapshotStore, orgSettingsInvalidator handlers.OrgSettingsInvalidator, shutdownCh <-chan struct{}, redisClient *cache.Client, sessionStreams *cache.SessionStreams, sharedCodingCredentialStore ...*db.CodingCredentialStore) (*chi.Mux, *http.Server, *preview.RecycleWorker, io.Closer, *preview.Manager, error) {
 	// Create stores
 	orgStore := db.NewOrganizationStore(pool)
@@ -75,6 +89,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	slackInboundEventStore := db.NewSlackInboundEventStore(pool)
 	sessionAttributionStore := db.NewSessionAttributionStore(pool)
 	slackUserLinkStore := db.NewSlackUserLinkStore(pool)
+	slackBotSettingsStore := db.NewSlackBotSettingsStore(pool)
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
@@ -192,6 +207,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		repoHandler.SetPRService(prService)
 	}
+	slackMetrics, slackMetricsErr := metrics.NewSlackbotMetrics()
+	if slackMetricsErr != nil {
+		logger.Warn().Err(slackMetricsErr).Msg("failed to initialize Slackbot metrics")
+	}
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
@@ -201,8 +220,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithGitHubSetupSigningKey(firstNonEmpty(cfg.CSRFSigningKey, cfg.SessionSecret)),
 		handlers.WithSlackOAuth(cfg.SlackOAuthClientID, cfg.SlackOAuthClientSecret),
 		handlers.WithSlackInstallationStore(slackInstallationStore),
+		handlers.WithSlackBotSettingsStore(slackBotSettingsStore),
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
+		handlers.WithSlackbotMetrics(slackMetrics),
 	}
 	// If the GitHub App service is available, let the integration handler list
 	// installation repos for explicit repository claims.
@@ -240,10 +261,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		jobStore,
 	)
 	slackbotHandler.SetLogger(logger)
-	if slackMetrics, err := metrics.NewSlackbotMetrics(); err == nil {
+	if slackMetrics != nil {
 		slackbotHandler.SetMetrics(slackMetrics)
-	} else {
-		logger.Warn().Err(err).Msg("failed to initialize Slackbot metrics")
 	}
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageRollupStore := db.NewUsageRollupStore(pool)
@@ -412,6 +431,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// thread composer clears the pending request and passes its id into the
 	// resumed agent run.
 	threadSvc.SetHumanInputRequestStore(sessionHumanInputStore)
+	transcriptStore := db.NewSessionTranscriptStore(pool)
+	threadSvc.SetTranscriptStore(transcriptStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
@@ -503,6 +524,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// degrades to logged links rather than disabling itself.
 	authHandler.SetEmailVerificationDeps(db.NewEmailVerificationStore(pool), emailSender)
 	apiClientHandler := handlers.NewAPIClientHandler(apiClientStore, apiTokenStore)
+	apiClientHandler.SetTxStarter(pool)
 	apiClientHandler.SetLogger(logger)
 	if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKey != "" {
 		ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey)
@@ -536,6 +558,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
+		prService.SetAutomationEventTriggerer(automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger))
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
@@ -656,8 +679,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		hmrWatcher, hmrErr = preview.NewHMRWatcher(preview.HMRWatcherConfig{
 			Inspector: previewInspector,
 			Store:     previewStore,
-			Logger:    logger,
-			BlobDir:   cfg.PreviewHMRBlobDir,
+			RuntimeStamper: preview.DBPreviewRuntimeRevisionStamper{
+				PreviewStore: previewStore,
+				SessionStore: sessionStore,
+			},
+			Logger:  logger,
+			BlobDir: cfg.PreviewHMRBlobDir,
 		})
 		if hmrErr != nil {
 			logger.Warn().Err(hmrErr).Msg("failed to initialize HMR watcher — auto-screenshot disabled")
@@ -683,6 +710,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		MaxPerUser:             cfg.PreviewMaxPerUser,
 		MaxPerOrg:              cfg.PreviewMaxPerOrg,
 		MaxPerWorker:           cfg.PreviewMaxPerWorker,
+		PreviewIdleTimeout:     cfg.PreviewIdleTimeout,
 	})
 
 	recycleWorker := preview.NewRecycleWorker(preview.RecycleWorkerConfig{
@@ -692,8 +720,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
 		recycleWorker.Start()
 		cleanupWorker := preview.NewCleanupWorker(preview.CleanupWorkerConfig{
-			Manager: previewManager,
-			Logger:  logger,
+			Manager:     previewManager,
+			Logger:      logger,
+			IdleTimeout: cfg.PreviewIdleTimeout,
 		})
 		cleanupWorker.Start()
 	} else {
@@ -704,7 +733,16 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 		PreferredRegion:      cfg.NodeRegion,
 	})
-	workerClient := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+	previewRPCSecrets := cfg.PreviewRPCSecrets
+	if len(previewRPCSecrets) == 0 && strings.TrimSpace(cfg.SessionSecret) != "" {
+		previewRPCSecrets = []string{cfg.SessionSecret}
+	}
+	previewRPCKeyring, err := auth.NewPreviewTokenKeyring(previewRPCSecrets)
+	if err != nil {
+		logger.Warn().Err(err).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+		previewRPCKeyring = auth.PreviewTokenKeyring{}
+	}
+	workerClient := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
 	settingsHandler.SetStaticEgressWorkerChecker(workerSelector)
 
 	// Preview gateway (separate HTTP listener for <id>.preview.* origins).
@@ -719,7 +757,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			Logger:                logger,
 			AppOrigin:             cfg.FrontendURL,
 			CookieSecret:          []byte(cfg.SessionSecret),
-			PreviewTokenSecret:    cfg.SessionSecret,
+			PreviewTokenKeyring:   previewRPCKeyring,
 			PreviewOriginTemplate: cfg.PreviewOriginTemplate,
 		})
 		addr := fmt.Sprintf(":%d", cfg.PreviewGatewayPort)
@@ -736,6 +774,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				logger.Error().Err(gwErr).Msg("preview gateway failed")
 			}
 		}()
+		reachabilityMonitor := preview.NewReachabilityMonitor(preview.ReachabilityMonitorConfig{
+			Store:  previewStore,
+			Logger: logger,
+		})
+		go reachabilityMonitor.Start(contextFromShutdown(shutdownCh))
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
@@ -752,7 +795,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	branchPreviewHandler.SetAPITokenStore(previewAPITokenStore)
 	sessionHandler.SetWorkerRuntime(workerSelector, workerClient, cfg.NodeID)
 	previewHandler.SetSandboxCapacityGate(sandboxCapacity)
-	internalPreviewHandler := handlers.NewInternalPreviewHandler(previewHandler, previewManager, cfg.NodeID, cfg.SessionSecret, logger)
+	internalPreviewHandler := handlers.NewInternalPreviewHandlerWithKeyring(previewHandler, previewManager, cfg.NodeID, previewRPCKeyring, logger)
 	internalPreviewHandler.SetSessionCancelRuntime(sessionStore, canceller)
 	previewStopper := preview.NewWorkerStopper(previewStore, workerSelector, workerClient, cfg.NodeID, previewManager)
 	branchPreviewHandler.SetStopper(previewStopper)
@@ -796,6 +839,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Get("/readyz", healthHandler.Readyz)
 	r.Handle("/metrics", promhttp.Handler())
 	if cfg.Mode == "worker" || cfg.Mode == "all" {
+		r.Get("/internal/preview/auth-check", internalPreviewHandler.AuthCheck)
 		r.Post("/internal/sessions/{sessionID}/cancel", internalPreviewHandler.CancelSession)
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
@@ -1046,6 +1090,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/threads/{tid}", sessionThreadHandler.GetThread)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/messages", sessionThreadHandler.GetThreadMessages)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/logs", sessionThreadHandler.GetThreadLogs)
+				r.Get("/api/v1/sessions/{id}/threads/{tid}/transcript", sessionThreadHandler.GetThreadTranscript)
 				r.Get("/api/v1/sessions/{id}/threads/{tid}/inbox/recoverable", sessionThreadHandler.ListRecoverableInboxEntries)
 				r.Get("/api/v1/sessions/{id}/thread-file-events", sessionThreadHandler.ListThreadFileEvents)
 				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
@@ -1362,14 +1407,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Audit logs
 				r.Get("/api/v1/audit-logs", auditLogHandler.List)
 				r.Get("/api/v1/audit-logs/{id}", auditLogHandler.Get)
-				r.Get("/api/v1/api-clients", apiClientHandler.List)
-				r.Post("/api/v1/api-clients", apiClientHandler.Create)
-				r.Get("/api/v1/api-clients/{id}", apiClientHandler.Get)
-				r.Patch("/api/v1/api-clients/{id}", apiClientHandler.Update)
-				r.Delete("/api/v1/api-clients/{id}", apiClientHandler.Delete)
-				r.Get("/api/v1/api-clients/{id}/tokens", apiClientHandler.ListTokens)
-				r.Post("/api/v1/api-clients/{id}/tokens", apiClientHandler.CreateToken)
-				r.Delete("/api/v1/api-clients/{id}/tokens/{token_id}", apiClientHandler.RevokeToken)
+				r.Post("/api/v1/api-keys", apiClientHandler.CreateAPIKey)
+				r.Get("/api/v1/api-keys", apiClientHandler.List)
+				r.Get("/api/v1/api-keys/{id}", apiClientHandler.Get)
+				r.Patch("/api/v1/api-keys/{id}", apiClientHandler.Update)
+				r.Delete("/api/v1/api-keys/{id}", apiClientHandler.Delete)
+				r.Get("/api/v1/api-keys/{id}/tokens", apiClientHandler.ListTokens)
+				r.Post("/api/v1/api-keys/{id}/tokens", apiClientHandler.CreateToken)
+				r.Delete("/api/v1/api-keys/{id}/tokens/{token_id}", apiClientHandler.RevokeToken)
 
 				// Team management. The roster read (GET /team/members) is registered
 				// in the admin+member group above; mutations and invite flows stay
@@ -1431,6 +1476,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/integrations/slack/connect", integrationHandler.ConnectSlack)
 				r.Get("/api/v1/integrations/slack/bot", integrationHandler.GetSlackBot)
 				r.Post("/api/v1/integrations/slack/bot/reinstall", integrationHandler.ReinstallSlackBot)
+				r.Get("/api/v1/integrations/slack/health", integrationHandler.GetSlackHealth)
+				r.Get("/api/v1/integrations/slack/settings", integrationHandler.GetSlackSettings)
+				r.Patch("/api/v1/integrations/slack/settings", integrationHandler.PatchSlackSettings)
 				r.Get("/api/v1/integrations/slack/channels", integrationHandler.ListSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels", integrationHandler.UpdateSlackChannels)
 				r.Patch("/api/v1/integrations/slack/channels/{slack_channel_id}", integrationHandler.PatchSlackChannelSettings)

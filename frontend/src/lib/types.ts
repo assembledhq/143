@@ -55,24 +55,6 @@ export interface UserSettings {
   diff_viewer_full_screen?: boolean;
 }
 
-export interface ThreadMessageWindowMeta {
-  next_older_cursor?: string;
-  has_older: boolean;
-  next_newer_cursor?: string;
-  has_newer?: boolean;
-  anchor_message_id?: number;
-  anchor_found?: boolean;
-  latest_assistant_message_id?: number;
-  live_edge_message_id?: number;
-  window_position?: "latest" | "older" | "newer" | "around";
-  thread_status: ThreadStatus;
-}
-
-export interface ThreadMessageWindowResponse {
-  data: SessionMessage[];
-  meta: ThreadMessageWindowMeta;
-}
-
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
 // fields keep their stored value, null clears a field, and nested objects
 // merge per key. Send only the fields being changed — never a full settings
@@ -212,11 +194,58 @@ export interface BranchPreviewResponse {
   expires_at?: string;
   stopped_at?: string;
   stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  unavailable_reason?:
+    | "owner_lost"
+    | "deploy_drain_timeout"
+    | "host_maintenance"
+    | "emergency_force"
+    | "lease_expired"
+    | "endpoint_unreachable";
   resumable?: boolean;
   resume_estimate_seconds?: number;
   services?: import('./preview-types').PreviewService[];
   infrastructure?: import('./preview-types').PreviewInfrastructure[];
   logs?: import('./preview-types').PreviewLog[];
+  launch?: PreviewLaunchDecision;
+}
+
+export type PreviewLaunchAction =
+  | "open"
+  | "wait"
+  | "resume"
+  | "start"
+  | "start_latest"
+  | "retry"
+  | "blocked"
+  | "closed";
+
+export type PreviewLaunchReason =
+  | "ready"
+  | "starting"
+  | "resumable"
+  | "no_runtime"
+  | "stale"
+  | "failed"
+  | "role_forbidden"
+  | "token_forbidden"
+  | "capacity"
+  | "config_required"
+  | "config_invalid"
+  | "repository_missing"
+  | "github_unavailable"
+  | "pull_request_closed"
+  | "preview_unavailable";
+
+export interface PreviewLaunchDecision {
+  action: PreviewLaunchAction;
+  reason: PreviewLaunchReason;
+  auto_open: boolean;
+  represents_latest: boolean;
+  requires_user_gesture?: boolean;
+  message?: string;
+  primary_label?: string;
+  secondary_label?: string;
+  stale_preview_url?: string;
 }
 
 export interface PreviewListMeta {
@@ -244,18 +273,6 @@ export interface BranchPreviewConfigOptions {
   requires_selection: boolean;
   readiness: string;
   validation_errors?: string[];
-}
-
-export interface PreviewAPIToken {
-  id: string;
-  org_id: string;
-  name: string;
-  scopes: string[];
-  repository_ids: string[];
-  created_by_user_id: string;
-  last_used_at?: string;
-  revoked_at?: string;
-  created_at: string;
 }
 
 export interface Integration {
@@ -286,6 +303,119 @@ export interface Integration {
   status: string;
   last_synced_at?: string;
   created_at: string;
+}
+
+export type SlackRoutingMode = "auto" | "answer_only" | "start_work";
+export type SlackResponseVisibility = "thread" | "dm";
+export type SlackNotificationPreset = "quiet" | "balanced" | "verbose" | "custom";
+export type SlackChannelAction = "session" | "preview" | "pr_request" | "human_input";
+
+export interface SlackBotSettings {
+  id?: string;
+  org_id: string;
+  slack_installation_id: string;
+  default_repository_id?: string;
+  default_branch?: string;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  notification_subscriptions?: Record<string, unknown>;
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type SlackBotSettingsUpdate = Partial<{
+  default_repository_id: string | null;
+  default_branch: string | null;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  notification_subscriptions: Record<string, unknown>;
+}>;
+
+export interface SlackUserLink {
+  id: string;
+  org_id: string;
+  slack_installation_id: string;
+  slack_team_id: string;
+  slack_user_id: string;
+  slack_email?: string;
+  slack_display_name?: string;
+  user_id?: string;
+  source: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SlackUserLinkUpsert {
+  user_id: string;
+  slack_user_id: string;
+  slack_email?: string;
+  slack_display_name?: string;
+}
+
+export type SlackChannelSettingsUpdate = Partial<{
+  slack_channel_name: string;
+  channel_type: string;
+  default_repository_id: string | null;
+  default_branch: string | null;
+  routing_mode: SlackRoutingMode | "";
+  response_visibility: SlackResponseVisibility | "";
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset | "";
+  notification_subscriptions: Record<string, unknown>;
+}>;
+
+export interface EffectiveSlackChannelSettings {
+  slack_channel_id: string;
+  default_repository_id?: string;
+  default_branch?: string;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  has_channel_override: boolean;
+}
+
+export interface SlackChannel {
+  id: string;
+  name: string;
+  type?: string;
+  selected: boolean;
+  monitoring_enabled?: boolean;
+  bot_configured?: boolean;
+  settings?: Partial<EffectiveSlackChannelSettings>;
+  effective_settings?: EffectiveSlackChannelSettings;
+}
+
+export interface SlackInstallation {
+  id: string;
+  org_id: string;
+  team_id: string;
+  team_name: string;
+  bot_user_id: string;
+  scope: string[];
+  status: string;
+  last_event_at?: string;
+  updated_at: string;
+}
+
+export interface SlackInstallationHealth {
+  installation: SlackInstallation;
+  required_scopes: string[];
+  missing_scopes: string[];
+  last_event_at?: string;
+  last_auth_check_at?: string;
+  auth_ok: boolean;
+  auth_error?: {
+    reason: string;
+    at: string;
+  };
+  symptoms?: string[];
 }
 
 export type GitHubRepositoryClaimStatus =
@@ -421,6 +551,23 @@ export interface AutopilotQueueRow {
     status: PullRequestStatus;
     merged_at?: string;
   };
+  latest_preview?: {
+    target_id: string;
+    preview_id?: string;
+    status:
+      | 'target_created'
+      | 'starting'
+      | 'ready'
+      | 'partially_ready'
+      | 'unhealthy'
+      | 'stopped'
+      | 'failed'
+      | 'expired'
+      | 'unavailable';
+    commit_sha: string;
+    latest_commit_sha?: string;
+    new_commits_available: boolean;
+  };
   available_action: AutopilotQueueAction;
   action_disabled_reason?: string | null;
 }
@@ -490,6 +637,7 @@ export interface Session {
   target_branch?: string;
   working_branch?: string;
   repository_id?: string;
+  repository_full_name?: string;
   linked_issues?: Array<{
     id: string;
     session_id: string;
@@ -810,7 +958,7 @@ export interface SessionInputReference {
   display: string;
 }
 
-export type SessionComposerAgentType = "claude_code" | "codex" | "gemini_cli" | "amp" | "pi";
+export type SessionComposerAgentType = "claude_code" | "codex" | "amp" | "pi" | "opencode";
 
 export type SessionInputCommandSource = "builtin" | "project";
 
@@ -897,6 +1045,63 @@ export interface HumanInputAnswerBody {
   answer_payload?: unknown;
 }
 
+export type SessionTranscriptEntryKind =
+  | 'message'
+  | 'tool_use'
+  | 'tool_result'
+  | 'log'
+  | 'human_input'
+  | 'milestone'
+  | 'checkpoint';
+
+export interface SessionTranscriptEntry {
+  id: string;
+  kind: SessionTranscriptEntryKind;
+  created_at: string;
+  message_id?: number;
+  log_id?: number;
+  request_id?: string;
+  role?: 'user' | 'assistant';
+  level?: string;
+  content?: string;
+  content_truncated?: boolean;
+  content_bytes?: number;
+  content_chars?: number;
+  summary?: string;
+  tool_name?: string;
+  collapsed?: boolean;
+  message?: SessionMessage;
+  log?: SessionLog;
+  human_input?: HumanInputRequest;
+}
+
+export interface SessionTranscriptTurn {
+  turn_number: number;
+  started_at: string;
+  ended_at?: string;
+  entries: SessionTranscriptEntry[];
+}
+
+export interface SessionTranscriptWindowMeta {
+  position: 'latest' | 'older' | 'newer' | 'around';
+  has_older: boolean;
+  next_older_cursor?: string;
+  has_newer: boolean;
+  next_newer_cursor?: string;
+  anchor_entry_id?: string;
+  anchor_found?: boolean;
+  latest_assistant_entry_id?: string;
+  latest_assistant_message_id?: number;
+  live_edge_entry_id?: string;
+  live_edge_message_id?: number;
+  thread_status: ThreadStatus;
+}
+
+export interface SessionTranscriptWindowResponse {
+  data: SessionTranscriptTurn[];
+  meta: SessionTranscriptWindowMeta;
+}
+
 export interface PullRequest {
   id: string;
   session_id: string;
@@ -935,6 +1140,7 @@ export interface PullRequestActiveRepair {
 
 export interface PullRequestRepairRequest {
   thread_id?: string;
+  push_changes?: boolean;
 }
 
 export type PullRequestMergeWhenReadyState =
@@ -1086,7 +1292,7 @@ export interface OrgSettings {
   llm_model?: string;
   llm_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '';
   agent_config?: Record<string, Record<string, string>>;
-  default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli' | 'amp' | 'pi';
+  default_agent_type?: 'codex' | 'claude_code' | 'amp' | 'pi' | 'opencode';
   pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
@@ -1501,7 +1707,7 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
-export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+export type CodingAuthAgent = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 export type CodingAuthType = "subscription" | "api_key";
 export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
 
@@ -1756,9 +1962,66 @@ export interface AIImprovementResponse {
   summary: string;
 }
 
+export type APIClientStatus = 'enabled' | 'disabled';
+
+export interface APIClient {
+  id: string;
+  org_id: string;
+  name: string;
+  description?: string;
+  status: APIClientStatus;
+  created_by_user_id?: string;
+  disabled_by_user_id?: string;
+  disabled_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface APIToken {
+  id: string;
+  org_id: string;
+  api_client_id: string;
+  name: string;
+  token_prefix: string;
+  scopes: string[];
+  repository_ids: string[];
+  allowed_ip_cidrs: string[];
+  expires_at?: string;
+  last_used_at?: string;
+  last_used_ip?: string;
+  last_used_user_agent?: string;
+  revoked_by_user_id?: string;
+  revoked_at?: string;
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CreateAPIKeyRequest {
+  integration_name: string;
+  description?: string;
+  token_name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPITokenRequest {
+  name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPIKeyResponse {
+  client: APIClient;
+  token: APIToken & { token: string };
+}
+
 // Audit log types
 export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user' | 'api_client' | 'api_token';
 
 export interface AuditLog {
   id: number;
@@ -2142,6 +2405,11 @@ export interface UsageBreakdownRow {
 export type AutomationScheduleType = 'interval' | 'cron';
 export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
 export type AutomationIdentityScope = 'org' | 'personal';
+export type AutomationGitHubEvent =
+  | 'github.pull_request.opened'
+  | 'github.issue_comment.created'
+  | 'github.pull_request_review.submitted'
+  | 'github.pull_request_review_comment.created';
 
 export interface Automation {
   id: string;
@@ -2165,6 +2433,7 @@ export interface Automation {
   interval_unit?: 'hours' | 'days' | 'weeks';
   interval_run_at?: string;
   cron_expression?: string;
+  github_event_triggers?: AutomationGitHubEvent[];
   timezone: string;
   next_run_at?: string;
   last_run_at?: string;
@@ -2181,7 +2450,7 @@ export interface AutomationRun {
   id: string;
   automation_id: string;
   triggered_at: string;
-  triggered_by: 'schedule' | 'manual';
+  triggered_by: 'schedule' | 'manual' | 'github';
   triggered_by_user_id?: string;
   scheduled_time?: string;
   goal_snapshot: string;

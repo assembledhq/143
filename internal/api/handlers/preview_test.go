@@ -34,12 +34,16 @@ func TestComputePreviewFreshness(t *testing.T) {
 
 	now := time.Date(2026, 5, 28, 16, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name            string
-		sessionRevision int64
-		previewRevision *int64
-		status          models.PreviewStatus
-		expectedState   models.PreviewFreshnessState
-		expectedReason  string
+		name                  string
+		sessionRevision       int64
+		previewRevision       *int64
+		runtimeRevision       *int64
+		runtimeRevisionSource models.PreviewRuntimeRevisionSource
+		status                models.PreviewStatus
+		restartReasons        []models.PreviewRestartReason
+		expectedState         models.PreviewFreshnessState
+		expectedReason        string
+		expectedRestart       bool
 	}{
 		{
 			name:            "current when revisions match",
@@ -47,6 +51,28 @@ func TestComputePreviewFreshness(t *testing.T) {
 			previewRevision: int64Ptr(4),
 			status:          models.PreviewStatusReady,
 			expectedState:   models.PreviewFreshnessCurrent,
+		},
+		{
+			name:                  "live updated when runtime revision is current",
+			sessionRevision:       5,
+			previewRevision:       int64Ptr(4),
+			runtimeRevision:       int64Ptr(5),
+			runtimeRevisionSource: models.PreviewRuntimeRevisionSourceHMR,
+			status:                models.PreviewStatusReady,
+			expectedState:         models.PreviewFreshnessLiveUpdated,
+			expectedReason:        "preview_live_updated",
+		},
+		{
+			name:            "restart required when session is newer and restart-triggering paths changed",
+			sessionRevision: 5,
+			previewRevision: int64Ptr(4),
+			status:          models.PreviewStatusReady,
+			restartReasons: []models.PreviewRestartReason{
+				{Kind: models.PreviewRestartReasonDependencyChanged, Path: "frontend/package.json"},
+			},
+			expectedState:   models.PreviewFreshnessRestartRequired,
+			expectedReason:  "restart_required",
+			expectedRestart: true,
 		},
 		{
 			name:            "out of date when session is newer",
@@ -90,14 +116,18 @@ func TestComputePreviewFreshness(t *testing.T) {
 				WorkspaceRevisionUpdatedAt: now,
 			}
 			preview := &models.PreviewInstance{
-				Status:                           tt.status,
-				SourceWorkspaceRevision:          tt.previewRevision,
-				SourceWorkspaceRevisionUpdatedAt: &now,
+				Status:                            tt.status,
+				SourceWorkspaceRevision:           tt.previewRevision,
+				SourceWorkspaceRevisionUpdatedAt:  &now,
+				RuntimeWorkspaceRevision:          tt.runtimeRevision,
+				RuntimeWorkspaceRevisionUpdatedAt: &now,
+				RuntimeWorkspaceRevisionSource:    tt.runtimeRevisionSource,
 			}
 
-			freshness := computePreviewFreshness(session, preview)
+			freshness := computePreviewFreshness(session, preview, tt.restartReasons)
 			require.Equal(t, tt.expectedState, freshness.State, "freshness state should match revision comparison")
 			require.Equal(t, tt.expectedReason, freshness.Reason, "freshness reason should explain non-current states")
+			require.Equal(t, tt.expectedRestart, freshness.RestartRequired, "freshness should report whether restart is required")
 		})
 	}
 }
@@ -544,7 +574,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -580,7 +610,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		previewID, sessionID, nil, orgID, userID, "bootstrap", "default", "starting",
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil,
+		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil, nil, nil, "",
 		"",
 		false,
 	}
@@ -615,8 +645,8 @@ func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uu
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
-	// CreatePreviewInstance: 24 bound args.
-	insertArgs := make([]any, 24)
+	// CreatePreviewInstance: 27 bound args.
+	insertArgs := make([]any, 27)
 	for i := range insertArgs {
 		insertArgs[i] = pgxmock.AnyArg()
 	}
@@ -711,7 +741,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, recycleConfig, recycleSandbox, "ready", strPtr("req-1"), "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil), "",
+		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 		false,
 	}
 }
@@ -1548,6 +1578,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1585,7 +1616,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(previewAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1647,6 +1678,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedStaticEgressNoCapableWorkers(t 
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1709,6 +1741,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1748,7 +1781,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(previewAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1870,6 +1903,9 @@ func TestPreviewHandler_EnsurePreview_RecycleStampsWorkspaceRevision(t *testing.
 	mock.ExpectExec("UPDATE preview_instances\\s+SET source_workspace_revision").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances\\s+SET runtime_workspace_revision").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1968,6 +2004,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -2007,7 +2044,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(previewAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -3467,6 +3504,9 @@ func TestPreviewHandler_RestartPreview_Success(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_instances\\s+SET source_workspace_revision").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances\\s+SET runtime_workspace_revision").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

@@ -210,6 +210,8 @@ func TestPullRequestHandler_StartRepair(t *testing.T) {
 			require.Equal(t, userID, gotUserID, "StartRepair should pass the current user ID to the service")
 			require.Equal(t, models.PullRequestRepairActionTypeFixTests, opts.Action, "StartRepair should use the endpoint's repair action type")
 			require.Equal(t, &threadID, opts.ThreadID, "StartRepair should pass the requested thread ID to the service")
+			require.NotNil(t, opts.PushChanges, "StartRepair should pass an explicit push preference to the service")
+			require.True(t, *opts.PushChanges, "StartRepair should default repair launches to pushing changes")
 			return &models.PullRequestRepairResponse{
 				SessionID:        sessionID,
 				ThreadID:         &threadID,
@@ -235,6 +237,86 @@ func TestPullRequestHandler_StartRepair(t *testing.T) {
 	require.Equal(t, sessionID, resp.Data.SessionID, "FixTests should return the launched repair session ID")
 	require.Equal(t, &threadID, resp.Data.ThreadID, "FixTests should return the selected repair thread ID")
 	require.Equal(t, models.PullRequestRepairActionTypeFixTests, resp.Data.RepairActionType, "FixTests should preserve the repair action type")
+}
+
+func TestPullRequestHandler_StartRepairWithoutPushingChanges(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	prID := uuid.New()
+	svc := &stubPullRequestHealthService{
+		getHealthFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error) {
+			return nil, nil
+		},
+		repairFunc: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID, opts ghservice.StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+			require.Equal(t, orgID, gotOrgID, "StartRepair should pass the active org ID to the service")
+			require.Equal(t, prID, gotPRID, "StartRepair should pass the parsed pull request ID to the service")
+			require.Equal(t, userID, gotUserID, "StartRepair should pass the current user ID to the service")
+			require.Equal(t, models.PullRequestRepairActionTypeFixTests, opts.Action, "StartRepair should preserve the repair action type")
+			require.NotNil(t, opts.PushChanges, "StartRepair should pass an explicit push preference to the service")
+			require.False(t, *opts.PushChanges, "StartRepair should pass the no-push dropdown option to the service")
+			return &models.PullRequestRepairResponse{
+				SessionID:        uuid.New(),
+				Mode:             "reconstructed",
+				HealthVersion:    4,
+				RepairActionType: opts.Action,
+			}, nil
+		},
+	}
+
+	handler := NewPullRequestHandler(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pull-requests/"+prID.String()+"/repair/fix-tests", strings.NewReader(`{"push_changes":false}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", prID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.FixTests(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "FixTests should return 200 for a successful no-push repair launch")
+}
+
+func TestPullRequestHandler_ResolveConflictsWithoutPushingChanges(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	prID := uuid.New()
+	svc := &stubPullRequestHealthService{
+		getHealthFunc: func(context.Context, uuid.UUID, uuid.UUID) (*models.PullRequestHealthResponse, error) {
+			return nil, nil
+		},
+		repairFunc: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID, opts ghservice.StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+			require.Equal(t, orgID, gotOrgID, "ResolveConflicts should pass the active org ID to the service")
+			require.Equal(t, prID, gotPRID, "ResolveConflicts should pass the parsed pull request ID to the service")
+			require.Equal(t, userID, gotUserID, "ResolveConflicts should pass the current user ID to the service")
+			require.Equal(t, models.PullRequestRepairActionTypeResolveConflicts, opts.Action, "ResolveConflicts should preserve the repair action type")
+			require.NotNil(t, opts.PushChanges, "ResolveConflicts should pass an explicit push preference to the service")
+			require.False(t, *opts.PushChanges, "ResolveConflicts should pass the no-push dropdown option to the service")
+			return &models.PullRequestRepairResponse{
+				SessionID:        uuid.New(),
+				Mode:             "reconstructed",
+				HealthVersion:    2,
+				RepairActionType: opts.Action,
+			}, nil
+		},
+	}
+
+	handler := NewPullRequestHandler(svc)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pull-requests/"+prID.String()+"/repair/resolve-conflicts", strings.NewReader(`{"push_changes":false}`))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", prID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.ResolveConflicts(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ResolveConflicts should return 200 for a successful no-push repair launch")
 }
 
 func TestPullRequestHandler_StartRepair_ErrorsAndResolveConflicts(t *testing.T) {
@@ -322,6 +404,30 @@ func TestPullRequestHandler_StartRepair_ErrorsAndResolveConflicts(t *testing.T) 
 			withUser:       true,
 			expectedCode:   http.StatusInternalServerError,
 			expectedSubstr: "PULL_REQUEST_REPAIR_FAILED",
+		},
+		{
+			name: "returns conflict when a repair session is already in progress",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				repairFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, ghservice.StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+					return nil, ghservice.ErrRepairAlreadyInProgress
+				},
+			}),
+			pathID:         prID.String(),
+			withUser:       true,
+			expectedCode:   http.StatusConflict,
+			expectedSubstr: "REPAIR_ALREADY_IN_PROGRESS",
+		},
+		{
+			name: "returns conflict when canonical repair session is busy",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				repairFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, ghservice.StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+					return nil, ghservice.ErrRepairSessionBusy
+				},
+			}),
+			pathID:         prID.String(),
+			withUser:       true,
+			expectedCode:   http.StatusConflict,
+			expectedSubstr: "REPAIR_SESSION_BUSY",
 		},
 	}
 

@@ -18,6 +18,20 @@ describe("SheetContent", () => {
     expect(dialog.className).toContain("overflow-y-auto");
   });
 
+  it("uses most of the mobile viewport for side sheets while leaving modal context visible", async () => {
+    render(
+      <Sheet open>
+        <SheetContent>
+          <SheetTitle>Details</SheetTitle>
+          <SheetDescription>Wide mobile details</SheetDescription>
+        </SheetContent>
+      </Sheet>,
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.className).toContain("w-[calc(100vw-2rem)]");
+  });
+
   it("allows consumers to override overflow behavior when needed", async () => {
     render(
       <Sheet open>

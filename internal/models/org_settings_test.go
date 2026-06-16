@@ -156,7 +156,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	raw := json.RawMessage(`{
 		"agent_config": {
 			"claude_code": {"ANTHROPIC_MODEL": "claude-opus-4-7", "ANTHROPIC_API_KEY": "sk-ant-org"},
-			"gemini_cli": {"GEMINI_MODEL": "gemini-2.5-pro"}
+			"opencode": {"OPENCODE_MODEL": "google/gemini-2.5-flash"}
 		}
 	}`)
 
@@ -166,7 +166,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	require.NotNil(t, s.AgentConfig, "should parse agent_config")
 	require.Equal(t, "claude-opus-4-7", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
 	require.Equal(t, "sk-ant-org", s.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"])
-	require.Equal(t, "gemini-2.5-pro", s.AgentConfig["gemini_cli"]["GEMINI_MODEL"])
+	require.Equal(t, "google/gemini-2.5-flash", s.AgentConfig["opencode"]["OPENCODE_MODEL"])
 	require.NotContains(t, s.AgentConfig, "codex", "codex should not be present when not configured")
 }
 
@@ -201,10 +201,10 @@ func TestAgentType_Validate(t *testing.T) {
 	t.Parallel()
 
 	require.NoError(t, AgentTypeClaudeCode.Validate())
-	require.NoError(t, AgentTypeGeminiCLI.Validate())
 	require.NoError(t, AgentTypeCodex.Validate())
 	require.NoError(t, AgentTypeAmp.Validate())
 	require.NoError(t, AgentTypePi.Validate())
+	require.NoError(t, AgentTypeOpenCode.Validate())
 	// pm_agent is intentionally rejected: it's an internal agent type used by
 	// the PM service for its own scheduled runs, never a user-selectable
 	// default_agent_type on OrgSettings.
@@ -249,7 +249,7 @@ func TestAgentType_SupportsReasoningEffort(t *testing.T) {
 
 	require.True(t, AgentTypeCodex.SupportsReasoningEffort(), "Codex should support explicit reasoning overrides")
 	require.True(t, AgentTypeClaudeCode.SupportsReasoningEffort(), "Claude Code should support explicit reasoning overrides")
-	require.False(t, AgentTypeGeminiCLI.SupportsReasoningEffort(), "Gemini CLI should not report reasoning override support")
+	require.False(t, AgentTypeOpenCode.SupportsReasoningEffort(), "OpenCode should not report reasoning override support")
 }
 
 func TestOrgSize_Validate(t *testing.T) {

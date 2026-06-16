@@ -28,7 +28,7 @@ type MembershipStore interface {
 }
 
 type SlackChannelStore interface {
-	GetByChannel(ctx context.Context, orgID uuid.UUID, teamID, channelID string) (models.SlackChannelSettings, error)
+	GetEffectiveByChannel(ctx context.Context, orgID uuid.UUID, teamID, channelID string) (models.EffectiveSlackChannelSettings, error)
 }
 
 type Authorizer struct {
@@ -102,7 +102,7 @@ func (a *Authorizer) authorizeChannelCapability(ctx context.Context, req ActionR
 	if a.channels == nil || req.ChannelID == "" || req.Capability == "" {
 		return nil
 	}
-	settings, err := a.channels.GetByChannel(ctx, req.OrgID, req.TeamID, req.ChannelID)
+	settings, err := a.channels.GetEffectiveByChannel(ctx, req.OrgID, req.TeamID, req.ChannelID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil

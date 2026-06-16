@@ -978,6 +978,28 @@ func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]stri
 	return paths, len(paths) > 0
 }
 
+// CacheRestorablePreviewInstallVerifyPaths returns the verify paths that can
+// be satisfied by dependency cache restores. Platform-owned cache paths are
+// intentionally ignored here for compatibility with existing configs: they may
+// still be valid after a normal install, but restored dependency blobs never
+// contain them.
+func CacheRestorablePreviewInstallVerifyPaths(verifyPaths []string) []string {
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, len(verifyPaths))
+	for _, raw := range verifyPaths {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+		if clean == "" || clean == "." || dependencyCachePathTargetsPlatformCache(clean) {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	return paths
+}
+
 // inferPreviewBuildCachePaths maps a JS lockfile to the Turborepo local cache
 // directories used by turbo >=1.9 (node_modules/.cache/turbo) and older or
 // explicitly configured setups (.turbo/cache), rooted at the lockfile's

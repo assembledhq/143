@@ -24,7 +24,7 @@ The important part is that the work is visible by default. Runs, prompts, output
 - **Context from the tools you already use.** Linear, Sentry, Slack, Notion, and GitHub can all feed the agent useful context. Setup happens once for the organization.
 - **Cloud execution.** Agents run in isolated cloud sandboxes, so teammates can kick off work from a browser, Slack, or mobile without keeping a local machine awake.
 - **PRs and previews, not mystery patches.** Agent output becomes a branch or pull request with a live preview when the repo supports it.
-- **Bring the agent you prefer.** 143 is designed around coding-agent adapters. Today that means tools like Claude Code, Codex, Gemini CLI, Amp, and Pi; the point is not to bet the product on one model vendor.
+- **Bring the agent you prefer.** 143 is designed around coding-agent adapters. Today that means tools like Claude Code, Codex, OpenCode, Amp, and Pi; the point is not to bet the product on one model vendor.
 - **Open source by default.** You can use the hosted service or run it yourself. The repo is MIT licensed.
 
 ## What you can use it for

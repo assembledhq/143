@@ -10,8 +10,8 @@ import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { writeStoredSessionActiveThread, writeStoredSessionAnchorPosition } from '@/lib/session-open-position';
 import { writeCachedViewerScope } from '@/lib/viewer-scope-cache';
-import type { Session, SessionMessage, SingleResponse, ListResponse } from '@/lib/types';
-import { installSessionDetailPageTestHooks } from './session-detail-test-kit';
+import type { Session, SingleResponse } from '@/lib/types';
+import { installSessionDetailPageTestHooks, makeTranscriptWindow } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -89,12 +89,9 @@ describe('SessionDetailPage warm-start message prefetch', () => {
 
     const messageRequests: string[] = [];
     server.use(
-      http.get(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`, ({ request }) => {
+      http.get(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript`, ({ request }) => {
         messageRequests.push(new URL(request.url).searchParams.get('position') ?? '');
-        return HttpResponse.json({
-          data: [] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
     );
     const { detailRequests, releaseDetail } = blockSessionDetail();
@@ -126,16 +123,13 @@ describe('SessionDetailPage warm-start message prefetch', () => {
 
     const anchorParams: Array<{ position: string | null; anchorMessageId: string | null }> = [];
     server.use(
-      http.get(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`, ({ request }) => {
+      http.get(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript`, ({ request }) => {
         const url = new URL(request.url);
         anchorParams.push({
           position: url.searchParams.get('position'),
           anchorMessageId: url.searchParams.get('anchor_message_id'),
         });
-        return HttpResponse.json({
-          data: [] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
+        return HttpResponse.json(makeTranscriptWindow([], [], { position: 'around', anchor_found: true }));
       }),
     );
     const { releaseDetail } = blockSessionDetail();
@@ -155,12 +149,9 @@ describe('SessionDetailPage warm-start message prefetch', () => {
 
     let messageRequests = 0;
     server.use(
-      http.get(`/api/v1/sessions/${sessionId}/threads/:threadId/messages`, () => {
+      http.get(`/api/v1/sessions/${sessionId}/threads/:threadId/transcript`, () => {
         messageRequests += 1;
-        return HttpResponse.json({
-          data: [] as SessionMessage[],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
     );
     const { releaseDetail } = blockSessionDetail();

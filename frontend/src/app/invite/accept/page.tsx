@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import { setActiveOrgId } from "@/lib/active-org";
@@ -200,9 +201,9 @@ function AcceptInvitationContent() {
 
           {status === "error" && (
             <div className="space-y-4">
-              <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              <ErrorText className="rounded-md bg-destructive/10 px-3 py-2 text-sm">
                 {errorMessage}
-              </div>
+              </ErrorText>
               <Button
                 variant="outline"
                 className="w-full"

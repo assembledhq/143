@@ -1,11 +1,11 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
+import { apiKeyHelp, OPENCODE_BACKING_PROVIDER_OPTIONS, openCodeAgentDefaults, openCodeDefaultModelForBackingProvider, openCodeModelsForBackingProvider, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type OpenCodeBackingProvider, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
@@ -40,7 +40,7 @@ import type {
 } from "@/lib/types";
 
 // agentLabel renders the human-readable agent name. The unified API exposes
-// rows tagged by agent (codex / claude_code / gemini_cli / amp / pi) so the
+// rows tagged by agent (codex / claude_code / amp / pi / opencode) so the
 // translation from provider strings the legacy personal page used is no
 // longer needed.
 function agentLabel(agent: CodingAuthAgent | string) {
@@ -49,12 +49,12 @@ function agentLabel(agent: CodingAuthAgent | string) {
       return "Codex";
     case "claude_code":
       return "Claude Code";
-    case "gemini_cli":
-      return "Gemini CLI";
     case "amp":
       return "Amp";
     case "pi":
       return "Pi";
+    case "opencode":
+      return "OpenCode";
     default:
       return agent;
   }
@@ -220,6 +220,10 @@ export default function AccountPage() {
   const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
   const [apiKey, setApiKey] = useState("");
   const [authLabel, setAuthLabel] = useState("");
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
+  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(openCodeBackingProvider), [openCodeBackingProvider]);
   // Subscription OAuth modal dispatch — only one is open at a time.
   // The dialog itself closes when these open so the OAuth modal owns the
   // user's attention during the device-code or paste-back flow.
@@ -256,6 +260,8 @@ export default function AccountPage() {
         auth_type: "api_key",
         label: authLabel.trim() || undefined,
         api_key: apiKey,
+        ...(provider === "opencode" ? { api_type: openCodeBackingProvider } : {}),
+        ...(provider === "opencode" ? { agent_defaults: openCodeAgentDefaults(openCodeModel, openCodeCustomModel) } : {}),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
@@ -360,7 +366,7 @@ export default function AccountPage() {
 
   // The selected provider's metadata drives whether the auth-type selector
   // is visible. For providers that don't ship a subscription OAuth flow
-  // (Gemini CLI / Amp / Pi), we coerce auth_type to "api_key" so the modal
+  // (Amp / Pi / OpenCode), we coerce auth_type to "api_key" so the modal
   // doesn't render a dead radio group.
   const selectedProviderOption = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === provider) ?? PERSONAL_PROVIDER_OPTIONS[0];
   const showAuthTypeSelector = selectedProviderOption.supportsSubscription;
@@ -373,9 +379,9 @@ export default function AccountPage() {
     const agent = personalProviderToAgent(p);
     const base = agent === "codex" ? "Codex"
       : agent === "claude_code" ? "Claude Code"
-      : agent === "gemini_cli" ? "Gemini CLI"
       : agent === "amp" ? "Amp"
       : agent === "pi" ? "Pi"
+      : agent === "opencode" ? "OpenCode"
       : agent;
     return type === "subscription" ? `${base} subscription` : `${base} API key`;
   }
@@ -386,6 +392,15 @@ export default function AccountPage() {
     setAuthLabel("");
     setProvider("openai");
     setAuthType("subscription");
+    setOpenCodeBackingProvider("opencode");
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeCustomModel("");
+  }
+
+  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider) {
+    setOpenCodeBackingProvider(value);
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(value));
+    setOpenCodeCustomModel("");
   }
 
   function closeAddModal() {
@@ -625,34 +640,75 @@ export default function AccountPage() {
         </div>
 
         {effectiveAuthType === "api_key" ? (
-          <div className="space-y-2">
-            <Label htmlFor="personal-api-key" className="flex items-center gap-2">
-              API key
-              <APIKeyHelpTooltip
-                ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
-                description={apiKeyHelp(provider).description}
-                href={apiKeyHelp(provider).href}
-                linkLabel={apiKeyHelp(provider).linkLabel}
+          <>
+            {provider === "opencode" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="personal-opencode-backing-provider">OpenCode provider</Label>
+                  <Select value={openCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
+                    <SelectTrigger id="personal-opencode-backing-provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {OPENCODE_BACKING_PROVIDER_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="personal-opencode-model">Default model</Label>
+                  <Select value={openCodeModel} onValueChange={setOpenCodeModel}>
+                    <SelectTrigger id="personal-opencode-model">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {openCodeModelOptions.map((model) => (
+                        <SelectItem key={model} value={model}>{model}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="personal-opencode-model-custom">Custom model override</Label>
+                  <Input
+                    id="personal-opencode-model-custom"
+                    value={openCodeCustomModel}
+                    onChange={(event) => setOpenCodeCustomModel(event.target.value)}
+                    placeholder="provider/model (e.g. xai/grok-code-fast)"
+                  />
+                </div>
+              </>
+            ) : null}
+            <div className="space-y-2">
+              <Label htmlFor="personal-api-key" className="flex items-center gap-2">
+                API key
+                <APIKeyHelpTooltip
+                  ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
+                  description={apiKeyHelp(provider).description}
+                  href={apiKeyHelp(provider).href}
+                  linkLabel={apiKeyHelp(provider).linkLabel}
+                />
+              </Label>
+              <Input
+                id="personal-api-key"
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+	                placeholder={
+	                  provider === "anthropic"
+	                    ? "sk-ant-..."
+	                    : provider === "amp"
+	                      ? "amp_..."
+	                      : provider === "pi"
+	                        ? "pi_..."
+	                        : provider === "opencode"
+	                          ? "OpenCode or provider key"
+	                          : "sk-..."
+	                }
               />
-            </Label>
-            <Input
-              id="personal-api-key"
-              type="password"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder={
-                provider === "anthropic"
-                  ? "sk-ant-..."
-                  : provider === "gemini"
-                    ? "AIza..."
-                    : provider === "amp"
-                      ? "amp_..."
-                      : provider === "pi"
-                        ? "pi_..."
-                        : "sk-..."
-              }
-            />
-          </div>
+            </div>
+          </>
         ) : null}
       </CodingAuthDialog>
 

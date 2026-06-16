@@ -77,6 +77,24 @@ const runtimeCacheTTL = 5 * time.Second
 // asset request issued an UPDATE on preview_instances.
 const accessRecordInterval = 15 * time.Second
 
+// previewProxyTokenTTL bounds the lifetime of the bearer token the gateway
+// mints for each proxied worker request. A fresh token is minted on every
+// request, so it only needs to outlive a single in-flight request — but we size
+// it to comfortably span an interactive preview's working window so that
+// long-lived connections (WebSocket/HMR, SSE) authorized once at handshake time
+// never trip on an expired token, even on a slow or busy worker.
+//
+// We deliberately keep it bounded rather than effectively infinite (e.g.
+// weeks): the token is a static, unrevocable bearer whose only early
+// invalidation is a runtime epoch bump on recycle, so a finite TTL caps the
+// replay window if a token ever leaks (logs, worker memory, a compromised hop).
+// 60 minutes is far longer than any single request or handshake yet still a
+// tight blast radius. Previously this was 30s, which let a slow worker response
+// outlive the token: the worker then rejected the in-flight request as "invalid
+// preview token", and the gateway mistook that auth failure for an unreachable
+// endpoint and tore down a perfectly healthy preview.
+const previewProxyTokenTTL = 60 * time.Minute
+
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
 // injects security headers. It does NOT use the main app session middleware.
@@ -88,7 +106,7 @@ type Gateway struct {
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
-	tokenSecret  string
+	tokenKeyring auth.PreviewTokenKeyring
 	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
 
@@ -121,6 +139,7 @@ type GatewayConfig struct {
 	AppOrigin             string // e.g. "https://app.143.dev"
 	CookieSecret          []byte // HMAC key for signing preview session cookies
 	PreviewTokenSecret    string
+	PreviewTokenKeyring   auth.PreviewTokenKeyring
 	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
 }
 
@@ -223,6 +242,12 @@ func (g *Gateway) recordAccessThrottled(ctx context.Context, orgID, previewID uu
 
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
+	tokenKeyring := cfg.PreviewTokenKeyring
+	if !tokenKeyring.Configured() && cfg.PreviewTokenSecret != "" {
+		if fallback, err := auth.NewPreviewTokenKeyring([]string{cfg.PreviewTokenSecret}); err == nil {
+			tokenKeyring = fallback
+		}
+	}
 	return &Gateway{
 		store:            cfg.Store,
 		manager:          cfg.Manager,
@@ -231,7 +256,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 		logger:           cfg.Logger,
 		appOrigin:        cfg.AppOrigin,
 		cookieSecret:     cfg.CookieSecret,
-		tokenSecret:      cfg.PreviewTokenSecret,
+		tokenKeyring:     tokenKeyring,
 		secureCookie:     strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
 		sessionCache:     make(map[uuid.UUID]*sessionCacheEntry),
 		runtimeCache:     make(map[uuid.UUID]*runtimeCacheEntry),
@@ -642,6 +667,32 @@ func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+func (g *Gateway) previewRuntimeUnavailableOverlayBody(previewID uuid.UUID) []byte {
+	controlURL := g.previewControlURL(previewID)
+	statusURL := g.previewStatusURL(previewID)
+	cfg, err := json.Marshal(map[string]any{
+		"appOrigin":     g.resolvedAppOrigin(),
+		"controlUrl":    controlURL,
+		"statusPath":    previewControlStatusPath,
+		"restartable":   true,
+		"initialStatus": string(models.PreviewStatusUnavailable),
+	})
+	if err != nil {
+		cfg = []byte("null")
+	}
+	return []byte(fmt.Sprintf(
+		previewControlOverlayHTML,
+		"Preview not connected",
+		"Preview not connected",
+		"Restart it from 143 to reconnect this preview.",
+		"Connection lost",
+		stdhtml.EscapeString(controlURL),
+		"Restart preview",
+		stdhtml.EscapeString(statusURL),
+		cfg,
+	))
+}
+
 type previewControlOverlayData struct {
 	Title       string
 	Description string
@@ -998,14 +1049,14 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		writeRuntimeUnavailable(w)
 		return
 	}
-	token, err := auth.GeneratePreviewToken(g.tokenSecret, auth.PreviewTokenClaims{
+	token, err := g.tokenKeyring.Generate(auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: runtime.WorkerNodeID,
 		RuntimeID:    &runtime.ID,
 		RuntimeEpoch: runtime.RuntimeEpoch,
 		PreviewID:    &previewID,
 		Action:       "proxy",
-		ExpiresAt:    time.Now().Add(30 * time.Second),
+		ExpiresAt:    time.Now().Add(previewProxyTokenTTL),
 	})
 	if err != nil {
 		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
@@ -1026,10 +1077,32 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 			req.Header.Set("Authorization", "Bearer "+token)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			if translateWorkerRuntimeMismatch(resp) {
-				// The worker no longer recognizes this runtime epoch; drop
-				// the cached runtime so the next request re-resolves.
+			if failure := g.translateWorkerPreviewFailure(resp, previewID, isNavigationRequest(originalReq)); failure.translated {
+				// Always drop the cached runtime so the next request
+				// re-resolves and re-mints a fresh token.
 				g.evictCachedRuntime(previewID)
+				// A routing mismatch (the worker recycled the epoch or no
+				// longer owns this runtime) is genuine evidence the cached
+				// runtime is stale, so mark it lost. A token-level auth
+				// failure ("invalid preview token") is NOT — an expired or
+				// mis-signed proxy token says nothing about runtime health,
+				// and marking it lost would kill a working preview. Evict and
+				// let the next request retry with a new token instead.
+				markedLost := previewWorkerFailureMarksRuntimeLost(failure.code)
+				if markedLost {
+					g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, previewWorkerFailureReason(failure.code, failure.message, failure.authDetail))
+				}
+				// worker_auth_detail carries the coarse token-failure class
+				// (bad_signature/expired/...) so an auth failure stays
+				// diagnosable from the app-side logs even when it is transient
+				// and the runtime is deliberately left healthy.
+				addPreviewProxyLogFields(g.logger.Warn(), originalReq, orgID, previewID, runtime, upstreamPath).
+					Str("worker_error_code", failure.code).
+					Str("worker_error_message", failure.message).
+					Str("worker_auth_detail", failure.authDetail).
+					Int("worker_status", failure.status).
+					Bool("runtime_marked_lost", markedLost).
+					Msg("translated preview worker auth/routing failure")
 				return nil
 			}
 
@@ -1053,12 +1126,100 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			g.evictCachedRuntime(previewID)
+			if shouldMarkRuntimeLostOnProxyError(err) {
+				g.markRuntimeEndpointUnreachable(originalReq.Context(), orgID, previewID, runtime, previewProxyErrorReason(err))
+			}
 			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
 				Msg("proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+func (g *Gateway) markRuntimeEndpointUnreachable(ctx context.Context, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, reason string) {
+	if g.store == nil || runtime == nil {
+		return
+	}
+	updated, err := g.store.MarkPreviewRuntimeLostIfCurrent(ctx, orgID, previewID, runtime.ID, runtime.RuntimeEpoch, reason, models.PreviewUnavailableReasonEndpointUnreachable)
+	if err != nil {
+		g.logger.Warn().Err(err).
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Msg("failed to mark unreachable preview runtime lost")
+		return
+	}
+	if updated {
+		g.logger.Warn().
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Str("worker_node_id", runtime.WorkerNodeID).
+			Str("endpoint_url", runtime.EndpointURL).
+			Msg("marked preview runtime lost after endpoint became unreachable")
+	}
+}
+
+func shouldMarkRuntimeLostOnProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"connection reset by peer",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"no such host",
+		"eof",
+		// Worker tore down the connection without responding: a dead pooled
+		// keep-alive conn, or a write racing the worker's close.
+		"server closed idle connection",
+		"broken pipe",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// previewWorkerFailureMarksRuntimeLost reports whether a translated worker
+// failure code is evidence that the cached runtime is genuinely stale — a
+// recycled epoch or a worker that no longer owns it — and should be marked
+// lost. Token-level auth failures (UNAUTHORIZED / "invalid preview token") are
+// transient: an expired or mis-signed proxy token does not mean the runtime is
+// unreachable, so those only evict the cache and let the next request retry
+// with a freshly minted token rather than tearing down a healthy preview.
+func previewWorkerFailureMarksRuntimeLost(workerCode string) bool {
+	switch workerCode {
+	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
+		return true
+	default:
+		return false
+	}
+}
+
+func previewProxyErrorReason(err error) string {
+	msg := "unknown error"
+	if err != nil {
+		msg = strings.ReplaceAll(err.Error(), "\n", " ")
+		msg = strings.ReplaceAll(msg, "\r", " ")
+	}
+	const maxReasonLen = 320
+	reason := "preview runtime endpoint unreachable: " + msg
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func previewWorkerProxyPath(previewID uuid.UUID, requestPath string) string {
@@ -1108,43 +1269,115 @@ func addPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, prev
 		Str("runtime_unavailable_reason", string(runtime.UnavailableReason))
 }
 
-func translateWorkerRuntimeMismatch(resp *http.Response) bool {
-	if resp.StatusCode != http.StatusForbidden {
-		return false
+// workerPreviewFailure describes a worker-originated auth/routing rejection that
+// the gateway translated into a runtime-unavailable response.
+type workerPreviewFailure struct {
+	translated bool
+	code       string
+	message    string
+	authDetail string
+	status     int
+}
+
+func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID uuid.UUID, navigation bool) workerPreviewFailure {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+		return workerPreviewFailure{status: resp.StatusCode}
 	}
+	originalStatus := resp.StatusCode
 	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
 
 	var parsed models.ErrorResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
+	workerMarked := resp.Header.Get(auth.PreviewWorkerErrorHeader) == "1"
+	// Capture the worker's coarse auth-failure class before we replace the
+	// response headers below; the worker only sets it on token rejections.
+	authDetail := sanitizeWorkerPreviewFailureMessage(resp.Header.Get(auth.PreviewWorkerAuthDetailHeader))
+	workerCode := parsed.Error.Code
+	workerMessage := parsed.Error.Message
+	shouldTranslate := false
 	switch parsed.Error.Code {
 	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
-	default:
+		shouldTranslate = originalStatus == http.StatusForbidden && workerMarked
+	case "UNAUTHORIZED":
+		shouldTranslate = originalStatus == http.StatusUnauthorized &&
+			workerMarked &&
+			(workerMessage == "invalid preview token" || workerMessage == "missing authorization token")
+	}
+	if !shouldTranslate {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
 
-	replacement, _ := json.Marshal(models.ErrorResponse{
-		Error: models.ErrorDetail{
-			Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
-			Message: "preview runtime is unavailable; restart the preview",
-		},
-	})
-	resp.StatusCode = http.StatusServiceUnavailable
-	resp.Status = fmt.Sprintf("%d %s", http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+	var replacement []byte
+	statusCode := http.StatusServiceUnavailable
+	contentType := "application/json"
+	if navigation {
+		replacement = g.previewRuntimeUnavailableOverlayBody(previewID)
+		statusCode = http.StatusOK
+		contentType = "text/html; charset=utf-8"
+	} else {
+		var err error
+		replacement, err = json.Marshal(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
+				Message: "preview runtime is unavailable; restart the preview",
+			},
+		})
+		if err != nil {
+			replacement = []byte(`{"error":{"code":"PREVIEW_RUNTIME_UNAVAILABLE","message":"preview runtime is unavailable; restart the preview"}}`)
+		}
+	}
+
+	resp.StatusCode = statusCode
+	resp.Status = fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode))
 	resp.Header = make(http.Header)
-	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Set("Content-Type", contentType)
 	resp.Header.Set("Cache-Control", "no-store")
 	resp.ContentLength = int64(len(replacement))
 	resp.Body = io.NopCloser(bytes.NewReader(replacement))
-	return true
+	return workerPreviewFailure{
+		translated: true,
+		code:       workerCode,
+		message:    sanitizeWorkerPreviewFailureMessage(workerMessage),
+		authDetail: authDetail,
+		status:     originalStatus,
+	}
+}
+
+func sanitizeWorkerPreviewFailureMessage(message string) string {
+	message = strings.ReplaceAll(message, "\n", " ")
+	message = strings.ReplaceAll(message, "\r", " ")
+	message = strings.TrimSpace(message)
+	if len(message) > 240 {
+		return message[:240]
+	}
+	return message
+}
+
+func previewWorkerFailureReason(code, message, authDetail string) string {
+	reason := "preview worker auth/routing failure"
+	if code != "" {
+		reason += ": " + code
+	}
+	if message != "" {
+		reason += " " + sanitizeWorkerPreviewFailureMessage(message)
+	}
+	if authDetail != "" {
+		reason += " (" + sanitizeWorkerPreviewFailureMessage(authDetail) + ")"
+	}
+	const maxReasonLen = 320
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func writeRuntimeUnavailable(w http.ResponseWriter) {
@@ -1166,6 +1399,16 @@ func writeRuntimeUnavailable(w http.ResponseWriter) {
 // activity heartbeats while the preview tab is visible. This keeps the
 // idle timeout tracker accurate even when the user is just viewing (not
 // navigating) the preview.
+//
+// The heartbeat doubles as a session watchdog: it is sent with fetch (not a
+// fire-and-forget Image) so we can observe a 401 PREVIEW_SESSION_EXPIRED. A
+// running SPA whose preview session has lapsed (idle past the sliding window,
+// or the instance was recycled) would otherwise just see every fetch/asset
+// 401 and render a blank screen with no way to recover. When we detect that
+// 401 we surface an in-app reconnect overlay (a Reconnect button plus a short
+// auto-reconnect countdown). Reconnecting is a top-level reload, which re-issues
+// a navigation request — the gateway then serves the full control overlay
+// (status, logs, Restart + auto-reconnect handshake) defined above.
 const activityHeartbeatScript = `
 (function() {
   "use strict";
@@ -1173,17 +1416,111 @@ const activityHeartbeatScript = `
   window.__143_heartbeat = true;
 
   var INTERVAL_MS = 30000; // 30 seconds
+  var RECONNECT_SECONDS = 5; // auto-reconnect countdown once expiry is detected
   var timer = null;
+  var expired = false;
+  var countdownTimer = null;
+
+  // Capture the native fetch at init, before the previewed app's bundles run.
+  // Apps that wrap window.fetch with an auth interceptor often throw or redirect
+  // on 401, which would hide the expiry signal from us; binding it now keeps the
+  // watchdog reading the real response status.
+  var nativeFetch = (window.fetch && window.fetch.bind(window)) || null;
+
+  function reconnect() {
+    // A top-level reload re-issues a navigation request, so the gateway serves
+    // the full control overlay (status, logs, Restart + auto-reconnect).
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    window.location.reload();
+  }
 
   function sendHeartbeat() {
-    var img = new Image();
-    img.src = "/__143_heartbeat?t=" + Date.now();
+    if (expired) return;
+    var url = "/__143_heartbeat?t=" + Date.now();
+    if (!nativeFetch) {
+      // Pre-fetch browsers: keep the idle timer alive but we cannot read a
+      // status, so expiry recovery is unavailable (a reload still works).
+      new Image().src = url;
+      return;
+    }
+    nativeFetch(url, {
+      cache: "no-store",
+      credentials: "same-origin"
+    }).then(function(resp) {
+      // 401 is the gateway's PREVIEW_SESSION_EXPIRED signal. Network errors are
+      // transient (offline, proxy blip) and must not trigger a recovery loop.
+      if (resp && resp.status === 401) onExpired();
+    }).catch(function() {});
+  }
+
+  function onExpired() {
+    if (expired) return;
+    expired = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    renderOverlay();
+  }
+
+  function renderOverlay() {
+    if (document.getElementById("__143-preview-reconnect")) return;
+    var host = document.createElement("div");
+    host.id = "__143-preview-reconnect";
+    host.style.cssText = "position:fixed;inset:0;z-index:2147483647;";
+    // Shadow DOM isolates our styles from the previewed app's CSS.
+    var root = host.attachShadow ? host.attachShadow({mode: "open"}) : host;
+    root.innerHTML =
+      "<style>" +
+      ":host,*{box-sizing:border-box}" +
+      ".scrim{position:fixed;inset:0;display:grid;place-items:center;" +
+      "background:color-mix(in srgb, black 55%, transparent);" +
+      "font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}" +
+      ".panel{color-scheme:light dark;width:min(92vw,380px);border-radius:12px;padding:24px;" +
+      "background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 14%,transparent);" +
+      "box-shadow:0 18px 60px color-mix(in srgb,black 45%,transparent)}" +
+      ".eyebrow{margin:0 0 8px;font-size:12px;color:color-mix(in srgb,CanvasText 56%,transparent)}" +
+      "h1{margin:0;font-size:20px;line-height:1.2}" +
+      "p{margin:10px 0 0;font-size:14px;line-height:1.5;color:color-mix(in srgb,CanvasText 68%,transparent)}" +
+      ".count{margin-top:14px;font-weight:600;color:CanvasText;font-size:13px}" +
+      "button{margin-top:20px;width:100%;min-height:38px;border-radius:8px;border:0;cursor:pointer;" +
+      "font-size:14px;font-weight:600;background:CanvasText;color:Canvas}" +
+      "</style>" +
+      "<div class='scrim'><div class='panel'>" +
+      "<p class='eyebrow'>143 preview</p>" +
+      "<h1>Preview disconnected</h1>" +
+      "<p>This preview's session expired — it may have been idle or restarted. Reconnect to pick up where you left off.</p>" +
+      "<p class='count' id='pv-count'></p>" +
+      "<button id='pv-reconnect' type='button'>Reconnect now</button>" +
+      "</div></div>";
+    (document.body || document.documentElement).appendChild(host);
+
+    var btn = root.querySelector("#pv-reconnect");
+    var countEl = root.querySelector("#pv-count");
+    if (btn) btn.addEventListener("click", reconnect);
+
+    var remaining = RECONNECT_SECONDS;
+    function paint() {
+      if (!countEl) return;
+      countEl.textContent = remaining > 0
+        ? "Reconnecting in " + remaining + "s…"
+        : "Reconnecting…";
+    }
+    paint();
+    countdownTimer = setInterval(function() {
+      // Only count down while the tab is visible so a backgrounded tab does not
+      // silently reload itself out from under the user.
+      if (document.visibilityState !== "visible") return;
+      remaining -= 1;
+      paint();
+      if (remaining <= 0) {
+        clearInterval(countdownTimer);
+        reconnect();
+      }
+    }, 1000);
   }
 
   function onVisibilityChange() {
     if (document.visibilityState === "visible") {
       sendHeartbeat();
-      if (!timer) {
+      if (!expired && !timer) {
         timer = setInterval(sendHeartbeat, INTERVAL_MS);
       }
     } else {

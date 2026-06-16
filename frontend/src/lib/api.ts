@@ -104,6 +104,18 @@ function get<T>(path: string, options?: RequestInit): Promise<T> {
   return request<T>(path, options);
 }
 
+function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  parent?.addEventListener('abort', abort, { once: true });
+  controller.signal.addEventListener('abort', () => {
+    globalThis.clearTimeout(timeout);
+    parent?.removeEventListener('abort', abort);
+  }, { once: true });
+  return controller.signal;
+}
+
 function post<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, {
     method: 'POST',
@@ -282,8 +294,12 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
     get: (id: string) =>
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
-    getPullRequest: (owner: string, repo: string, number: string | number) =>
-      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}`),
+    getPullRequest: (owner: string, repo: string, number: string | number, params?: { intent?: 'open' | 'status' | 'diagnose' }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.intent) searchParams.set('intent', params.intent);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}${qs ? `?${qs}` : ''}`);
+    },
     restart: (id: string, body?: { start_latest?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
     startLatest: (id: string) =>
@@ -292,13 +308,6 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/stop`),
     bootstrap: (id: string) =>
       post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
-    apiTokens: {
-      list: () => get<import('./types').ListResponse<import('./types').PreviewAPIToken>>('/api/v1/previews/api-tokens'),
-      create: (body: { name: string; scopes: string[]; repository_ids: string[] }) =>
-        post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
-      revoke: (id: string) =>
-        del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
-    },
     policies: {
       list: () => get<import('./types').ListResponse<import('./types').PreviewPolicySummary>>('/api/v1/previews/policies'),
       update: (repositoryId: string, body: { auto_mode: 'off' | 'warm' | 'on' }) =>
@@ -307,6 +316,22 @@ export const api = {
           body: JSON.stringify(body),
         }),
     },
+  },
+  apiKeys: {
+    create: (body: import('./types').CreateAPIKeyRequest) =>
+      post<import('./types').SingleResponse<import('./types').CreateAPIKeyResponse>>('/api/v1/api-keys', body),
+    listClients: () =>
+      get<import('./types').ListResponse<import('./types').APIClient>>('/api/v1/api-keys'),
+    updateClient: (id: string, body: Partial<Pick<import('./types').APIClient, 'name' | 'description' | 'status'>>) =>
+      patch<import('./types').SingleResponse<import('./types').APIClient>>(`/api/v1/api-keys/${id}`, body),
+    disableClient: (id: string) =>
+      del<void>(`/api/v1/api-keys/${id}`),
+    listTokens: (clientId: string) =>
+      get<import('./types').ListResponse<import('./types').APIToken>>(`/api/v1/api-keys/${clientId}/tokens`),
+    createToken: (clientId: string, body: import('./types').CreateAPITokenRequest) =>
+      post<import('./types').SingleResponse<import('./types').APIToken & { token: string }>>(`/api/v1/api-keys/${clientId}/tokens`, body),
+    revokeToken: (clientId: string, tokenId: string) =>
+      del<void>(`/api/v1/api-keys/${clientId}/tokens/${tokenId}`),
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
@@ -346,7 +371,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Issue>>(`/api/v1/issues${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Issue>>(`/api/v1/issues/${id}`),
-    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string; message?: string; force?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
   autopilot: {
@@ -529,28 +554,18 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
-    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest' | 'around'; before?: string; after?: string; anchorMessageId?: number; limit?: number } = { position: 'latest' }) => {
+    getThreadTranscriptWindow: (sessionId: string, threadId: string, params: { position?: 'latest' | 'around'; before?: string; after?: string; anchorEntryId?: string; anchorMessageId?: number; anchorTurnNumber?: number; limitTurns?: number; include?: Array<'messages' | 'tools' | 'human_inputs' | 'system'> } = { position: 'latest' }) => {
       const searchParams = new URLSearchParams();
       if (params.position) searchParams.set('position', params.position);
       if (params.before) searchParams.set('before', params.before);
       if (params.after) searchParams.set('after', params.after);
-      if (params.anchorMessageId) searchParams.set('anchor_message_id', String(params.anchorMessageId));
-      if (params.limit) searchParams.set('limit', String(params.limit));
+      if (params.anchorEntryId) searchParams.set('anchor_entry_id', params.anchorEntryId);
+      if (params.anchorMessageId != null) searchParams.set('anchor_message_id', String(params.anchorMessageId));
+      if (params.anchorTurnNumber != null) searchParams.set('anchor_turn_number', String(params.anchorTurnNumber));
+      if (params.limitTurns != null) searchParams.set('limit_turns', String(params.limitTurns));
+      if (params.include?.length) searchParams.set('include', params.include.join(','));
       const qs = searchParams.toString();
-      return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
-    },
-    getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[]; latestTurns?: number } = {}) => {
-      const searchParams = new URLSearchParams();
-      const turnNumbers = Array.from(new Set((params.turnNumbers ?? []).filter((turn) => Number.isInteger(turn) && turn >= 0))).sort((a, b) => a - b);
-      if (turnNumbers.length > 0) {
-        searchParams.set('turn_numbers', turnNumbers.join(','));
-      } else if (params.latestTurns && Number.isInteger(params.latestTurns) && params.latestTurns > 0) {
-        // Bootstrap mode: fetch the thread's most recent N turns of logs
-        // before the message window has resolved which turns are visible.
-        searchParams.set('latest_turns', String(params.latestTurns));
-      }
-      const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SessionTranscriptWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript${qs ? `?${qs}` : ''}`);
     },
     listRecoverableThreadInboxEntries: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').ThreadInboxEntry>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/inbox/recoverable`),
@@ -625,8 +640,11 @@ export const api = {
         return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
           .then(r => r.data ?? []);
       },
-      console: (sessionId: string) =>
-        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+      console: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(
+          `/api/v1/sessions/${sessionId}/preview/console`,
+          { signal: timeoutSignal(opts?.timeoutMs ?? 5000, opts?.signal) },
+        )
           .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
@@ -704,11 +722,30 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
     },
     connectSlack: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/slack/connect'),
-    listSlackChannels: () => get<{ data: Array<{ id: string; name: string; selected: boolean }> }>('/api/v1/integrations/slack/channels'),
+    getSlackHealth: () => get<import('./types').SingleResponse<import('./types').SlackInstallationHealth>>('/api/v1/integrations/slack/health'),
+    getSlackSettings: () => get<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings'),
+    updateSlackSettings: (settings: import('./types').SlackBotSettingsUpdate) =>
+      request<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
+    listSlackUserLinks: () => get<import('./types').ListResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links'),
+    upsertSlackUserLink: (link: import('./types').SlackUserLinkUpsert) =>
+      request<import('./types').SingleResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links', {
+        method: 'POST',
+        body: JSON.stringify(link),
+      }),
+    deleteSlackUserLink: (id: string) => del<void>(`/api/v1/integrations/slack/user-links/${encodeURIComponent(id)}`),
+    listSlackChannels: () => get<{ data: import('./types').SlackChannel[] }>('/api/v1/integrations/slack/channels'),
     updateSlackChannels: (channelIds: string[]) => request('/api/v1/integrations/slack/channels', {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    updateSlackChannelSettings: (channelId: string, settings: import('./types').SlackChannelSettingsUpdate) =>
+      request<import('./types').SingleResponse<unknown>>(`/api/v1/integrations/slack/channels/${encodeURIComponent(channelId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
     connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
     connectCircleCI: (authToken: string, projectSlug: string) =>
       post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {

@@ -19,7 +19,7 @@ export const platformLayers = [
     heading: "Run agents from anywhere.",
     body: "Start Codex, Claude Code, and other coding agents from web, mobile, Slack, Linear, or Sentry. Runs happen in cloud sandboxes your team can follow.",
     components: [
-      "Codex, Claude Code, Gemini CLI, and more",
+      "Codex, Claude Code, OpenCode, and more",
       "Cloud sandboxes with previews",
       "Mobile-friendly job controls",
       "Autopilot from issues and errors",

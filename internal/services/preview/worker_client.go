@@ -85,14 +85,14 @@ type StartBranchPreviewJobPayload struct {
 // The job re-attempts the start once capacity is available, retrying with
 // backoff rather than silently dropping the webhook event.
 type AutoPreviewDeferredPayload struct {
-	OrgID          uuid.UUID             `json:"org_id"`
-	UserID         uuid.UUID             `json:"user_id"`
-	RepositoryID   uuid.UUID             `json:"repository_id"`
-	PRNumber       int                   `json:"pr_number"`
-	HeadRef        string                `json:"head_ref"`
-	HeadSHA        string                `json:"head_sha"`
-	HTMLURL        string                `json:"html_url"`
-	Mode           models.PreviewAutoMode `json:"mode"`
+	OrgID        uuid.UUID              `json:"org_id"`
+	UserID       uuid.UUID              `json:"user_id"`
+	RepositoryID uuid.UUID              `json:"repository_id"`
+	PRNumber     int                    `json:"pr_number"`
+	HeadRef      string                 `json:"head_ref"`
+	HeadSHA      string                 `json:"head_sha"`
+	HTMLURL      string                 `json:"html_url"`
+	Mode         models.PreviewAutoMode `json:"mode"`
 }
 
 type PreviewCachePrewarmSource string
@@ -167,13 +167,23 @@ type RemoteStopActivePreviewForSessionResponse struct {
 // WorkerPreviewClient is the signed app->worker preview control-plane client.
 type WorkerPreviewClient struct {
 	httpClient *http.Client
-	secret     string
+	keyring    auth.PreviewTokenKeyring
 }
 
 // NewWorkerPreviewClient creates a worker preview client.
 func NewWorkerPreviewClient(secret string) *WorkerPreviewClient {
+	keyring, err := auth.NewPreviewTokenKeyring([]string{secret})
+	if err != nil {
+		keyring = auth.PreviewTokenKeyring{}
+	}
+	return NewWorkerPreviewClientWithKeyring(keyring)
+}
+
+// NewWorkerPreviewClientWithKeyring creates a worker preview client backed by
+// the ordered preview RPC keyring.
+func NewWorkerPreviewClientWithKeyring(keyring auth.PreviewTokenKeyring) *WorkerPreviewClient {
 	return &WorkerPreviewClient{
-		secret: secret,
+		keyring: keyring,
 		httpClient: &http.Client{
 			Timeout: previewWorkerHTTPTimeout,
 		},
@@ -201,7 +211,7 @@ func (c *WorkerPreviewClient) newRequest(
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	token, err := auth.GeneratePreviewToken(c.secret, claims)
+	token, err := c.keyring.Generate(claims)
 	if err != nil {
 		return nil, fmt.Errorf("sign preview token: %w", err)
 	}

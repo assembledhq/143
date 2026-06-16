@@ -237,11 +237,11 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 		WithArgs(pgx.NamedArgs{
 			"org_id":          orgID,
 			"pull_request_id": pullRequestID,
-			"health_version":  int64(7),
+			"head_sha":        "head-new",
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns).
-			AddRow(uuid.New(), orgID, pullRequestID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(7), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now).
-			AddRow(uuid.New(), orgID, pullRequestID, terminalSessionID, (*uuid.UUID)(nil), models.PullRequestRepairActionTypeResolveConflicts, int64(7), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now))
+			AddRow(uuid.New(), orgID, pullRequestID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(6), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now, "head-new", "base-old").
+			AddRow(uuid.New(), orgID, pullRequestID, terminalSessionID, (*uuid.UUID)(nil), models.PullRequestRepairActionTypeResolveConflicts, int64(7), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now, "head-new", "base-new"))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id = .+ AND id = ANY\\(@ids\\) AND deleted_at IS NULL").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID,
@@ -276,6 +276,7 @@ func TestPRServiceBuildPullRequestHealthResponseIncludesActiveRepairs(t *testing
 	require.Equal(t, sessionID, resp.ActiveRepairs[0].SessionID, "buildPullRequestHealthResponse should surface the running repair session")
 	require.Equal(t, &threadID, resp.ActiveRepairs[0].ThreadID, "buildPullRequestHealthResponse should surface the running repair thread")
 	require.Equal(t, models.SessionStatusRunning, resp.ActiveRepairs[0].SessionStatus, "buildPullRequestHealthResponse should surface the linked session status")
+	require.Equal(t, int64(6), resp.ActiveRepairs[0].HealthVersion, "buildPullRequestHealthResponse should preserve the repair launch health version even when current health has advanced on the same head")
 	require.False(t, resp.CanMerge, "buildPullRequestHealthResponse should suppress merge while a repair is active for the current health version")
 	require.NoError(t, mock.ExpectationsWereMet(), "all active repair health queries should be executed")
 }
@@ -657,7 +658,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": headSHA}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("INSERT INTO pull_request_health_current").
 		WithArgs(pgx.NamedArgs{
@@ -790,7 +791,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": "head-sync"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("INSERT INTO pull_request_health_current").
 		WithArgs(pgx.NamedArgs{
@@ -1094,7 +1095,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": "head-pending"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec("INSERT INTO pull_request_health_current").
 		WithArgs(pgx.NamedArgs{
@@ -1296,7 +1297,7 @@ func TestPRServiceEnrichPullRequestHealth(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all enrichment expectations should be met")
 }
 
-func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
+func TestPRServiceStartPullRequestRepairBlocksWhenInFlight(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -1339,10 +1340,10 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 			"org_id":          orgID,
 			"pull_request_id": pullRequestID,
 			"action_type":     models.PullRequestRepairActionTypeResolveConflicts,
-			"health_version":  int64(5),
+			"head_sha":        "head",
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns).AddRow(
-			repairRunID, orgID, pullRequestID, sessionID, (*uuid.UUID)(nil), models.PullRequestRepairActionTypeResolveConflicts, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now,
+			repairRunID, orgID, pullRequestID, sessionID, (*uuid.UUID)(nil), models.PullRequestRepairActionTypeResolveConflicts, int64(4), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now, "head", "base-old",
 		))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1357,11 +1358,137 @@ func TestPRServiceStartPullRequestRepairReusesExistingRun(t *testing.T) {
 	}
 
 	resp, err := service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionTypeResolveConflicts})
-	require.NoError(t, err, "StartPullRequestRepair should reuse an active in-flight repair run")
-	require.Equal(t, sessionID, resp.SessionID, "StartPullRequestRepair should return the active repair session")
-	require.True(t, resp.ReusedInFlight, "StartPullRequestRepair should mark reused in-flight runs")
-	require.Equal(t, "existing", resp.Mode, "StartPullRequestRepair should report that it reused an existing session")
-	require.NoError(t, mock.ExpectationsWereMet(), "all repair-run reuse expectations should be met")
+	require.Nil(t, resp, "StartPullRequestRepair should not return a session when an in-flight repair is detected")
+	require.ErrorIs(t, err, ErrRepairAlreadyInProgress, "StartPullRequestRepair should return ErrRepairAlreadyInProgress when a repair session is already running")
+	require.NoError(t, mock.ExpectationsWereMet(), "all repair-run in-flight detection expectations should be met")
+}
+
+func TestPRServiceStartPullRequestRepairReturnsBusyWhenCanonicalSessionRunning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	summary := models.PullRequestHealthSummary{
+		MergeState:       models.PullRequestMergeStateBlocked,
+		FailingTestCount: 1,
+		NeedsAgentAction: true,
+	}
+	summaryJSON, err := json.Marshal(summary)
+	require.NoError(t, err, "should marshal health summary")
+	snapshotKey := "snapshot"
+	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusRunning)
+	setPRHealthSessionRowValue(sessionRow, "snapshot_key", &snapshotKey)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
+		WillReturnRows(pgxmock.NewRows(prHealthSnapshotTestColumns).AddRow(
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, nil, nil, 0, models.PullRequestHealthEnrichmentStatusReady, nil, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":          orgID,
+			"pull_request_id": pullRequestID,
+			"action_type":     models.PullRequestRepairActionTypeFixTests,
+			"head_sha":        "head",
+		}).
+		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(
+			sessionRow...,
+		))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+
+	resp, err := service.StartPullRequestRepair(context.Background(), orgID, pullRequestID, uuid.New(), StartPullRequestRepairOptions{Action: models.PullRequestRepairActionTypeFixTests})
+	require.Nil(t, resp, "StartPullRequestRepair should not launch a second repair turn while the canonical session is running")
+	require.ErrorIs(t, err, ErrRepairSessionBusy, "StartPullRequestRepair should return a handled busy error when the canonical session is not resumable")
+	require.NoError(t, mock.ExpectationsWereMet(), "all busy repair expectations should be met")
+}
+
+func TestPRServiceCompletePullRequestRepairRunPublishesUpdate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	redisMetrics, err := cache.NewMetrics()
+	require.NoError(t, err, "redis metrics should initialize")
+	redisClient := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), redisMetrics)
+	require.NotNil(t, redisClient, "redis client should initialize")
+	t.Cleanup(func() {
+		require.NoError(t, redisClient.Close(), "redis client should close cleanly")
+	})
+	streams := cache.NewPullRequestStreams(redisClient, zerolog.Nop())
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	sessionID := uuid.New()
+	repairRunID := uuid.New()
+	now := time.Now().UTC()
+	summaryJSON := json.RawMessage(`{"merge_state":"blocked","has_conflicts":false,"failing_test_count":1,"needs_agent_action":true}`)
+
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "test should subscribe to pull request updates")
+	defer sub.Close()
+
+	mock.ExpectExec("UPDATE pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": repairRunID}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, &sessionID, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+			pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusReady, nil, now, now,
+		))
+
+	service := &PRService{
+		pullRequests:    db.NewPullRequestStore(mock),
+		prHealthStreams: streams,
+		logger:          zerolog.New(io.Discard),
+	}
+
+	err = service.CompletePullRequestRepairRun(context.Background(), orgID, pullRequestID, repairRunID)
+	require.NoError(t, err, "CompletePullRequestRepairRun should deactivate the run and publish a pull request update")
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-sub.C:
+			return event.PullRequestID == pullRequestID && event.Version == 5 && event.HeadSHA == "head"
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "CompletePullRequestRepairRun should publish a pull request update for health refetch")
+	require.NoError(t, mock.ExpectationsWereMet(), "all repair completion expectations should be met")
 }
 
 func TestPRHealthServiceHelpers(t *testing.T) {
@@ -1393,15 +1520,22 @@ func TestPRHealthServiceHelpers(t *testing.T) {
 	require.Equal(t, &first, firstNonNilString(nil, &first, &second), "firstNonNilString should return the first non-empty pointer")
 	require.Equal(t, "text", truncateText("text", 0), "truncateText should leave values unchanged for non-positive limits")
 	require.Equal(t, "hello world", stripWhitespace("  hello   world \n"), "stripWhitespace should collapse repeated whitespace")
-	require.Equal(t, "Please resolve the conflicts.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts), "repairPromptForAction should specialize conflict repair prompts")
-	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other"), "repairPromptForAction should provide a default prompt")
+	require.Equal(t, "Please resolve the conflicts and push changes to the pull request branch.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts, true), "repairPromptForAction should specialize conflict repair prompts that push changes")
+	require.Equal(t, "Please resolve the conflicts without pushing changes.", repairPromptForAction(models.PullRequestRepairActionTypeResolveConflicts, false), "repairPromptForAction should specialize conflict repair prompts that do not push changes")
+	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other", true), "repairPromptForAction should provide a default prompt")
+	require.Equal(t, "Please repair this pull request.", repairPromptForAction("other", false), "repairPromptForAction default prompt should ignore the push flag")
+	require.True(t, repairShouldPushChanges(StartPullRequestRepairOptions{}), "repairShouldPushChanges should default omitted options to pushing changes")
+	pushTrue, pushFalse := true, false
+	require.True(t, repairShouldPushChanges(StartPullRequestRepairOptions{PushChanges: &pushTrue}), "repairShouldPushChanges should honor an explicit push=true")
+	require.False(t, repairShouldPushChanges(StartPullRequestRepairOptions{PushChanges: &pushFalse}), "repairShouldPushChanges should honor an explicit push=false")
 	require.Equal(t, models.PullRequestMergeStateBlocked, normalizeRepairMergeState(models.PullRequestMergeStateUnknown, boolPtr(false), "blocked"), "normalizeRepairMergeState should preserve non-conflict blocked states")
 	require.Equal(t, models.PullRequestMergeStateBehind, normalizeRepairMergeState(models.PullRequestMergeStateBehind, nil, ""), "normalizeRepairMergeState should fall back to the existing state when GitHub mergeability is unknown")
 	require.True(t, isSessionTerminalStatus(models.SessionStatusCompleted), "isSessionTerminalStatus should recognize completed sessions")
 	require.False(t, isSessionTerminalStatus(models.SessionStatusRunning), "isSessionTerminalStatus should reject active sessions")
 	require.True(t, isUniqueActiveRepairRunViolation(&pgconn.PgError{Code: pgerrcode.UniqueViolation, ConstraintName: "idx_pull_request_repair_runs_active"}), "isUniqueActiveRepairRunViolation should recognize the active repair-run uniqueness constraint")
 	require.False(t, isUniqueActiveRepairRunViolation(errors.New("boom")), "isUniqueActiveRepairRunViolation should reject unrelated errors")
-	require.Equal(t, "Please fix these tests.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests), "repairPromptForAction should specialize test repair prompts")
+	require.Equal(t, "Please fix these tests and push changes to the pull request branch.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests, true), "repairPromptForAction should specialize test repair prompts that push changes")
+	require.Equal(t, "Please fix these tests without pushing changes.", repairPromptForAction(models.PullRequestRepairActionTypeFixTests, false), "repairPromptForAction should specialize test repair prompts that do not push changes")
 	require.Equal(t, "", firstNonEmpty("", "  "), "firstNonEmpty should return an empty string when every value is blank")
 	require.Nil(t, firstNonNilString(strPtr("   ")), "firstNonNilString should skip blank pointed strings")
 	require.Equal(t, "12345…", truncateText("123456", 5), "truncateText should append an ellipsis when trimming long strings")
@@ -1463,6 +1597,8 @@ func TestPRServiceResumeRepairSession(t *testing.T) {
 						"workspace_mode":       models.PullRequestRepairWorkspaceModePRHeadReconstruction,
 						"active":               true,
 						"obsoleted_by_version": (*int64)(nil),
+						"head_sha":             "head",
+						"base_sha":             "base",
 					}).
 					WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
 				mock.ExpectQuery("INSERT INTO jobs").
@@ -1955,7 +2091,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 			}).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 		mock.ExpectExec("UPDATE pull_request_repair_runs").
-			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1)}).
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": "head-inline"}).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 		mock.ExpectExec("INSERT INTO pull_request_health_current").
 			WithArgs(pgx.NamedArgs{
@@ -2265,7 +2401,7 @@ func TestPRServiceReconcileAndRepairBranchCoverage(t *testing.T) {
 				"org_id":          orgID,
 				"pull_request_id": pullRequestID,
 				"action_type":     models.PullRequestRepairActionTypeFixTests,
-				"health_version":  int64(5),
+				"head_sha":        "head",
 			}).
 			WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns))
 
@@ -2364,7 +2500,7 @@ var prHealthSnapshotTestColumns = []string{
 }
 
 var prRepairRunTestColumns = []string{
-	"id", "org_id", "pull_request_id", "session_id", "thread_id", "action_type", "health_version", "workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at",
+	"id", "org_id", "pull_request_id", "session_id", "thread_id", "action_type", "health_version", "workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at", "head_sha", "base_sha",
 }
 
 var prHealthSessionThreadColumns = []string{

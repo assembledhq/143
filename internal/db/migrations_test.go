@@ -48,6 +48,40 @@ func TestMigrationsDeclareSessionsModelUsedColumn(t *testing.T) {
 	require.Fail(t, "schema must add sessions.model_used because SessionStore.UpdateResult writes it")
 }
 
+func TestRemoveGeminiCLIMigrationKeepsHistoricalSessionsReadable(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000186_remove_gemini_cli_agent_type.up.sql")
+	require.NoError(t, err, "test should read the Gemini CLI removal migration")
+
+	sql := string(body)
+	require.NotContains(t, sql, "VALIDATE CONSTRAINT chk_sessions_agent_type",
+		"session agent_type constraint should stay NOT VALID so historical gemini_cli sessions remain readable")
+	require.Contains(t, sql, "jsonb_set",
+		"migration should normalize saved org default_agent_type values away from gemini_cli")
+	require.Contains(t, sql, "agent_config,gemini_cli",
+		"migration should remove saved gemini_cli agent_config entries")
+	require.Contains(t, sql, "UPDATE automations",
+		"migration should normalize saved automation config away from gemini_cli")
+}
+
+func TestUsersSecondaryEmailsMigrationIsExpandOnly(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000193_users_secondary_emails.up.sql")
+	require.NoError(t, err, "test should read the users secondary emails migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "ALTER TABLE users ADD COLUMN secondary_emails text[];",
+		"migration should add secondary_emails as a nullable expand-only column")
+	require.NotContains(t, sql, "UPDATE users",
+		"migration should not backfill users in the schema migration")
+	require.NotContains(t, sql, "SET DEFAULT",
+		"migration should not set a default that can require table-wide validation")
+	require.NotContains(t, sql, "SET NOT NULL",
+		"migration should leave secondary_emails nullable and let queries coalesce null arrays")
+}
+
 func TestMigrationsAllowBuilderRole(t *testing.T) {
 	t.Parallel()
 
@@ -434,6 +468,41 @@ func TestReviewLoopMigrationDoesNotReferenceSessionMessagesByIDOnly(t *testing.T
 	sql := string(body)
 	require.NotContains(t, sql, "REFERENCES session_messages(id)",
 		"session_messages is partitioned with primary key (id, created_at), so review loop message pointers must not FK to id alone")
+}
+
+func TestSlackHumanInputPrivacyMigrationIsRetrySafe(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000189_slackbot_human_input_privacy.up.sql")
+	require.NoError(t, err, "test should read the Slack human-input privacy migration")
+
+	sql := string(body)
+	require.Contains(t, sql, "ADD COLUMN IF NOT EXISTS assigned_user_id",
+		"Slack human-input privacy migration should tolerate retry after partially adding assigned_user_id")
+	require.Contains(t, sql, "ADD COLUMN IF NOT EXISTS sensitivity",
+		"Slack human-input privacy migration should tolerate retry after partially adding sensitivity")
+	require.Contains(t, sql, "ADD COLUMN IF NOT EXISTS preferred_channel",
+		"Slack human-input privacy migration should tolerate retry after partially adding preferred_channel")
+	require.Contains(t, sql, "CREATE INDEX IF NOT EXISTS idx_session_human_input_requests_assigned_pending",
+		"Slack human-input privacy migration should tolerate retry after creating assigned-user index")
+	require.Contains(t, sql, "CREATE INDEX IF NOT EXISTS idx_slack_inbound_events_payload_retention",
+		"Slack human-input privacy migration should tolerate retry after creating payload-retention index")
+}
+
+func TestSlackSessionClaimsMigrationDropsDependentIndexExplicitly(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000190_slack_session_claims.up.sql")
+	require.NoError(t, err, "test should read the Slack session claims up migration")
+	downBody, err := os.ReadFile("../../migrations/000190_slack_session_claims.down.sql")
+	require.NoError(t, err, "test should read the Slack session claims down migration")
+
+	require.Contains(t, string(upBody), "CREATE TABLE IF NOT EXISTS slack_session_claims",
+		"Slack session claims up migration should tolerate retry after creating the claims table")
+	require.Contains(t, string(upBody), "CREATE INDEX IF NOT EXISTS idx_slack_session_claims_org_user",
+		"Slack session claims up migration should tolerate retry after creating the claims index")
+	require.Contains(t, string(downBody), "DROP INDEX IF EXISTS idx_slack_session_claims_org_user",
+		"Slack session claims down migration should drop the claims index explicitly before dropping the table")
 }
 
 func TestGitHubInstallationClaimsMigrationDeduplicatesInstallationsBeforeUpsert(t *testing.T) {

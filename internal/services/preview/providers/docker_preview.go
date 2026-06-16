@@ -288,46 +288,72 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 	var svcEnvs map[string]map[string]string
 	if err := func() (phaseErr error) {
 		// Phase 1: Provision infrastructure containers.
-		for name, infraCfg := range cfg.Infrastructure {
-			tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
-			if !ok {
-				phaseErr = fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
-				return phaseErr
-			}
+		if len(cfg.Infrastructure) > 0 {
+			notifyPhaseStart(observer, "provision_infrastructure")
+			phaseStarted := time.Now()
+			for name, infraCfg := range cfg.Infrastructure {
+				tmpl, ok := preview.LookupInfraTemplate(infraCfg.Template)
+				if !ok {
+					phaseErr = fmt.Errorf("unknown infrastructure template %q", infraCfg.Template)
+					notifyPhaseEnd(observer, "provision_infrastructure", phaseErr)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "provision_infrastructure", time.Since(phaseStarted))
+					return phaseErr
+				}
 
-			ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
-			if err != nil {
-				phaseErr = fmt.Errorf("provision infrastructure %q: %w", name, err)
-				return phaseErr
+				ih, err := d.provisionInfra(ctx, sb, handle, name, infraCfg, tmpl)
+				if err != nil {
+					phaseErr = fmt.Errorf("provision infrastructure %q: %w", name, err)
+					notifyPhaseEnd(observer, "provision_infrastructure", phaseErr)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "provision_infrastructure", time.Since(phaseStarted))
+					return phaseErr
+				}
+				d.mu.Lock()
+				state.infra[name] = ih
+				d.mu.Unlock()
+				infraCreds[name] = ih.Credential
 			}
-			d.mu.Lock()
-			state.infra[name] = ih
-			d.mu.Unlock()
-			infraCreds[name] = ih.Credential
+			notifyPhaseEnd(observer, "provision_infrastructure", nil)
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "provision_infrastructure", time.Since(phaseStarted))
 		}
 
 		// Phase 2: Wait for infrastructure health.
-		for name, ih := range state.infra {
-			infraCfg := cfg.Infrastructure[name]
-			tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
-			if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
-				phaseErr = fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
-				return phaseErr
+		if len(state.infra) > 0 {
+			notifyPhaseStart(observer, "infrastructure_health")
+			phaseStarted := time.Now()
+			for name, ih := range state.infra {
+				infraCfg := cfg.Infrastructure[name]
+				tmpl, _ := preview.LookupInfraTemplate(infraCfg.Template)
+				if err := d.waitForInfraHealth(ctx, ih.ContainerID, tmpl); err != nil {
+					phaseErr = fmt.Errorf("%w: infrastructure %q (%s): %v", preview.ErrInfraUnhealthy, name, infraCfg.Template, err)
+					notifyPhaseEnd(observer, "infrastructure_health", phaseErr)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "infrastructure_health", time.Since(phaseStarted))
+					return phaseErr
+				}
+				d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
 			}
-			d.logger.Info().Str("infra", name).Str("template", infraCfg.Template).Msg("infrastructure healthy")
+			notifyPhaseEnd(observer, "infrastructure_health", nil)
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "infrastructure_health", time.Since(phaseStarted))
 		}
 
 		// Phase 3: Run init scripts.
-		for name, infraCfg := range cfg.Infrastructure {
-			if infraCfg.InitScript == "" {
-				continue
+		if previewConfigHasInitScripts(cfg) {
+			notifyPhaseStart(observer, "init_scripts")
+			phaseStarted := time.Now()
+			for name, infraCfg := range cfg.Infrastructure {
+				if infraCfg.InitScript == "" {
+					continue
+				}
+				ih := state.infra[name]
+				if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
+					phaseErr = fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
+					notifyPhaseEnd(observer, "init_scripts", phaseErr)
+					metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "init_scripts", time.Since(phaseStarted))
+					return phaseErr
+				}
+				d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
 			}
-			ih := state.infra[name]
-			if err := d.runInitScript(ctx, sb, ih, infraCfg); err != nil {
-				phaseErr = fmt.Errorf("%w: infrastructure %q script %q: %v", preview.ErrInitScriptFailed, name, infraCfg.InitScript, err)
-				return phaseErr
-			}
-			d.logger.Info().Str("infra", name).Str("script", infraCfg.InitScript).Msg("init script completed")
+			notifyPhaseEnd(observer, "init_scripts", nil)
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "init_scripts", time.Since(phaseStarted))
 		}
 
 		// Phase 4: Run the platform-managed install phase before services start.
@@ -344,9 +370,17 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 
 		// Phase 5: Write generated runtime secret files after install so install
 		// hooks cannot read preview-runtime app secrets.
-		if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
-			phaseErr = fmt.Errorf("write preview secret files: %w", err)
-			return phaseErr
+		if len(cfg.RuntimeSecretFiles) > 0 {
+			notifyPhaseStart(observer, "runtime_secret_files")
+			phaseStarted := time.Now()
+			if err := d.writeRuntimeSecretFiles(ctx, sb, cfg.RuntimeSecretFiles); err != nil {
+				phaseErr = fmt.Errorf("write preview secret files: %w", err)
+				notifyPhaseEnd(observer, "runtime_secret_files", phaseErr)
+				metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "runtime_secret_files", time.Since(phaseStarted))
+				return phaseErr
+			}
+			notifyPhaseEnd(observer, "runtime_secret_files", nil)
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "runtime_secret_files", time.Since(phaseStarted))
 		}
 
 		// Phase 6: Build service environment with injected credentials.
@@ -532,6 +566,18 @@ func (d *DockerPreviewProvider) PrewarmPreviewInstallCaches(ctx context.Context,
 		infra:   map[string]*preview.InfraHandle{},
 	}
 	return d.runPreviewInstallWithSaveMode(ctx, state, cfg.Install, opts, observer, false)
+}
+
+func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, infraCfg := range cfg.Infrastructure {
+		if infraCfg.InitScript != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // =============================================================================
@@ -1134,6 +1180,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	}
 
 	dependencyPaths, dependencyCacheEnabled := preview.ResolvePreviewInstallCachePaths(install)
+	cacheRestorableVerifyPaths := preview.CacheRestorablePreviewInstallVerifyPaths(install.VerifyPaths)
 	packageManagerPaths, packageManagers, packageManagerCacheEnabled := preview.ResolvePreviewInstallPackageManagerCachePaths(install)
 	var dependencyCacheKey string
 	var dependencyLockfiles []preview.PreviewInstallLockfileKey
@@ -1261,7 +1308,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 			}
 			notifyPhaseEnd(observer, "dependency_cache_key", nil)
 			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "dependency_cache_key", time.Since(keyStarted))
-			if !markerExists && len(install.VerifyPaths) == 0 {
+			if !markerExists && len(cacheRestorableVerifyPaths) == 0 {
 				// Without declared verify_paths there is no contract proving a
 				// restored tree reproduces install output, and commands like
 				// `npm ci` wipe restored paths anyway — restoring first would
@@ -1308,7 +1355,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 							// image. When the repo's declared verify_paths are
 							// all present after restore, writing the marker
 							// lets the install phase skip entirely.
-							if d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, install.VerifyPaths) {
+							if d.previewInstallVerifyPathsSatisfied(ctx, state.sandbox, cacheRestorableVerifyPaths) {
 								if markerErr := d.writePreviewInstallMarker(ctx, state.sandbox, markerPath); markerErr != nil {
 									d.logger.Warn().Err(markerErr).Str("marker", markerPath).Msg("preview dependency cache restore satisfied verify_paths but marker write failed; running install")
 								} else {
@@ -1337,7 +1384,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 	// cold starts will run preview.install and clean_paths may wipe restored
 	// files before the install command can use them. With a marker present,
 	// restore can satisfy verify_paths and skip preview.install entirely.
-	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, install.VerifyPaths) {
+	if !forceInstallAfterDependencyRestoreFailure && d.previewInstallCacheValid(ctx, state.sandbox, markerPath, cacheRestorableVerifyPaths) {
 		d.logger.Info().Str("marker", markerPath).Msg("preview install cache hit")
 		if dependencyRestoredThisLaunch {
 			// The blob for this exact key was just extracted into the
@@ -1370,6 +1417,7 @@ func (d *DockerPreviewProvider) runPreviewInstallWithSaveMode(ctx context.Contex
 			outputTail = outputTail[1:]
 		}
 		outputTail = append(outputTail, text)
+		notifyInstallOutput(observer, text)
 		d.logger.Debug().Str("output", text).Msg("preview install output")
 	}
 	installCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1897,6 +1945,19 @@ func notifyServiceOutput(observer preview.ServiceObserver, name, line string) {
 		return
 	}
 	observer.OnServiceOutput(name, line)
+}
+
+type installOutputObserver interface {
+	OnInstallOutput(line string)
+}
+
+func notifyInstallOutput(observer preview.ServiceObserver, line string) {
+	if observer == nil {
+		return
+	}
+	if installObserver, ok := observer.(installOutputObserver); ok {
+		installObserver.OnInstallOutput(line)
+	}
 }
 
 // notifyServiceReady invokes observer.OnServiceReady when observer is non-nil.

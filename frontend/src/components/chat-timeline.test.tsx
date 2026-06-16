@@ -2,12 +2,22 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement } from "react";
 import { ChatTimeline, formatMessageTime } from "./chat-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
 import { server } from "@/test/mocks/server";
+
+const { canCopyToClipboardMock, copyTextToClipboardMock } = vi.hoisted(() => ({
+  canCopyToClipboardMock: vi.fn(() => true),
+  copyTextToClipboardMock: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/clipboard", () => ({
+  canCopyToClipboard: canCopyToClipboardMock,
+  copyTextToClipboard: copyTextToClipboardMock,
+}));
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number }): SessionMessage {
   return {
@@ -74,6 +84,12 @@ describe("formatMessageTime", () => {
 });
 
 describe("ChatTimeline", () => {
+  beforeEach(() => {
+    canCopyToClipboardMock.mockReturnValue(true);
+    copyTextToClipboardMock.mockClear();
+    copyTextToClipboardMock.mockResolvedValue(undefined);
+  });
+
   it("renders message bubbles", () => {
     const entries: TimelineEntry[] = [
       { kind: "message", data: makeMessage({ id: 1, content: "User said hi", role: "user" }) },
@@ -91,6 +107,23 @@ describe("ChatTimeline", () => {
     render(<ChatTimeline entries={entries} isRunning={false} />);
 
     expect(screen.getByText("Selectable user prompt").closest(".chat-user-bubble")).toBeInTheDocument();
+  });
+
+  it("copies user prompts and assistant final responses from transcript message actions", async () => {
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: makeMessage({ id: 1, content: "Original prompt\nwith details", role: "user" }) },
+      { kind: "message", data: makeMessage({ id: 2, content: "Final response\nwith next steps", role: "assistant" }) },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Copy prompt" }));
+    await user.click(screen.getByRole("button", { name: "Copy final response" }));
+
+    expect(copyTextToClipboardMock).toHaveBeenNthCalledWith(1, "Original prompt\nwith details");
+    expect(copyTextToClipboardMock).toHaveBeenNthCalledWith(2, "Final response\nwith next steps");
+    expect(screen.getByRole("button", { name: "Copied prompt" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copied final response" })).toBeInTheDocument();
   });
 
   it("renders tool group collapsed by default, expands on click", async () => {

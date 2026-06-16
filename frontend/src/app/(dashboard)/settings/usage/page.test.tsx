@@ -399,6 +399,15 @@ describe('UsagePage', () => {
     expect(screen.queryByText('By Capacity')).not.toBeInTheDocument();
   });
 
+  it('offers OpenCode in the agent filter', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<UsagePage />);
+
+    await user.click(screen.getByLabelText('Agent filter'));
+
+    expect(await screen.findByText('OpenCode')).toBeInTheDocument();
+  });
+
   it('keeps the chart request valid for the default user breakdown', async () => {
     server.use(
       http.get('*/api/v1/usage/timeseries', ({ request }) => {

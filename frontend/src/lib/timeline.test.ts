@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildTimeline, flattenTimelineResponse } from "./timeline";
-import type { SessionMessage, SessionLog } from "./types";
+import { buildTimeline, flattenTimelineResponse, flattenTranscriptWindows } from "./timeline";
+import type { SessionMessage, SessionLog, SessionTranscriptTurn, HumanInputRequest } from "./types";
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number; created_at: string }): SessionMessage {
   return {
@@ -105,7 +105,7 @@ describe("buildTimeline", () => {
     expect(result[0].kind).toBe("log");
   });
 
-  it("keeps recoverable Codex apply_patch diagnostics behind the log toggle", () => {
+  it("does not classify raw Codex-looking errors without backend visibility metadata", () => {
     const logs = [
       makeLog({
         id: 1,
@@ -116,21 +116,43 @@ describe("buildTimeline", () => {
     ];
     const result = buildTimeline([], logs);
     expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
+    expect(result[0].kind).toBe("error");
   });
 
-  it("keeps recoverable Codex apply_patch diagnostics with top-level context behind the log toggle", () => {
+  it("keeps backend-classified Codex diagnostics behind the log toggle", () => {
     const logs = [
       makeLog({
         id: 1,
         created_at: "2026-01-01T00:00:01Z",
         level: "error",
         message: "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/db/autopilot_queue.go:\nfunc ptrTime(t time.Time) *time.Time {\n\treturn &t\n}",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
+      }),
+      makeLog({
+        id: 2,
+        created_at: "2026-01-01T00:00:02Z",
+        level: "error",
+        message: "Reconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: Try again)",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
+      }),
+      makeLog({
+        id: 3,
+        created_at: "2026-01-01T00:00:03Z",
+        level: "error",
+        message: "2026-06-12T08:54:38.209896Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: Try again, url: wss://chatgpt.com/backend-api/codex/responses",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
+      }),
+      makeLog({
+        id: 4,
+        created_at: "2026-01-01T00:00:04Z",
+        level: "error",
+        message: "2026-06-12T02:31:46.399958Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit",
+        metadata: { visibility: "hidden", diagnostic_class: "benign_runtime_diagnostic", diagnostic_source: "codex" },
       }),
     ];
     const result = buildTimeline([], logs);
-    expect(result).toHaveLength(1);
-    expect(result[0].kind).toBe("log");
+    expect(result).toHaveLength(4);
+    expect(result.map((entry) => entry.kind)).toEqual(["log", "log", "log", "log"]);
   });
 
   it("shows streamed assistant output logs as assistant_output when no persisted message exists", () => {
@@ -280,5 +302,75 @@ describe("flattenTimelineResponse", () => {
     expect(flattened.messages).toEqual([]);
     expect(flattened.logs).toEqual([]);
     expect(flattened.humanInputs).toEqual([request]);
+  });
+});
+
+describe("flattenTranscriptWindows", () => {
+  const humanInput: HumanInputRequest = {
+    id: "hir-1",
+    org_id: "org-1",
+    session_id: "session-1",
+    turn_number: 1,
+    agent_type: "claude_code",
+    request_kind: "action_choice",
+    status: "answered",
+    title: "Choose next action",
+    body: "What next?",
+    choices: [],
+    created_at: "2026-01-01T00:00:30Z",
+  };
+
+  it("unwraps the embedded message/log/human-input records from each turn", () => {
+    const message = makeMessage({ id: 1, created_at: "2026-01-01T00:00:00Z", role: "user", content: "hi" });
+    const toolUse = makeLog({ id: 10, created_at: "2026-01-01T00:00:10Z", level: "tool_use" });
+    const turns: SessionTranscriptTurn[] = [
+      {
+        turn_number: 1,
+        started_at: message.created_at,
+        entries: [
+          { id: "msg_1", kind: "message", created_at: message.created_at, message_id: 1, message },
+          { id: "tuse_10", kind: "tool_use", created_at: toolUse.created_at, log_id: 10, log: toolUse },
+          { id: "hiq_hir-1", kind: "human_input", created_at: humanInput.created_at, human_input: humanInput },
+        ],
+      },
+    ];
+
+    const { messages, logs, humanInputs } = flattenTranscriptWindows(turns);
+
+    expect(messages).toEqual([message]);
+    expect(logs).toEqual([toolUse]);
+    expect(humanInputs).toEqual([humanInput]);
+  });
+
+  it("de-duplicates records that repeat across overlapping turns/pages", () => {
+    const message = makeMessage({ id: 1, created_at: "2026-01-01T00:00:00Z" });
+    const log = makeLog({ id: 10, created_at: "2026-01-01T00:00:10Z", level: "output" });
+    const entry = {
+      message: { id: "msg_1", kind: "message" as const, created_at: message.created_at, message_id: 1, message },
+      log: { id: "log_10", kind: "log" as const, created_at: log.created_at, log_id: 10, log },
+    };
+    const turns: SessionTranscriptTurn[] = [
+      { turn_number: 1, started_at: message.created_at, entries: [entry.message, entry.log] },
+      { turn_number: 1, started_at: message.created_at, entries: [entry.message, entry.log] },
+    ];
+
+    const { messages, logs } = flattenTranscriptWindows(turns);
+
+    expect(messages.map((m) => m.id)).toEqual([1]);
+    expect(logs.map((l) => l.id)).toEqual([10]);
+  });
+
+  it("skips entries that carry no embedded record and tolerates an empty input", () => {
+    const turns: SessionTranscriptTurn[] = [
+      {
+        turn_number: 2,
+        started_at: "2026-01-01T00:01:00Z",
+        // e.g. a milestone/checkpoint marker with only a summary, no record.
+        entries: [{ id: "milestone_1", kind: "milestone", created_at: "2026-01-01T00:01:00Z", summary: "Plan approved" }],
+      },
+    ];
+
+    expect(flattenTranscriptWindows(turns)).toEqual({ messages: [], logs: [], humanInputs: [] });
+    expect(flattenTranscriptWindows(undefined)).toEqual({ messages: [], logs: [], humanInputs: [] });
   });
 });

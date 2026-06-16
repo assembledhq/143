@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
@@ -131,6 +132,32 @@ func TestStartRunnerReadWorkspacePreviewConfig_ParseError(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidConfig, "invalid committed preview config should use the shared invalid-config sentinel")
 	require.Contains(t, err.Error(), repoconfig.ConfigPath, "invalid config error should name the repo config path")
 	require.Nil(t, cfg, "invalid committed preview config should not return a fallback config")
+}
+
+func TestStartRunnerCreateStartupLog_PersistsPreviewLog(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "info", "build", "Creating preview sandbox", json.RawMessage(`{}`), time.Now()))
+
+	runner := &StartRunner{
+		previews: db.NewPreviewStore(mock),
+		logger:   zerolog.Nop(),
+	}
+	runner.createStartupLog(context.Background(), orgID, previewID, "info", models.PreviewLogStepBuild, "Creating preview sandbox", map[string]any{
+		"phase": "sandbox_create",
+	})
+	require.NoError(t, mock.ExpectationsWereMet(), "startup log helper should persist preview log rows")
 }
 
 func TestStartRunnerApplyBranchPreviewSandboxNetworkUsesStaticEgress(t *testing.T) {
@@ -435,6 +462,7 @@ type fakePreviewStartupCache struct {
 	restoreCalled bool
 	createKey     string
 	createMeta    SnapshotMetadata
+	createErr     error
 	hit           *CacheHit
 
 	baseFindKey   string
@@ -470,7 +498,7 @@ func (f *fakePreviewStartupCache) ApplyPartialInvalidation(_ context.Context, _ 
 func (f *fakePreviewStartupCache) CreateSnapshot(_ context.Context, _ *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error {
 	f.createKey = snapshotKey
 	f.createMeta = metadata
-	return nil
+	return f.createErr
 }
 
 type fakeStartRunnerSandboxProvider struct {
@@ -769,10 +797,63 @@ func TestStartRunnerCreateBranchPreviewStartupCache_RecordsSuccessfulLaunch(t *t
 	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
 
 	keys := branchPreviewStartupCacheKeys{SnapshotKey: "cache-key", BaseKey: "base-key", CommitSHA: "abc1234"}
-	runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, keys, sb, nil)
+	result := runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, keys, sb, nil)
 
+	require.Equal(t, StartupSnapshotSaved, result, "successful branch preview launch should report a saved startup snapshot")
 	require.Equal(t, "cache-key", cache.createKey, "successful branch preview launch should write the startup cache snapshot")
 	require.Equal(t, SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: "base-key", CommitSHA: "abc1234"}, cache.createMeta, "startup cache metadata should record org, repo, base key, and commit")
+}
+
+func TestStartRunnerCreateBranchPreviewStartupCache_ReportsDisabledWithoutCache(t *testing.T) {
+	t.Parallel()
+
+	runner := &StartRunner{logger: zerolog.Nop()}
+	result := runner.createBranchPreviewStartupCache(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		branchPreviewStartupCacheKeys{SnapshotKey: "cache-key"},
+		&agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"},
+		nil,
+	)
+
+	require.Equal(t, StartupSnapshotDisabled, result, "missing snapshot cache should report startup snapshot caching as disabled")
+}
+
+func TestStartRunnerCreateBranchPreviewStartupCache_ReportsSkippedNoLockfiles(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakePreviewStartupCache{}
+	runner := &StartRunner{snapshotCache: cache, logger: zerolog.Nop()}
+	result := runner.createBranchPreviewStartupCache(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		branchPreviewStartupCacheKeys{},
+		&agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"},
+		nil,
+	)
+
+	require.Equal(t, StartupSnapshotSkippedNoLockfiles, result, "empty startup snapshot key should report missing lockfile-derived keys")
+	require.Empty(t, cache.createKey, "missing lockfiles should not create a startup snapshot")
+}
+
+func TestStartRunnerCreateBranchPreviewStartupCache_ReportsTooLarge(t *testing.T) {
+	t.Parallel()
+
+	cache := &fakePreviewStartupCache{createErr: fmt.Errorf("snapshot create: tar too large (>2147483648 bytes max)")}
+	runner := &StartRunner{snapshotCache: cache, logger: zerolog.Nop()}
+	result := runner.createBranchPreviewStartupCache(
+		context.Background(),
+		uuid.New(),
+		uuid.New(),
+		branchPreviewStartupCacheKeys{SnapshotKey: "cache-key"},
+		&agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"},
+		nil,
+	)
+
+	require.Equal(t, StartupSnapshotTooLarge, result, "oversized startup snapshot creation should be classified distinctly")
+	require.Equal(t, "cache-key", cache.createKey, "startup snapshot creation should have been attempted before size classification")
 }
 
 func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testing.T) {
@@ -804,10 +885,11 @@ func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testi
 
 	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
 	require.NoError(t, err, "skipping secret-file configs should not surface an error")
-	runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, branchPreviewStartupCacheKeys{SnapshotKey: "cache-key"}, sb, cfg)
+	result := runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, branchPreviewStartupCacheKeys{SnapshotKey: "cache-key"}, sb, cfg)
 
 	require.Empty(t, keys.SnapshotKey, "branch preview startup cache should not restore snapshots for configs with generated secret files")
 	require.Empty(t, cache.findKey, "secret-file configs should not query startup cache entries")
 	require.Empty(t, cache.createKey, "secret-file configs should not write startup cache snapshots")
 	require.False(t, cache.restoreCalled, "secret-file configs should not restore cached workspace files")
+	require.Equal(t, StartupSnapshotSkippedSecretFiles, result, "secret-file configs should report the secret-file skip reason")
 }

@@ -44,9 +44,9 @@ func TestPreparePrompt_SerializesCanonicalReferencesForManualSessions(t *testing
 	}{
 		{name: "claude", adapter: NewClaudeCodeAdapter(zerolog.Nop())},
 		{name: "codex", adapter: NewCodexAdapter(zerolog.Nop())},
-		{name: "gemini", adapter: NewGeminiCLIAdapter(zerolog.Nop())},
 		{name: "amp", adapter: NewAmpAdapter(zerolog.Nop())},
 		{name: "pi", adapter: NewPiAdapter(zerolog.Nop())},
+		{name: "opencode", adapter: NewOpenCodeAdapter(zerolog.Nop())},
 	}
 
 	for _, tt := range tests {
@@ -94,9 +94,9 @@ func TestPreparePrompt_SerializesMaterializedAttachmentsForManualSessions(t *tes
 	}{
 		{name: "claude", adapter: NewClaudeCodeAdapter(zerolog.Nop())},
 		{name: "codex", adapter: NewCodexAdapter(zerolog.Nop())},
-		{name: "gemini", adapter: NewGeminiCLIAdapter(zerolog.Nop())},
 		{name: "amp", adapter: NewAmpAdapter(zerolog.Nop())},
 		{name: "pi", adapter: NewPiAdapter(zerolog.Nop())},
+		{name: "opencode", adapter: NewOpenCodeAdapter(zerolog.Nop())},
 	}
 
 	for _, tt := range tests {

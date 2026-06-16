@@ -1,4 +1,4 @@
-import type { HumanInputRequest, SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry } from "./types";
+import type { HumanInputRequest, SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry, SessionTranscriptTurn } from "./types";
 
 /** Prefix added by the backend when a message is sent in plan mode. */
 export const PLAN_MODE_PREFIX = "[PLAN_MODE]\n";
@@ -37,15 +37,8 @@ function metadataString(metadata: SessionLog["metadata"] | null | undefined, key
   return typeof value === "string" ? value : undefined;
 }
 
-function isRecoverableCodexRouterDiagnostic(message: string): boolean {
-  return message.includes("codex_core::tools::router:") && (
-    message.includes("write_stdin failed: stdin is closed for this session") ||
-    message.includes("apply_patch verification failed: Failed to find expected lines")
-  );
-}
-
 function isHiddenLog(log: SessionLog): boolean {
-  return metadataString(log.metadata, "visibility") === "hidden" || isRecoverableCodexRouterDiagnostic(log.message);
+  return metadataString(log.metadata, "visibility") === "hidden";
 }
 
 function isToolResultLog(item: TaggedTimelineItem | undefined): item is Extract<TaggedTimelineItem, { source: "log" }> {
@@ -298,6 +291,47 @@ export function flattenTimelineResponse(entries: SessionTimelineResponseEntry[])
           humanInputs.push(entry.human_input_request);
         }
         break;
+    }
+  }
+
+  return { messages, logs, humanInputs };
+}
+
+/**
+ * Flattens the turn/entry structure returned by the `/transcript` window
+ * endpoint into the {messages, logs, humanInputs} arrays that buildTimeline()
+ * consumes. Each transcript entry embeds the full underlying record
+ * (`message`/`log`/`human_input`), so this is a pure unwrap-and-dedupe. The
+ * embedded `log` is already a SessionLogResponse (preview-truncated with a
+ * `message_truncated` flag), matching what the legacy `/logs` endpoint
+ * returned, so downstream rendering and "Load full output" behave identically.
+ */
+export function flattenTranscriptWindows(turns: SessionTranscriptTurn[] | undefined): {
+  messages: SessionMessage[];
+  logs: SessionLog[];
+  humanInputs: HumanInputRequest[];
+} {
+  const messages: SessionMessage[] = [];
+  const logs: SessionLog[] = [];
+  const humanInputs: HumanInputRequest[] = [];
+  const seenMessageIds = new Set<number>();
+  const seenLogIds = new Set<number>();
+  const seenHumanInputIds = new Set<string>();
+
+  for (const turn of turns ?? []) {
+    for (const entry of turn.entries) {
+      if (entry.message && !seenMessageIds.has(entry.message.id)) {
+        seenMessageIds.add(entry.message.id);
+        messages.push(entry.message);
+      }
+      if (entry.log && !seenLogIds.has(entry.log.id)) {
+        seenLogIds.add(entry.log.id);
+        logs.push(entry.log);
+      }
+      if (entry.human_input && !seenHumanInputIds.has(entry.human_input.id)) {
+        seenHumanInputIds.add(entry.human_input.id);
+        humanInputs.push(entry.human_input);
+      }
     }
   }
 

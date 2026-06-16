@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,17 @@ import (
 // (stop preview + revoke all access sessions atomically).
 type PreviewStore struct {
 	db TxStarter
+}
+
+// PreviewHealthSample is a platform-wide preview lifecycle snapshot for ops
+// dashboards. It intentionally aggregates across orgs.
+type PreviewHealthSample struct {
+	ActivePreviews              int64
+	PreviewsStarted             int64
+	PreviewsReady               int64
+	PreviewsFailedOrUnavailable int64
+	StartupP50Seconds           float64
+	StartupP95Seconds           float64
 }
 
 // NewPreviewStore creates a new PreviewStore.
@@ -69,7 +81,9 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
-	source_workspace_revision, source_workspace_revision_updated_at, unavailable_reason, preview_holding_container`
+	source_workspace_revision, source_workspace_revision_updated_at,
+	runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source,
+	unavailable_reason, preview_holding_container`
 
 const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, worker_node_id,
 	endpoint_url, preview_handle, primary_port, status, lease_expires_at,
@@ -346,33 +360,61 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 	scopePredicate := "TRUE"
 	switch filters.Scope {
 	case "running":
-		scopePredicate = fmt.Sprintf("latest.status IN %s", activeStatusFilter)
+		scopePredicate = fmt.Sprintf("preview_index.status IN %s", activeStatusFilter)
 	case "resumable":
-		scopePredicate = branchPreviewResumablePredicate
+		scopePredicate = "preview_index.resumable"
 	case "recent":
-		scopePredicate = fmt.Sprintf("latest.status IN %s AND NOT %s AND latest.created_at >= now() - interval '7 days'", terminalStatusFilter, branchPreviewResumablePredicate)
+		scopePredicate = fmt.Sprintf("preview_index.status IN %s AND NOT preview_index.resumable AND preview_index.sort_created_at >= now() - interval '7 days'", terminalStatusFilter)
 	}
-	query := fmt.Sprintf(`SELECT %s
-		FROM preview_targets target
-		JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
-		LEFT JOIN LATERAL (
-			SELECT id, status, expires_at, stopped_at, stopped_reason, current_phase, error, created_at
-			FROM preview_instances
-			WHERE org_id = target.org_id
-			  AND preview_target_id = target.id
-			ORDER BY created_at DESC
-			LIMIT 1
-		) latest ON TRUE
-		WHERE target.org_id = @org_id
-		  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
-		  AND (@branch = '' OR target.branch = @branch)
-		  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
-		  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
-		       OR repo.full_name ILIKE '%%' || @q || '%%'
-		       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
-		  AND (@cursor_id::uuid IS NULL OR (COALESCE(latest.created_at, target.created_at), target.id) < (@cursor_time, @cursor_id))
+	query := fmt.Sprintf(`WITH target_previews AS (
+			SELECT %s
+			FROM preview_targets target
+			JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
+			LEFT JOIN LATERAL (
+				SELECT id, status, expires_at, stopped_at, stopped_reason, current_phase, error, created_at
+				FROM preview_instances
+				WHERE org_id = target.org_id
+				  AND preview_target_id = target.id
+				ORDER BY created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE target.org_id = @org_id
+		),
+		session_previews AS (
+			SELECT pi.id AS target_id, pi.id AS preview_id,
+				sess.repository_id, repo.full_name AS repository_full_name,
+				COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+				COALESCE(NULLIF(pi.base_commit_sha, ''), sess.base_commit_sha, '') AS commit_sha,
+				'' AS preview_config_name,
+				'session' AS source_type, sess.id::text AS source_id, '' AS source_url,
+				pi.status AS status,
+				pi.created_at, pi.created_at AS sort_created_at,
+				pi.expires_at, pi.stopped_at, COALESCE(pi.stopped_reason, '') AS stopped_reason,
+				COALESCE(pi.current_phase, '') AS current_phase, COALESCE(pi.error, '') AS error,
+				false AS resumable, NULL::integer AS resume_estimate_seconds
+			FROM preview_instances pi
+			JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+			JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+			WHERE pi.org_id = @org_id
+			  AND pi.preview_target_id IS NULL
+			  AND pi.session_id IS NOT NULL
+		),
+		preview_index AS (
+			SELECT * FROM target_previews
+			UNION ALL
+			SELECT * FROM session_previews
+		)
+		SELECT *
+		FROM preview_index
+		WHERE (@repository_id::uuid IS NULL OR preview_index.repository_id = @repository_id)
+		  AND (@branch = '' OR preview_index.branch = @branch)
+		  AND (@status = '' OR preview_index.status = @status)
+		  AND (@q = '' OR preview_index.branch ILIKE '%%' || @q || '%%'
+		       OR preview_index.repository_full_name ILIKE '%%' || @q || '%%'
+		       OR (regexp_match(preview_index.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
+		  AND (@cursor_id::uuid IS NULL OR (preview_index.sort_created_at, preview_index.target_id) < (@cursor_time, @cursor_id))
 		  AND %s
-		ORDER BY COALESCE(latest.created_at, target.created_at) DESC, target.id DESC
+		ORDER BY preview_index.sort_created_at DESC, preview_index.target_id DESC
 		LIMIT @limit`, branchPreviewSummarySelect(), scopePredicate)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":        orgID,
@@ -390,10 +432,47 @@ func (s *PreviewStore) ListBranchPreviewIndex(ctx context.Context, orgID uuid.UU
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
 }
 
+// GetSessionPreviewSummary returns target-shaped metadata for a runtime-only
+// session preview. Session previews do not have preview_targets rows, so the
+// preview instance ID acts as the stable list/detail ID.
+func (s *PreviewStore) GetSessionPreviewSummary(ctx context.Context, orgID, previewID uuid.UUID) (*models.BranchPreviewSummary, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT pi.id AS target_id, pi.id AS preview_id,
+			sess.repository_id, repo.full_name AS repository_full_name,
+			COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+			COALESCE(NULLIF(pi.base_commit_sha, ''), sess.base_commit_sha, '') AS commit_sha,
+			'' AS preview_config_name,
+			'session' AS source_type, sess.id::text AS source_id, '' AS source_url,
+			pi.status AS status,
+			pi.created_at, pi.created_at AS sort_created_at,
+			pi.expires_at, pi.stopped_at, COALESCE(pi.stopped_reason, '') AS stopped_reason,
+			COALESCE(pi.current_phase, '') AS current_phase, COALESCE(pi.error, '') AS error,
+			false AS resumable, NULL::integer AS resume_estimate_seconds
+		FROM preview_instances pi
+		JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+		JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+		WHERE pi.id = @preview_id
+		  AND pi.org_id = @org_id
+		  AND pi.preview_target_id IS NULL
+		  AND pi.session_id IS NOT NULL`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query session preview summary: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.BranchPreviewSummary])
+	if err != nil {
+		return nil, fmt.Errorf("get session preview summary: %w", err)
+	}
+	return &row, nil
+}
+
 func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID uuid.UUID, filters BranchPreviewIndexFilters) (map[string]int, error) {
-	query := fmt.Sprintf(`WITH latest_targets AS (
-			SELECT target.id, target.org_id, target.repository_id, target.source_type, target.source_id, target.last_snapshot_key,
-			       latest.status, latest.created_at
+	query := fmt.Sprintf(`WITH target_previews AS (
+			SELECT target.id AS target_id, target.org_id, target.repository_id, repo.full_name AS repository_full_name,
+			       target.branch, target.source_id, COALESCE(latest.status, 'target_created') AS status,
+			       COALESCE(latest.created_at, target.created_at) AS sort_created_at,
+			       %s AS resumable
 			FROM preview_targets target
 			JOIN repositories repo ON repo.id = target.repository_id AND repo.org_id = target.org_id
 			LEFT JOIN LATERAL (
@@ -405,19 +484,39 @@ func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID 
 				LIMIT 1
 			) latest ON TRUE
 			WHERE target.org_id = @org_id
-			  AND (@repository_id::uuid IS NULL OR target.repository_id = @repository_id)
-			  AND (@branch = '' OR target.branch = @branch)
-			  AND (@status = '' OR COALESCE(latest.status, 'target_created') = @status)
-			  AND (@q = '' OR target.branch ILIKE '%%' || @q || '%%'
-			       OR repo.full_name ILIKE '%%' || @q || '%%'
-			       OR (regexp_match(target.source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
+		),
+		session_previews AS (
+			SELECT pi.id AS target_id, pi.org_id, sess.repository_id, repo.full_name AS repository_full_name,
+			       COALESCE(sess.working_branch, sess.target_branch, '') AS branch,
+			       sess.id::text AS source_id, pi.status AS status,
+			       pi.created_at AS sort_created_at, false AS resumable
+			FROM preview_instances pi
+			JOIN sessions sess ON sess.id = pi.session_id AND sess.org_id = pi.org_id
+			JOIN repositories repo ON repo.id = sess.repository_id AND repo.org_id = sess.org_id
+			WHERE pi.org_id = @org_id
+			  AND pi.preview_target_id IS NULL
+			  AND pi.session_id IS NOT NULL
+		),
+		preview_index AS (
+			SELECT * FROM target_previews
+			UNION ALL
+			SELECT * FROM session_previews
+		),
+		filtered AS (
+			SELECT *
+			FROM preview_index
+			WHERE (@repository_id::uuid IS NULL OR repository_id = @repository_id)
+			  AND (@branch = '' OR branch = @branch)
+			  AND (@status = '' OR status = @status)
+			  AND (@q = '' OR branch ILIKE '%%' || @q || '%%'
+			       OR repository_full_name ILIKE '%%' || @q || '%%'
+			       OR (regexp_match(source_id, '#([0-9]+)(@|$)'))[1] = regexp_replace(@q, '^#', ''))
 		)
 		SELECT
-			COUNT(*) FILTER (WHERE latest.status IN %s)::int AS running,
-			COUNT(*) FILTER (WHERE %s)::int AS resumable,
-			COUNT(*) FILTER (WHERE latest.status IN %s AND NOT %s AND latest.created_at >= now() - interval '7 days')::int AS recent
-		FROM latest_targets target
-		LEFT JOIN LATERAL (SELECT target.status, target.created_at) latest ON TRUE`, activeStatusFilter, branchPreviewResumablePredicate, terminalStatusFilter, branchPreviewResumablePredicate)
+			COUNT(*) FILTER (WHERE status IN %s)::int AS running,
+			COUNT(*) FILTER (WHERE resumable)::int AS resumable,
+			COUNT(*) FILTER (WHERE status IN %s AND NOT resumable AND sort_created_at >= now() - interval '7 days')::int AS recent
+		FROM filtered`, branchPreviewResumablePredicate, activeStatusFilter, terminalStatusFilter)
 	var running, resumable, recent int
 	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":        orgID,
@@ -429,6 +528,33 @@ func (s *PreviewStore) CountBranchPreviewIndexScopes(ctx context.Context, orgID 
 		return nil, fmt.Errorf("count branch preview index scopes: %w", err)
 	}
 	return map[string]int{"running": running, "resumable": resumable, "recent": recent}, nil
+}
+
+func (s *PreviewStore) GetBranchPreviewTargetResumability(ctx context.Context, orgID, targetID uuid.UUID) (bool, *int, error) {
+	query := fmt.Sprintf(`SELECT EXISTS (
+			SELECT 1
+			FROM preview_targets target
+			LEFT JOIN LATERAL (
+				SELECT status, created_at
+				FROM preview_instances
+				WHERE org_id = target.org_id
+				  AND preview_target_id = target.id
+				ORDER BY created_at DESC
+				LIMIT 1
+			) latest ON TRUE
+			WHERE target.org_id = @org_id
+			  AND target.id = @target_id
+			  AND %s
+		) AS resumable`, branchPreviewResumablePredicate)
+	var resumable bool
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{"org_id": orgID, "target_id": targetID}).Scan(&resumable); err != nil {
+		return false, nil, fmt.Errorf("get branch preview target resumability: %w", err)
+	}
+	if !resumable {
+		return false, nil, nil
+	}
+	estimate := 30
+	return true, &estimate, nil
 }
 
 func (s *PreviewStore) CountActiveAutoPreviews(ctx context.Context, orgID uuid.UUID) (int, error) {
@@ -711,40 +837,45 @@ func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.Prev
 			worker_node_id, preview_handle, primary_service, port,
 			config_digest, base_commit_sha, expires_at,
 			last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
-			current_phase, request_id, source_workspace_revision, source_workspace_revision_updated_at
+			current_phase, request_id, source_workspace_revision, source_workspace_revision_updated_at,
+			runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source
 		) VALUES (
 			@session_id, @org_id, @user_id, @profile_name, @name, @status, @provider,
 			@worker_node_id, @preview_handle, @primary_service, @port,
 			@config_digest, @base_commit_sha, @expires_at,
 			@last_path, @memory_limit_mb, @cpu_limit_millis, @disk_limit_mb, @recycle_config, @recycle_sandbox,
-			@current_phase, @request_id, @source_workspace_revision, @source_workspace_revision_updated_at
+			@current_phase, @request_id, @source_workspace_revision, @source_workspace_revision_updated_at,
+			@runtime_workspace_revision, @runtime_workspace_revision_updated_at, @runtime_workspace_revision_source
 		) RETURNING %s`, previewInstanceColumns)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"session_id":                           p.SessionID,
-		"org_id":                               p.OrgID,
-		"user_id":                              p.UserID,
-		"profile_name":                         p.ProfileName,
-		"name":                                 p.Name,
-		"status":                               p.Status,
-		"provider":                             p.Provider,
-		"worker_node_id":                       p.WorkerNodeID,
-		"preview_handle":                       p.PreviewHandle,
-		"primary_service":                      p.PrimaryService,
-		"port":                                 p.Port,
-		"config_digest":                        p.ConfigDigest,
-		"base_commit_sha":                      p.BaseCommitSHA,
-		"expires_at":                           p.ExpiresAt,
-		"last_path":                            p.LastPath,
-		"memory_limit_mb":                      p.MemoryLimitMB,
-		"cpu_limit_millis":                     p.CPULimitMillis,
-		"disk_limit_mb":                        p.DiskLimitMB,
-		"recycle_config":                       p.RecycleConfig,
-		"recycle_sandbox":                      p.RecycleSandbox,
-		"current_phase":                        p.CurrentPhase,
-		"request_id":                           p.RequestID,
-		"source_workspace_revision":            p.SourceWorkspaceRevision,
-		"source_workspace_revision_updated_at": p.SourceWorkspaceRevisionUpdatedAt,
+		"session_id":                            p.SessionID,
+		"org_id":                                p.OrgID,
+		"user_id":                               p.UserID,
+		"profile_name":                          p.ProfileName,
+		"name":                                  p.Name,
+		"status":                                p.Status,
+		"provider":                              p.Provider,
+		"worker_node_id":                        p.WorkerNodeID,
+		"preview_handle":                        p.PreviewHandle,
+		"primary_service":                       p.PrimaryService,
+		"port":                                  p.Port,
+		"config_digest":                         p.ConfigDigest,
+		"base_commit_sha":                       p.BaseCommitSHA,
+		"expires_at":                            p.ExpiresAt,
+		"last_path":                             p.LastPath,
+		"memory_limit_mb":                       p.MemoryLimitMB,
+		"cpu_limit_millis":                      p.CPULimitMillis,
+		"disk_limit_mb":                         p.DiskLimitMB,
+		"recycle_config":                        p.RecycleConfig,
+		"recycle_sandbox":                       p.RecycleSandbox,
+		"current_phase":                         p.CurrentPhase,
+		"request_id":                            p.RequestID,
+		"source_workspace_revision":             p.SourceWorkspaceRevision,
+		"source_workspace_revision_updated_at":  p.SourceWorkspaceRevisionUpdatedAt,
+		"runtime_workspace_revision":            p.RuntimeWorkspaceRevision,
+		"runtime_workspace_revision_updated_at": p.RuntimeWorkspaceRevisionUpdatedAt,
+		"runtime_workspace_revision_source":     p.RuntimeWorkspaceRevisionSource,
 	})
 	if err != nil {
 		return fmt.Errorf("insert preview instance: %w", err)
@@ -861,6 +992,30 @@ func (s *PreviewStore) GetActivePreviewRuntime(ctx context.Context, orgID, previ
 		return nil, fmt.Errorf("get active preview runtime: %w", err)
 	}
 	return &row, nil
+}
+
+// ListActivePreviewRuntimesForReachability returns active runtime endpoints for app-side probes.
+// lint:allow-no-orgid reason="cross-org app-side reachability sweep probes active preview runtime endpoints"
+func (s *PreviewStore) ListActivePreviewRuntimesForReachability(ctx context.Context, limit int) ([]models.PreviewRuntime, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM preview_runtimes
+		WHERE status IN %s
+		  AND lease_expires_at > now()
+		ORDER BY last_heartbeat_at ASC, updated_at ASC
+		LIMIT @limit`, previewRuntimeColumns, activeRuntimeStatusFilter)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"limit": limit})
+	if err != nil {
+		return nil, fmt.Errorf("query active preview runtimes for reachability: %w", err)
+	}
+	runtimes, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PreviewRuntime])
+	if err != nil {
+		return nil, fmt.Errorf("scan active preview runtimes for reachability: %w", err)
+	}
+	return runtimes, nil
 }
 
 // MarkPreviewRuntimeReady marks a runtime ready and mirrors routing fields onto
@@ -1187,7 +1342,12 @@ func (s *PreviewStore) updatePreviewStatus(ctx context.Context, orgID, id uuid.U
 				preview_holding_container = FALSE, stopped_at = now(), updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	} else {
-		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
+		query = `UPDATE preview_instances
+			SET status = @status,
+			    current_phase = @phase,
+			    error = @error,
+			    ready_at = CASE WHEN @status IN ('ready', 'partially_ready') THEN COALESCE(ready_at, now()) ELSE ready_at END,
+			    updated_at = now()
 			WHERE id = @id AND org_id = @org_id`
 	}
 	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -1240,7 +1400,12 @@ func (s *PreviewStore) UpdatePreviewStatusIfActive(ctx context.Context, orgID, i
 
 func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, id uuid.UUID, status models.PreviewStatus, errMsg string) (int64, error) {
 	phase := previewPhaseForStatus(status)
-	query := `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error, updated_at = now()
+	query := `UPDATE preview_instances
+		SET status = @status,
+		    current_phase = @phase,
+		    error = @error,
+		    ready_at = CASE WHEN @status IN ('ready', 'partially_ready') THEN COALESCE(ready_at, now()) ELSE ready_at END,
+		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND status NOT IN ('stopped', 'failed', 'expired', 'unavailable')`
 	if status.IsTerminal() {
 		query = `UPDATE preview_instances SET status = @status, current_phase = @phase, error = @error,
@@ -1280,6 +1445,142 @@ func (s *PreviewStore) UpdatePreviewSourceWorkspaceRevision(ctx context.Context,
 	return nil
 }
 
+func (s *PreviewStore) UpdatePreviewRuntimeWorkspaceRevision(ctx context.Context, orgID, id uuid.UUID, revision int64, revisionUpdatedAt time.Time, source models.PreviewRuntimeRevisionSource) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE preview_instances
+		SET runtime_workspace_revision = @workspace_revision,
+		    runtime_workspace_revision_updated_at = @workspace_revision_updated_at,
+		    runtime_workspace_revision_source = @workspace_revision_source,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{
+			"id":                            id,
+			"org_id":                        orgID,
+			"workspace_revision":            revision,
+			"workspace_revision_updated_at": revisionUpdatedAt,
+			"workspace_revision_source":     source,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview runtime workspace revision: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("preview instance not found")
+	}
+	return nil
+}
+
+const minPreviewStartupEstimateSamples = 5
+
+// PreviewHealthSample returns a compact platform-wide preview health aggregate
+// for the Grafana lifecycle sampler.
+// lint:allow-no-orgid reason="platform preview health dashboard intentionally aggregates preview lifecycle across orgs"
+func (s *PreviewStore) PreviewHealthSample(ctx context.Context) (PreviewHealthSample, error) {
+	query := fmt.Sprintf(`
+		/* preview health sample */
+		WITH recent_ready AS (
+			SELECT EXTRACT(EPOCH FROM (ready_at - created_at))::double precision AS startup_seconds
+			FROM preview_instances
+			WHERE ready_at IS NOT NULL
+			  AND ready_at >= created_at
+			  AND ready_at >= now() - interval '15 minutes'
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE status IN %s)::bigint AS active_previews,
+			COUNT(*) FILTER (WHERE created_at >= now() - interval '15 minutes')::bigint AS previews_started,
+			COUNT(*) FILTER (WHERE ready_at IS NOT NULL AND ready_at >= now() - interval '15 minutes')::bigint AS previews_ready,
+			COUNT(*) FILTER (WHERE status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')::bigint AS previews_failed_unavailable,
+			COALESCE((SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p50_seconds,
+			COALESCE((SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p95_seconds
+		FROM preview_instances
+		WHERE status IN %s
+		   OR created_at >= now() - interval '15 minutes'
+		   OR ready_at >= now() - interval '15 minutes'
+		   OR (status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')`, activeStatusFilter, activeStatusFilter)
+
+	var sample PreviewHealthSample
+	if err := s.db.QueryRow(ctx, query).Scan(
+		&sample.ActivePreviews,
+		&sample.PreviewsStarted,
+		&sample.PreviewsReady,
+		&sample.PreviewsFailedOrUnavailable,
+		&sample.StartupP50Seconds,
+		&sample.StartupP95Seconds,
+	); err != nil {
+		return PreviewHealthSample{}, fmt.Errorf("preview health sample: %w", err)
+	}
+	return sample, nil
+}
+
+func (s *PreviewStore) GetPreviewStartupEstimate(ctx context.Context, orgID, previewID uuid.UUID, configDigest string) (*models.PreviewStartupEstimate, error) {
+	if strings.TrimSpace(configDigest) == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT EXTRACT(EPOCH FROM (ready_at - created_at))::int AS startup_seconds
+		FROM (
+			SELECT created_at, ready_at
+			FROM preview_instances
+			WHERE org_id = @org_id
+			  AND id <> @preview_id
+			  AND config_digest = @config_digest
+			  AND ready_at IS NOT NULL
+			  AND ready_at >= created_at
+			  AND created_at >= now() - interval '30 days'
+			ORDER BY ready_at DESC
+			LIMIT 50
+		) recent_previews`,
+		pgx.NamedArgs{
+			"org_id":        orgID,
+			"preview_id":    previewID,
+			"config_digest": configDigest,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query preview startup estimate samples: %w", err)
+	}
+	samples, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (int, error) {
+		var seconds int
+		if err := row.Scan(&seconds); err != nil {
+			return 0, err
+		}
+		return seconds, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("collect preview startup estimate samples: %w", err)
+	}
+	if len(samples) < minPreviewStartupEstimateSamples {
+		return nil, nil
+	}
+
+	sort.Ints(samples)
+	p50 := samples[(len(samples)-1)/2]
+	return &models.PreviewStartupEstimate{
+		Label:       fmt.Sprintf("Usually ready in ~%ds", roundStartupEstimateSeconds(p50)),
+		P50Seconds:  p50,
+		SampleCount: len(samples),
+		Confidence:  startupEstimateConfidence(len(samples)),
+	}, nil
+}
+
+func roundStartupEstimateSeconds(seconds int) int {
+	if seconds <= 10 {
+		return seconds
+	}
+	return ((seconds + 4) / 5) * 5
+}
+
+func startupEstimateConfidence(sampleCount int) string {
+	switch {
+	case sampleCount >= 30:
+		return "high"
+	case sampleCount >= 10:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
 func previewPhaseForStatus(status models.PreviewStatus) string {
 	switch status {
 	case models.PreviewStatusReady, models.PreviewStatusPartiallyReady:
@@ -1307,6 +1608,22 @@ func (s *PreviewStore) UpdatePreviewAccess(ctx context.Context, orgID, id uuid.U
 	)
 	if err != nil {
 		return fmt.Errorf("update preview access: %w", err)
+	}
+	return nil
+}
+
+// UpdatePreviewAccessAndExtend updates activity and slides active preview expiry
+// without shortening an already farther-out lifetime.
+func (s *PreviewStore) UpdatePreviewAccessAndExtend(ctx context.Context, orgID, id uuid.UUID, extension, maxTTL time.Duration) error {
+	_, err := s.db.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_instances SET last_accessed_at = now(),
+			expires_at = LEAST(GREATEST(expires_at, now() + @extension), created_at + @max_ttl),
+			updated_at = now()
+		 WHERE id = @id AND org_id = @org_id AND status IN %s`, activeStatusFilter),
+		pgx.NamedArgs{"id": id, "org_id": orgID, "extension": extension, "max_ttl": maxTTL},
+	)
+	if err != nil {
+		return fmt.Errorf("update preview access and extend expiry: %w", err)
 	}
 	return nil
 }
@@ -1980,6 +2297,63 @@ func (s *PreviewStore) MarkActivePreviewRuntimesLostByWorkerWithReason(ctx conte
 		return 0, fmt.Errorf("mark active preview runtimes lost by worker: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// MarkPreviewRuntimeLostIfCurrent marks one runtime lost and transitions its
+// preview unavailable only if that runtime is still the newest active route.
+func (s *PreviewStore) MarkPreviewRuntimeLostIfCurrent(ctx context.Context, orgID, previewID, runtimeID uuid.UUID, runtimeEpoch int, reason string, unavailableReason models.PreviewUnavailableReason) (bool, error) {
+	if err := unavailableReason.Validate(); err != nil {
+		return false, err
+	}
+	tag, err := s.db.Exec(ctx,
+		fmt.Sprintf(`WITH lost AS (
+			UPDATE preview_runtimes pr
+			SET status = 'lost',
+				error = @reason,
+				unavailable_reason = @unavailable_reason,
+				stopped_at = COALESCE(stopped_at, now()),
+				updated_at = now()
+			WHERE pr.org_id = @org_id
+			  AND pr.preview_instance_id = @preview_id
+			  AND pr.id = @runtime_id
+			  AND pr.runtime_epoch = @runtime_epoch
+			  AND pr.status IN %s
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM preview_runtimes newer
+				WHERE newer.org_id = @org_id
+				  AND newer.preview_instance_id = @preview_id
+				  AND newer.runtime_epoch > @runtime_epoch
+				  AND newer.status IN %s
+				  AND newer.lease_expires_at > now()
+			  )
+			RETURNING pr.org_id, pr.preview_instance_id
+		)
+		UPDATE preview_instances pi
+		SET status = 'unavailable',
+			current_phase = 'unavailable',
+			error = @reason,
+			unavailable_reason = @unavailable_reason,
+			preview_holding_container = FALSE,
+			stopped_at = COALESCE(stopped_at, now()),
+			updated_at = now()
+		FROM lost
+		WHERE pi.id = lost.preview_instance_id
+		  AND pi.org_id = lost.org_id
+		  AND pi.status IN %s`, activeRuntimeStatusFilter, activeRuntimeStatusFilter, activeStatusFilter),
+		pgx.NamedArgs{
+			"org_id":             orgID,
+			"preview_id":         previewID,
+			"runtime_id":         runtimeID,
+			"runtime_epoch":      runtimeEpoch,
+			"reason":             reason,
+			"unavailable_reason": unavailableReason,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark preview runtime lost if current: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // MarkExpiredPreviewRuntimesLost marks runtimes with expired leases lost and

@@ -80,6 +80,58 @@ ensure_bridge() {
   fi
 }
 
+# sandbox-dns is pinned to fixed addresses (172.30.0.2 on the sandbox bridge,
+# 172.31.0.2 on the static-egress bridge) so the resolv.conf files can hard-code
+# the resolver. Because the IPs never change, a single leaked libnetwork
+# endpoint still holding one of them — left behind by a daemon hiccup or an
+# ungraceful blue/green drain — makes every later recreate fail with
+# "failed to set up container networking: Address already in use" and wedges
+# ALL future deploys on the host until the endpoint is cleared by hand. This
+# helper finds whichever endpoint currently owns a pinned IP and force-detaches
+# it so the recreate can reclaim the address.
+disconnect_endpoint_for_ip() {
+  local network="$1"
+  local ip="$2"
+  local endpoint
+
+  endpoint="$(docker network inspect "$network" \
+    -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' 2>/dev/null \
+    | awk -v want="$ip/" 'index($2, want) == 1 {print $1}' | head -n1)"
+  if [ -n "$endpoint" ]; then
+    echo "Detaching stale endpoint '$endpoint' holding $ip on $network..." >&2
+    docker network disconnect -f "$network" "$endpoint" >/dev/null 2>&1 || true
+  fi
+}
+
+clear_sandbox_dns_endpoints() {
+  # Remove the prior container (if any) and drop leaked endpoints by name and by
+  # pinned IP. The by-IP pass catches ghost endpoints whose owning container was
+  # removed uncleanly and no longer matches the container name.
+  docker rm -f 143-sandbox-dns-1 >/dev/null 2>&1 || true
+  docker network disconnect -f "$SANDBOX_NETWORK" 143-sandbox-dns-1 >/dev/null 2>&1 || true
+  docker network disconnect -f "$STATIC_EGRESS_NETWORK" 143-sandbox-dns-1 >/dev/null 2>&1 || true
+  disconnect_endpoint_for_ip "$SANDBOX_NETWORK" 172.30.0.2
+  disconnect_endpoint_for_ip "$STATIC_EGRESS_NETWORK" "$STATIC_EGRESS_DNS_IP"
+}
+
+# Per-turn sandbox run containers (143-worker-run-*) should be removed when a
+# coding turn ends; leftovers accumulate stale libnetwork endpoints on the
+# sandbox bridge and feed the leaked-endpoint failure handled above. Sweep only
+# NON-running containers so in-flight coding turns are never touched.
+sweep_stopped_worker_run_containers() {
+  local stale
+  stale="$(docker ps -a \
+    --filter 'name=143-worker-run-' \
+    --filter 'status=exited' \
+    --filter 'status=created' \
+    --filter 'status=dead' \
+    --format '{{.ID}}' 2>/dev/null || true)"
+  if [ -n "$stale" ]; then
+    echo "Removing stale (non-running) worker-run sandbox containers..." >&2
+    printf '%s\n' "$stale" | xargs -r docker rm -f >/dev/null 2>&1 || true
+  fi
+}
+
 ensure_static_egress_dns() {
   local compose_dir
   local compose_file
@@ -97,10 +149,32 @@ ensure_static_egress_dns() {
 
   # Fresh SSH provisioning verifies static egress before the full worker
   # compose stack is started, so make the pinned sandbox DNS IP available
-  # without starting the worker service early.
+  # without starting the worker service early. Routine reconciliation must not
+  # force a rebuild: recreating sandbox-dns briefly frees the pinned resolver
+  # IPs, and an active worker can race in with a new sandbox container that
+  # claims them before DNS starts.
   (
     cd "$compose_dir"
-    docker compose -f "$compose_file" up -d --build --no-deps sandbox-dns
+    if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
+      docker compose -f "$compose_file" build sandbox-dns
+    fi
+
+    if docker compose -f "$compose_file" up -d --no-deps sandbox-dns; then
+      exit 0
+    fi
+
+    echo "sandbox-dns start failed; clearing leaked sandbox-dns network endpoints and retrying..." >&2
+    for attempt in 1 2 3; do
+      clear_sandbox_dns_endpoints
+      sweep_stopped_worker_run_containers
+      if docker compose -f "$compose_file" up -d --no-deps sandbox-dns; then
+        exit 0
+      fi
+      if [ "$attempt" != "3" ]; then
+        sleep 1
+      fi
+    done
+    exit 1
   )
 }
 
@@ -119,6 +193,10 @@ if ! docker network inspect "$DEFAULT_NETWORK" >/dev/null 2>&1; then
   docker network create --driver bridge \
     --label managed-by=143 "$DEFAULT_NETWORK"
 fi
+
+# Reclaim sandbox-bridge endpoints leaked by ended coding turns before they
+# accumulate and starve the pinned sandbox-dns addresses.
+sweep_stopped_worker_run_containers
 
 # Install iptables-persistent so the egress block survives reboots. This is
 # best-effort because some minimal images prompt or temporarily lack apt locks;

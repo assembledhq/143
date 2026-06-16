@@ -55,9 +55,10 @@ COPY --from=go-builder /bin/worker-deployctl /bin/worker-deployctl
 COPY --from=go-builder /app/migrations /migrations
 COPY --from=go-builder /opt/143/cli /opt/143/cli
 
-# Copy entrypoint and encrypted production secrets
+# Copy entrypoint. The encrypted production env bundle is NOT baked into
+# the image (this image is public on GHCR) — deploy bind-mounts it from
+# /opt/143/.env.production.enc on the host to /app/.env.production.enc.
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-COPY .env.production.enc .env.production.enc
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

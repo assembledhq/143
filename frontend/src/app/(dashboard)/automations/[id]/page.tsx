@@ -116,7 +116,7 @@ function SettingsTab({
   const effectiveAgentType = model
     ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
     : automation.agent_type ?? defaultAgentType;
-  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi"].includes(effectiveAgentType);
+  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi", "opencode"].includes(effectiveAgentType);
   const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
   let prePRReviewDescription = "Off for agents without review-loop support.";
   if (supportsNativeReviewLoop) {

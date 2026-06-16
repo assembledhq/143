@@ -262,7 +262,7 @@ func (d *DockerFileReader) ReadFile(ctx context.Context, containerID, workDir, f
 }
 
 // isNotFoundStderr detects the ENOENT message produced by the small utilities
-// we exec inside the sandbox (head, sed — GNU coreutils, busybox, or BSD all
+// we exec inside the sandbox (head, awk — GNU coreutils, busybox, or BSD all
 // surface ENOENT with the same phrase). Keeping this in one spot lets
 // ReadFile/ReadFileContext surface a single ErrFileNotFound sentinel to
 // callers instead of forcing them to pattern-match on stderr themselves.
@@ -283,8 +283,16 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 	}
 	endLine := line + below
 
-	// Use sed to extract the line range. Path is passed as an argument.
-	argv := []string{"sed", "-n", fmt.Sprintf("%d,%dp", startLine, endLine), absPath}
+	// Capture the requested window and total line count in one exec. Each line
+	// gets a stable prefix so empty file lines and arbitrary tabs in content
+	// round-trip without ambiguity.
+	argv := []string{
+		"awk",
+		"-v", fmt.Sprintf("start=%d", startLine),
+		"-v", fmt.Sprintf("end=%d", endLine),
+		`NR >= start && NR <= end { print "L" NR "\t" $0 } END { print "T" NR }`,
+		absPath,
+	}
 	stdout, stderrOut, exitCode, err := d.execCmd(ctx, containerID, workDir, argv)
 	if err != nil {
 		return FileContextResult{}, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
@@ -298,35 +306,36 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 	}
 
 	var lines []FileLine
-	for i, content := range strings.Split(stdout, "\n") {
-		lineNum := startLine + i
-		if lineNum > endLine {
-			break
+	totalLines := -1
+	for _, outputLine := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+		if outputLine == "" {
+			continue
 		}
-		lines = append(lines, FileLine{
-			Number:  lineNum,
-			Content: content,
-		})
-	}
-
-	totalLines := 0
-	for _, lineContent := range strings.Split(stdout, "\n") {
-		_ = lineContent
-	}
-
-	countStdout, countStderr, countExitCode, countErr := d.execCmd(ctx, containerID, workDir, []string{"awk", "END{print NR}", absPath})
-	if countErr != nil {
-		return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %w", filePath, line, countErr)
-	}
-	if countExitCode != 0 {
-		trimmed := strings.TrimSpace(countStderr)
-		if isNotFoundStderr(trimmed) {
-			return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %w", filePath, line, ErrFileNotFound)
+		if strings.HasPrefix(outputLine, "T") {
+			parsedTotal, scanErr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(outputLine, "T")))
+			if scanErr != nil {
+				return FileContextResult{}, fmt.Errorf("parse line count %s:%d: %w", filePath, line, scanErr)
+			}
+			totalLines = parsedTotal
+			continue
 		}
-		return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %s", filePath, line, trimmed)
+		if strings.HasPrefix(outputLine, "L") {
+			numberPart, content, ok := strings.Cut(strings.TrimPrefix(outputLine, "L"), "\t")
+			if !ok {
+				return FileContextResult{}, fmt.Errorf("parse context line %s:%d: missing separator", filePath, line)
+			}
+			lineNum, scanErr := strconv.Atoi(numberPart)
+			if scanErr != nil {
+				return FileContextResult{}, fmt.Errorf("parse context line %s:%d: %w", filePath, line, scanErr)
+			}
+			lines = append(lines, FileLine{
+				Number:  lineNum,
+				Content: content,
+			})
+		}
 	}
-	if _, scanErr := fmt.Sscanf(strings.TrimSpace(countStdout), "%d", &totalLines); scanErr != nil {
-		return FileContextResult{}, fmt.Errorf("parse line count %s:%d: %w", filePath, line, scanErr)
+	if totalLines < 0 {
+		return FileContextResult{}, fmt.Errorf("parse line count %s:%d: missing total", filePath, line)
 	}
 
 	result := FileContextResult{

@@ -52,7 +52,6 @@ var anthropicRates = map[string]tokenRate{
 }
 
 var googleRates = map[string]tokenRate{
-	models.GeminiCLIModelGemini25Pro: {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
 	models.PiModelGemini25Pro:        {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
 }
 
@@ -113,6 +112,14 @@ func FinalizeTokenUsage(usage TokenUsage, hint TokenUsageHint) TokenUsage {
 			usage.NativeCost = derived
 		}
 	}
+	if !reported && hint.AgentType == models.AgentTypeOpenCode && hint.EffectiveModel != "" && usage.NativeCost == nil {
+		usage.NativeCost = &TokenCost{
+			Amount: 0,
+			Unit:   TokenCostUnitUSD,
+			Source: TokenCostSourceUnavailable,
+			Detail: "opencode_usage_unreported",
+		}
+	}
 
 	if usage.Cost != nil && usage.Cost.Unit == TokenCostUnitUSD {
 		usage.TotalCostUSD = usage.Cost.Amount
@@ -142,8 +149,6 @@ func nativeProviderForHint(hint TokenUsageHint) string {
 		return "anthropic"
 	case models.AgentTypeCodex:
 		return "openai"
-	case models.AgentTypeGeminiCLI:
-		return "google"
 	case models.AgentTypeAmp:
 		return "amp"
 	case models.AgentTypePi:
@@ -152,6 +157,12 @@ func nativeProviderForHint(hint TokenUsageHint) string {
 			return provider
 		}
 		return "pi"
+	case models.AgentTypeOpenCode:
+		provider, _ := splitProviderModel(hint.EffectiveModel)
+		if provider != "" {
+			return provider
+		}
+		return "opencode"
 	default:
 		return ""
 	}
@@ -177,30 +188,42 @@ func deriveTokenCost(usage TokenUsage, hint TokenUsageHint) *TokenCost {
 				return deriveCostFromRate(usage, rate)
 			}
 		}
-	case models.AgentTypeGeminiCLI:
-		if hint.BillingMode == TokenBillingModeAPIKey {
-			if rate, ok := googleRates[hint.EffectiveModel]; ok {
-				return deriveCostFromRate(usage, rate)
-			}
-		}
 	case models.AgentTypePi:
 		if hint.BillingMode != TokenBillingModeAPIKey {
 			return nil
 		}
 		provider, model := splitPiProviderModel(hint.EffectiveModel)
-		switch provider {
-		case "anthropic":
-			if rate, ok := anthropicRates[provider+"/"+model]; ok {
-				return deriveCostFromRate(usage, rate)
-			}
-		case "openai":
-			if rate, ok := openAIAPIRates[provider+"/"+model]; ok {
-				return deriveCostFromRate(usage, rate)
-			}
-		case "google":
-			if rate, ok := googleRates[provider+"/"+model]; ok {
-				return deriveCostFromRate(usage, rate)
-			}
+		return deriveProviderModelCost(usage, provider, model)
+	case models.AgentTypeOpenCode:
+		if hint.BillingMode != TokenBillingModeAPIKey {
+			return nil
+		}
+		provider, model := splitProviderModel(hint.EffectiveModel)
+		return deriveProviderModelCost(usage, provider, model)
+	}
+	return nil
+}
+
+func deriveProviderModelCost(usage TokenUsage, provider, model string) *TokenCost {
+	fullModel := provider + "/" + model
+	switch provider {
+	case "anthropic":
+		if rate, ok := anthropicRates[fullModel]; ok {
+			return deriveCostFromRate(usage, rate)
+		}
+	case "openai":
+		if rate, ok := openAIAPIRates[fullModel]; ok {
+			return deriveCostFromRate(usage, rate)
+		}
+		if rate, ok := openAIAPIRates[model]; ok {
+			return deriveCostFromRate(usage, rate)
+		}
+	case "google":
+		if rate, ok := googleRates[fullModel]; ok {
+			return deriveCostFromRate(usage, rate)
+		}
+		if rate, ok := googleRates[model]; ok {
+			return deriveCostFromRate(usage, rate)
 		}
 	}
 	return nil
@@ -220,6 +243,10 @@ func deriveCostFromRate(usage TokenUsage, rate tokenRate) *TokenCost {
 }
 
 func splitPiProviderModel(model string) (string, string) {
+	return splitProviderModel(model)
+}
+
+func splitProviderModel(model string) (string, string) {
 	before, after, ok := strings.Cut(model, "/")
 	if !ok {
 		return "", model

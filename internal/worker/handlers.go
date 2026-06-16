@@ -212,7 +212,7 @@ func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger 
 			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, session.OrgID, session.ID, "failed", 0)
 		}
 		enqueueSlackRunUpdateIfLinked(writeCtx, stores, logger, session.OrgID, session.ID, "failed", "143 session failed", errMsg, true)
-		enqueueSlackSessionNotifications(writeCtx, stores, logger, session.OrgID, session.ID, session.AutomationRunID, "session.failed", "143 session failed", errMsg)
+		enqueueSlackSessionNotifications(writeCtx, stores, logger, session.OrgID, session.ID, session.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 	})
 }
 
@@ -299,15 +299,17 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
 		}
 		enqueueSlackRunUpdateIfLinked(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, "failed", "143 session failed", errMsg, true)
-		enqueueSlackSessionNotifications(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, failedSession.AutomationRunID, "session.failed", "143 session failed", errMsg)
+		enqueueSlackSessionNotifications(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, failedSession.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 	})
 }
 
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
-	WebhookDays int
-	LogsDays    int
-	JobsDays    int
+	WebhookDays              int
+	LogsDays                 int
+	JobsDays                 int
+	SlackInboundPayloadDays  int
+	SlackInboundPayloadBatch int
 }
 
 // RegisterHandlers registers all job handlers on the worker.
@@ -447,6 +449,7 @@ type Stores struct {
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
 	SlackInstallations  *db.SlackInstallationStore
+	SlackBotSettings    *db.SlackBotSettingsStore
 	SlackUserLinks      *db.SlackUserLinkStore
 	SlackChannels       *db.SlackChannelSettingsStore
 	SlackSessionLinks   *db.SlackSessionLinkStore
@@ -490,6 +493,7 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
@@ -577,6 +581,9 @@ type Services struct {
 	// PreviewController handles control-plane actions for already-created
 	// previews. nil when preview control is unavailable on this process.
 	PreviewController previewController
+	// SlackPreviewControl creates and opens previews from Slack actions using
+	// the same product control plane as the web preview surfaces.
+	SlackPreviewControl SlackPreviewControl
 
 	// SessionExecutorDispatcher moves run_agent and continue_session ownership
 	// from the worker process to durable per-session executor containers when
@@ -605,6 +612,11 @@ type previewController interface {
 	RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID) error
 	StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error
 	SetLifetime(ctx context.Context, orgID, previewID uuid.UUID, duration time.Duration) (time.Time, error)
+}
+
+type SlackPreviewControl interface {
+	CreatePreviewForSlack(ctx context.Context, orgID uuid.UUID, target models.SlackPreviewTarget, actor models.SlackActor) (models.PreviewInstance, error)
+	OpenPreviewURL(ctx context.Context, orgID, previewID uuid.UUID, actor models.SlackActor) (string, error)
 }
 
 type orchestratorService interface {
@@ -722,7 +734,7 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID}
 			}
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-				EventKind: "preview.failed",
+				EventKind: string(models.SlackNotificationPreviewFailed),
 				Title:     "Preview failed",
 				Body:      err.Error(),
 				SessionID: &input.SessionID,
@@ -731,7 +743,7 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 			return &FatalError{Err: err}
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-			EventKind: "preview.ready",
+			EventKind: string(models.SlackNotificationPreviewReady),
 			Title:     "Preview ready",
 			Body:      "The preview is ready.",
 			SessionID: &input.SessionID,
@@ -770,7 +782,7 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
 			}
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-				EventKind: "preview.failed",
+				EventKind: string(models.SlackNotificationPreviewFailed),
 				Title:     "Preview failed",
 				Body:      err.Error(),
 				PreviewID: &input.PreviewID,
@@ -778,7 +790,7 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 			return &FatalError{Err: err}
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-			EventKind: "preview.ready",
+			EventKind: string(models.SlackNotificationPreviewReady),
 			Title:     "Preview ready",
 			Body:      "The preview is ready.",
 			PreviewID: &input.PreviewID,
@@ -1589,6 +1601,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		threadMessages := fetchSlackThreadContext(ctx, slackClient, slackCfg.AccessToken, payload.ChannelID, threadTS, logger)
 		contextFiles := fetchSlackContextFiles(ctx, slackClient, slackCfg.AccessToken, payload.FileIDs, logger)
 		contextRefs := detectSlackContextReferences(payload.Text, threadMessages)
+		resolvedContext := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
 
 		var mappedUserID *uuid.UUID
 		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
@@ -1619,6 +1632,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					TurnNumber: session.CurrentTurn,
 					Role:       models.MessageRoleUser,
 					Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+					References: slackContextReferencesForSessionInput(contextRefs),
 				}
 				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
 					return fmt.Errorf("create slack follow-up message: %w", err)
@@ -1643,8 +1657,16 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
-				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText); err != nil {
-					logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
+				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, slackbotsvc.SlackRoutingModeAuto)
+				var posted ingestion.SlackPostedMessage
+				var postErr error
+				if len(ackBlocks) > 0 {
+					posted, postErr = slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks)
+				} else {
+					posted, postErr = slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText)
+				}
+				if postErr != nil {
+					logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
 				} else {
 					if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
 						logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack continuation status timestamp")
@@ -1677,27 +1699,36 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			PMApproach:        &title,
 		}
 		if stores.SlackChannels != nil {
-			settings, settingsErr := stores.SlackChannels.GetByChannel(ctx, orgID, payload.TeamID, payload.ChannelID)
+			settings, settingsErr := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, payload.TeamID, payload.ChannelID)
 			if settingsErr == nil {
-				authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
-				if _, authErr := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
-					OrgID:                    orgID,
-					TeamID:                   payload.TeamID,
-					ChannelID:                payload.ChannelID,
-					SlackUserID:              payload.SlackUserID,
-					Capability:               slackbotsvc.CapabilitySession,
-					AllowedRoles:             []models.Role{models.RoleAdmin, models.RoleMember, models.RoleBuilder},
-					AllowUnmappedTeamSession: true,
-					IsOriginatingTeamSession: true,
-				}); authErr != nil {
+				if !stringSliceContains(settings.AllowedActions, string(slackbotsvc.CapabilitySession)) {
 					if markErr := stores.SlackInboundEvents.MarkFailed(ctx, orgID, inboundID, "Slack-started sessions are not allowed in this channel"); markErr != nil {
 						logger.Warn().Err(markErr).Str("channel_id", payload.ChannelID).Msg("failed to mark disallowed Slack session event failed")
 					}
-					logger.Warn().Err(authErr).Str("channel_id", payload.ChannelID).Msg("Slack-started session blocked by Slack authorization")
+					logger.Warn().Str("channel_id", payload.ChannelID).Msg("Slack-started session blocked by effective Slack channel settings")
 					return nil
 				}
-				session.RepositoryID = settings.DefaultRepositoryID
-				session.TargetBranch = settings.DefaultBranch
+				if mappedUserID != nil && stores.Memberships != nil {
+					membership, membershipErr := stores.Memberships.Get(ctx, *mappedUserID, orgID)
+					if membershipErr != nil || !roleCanStartSlackSession(membership.Role) {
+						if markErr := stores.SlackInboundEvents.MarkFailed(ctx, orgID, inboundID, "Slack-started sessions require builder access"); markErr != nil {
+							logger.Warn().Err(markErr).Str("channel_id", payload.ChannelID).Msg("failed to mark unauthorized Slack session event failed")
+						}
+						logger.Warn().Err(membershipErr).Str("channel_id", payload.ChannelID).Msg("Slack-started session blocked by mapped user role")
+						return nil
+					}
+				}
+				resolvedContext = slackbotsvc.ResolveSlackContext(slackbotsvc.SlackContextResolveInput{
+					Settings:              settings,
+					Text:                  payload.Text,
+					References:            slackContextReferencesForResolver(contextRefs),
+					TriggeringSlackUserID: payload.SlackUserID,
+				})
+				session.RepositoryID = resolvedContext.RepositoryID
+				if strings.TrimSpace(resolvedContext.Branch) != "" {
+					branch := strings.TrimSpace(resolvedContext.Branch)
+					session.TargetBranch = &branch
+				}
 			} else if !errors.Is(settingsErr, pgx.ErrNoRows) {
 				logger.Warn().Err(settingsErr).Str("channel_id", payload.ChannelID).Msg("failed to load Slack channel settings")
 			}
@@ -1713,6 +1744,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
 			Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+			References: slackContextReferencesForSessionInput(contextRefs),
 		}
 		if err := stores.SessionMessages.Create(ctx, initial); err != nil {
 			return fmt.Errorf("create initial slack session message: %w", err)
@@ -1744,15 +1776,17 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to persist Slack session attribution")
 			}
 		}
-		dedupeKey := db.RunAgentDedupeKey(session.ID)
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
-			return fmt.Errorf("enqueue slack-started session: %w", err)
+		if !blockingSlackMissingContext(resolvedContext.Missing) {
+			dedupeKey := db.RunAgentDedupeKey(session.ID)
+			if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
+				return fmt.Errorf("enqueue slack-started session: %w", err)
+			}
 		}
 		ackText := slackSessionAckText(services, session.ID, "Starting")
 		if teamLine := slackTeamSessionLine(*link); teamLine != "" {
 			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 		}
-		ackBlocks := slackSessionAckBlocks(ctx, stores, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText)
+		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode)
 		var posted ingestion.SlackPostedMessage
 		var postErr error
 		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
@@ -1838,14 +1872,14 @@ func slackChannelResponseVisibility(ctx context.Context, stores *Stores, logger 
 	if stores == nil || stores.SlackChannels == nil || channelID == "" {
 		return "thread"
 	}
-	settings, err := stores.SlackChannels.GetByChannel(ctx, orgID, teamID, channelID)
+	settings, err := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, teamID, channelID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack response visibility")
 		}
 		return "thread"
 	}
-	return slackNormalizeResponseVisibility(settings.ResponseVisibility)
+	return slackNormalizeResponseVisibility(string(settings.ResponseVisibility))
 }
 
 func slackNormalizeResponseVisibility(value string) string {
@@ -1855,6 +1889,17 @@ func slackNormalizeResponseVisibility(value string) string {
 	default:
 		return "thread"
 	}
+}
+
+func slackNormalizeOptionalResponseVisibility(value *models.SlackResponseVisibility) string {
+	if value == nil {
+		return "thread"
+	}
+	return slackNormalizeResponseVisibility(string(*value))
+}
+
+func slackResponseVisibilityPtr(value models.SlackResponseVisibility) *models.SlackResponseVisibility {
+	return &value
 }
 
 func slackDeliveryTargetFromVisibility(link models.SlackSessionLink, replyThreadTS, responseVisibility, dmChannelID string) (string, string, bool) {
@@ -1918,6 +1963,8 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 	previews := []db.SlackHomePreviewSummary{}
 	automationRuns := []db.SlackHomeAutomationRunSummary{}
 	memberships := []models.MembershipSummary{}
+	var botSettings *models.SlackBotSettings
+	var defaultRepo *models.Repository
 	if stores != nil && stores.SlackSessionLinks != nil {
 		var err error
 		pending, err = stores.SlackSessionLinks.ListPendingHumanInputsForSlackUser(ctx, orgID, teamID, slackUserID, 5)
@@ -1946,6 +1993,20 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			}
 		}
 	}
+	if stores != nil && stores.SlackBotSettings != nil {
+		if settings, err := stores.SlackBotSettings.GetByOrg(ctx, orgID); err == nil {
+			botSettings = &settings
+			if settings.DefaultRepositoryID != nil && stores.Repositories != nil {
+				if repo, repoErr := stores.Repositories.GetByID(ctx, orgID, *settings.DefaultRepositoryID); repoErr == nil {
+					defaultRepo = &repo
+				} else if !errors.Is(repoErr, pgx.ErrNoRows) {
+					logger.Warn().Err(repoErr).Str("repository_id", settings.DefaultRepositoryID.String()).Msg("failed to load Slack App Home default repository")
+				}
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home defaults")
+		}
+	}
 	blocks := []ingestion.SlackBlock{
 		{
 			Type: "header",
@@ -1964,6 +2025,7 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 		},
 	}
 	blocks = append(blocks, slackHomePendingBlocks(services, pending)...)
+	blocks = append(blocks, slackHomePersonalDefaultsBlock(botSettings, defaultRepo))
 	blocks = append(blocks, slackHomeRecentWorkBlock(services, recent))
 	blocks = append(blocks, slackHomeActivePreviewBlocks(services, orgID, previews)...)
 	blocks = append(blocks, slackHomeAutomationRunBlock(services, automationRuns), slackHomeOrgSelectorBlock(memberships, orgID),
@@ -1975,6 +2037,70 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 	return ingestion.SlackHomeView{
 		Type:   "home",
 		Blocks: blocks,
+	}
+}
+
+func slackHomePersonalDefaultsBlock(settings *models.SlackBotSettings, repo *models.Repository) ingestion.SlackBlock {
+	if settings == nil {
+		return ingestion.SlackBlock{
+			Type: "section",
+			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Personal defaults*\nUsing the connected organization's Slack defaults."},
+		}
+	}
+	repoLabel := "Not set"
+	if repo != nil && strings.TrimSpace(repo.FullName) != "" {
+		repoLabel = strings.TrimSpace(repo.FullName)
+	} else if settings.DefaultRepositoryID != nil {
+		repoLabel = settings.DefaultRepositoryID.String()
+	}
+	branchLabel := "Not set"
+	if settings.DefaultBranch != nil && strings.TrimSpace(*settings.DefaultBranch) != "" {
+		branchLabel = "`" + strings.TrimSpace(*settings.DefaultBranch) + "`"
+	}
+	text := fmt.Sprintf(
+		"*Personal defaults*\nRepository: %s\nBranch: %s\nRouting: %s\nReplies: %s\nNotifications: %s",
+		repoLabel,
+		branchLabel,
+		slackRoutingModeLabel(models.SlackRoutingMode(settings.RoutingMode)),
+		slackResponseVisibilityLabel(settings.ResponseVisibility),
+		slackNotificationPresetLabel(settings.NotificationPreset),
+	)
+	return ingestion.SlackBlock{
+		Type: "section",
+		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+	}
+}
+
+func slackRoutingModeLabel(mode models.SlackRoutingMode) string {
+	switch mode {
+	case models.SlackRoutingModeAnswerOnly:
+		return "Answer only"
+	case models.SlackRoutingModeStartWork:
+		return "Start work"
+	default:
+		return "Auto"
+	}
+}
+
+func slackResponseVisibilityLabel(visibility models.SlackResponseVisibility) string {
+	switch visibility {
+	case models.SlackResponseVisibilityDM:
+		return "DM"
+	default:
+		return "Thread"
+	}
+}
+
+func slackNotificationPresetLabel(preset models.SlackNotificationPreset) string {
+	switch preset {
+	case models.SlackNotificationPresetQuiet:
+		return "Quiet"
+	case models.SlackNotificationPresetVerbose:
+		return "Verbose"
+	case models.SlackNotificationPresetCustom:
+		return "Custom"
+	default:
+		return "Balanced"
 	}
 }
 
@@ -2234,21 +2360,45 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 		if !ok {
 			return fmt.Errorf("unexpected slack credential type")
 		}
-		text := strings.TrimSpace(input.Title)
-		if input.Summary != "" {
-			text += "\n" + strings.TrimSpace(input.Summary)
+		progress := slackbotsvc.NormalizeProgressUpdate(slackbotsvc.ProgressInput{
+			UpdateKind: input.UpdateKind,
+			Title:      input.Title,
+			Summary:    input.Summary,
+			Terminal:   input.Terminal,
+			Failed:     strings.Contains(strings.ToLower(input.UpdateKind+" "+input.Title), "fail"),
+			OccurredAt: time.Now(),
+		})
+		previous := slackbotsvc.SlackProgressPrevious{}
+		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
+			previous.UpdatedAt = link.UpdatedAt
 		}
-		if input.Terminal {
-			text += "\n\nSession: " + slackSessionURL(services, sessionID)
+		if link.LatestProgressKind != nil {
+			previous.Kind = slackbotsvc.SlackProgressKind(*link.LatestProgressKind)
 		}
-		if text == "" {
-			text = "143 session update"
+		if !slackbotsvc.ShouldSendProgressUpdate(progress, previous, slackbotsvc.DefaultSlackProgressPolicy()) {
+			if services != nil && services.SlackbotMetrics != nil {
+				services.SlackbotMetrics.RecordDroppedUpdate(ctx, string(progress.Kind), "progress_policy")
+			}
+			return nil
 		}
+		state := slackLifecycleStateForProgress(progress)
+		rendered := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+			Session:    models.Session{ID: sessionID},
+			Link:       link,
+			State:      state,
+			Title:      progress.Title,
+			Summary:    progress.Summary,
+			SessionURL: slackSessionURL(services, sessionID),
+		})
+		text := rendered.Text
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
 			updateStarted := time.Now()
 			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, text); err == nil {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
+				if updateErr := stores.SlackSessionLinks.SetLatestStatusProgress(ctx, orgID, sessionID, *link.LatestStatusMessageTS, string(progress.Kind)); updateErr != nil {
+					logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack progress kind")
+				}
 				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", text)
 				return nil
 			} else {
@@ -2263,7 +2413,7 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 			return err
 		}
 		if stores.SlackSessionLinks != nil {
-			if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, sessionID, posted.Timestamp); updateErr != nil {
+			if updateErr := stores.SlackSessionLinks.SetLatestStatusProgress(ctx, orgID, sessionID, posted.Timestamp, string(progress.Kind)); updateErr != nil {
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack status message timestamp")
 			}
 		}
@@ -2310,16 +2460,15 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				logger.Warn().Err(sessionErr).Str("session_id", sessionID.String()).Msg("failed to load session outcome for Slack final response")
 			}
 		}
-		text, blocks := renderSlackFinalBlocks(services, msg.Content, orgID, sessionID, details)
-		if teamLine := slackTeamSessionLine(link); teamLine != "" {
-			text = strings.TrimSpace(text) + "\n\n" + teamLine
-			if len(blocks) > 0 && blocks[0].Text != nil {
-				blocks[0].Text.Text = strings.TrimSpace(blocks[0].Text.Text) + "\n\n" + teamLine
-			}
-		}
+		text, blocks := renderSlackFinalBlocks(services, msg.Content, orgID, sessionID, link, details)
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
-			terminal := "Completed\nSession: " + slackSessionURL(services, sessionID)
+			terminal := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+				Session:    models.Session{ID: sessionID},
+				Link:       link,
+				State:      slackbotsvc.SessionLifecycleComplete,
+				SessionURL: slackSessionURL(services, sessionID),
+			}).Text
 			updateStarted := time.Now()
 			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, terminal); err != nil {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
@@ -2379,7 +2528,17 @@ func newSlackDeliverHumanInputHandler(stores *Stores, services *Services, logger
 			return fmt.Errorf("unexpected slack credential type")
 		}
 		text, blocks := renderSlackHumanInput(services, req, sessionID)
-		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
+		channelID, threadTS, shouldPost := slackHumanInputDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, req, link, slackReplyThreadTS(link.SlackThreadTS))
+		if !shouldPost {
+			logger.Info().
+				Str("org_id", orgID.String()).
+				Str("session_id", sessionID.String()).
+				Str("human_input_request_id", requestID.String()).
+				Str("sensitivity", string(req.Sensitivity)).
+				Str("preferred_channel", string(req.PreferredChannel)).
+				Msg("skipping Slack human-input delivery because request is not channel-deliverable")
+			return nil
+		}
 		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
@@ -2459,11 +2618,15 @@ func newSlackSendNotificationHandler(stores *Stores, services *Services, logger 
 }
 
 func renderSlackNotification(services *Services, input models.SlackSendNotificationJobPayload) (string, []ingestion.SlackBlock) {
+	renderInput := slackNotificationRenderInput(input)
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
-		title = "143 notification"
+		title = slackNotificationDefaultTitle(renderInput.Kind)
 	}
 	body := strings.TrimSpace(input.Body)
+	if body == "" {
+		body = slackNotificationDefaultBody(renderInput.Kind)
+	}
 	var text strings.Builder
 	text.WriteString("*")
 	text.WriteString(title)
@@ -2520,10 +2683,105 @@ func renderSlackNotification(services *Services, input models.SlackSendNotificat
 			})
 		}
 	}
+	if input.PullRequestID != "" {
+		prURL := strings.TrimSpace(input.PullRequestURL)
+		if prURL == "" && input.SessionID != "" {
+			if sessionID, err := uuid.Parse(input.SessionID); err == nil {
+				prURL = slackSessionURL(services, sessionID)
+			}
+		}
+		if prURL != "" {
+			elements = append(elements, map[string]any{
+				"type": "button",
+				"text": map[string]string{"type": "plain_text", "text": "Review PR"},
+				"url":  prURL,
+			})
+		}
+	}
 	if len(elements) > 0 {
 		blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	}
 	return text.String(), blocks
+}
+
+func slackNotificationRenderInput(input models.SlackSendNotificationJobPayload) models.SlackNotificationRenderInput {
+	return models.SlackNotificationRenderInput{
+		Kind:            models.SlackNotificationKind(input.Kind),
+		Preset:          models.SlackNotificationPreset(input.NotificationPreset),
+		Title:           input.Title,
+		Body:            input.Body,
+		SessionID:       parseOptionalUUID(input.SessionID),
+		AutomationID:    parseOptionalUUID(input.AutomationID),
+		AutomationRunID: parseOptionalUUID(input.AutomationRunID),
+		PullRequestID:   parseOptionalUUID(input.PullRequestID),
+		PreviewID:       parseOptionalUUID(input.PreviewID),
+		ActorUserID:     parseOptionalUUID(input.ActorUserID),
+	}
+}
+
+func parseOptionalUUID(raw string) *uuid.UUID {
+	if raw == "" {
+		return nil
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func slackNotificationDefaultTitle(kind models.SlackNotificationKind) string {
+	switch kind {
+	case models.SlackNotificationSessionCompleted:
+		return "Session completed"
+	case models.SlackNotificationSessionFailed:
+		return "Session failed"
+	case models.SlackNotificationAutomationCompleted:
+		return "Automation completed"
+	case models.SlackNotificationAutomationFailed:
+		return "Automation failed"
+	case models.SlackNotificationAutomationFailureStreak:
+		return "Automation failure streak"
+	case models.SlackNotificationPROpened:
+		return "Pull request opened"
+	case models.SlackNotificationPreviewReady:
+		return "Preview ready"
+	case models.SlackNotificationPreviewFailed:
+		return "Preview failed"
+	case models.SlackNotificationPreviewStale:
+		return "Preview stale"
+	case models.SlackNotificationHumanInputRequested:
+		return "143 needs your response"
+	default:
+		return "143 notification"
+	}
+}
+
+func slackNotificationDefaultBody(kind models.SlackNotificationKind) string {
+	switch kind {
+	case models.SlackNotificationSessionCompleted:
+		return "The requested work finished. Open the session to review the result."
+	case models.SlackNotificationSessionFailed:
+		return "The run failed before completing. Open the session for details and recovery options."
+	case models.SlackNotificationAutomationCompleted:
+		return "An automation run completed."
+	case models.SlackNotificationAutomationFailed:
+		return "An automation run failed and may need attention."
+	case models.SlackNotificationAutomationFailureStreak:
+		return "This automation has failed repeatedly."
+	case models.SlackNotificationPROpened:
+		return "A pull request is ready for review."
+	case models.SlackNotificationPreviewReady:
+		return "A preview is ready to open."
+	case models.SlackNotificationPreviewFailed:
+		return "Preview startup failed. Open the session or preview details to inspect logs."
+	case models.SlackNotificationPreviewStale:
+		return "The session has newer workspace changes than the active preview."
+	case models.SlackNotificationHumanInputRequested:
+		return "The agent is waiting for a human response."
+	default:
+		return ""
+	}
 }
 
 type slackNotificationSubscriptionConfig struct {
@@ -2533,11 +2791,14 @@ type slackNotificationSubscriptionConfig struct {
 	DMUserIDs    []string `json:"dm_user_ids"`
 }
 
-func slackNotificationSubscriptionMatches(raw json.RawMessage, eventKind string, automationID *uuid.UUID) bool {
+func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
 	if len(raw) == 0 || string(raw) == "null" {
-		return false
+		raw = json.RawMessage(`{}`)
 	}
 	cfg := parseSlackNotificationSubscriptionConfig(raw)
+	if len(cfg.Events) == 0 {
+		cfg.Events = slackNotificationPresetEvents(preset)
+	}
 	if len(cfg.Events) == 0 {
 		return false
 	}
@@ -2548,6 +2809,35 @@ func slackNotificationSubscriptionMatches(raw json.RawMessage, eventKind string,
 		return stringSliceContains(cfg.Automations, automationID.String())
 	}
 	return true
+}
+
+func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []string {
+	if preset == nil {
+		return nil
+	}
+	switch *preset {
+	case models.SlackNotificationPresetQuiet:
+		return []string{
+			string(models.SlackNotificationSessionFailed),
+			string(models.SlackNotificationAutomationFailed),
+			string(models.SlackNotificationAutomationFailureStreak),
+			string(models.SlackNotificationHumanInputRequested),
+		}
+	case models.SlackNotificationPresetBalanced:
+		return []string{
+			string(models.SlackNotificationSessionCompleted),
+			string(models.SlackNotificationSessionFailed),
+			string(models.SlackNotificationAutomationFailed),
+			string(models.SlackNotificationAutomationFailureStreak),
+			string(models.SlackNotificationPROpened),
+			string(models.SlackNotificationPreviewReady),
+			string(models.SlackNotificationHumanInputRequested),
+		}
+	case models.SlackNotificationPresetVerbose:
+		return []string{"*"}
+	default:
+		return nil
+	}
 }
 
 func slackNotificationEventMatches(events []string, eventKind string) bool {
@@ -2567,12 +2857,15 @@ func slackNotificationEventMatches(events []string, eventKind string) bool {
 }
 
 type slackNotificationFanoutInput struct {
-	EventKind    string
-	Title        string
-	Body         string
-	SessionID    *uuid.UUID
-	PreviewID    *uuid.UUID
-	AutomationID *uuid.UUID
+	EventKind       string
+	Title           string
+	Body            string
+	SessionID       *uuid.UUID
+	PreviewID       *uuid.UUID
+	PullRequestID   *uuid.UUID
+	PullRequestURL  string
+	AutomationID    *uuid.UUID
+	AutomationRunID *uuid.UUID
 }
 
 type slackNotificationDestination struct {
@@ -2585,7 +2878,7 @@ type slackNotificationDestination struct {
 func slackNotificationDestinations(setting models.SlackChannelSettings, input slackNotificationFanoutInput) []slackNotificationDestination {
 	subs := parseSlackNotificationSubscriptionConfig(setting.NotificationSubscriptions)
 	destinations := []slackNotificationDestination{}
-	if slackNormalizeResponseVisibility(setting.ResponseVisibility) != "dm" {
+	if slackNormalizeOptionalResponseVisibility(setting.ResponseVisibility) != "dm" {
 		destinations = append(destinations, slackNotificationDestination{
 			TeamID:    setting.SlackTeamID,
 			ChannelID: setting.SlackChannelID,
@@ -2614,7 +2907,7 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 		return
 	}
 	for _, setting := range settings {
-		if !slackNotificationSubscriptionMatches(setting.NotificationSubscriptions, input.EventKind, input.AutomationID) {
+		if !slackNotificationSubscriptionMatches(setting.NotificationSubscriptions, setting.NotificationPreset, input.EventKind, input.AutomationID) {
 			continue
 		}
 		dedupeKeyParts := []string{"slack_notification", input.EventKind, setting.SlackChannelID}
@@ -2623,6 +2916,9 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 		}
 		if input.PreviewID != nil {
 			dedupeKeyParts = append(dedupeKeyParts, input.PreviewID.String())
+		}
+		if input.PullRequestID != nil {
+			dedupeKeyParts = append(dedupeKeyParts, input.PullRequestID.String())
 		}
 		if input.AutomationID != nil {
 			dedupeKeyParts = append(dedupeKeyParts, input.AutomationID.String())
@@ -2644,6 +2940,19 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 			}
 			if input.PreviewID != nil {
 				payload.PreviewID = input.PreviewID.String()
+			}
+			if input.PullRequestID != nil {
+				payload.PullRequestID = input.PullRequestID.String()
+				payload.PullRequestURL = strings.TrimSpace(input.PullRequestURL)
+			}
+			if input.AutomationID != nil {
+				payload.AutomationID = input.AutomationID.String()
+			}
+			if input.AutomationRunID != nil {
+				payload.AutomationRunID = input.AutomationRunID.String()
+			}
+			if setting.NotificationPreset != nil {
+				payload.NotificationPreset = string(*setting.NotificationPreset)
 			}
 			destinationDedupeKey := dedupeKey
 			if destination.SlackUserID != "" {
@@ -2694,18 +3003,19 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		logger.Warn().Err(err).Str("automation_run_id", automationRunID.String()).Msg("failed to load automation run for Slack notification")
 		return
 	}
-	automationKind := "automation.run.completed"
-	if eventKind == "session.failed" {
-		automationKind = "automation.run.failed"
+	automationKind := string(models.SlackNotificationAutomationCompleted)
+	if eventKind == string(models.SlackNotificationSessionFailed) {
+		automationKind = string(models.SlackNotificationAutomationFailed)
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-		EventKind:    automationKind,
-		Title:        title,
-		Body:         body,
-		SessionID:    &sessionID,
-		AutomationID: &run.AutomationID,
+		EventKind:       automationKind,
+		Title:           title,
+		Body:            body,
+		SessionID:       &sessionID,
+		AutomationID:    &run.AutomationID,
+		AutomationRunID: automationRunID,
 	})
-	if automationKind == "automation.run.failed" {
+	if automationKind == string(models.SlackNotificationAutomationFailed) {
 		streak, streakErr := stores.AutomationRuns.CountConsecutiveFailures(ctx, orgID, run.AutomationID)
 		if streakErr != nil {
 			logger.Warn().Err(streakErr).Str("automation_id", run.AutomationID.String()).Msg("failed to count automation failure streak for Slack notification")
@@ -2713,11 +3023,12 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		}
 		if streak >= 3 {
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-				EventKind:    "automation.run.failure_streak",
-				Title:        "Automation failure streak",
-				Body:         fmt.Sprintf("%d consecutive automation runs failed.", streak),
-				SessionID:    &sessionID,
-				AutomationID: &run.AutomationID,
+				EventKind:       string(models.SlackNotificationAutomationFailureStreak),
+				Title:           "Automation failure streak",
+				Body:            fmt.Sprintf("%d consecutive automation runs failed.", streak),
+				SessionID:       &sessionID,
+				AutomationID:    &run.AutomationID,
+				AutomationRunID: automationRunID,
 			})
 		}
 	}
@@ -2743,7 +3054,7 @@ func enqueueSlackPreviewStaleIfNeeded(ctx context.Context, stores *Stores, logge
 		return
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-		EventKind: "preview.stale",
+		EventKind: string(models.SlackNotificationPreviewStale),
 		Title:     "Preview stale",
 		Body:      "The session has newer workspace changes than the active preview. Refresh the preview to pick up the latest changes.",
 		SessionID: &sessionID,
@@ -2764,81 +3075,175 @@ func slackPreviewIsStaleForSession(session models.Session, preview models.Previe
 }
 
 func renderSlackHumanInput(services *Services, req models.HumanInputRequest, sessionID uuid.UUID) (string, []ingestion.SlackBlock) {
-	var b strings.Builder
-	b.WriteString("*")
-	b.WriteString(req.Title)
-	b.WriteString("*\n")
-	b.WriteString(strings.TrimSpace(req.Body))
+	summary := strings.TrimSpace(req.Body)
 	if len(req.Choices) > 0 {
-		b.WriteString("\n\nChoices:")
+		var choices strings.Builder
+		choices.WriteString(summary)
+		choices.WriteString("\n\nChoices:")
 		for _, choice := range req.Choices {
-			b.WriteString("\n- ")
-			b.WriteString(choice.ID)
-			b.WriteString(": ")
-			b.WriteString(choice.Label)
+			choices.WriteString("\n- ")
+			choices.WriteString(choice.ID)
+			choices.WriteString(": ")
+			choices.WriteString(choice.Label)
 		}
+		summary = strings.TrimSpace(choices.String())
 	}
-	b.WriteString("\n\nAnswer in 143 or use a Slack action.\nSession: ")
-	b.WriteString(slackSessionURL(services, sessionID))
-	text := b.String()
-	blocks := []ingestion.SlackBlock{
-		{
-			Type: "section",
-			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
-		},
-	}
+	rendered := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+		Session:    models.Session{ID: sessionID},
+		State:      slackbotsvc.SessionLifecycleWaiting,
+		Title:      strings.TrimSpace(req.Title),
+		Summary:    summary + "\n\nAnswer in 143 or use a Slack action.",
+		SessionURL: slackSessionURL(services, sessionID),
+	})
+	text := rendered.Text
+	blocks := rendered.Blocks
 	if len(req.Choices) > 0 {
 		elements := make([]map[string]any, 0, min(len(req.Choices), 5))
-		for i, choice := range req.Choices {
-			if i >= 5 {
-				break
-			}
+		if req.Kind == models.HumanInputRequestKindMultiChoice {
 			value, err := json.Marshal(map[string]string{
 				"session_id": sessionID.String(),
 				"request_id": req.ID.String(),
-				"answer":     choice.ID,
 			})
-			if err != nil {
-				continue
+			if err == nil {
+				elements = append(elements, map[string]any{
+					"type":      "button",
+					"action_id": "slack_answer_human_input_multi",
+					"text":      map[string]string{"type": "plain_text", "text": "Choose options"},
+					"value":     string(value),
+				})
 			}
-			label := strings.TrimSpace(choice.Label)
-			if label == "" {
-				label = choice.ID
+		} else {
+			for i, choice := range req.Choices {
+				if i >= 5 {
+					break
+				}
+				value, err := json.Marshal(map[string]string{
+					"session_id": sessionID.String(),
+					"request_id": req.ID.String(),
+					"answer":     choice.ID,
+				})
+				if err != nil {
+					continue
+				}
+				label := strings.TrimSpace(choice.Label)
+				if label == "" {
+					label = choice.ID
+				}
+				actionID := "slack_answer_human_input"
+				if req.Kind == models.HumanInputRequestKindToolApproval || req.Kind == models.HumanInputRequestKindActionChoice {
+					switch strings.ToLower(choice.ID) {
+					case "continue":
+						actionID = "slack_continue_human_input"
+					case "resume":
+						actionID = "slack_resume_human_input"
+					case "stop":
+						actionID = "slack_stop_human_input"
+					case "approve", "approved", "yes", "allow":
+						actionID = "slack_approve_human_input"
+					case "deny", "denied", "no", "reject", "cancel":
+						actionID = "slack_deny_human_input"
+					}
+				}
+				element := map[string]any{
+					"type":      "button",
+					"action_id": actionID,
+					"text": map[string]string{
+						"type": "plain_text",
+						"text": truncateSlackButtonText(label),
+					},
+					"value": string(value),
+				}
+				if choice.Destructive || actionID == "slack_deny_human_input" || actionID == "slack_stop_human_input" {
+					element["style"] = "danger"
+				} else if actionID == "slack_approve_human_input" || actionID == "slack_continue_human_input" || actionID == "slack_resume_human_input" {
+					element["style"] = "primary"
+				}
+				elements = append(elements, element)
 			}
-			elements = append(elements, map[string]any{
-				"type":      "button",
-				"action_id": "slack_answer_human_input",
-				"text": map[string]string{
-					"type": "plain_text",
-					"text": truncateSlackButtonText(label),
-				},
-				"value": string(value),
-			})
 		}
 		if len(elements) > 0 {
 			blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
 		}
 	}
-	blocks = append(blocks, ingestion.SlackBlock{
-		Type: "actions",
-		Elements: []map[string]any{
-			{
-				"type":      "button",
-				"action_id": "slack_answer_human_input_freeform",
-				"text":      map[string]string{"type": "plain_text", "text": "Reply in Slack"},
-				"value": slackActionValue(map[string]string{
-					"session_id": sessionID.String(),
-					"request_id": req.ID.String(),
-				}),
-			},
-			{
-				"type": "button",
-				"text": map[string]string{"type": "plain_text", "text": "Answer in 143"},
-				"url":  slackSessionURL(services, sessionID),
-			},
-		},
+	elements := []map[string]any{}
+	if req.Kind == "" || req.Kind.AcceptsFreeText() {
+		elements = append(elements, map[string]any{
+			"type":      "button",
+			"action_id": "slack_answer_human_input_freeform",
+			"text":      map[string]string{"type": "plain_text", "text": "Reply in Slack"},
+			"value": slackActionValue(map[string]string{
+				"session_id": sessionID.String(),
+				"request_id": req.ID.String(),
+			}),
+		})
+	}
+	elements = append(elements, map[string]any{
+		"type": "button",
+		"text": map[string]string{"type": "plain_text", "text": "Answer in 143"},
+		"url":  slackSessionURL(services, sessionID),
 	})
+	blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	return text, blocks
+}
+
+func slackHumanInputDeliveryTarget(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, accessToken string, logger zerolog.Logger, req models.HumanInputRequest, link models.SlackSessionLink, replyThreadTS string) (string, string, bool) {
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
+	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == models.HumanInputPreferredChannelWeb {
+		return "", "", false
+	}
+	needsDM := req.PreferredChannel == models.HumanInputPreferredChannelSlackDM ||
+		req.Sensitivity == models.HumanInputSensitivityPersonal ||
+		req.Sensitivity == models.HumanInputSensitivitySensitive
+	slackUserID := link.SlackUserID
+	if req.AssignedUserID != nil {
+		needsDM = true
+		slackUserID = ""
+		if stores != nil && stores.SlackUserLinks != nil {
+			assignedLink, err := stores.SlackUserLinks.GetByUser(ctx, req.OrgID, *req.AssignedUserID, link.SlackTeamID)
+			if err == nil {
+				slackUserID = assignedLink.SlackUserID
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				logger.Warn().Err(err).
+					Str("org_id", req.OrgID.String()).
+					Str("assigned_user_id", req.AssignedUserID.String()).
+					Msg("failed to resolve assigned Slack user for human-input delivery")
+			}
+		}
+	}
+	if !needsDM {
+		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, accessToken, logger, link, replyThreadTS)
+		return channelID, threadTS, true
+	}
+	if slackUserID == "" {
+		return "", "", false
+	}
+	dmChannelID, err := slackClient.OpenDM(ctx, accessToken, slackUserID)
+	if err != nil {
+		logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to open Slack DM for human-input delivery")
+		return "", "", false
+	}
+	return slackHumanInputDeliveryTargetFromRequest(req, link, replyThreadTS, dmChannelID)
+}
+
+func slackHumanInputDeliveryTargetFromRequest(req models.HumanInputRequest, link models.SlackSessionLink, replyThreadTS, dmChannelID string) (string, string, bool) {
+	if req.PreferredChannel == models.HumanInputPreferredChannelWeb {
+		return "", "", false
+	}
+	needsDM := req.PreferredChannel == models.HumanInputPreferredChannelSlackDM ||
+		req.Sensitivity == models.HumanInputSensitivityPersonal ||
+		req.Sensitivity == models.HumanInputSensitivitySensitive
+	if needsDM {
+		if dmChannelID == "" {
+			return "", "", false
+		}
+		return dmChannelID, "", true
+	}
+	return link.SlackChannelID, replyThreadTS, true
 }
 
 func truncateSlackButtonText(text string) string {
@@ -2872,13 +3277,31 @@ func enqueueSlackHumanInputsIfPending(ctx context.Context, stores *Stores, logge
 		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "slack_deliver_human_input", payload, 4, &dedupeKey); err != nil {
 			logger.Warn().Err(err).Str("human_input_request_id", req.ID.String()).Msg("failed to enqueue Slack human-input delivery")
 		}
-		enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-			EventKind: "human_input.requested",
-			Title:     "143 needs your response",
-			Body:      strings.TrimSpace(req.Title),
-			SessionID: &sessionID,
-		})
+		if slackHumanInputAllowsNotificationFanout(req) {
+			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+				EventKind: string(models.SlackNotificationHumanInputRequested),
+				Title:     "143 needs your response",
+				Body:      strings.TrimSpace(req.Title),
+				SessionID: &sessionID,
+			})
+		}
 	}
+}
+
+func slackHumanInputAllowsNotificationFanout(req models.HumanInputRequest) bool {
+	if req.AssignedUserID != nil {
+		return false
+	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
+	}
+	if req.Sensitivity != models.HumanInputSensitivityTeam {
+		return false
+	}
+	return req.PreferredChannel == models.HumanInputPreferredChannelSlackThread
 }
 
 func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -2899,8 +3322,14 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 			if input.CallbackID == "slack_human_input_freeform_modal" {
 				return handleSlackHumanInputFreeformModal(ctx, stores, services, slackClient, input)
 			}
+			if input.CallbackID == "slack_human_input_multi_modal" {
+				return handleSlackHumanInputMultiModal(ctx, stores, services, slackClient, input)
+			}
 			if input.CallbackID == "slack_configure_channel_modal" {
 				return handleSlackConfigureChannelModal(ctx, stores, input)
+			}
+			if input.CallbackID == "slack_missing_context_modal" {
+				return handleSlackMissingContextModal(ctx, stores, input)
 			}
 			return nil
 		case "slack_open_session":
@@ -2915,19 +3344,23 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 			return handleSlackSelectRepository(ctx, stores, input)
 		case "slack_configure_channel":
 			return handleSlackConfigureChannel(ctx, stores, slackClient, input)
+		case "slack_choose_preview_target", "slack_choose_pull_request", "slack_choose_branch":
+			return handleSlackMissingContextPrompt(ctx, stores, slackClient, input)
 		case "slack_create_preview":
-			return handleSlackCreatePreview(ctx, stores, slackClient, input)
+			return handleSlackCreatePreview(ctx, stores, services, slackClient, input)
 		case "slack_open_preview":
 			return handleSlackOpenPreview(ctx, stores, services, slackClient, input)
-		case "slack_answer_human_input":
+		case "slack_answer_human_input", "slack_approve_human_input", "slack_deny_human_input", "slack_continue_human_input", "slack_resume_human_input", "slack_stop_human_input":
 			return handleSlackHumanInputAnswer(ctx, stores, services, slackClient, input)
 		case "slack_answer_human_input_freeform":
 			return handleSlackHumanInputFreeformPrompt(ctx, stores, slackClient, input)
+		case "slack_answer_human_input_multi":
+			return handleSlackHumanInputMultiPrompt(ctx, stores, slackClient, input)
 		case "slack_member_joined_channel":
 			return handleSlackMemberJoinedChannel(ctx, stores, slackClient, input)
 		case "slack_refresh_preview", "slack_restart_preview", "slack_stop_preview", "slack_extend_preview":
 			return handleSlackPreviewAction(ctx, stores, services, input)
-		case "slack_repair_pr", "slack_merge_pr", "slack_claim_team_session", "slack_start_work":
+		case "slack_repair_pr", "slack_merge_pr", "slack_claim_team_session", "slack_start_work", "slack_create_pr":
 			return handleSlackSpecializedSessionAction(ctx, stores, services, slackClient, input)
 		default:
 			logger.Debug().Str("action_id", input.ActionID).Msg("unhandled Slack interaction action")
@@ -3235,7 +3668,7 @@ func handleSlackSelectRepository(ctx context.Context, stores *Stores, input mode
 		SlackChannelID:            channelID,
 		DefaultRepositoryID:       &repoID,
 		DefaultBranch:             defaultBranchPtr,
-		ResponseVisibility:        "thread",
+		ResponseVisibility:        slackResponseVisibilityPtr(models.SlackResponseVisibilityThread),
 		AllowedActions:            []string{"session", "preview"},
 		NotificationSubscriptions: json.RawMessage(`{}`),
 		Active:                    true,
@@ -3399,6 +3832,7 @@ func handleSlackConfigureChannelModal(ctx context.Context, stores *Stores, input
 	if responseVisibility == "" {
 		responseVisibility = "thread"
 	}
+	responseVisibilityValue := models.SlackResponseVisibility(responseVisibility)
 	allowedActions := slackModalSelectedValues(input.RawPayload, "allowed_actions", "selected")
 	if len(allowedActions) == 0 {
 		allowedActions = []string{"session", "preview"}
@@ -3411,12 +3845,157 @@ func handleSlackConfigureChannelModal(ctx context.Context, stores *Stores, input
 		SlackChannelID:            metadata.ChannelID,
 		DefaultRepositoryID:       &repo.ID,
 		DefaultBranch:             &defaultBranch,
-		ResponseVisibility:        responseVisibility,
+		ResponseVisibility:        &responseVisibilityValue,
 		AllowedActions:            allowedActions,
 		NotificationSubscriptions: notificationSubscriptions,
 		Active:                    true,
 	}
 	return stores.SlackChannels.Upsert(ctx, settings)
+}
+
+func handleSlackMissingContextPrompt(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil {
+		return fmt.Errorf("slack missing-context dependencies are not configured")
+	}
+	orgID, err := uuid.Parse(input.OrgID)
+	if err != nil {
+		return fmt.Errorf("parse org_id: %w", err)
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	if input.TriggerID == "" {
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Open the linked 143 session to add the missing context.")
+	}
+	var value struct {
+		OrgID     string `json:"org_id"`
+		SessionID string `json:"session_id"`
+		Kind      string `json:"kind"`
+	}
+	if input.Value != "" {
+		if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
+			return fmt.Errorf("parse Slack missing-context value: %w", err)
+		}
+	}
+	kind := strings.TrimSpace(value.Kind)
+	if kind == "" {
+		switch input.ActionID {
+		case "slack_choose_preview_target":
+			kind = "preview_target"
+		case "slack_choose_pull_request":
+			kind = "pull_request"
+		case "slack_choose_branch":
+			kind = "branch"
+		default:
+			kind = "context"
+		}
+	}
+	return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackMissingContextModal(kind, input.Value))
+}
+
+func slackMissingContextModal(kind string, privateMetadata string) ingestion.SlackHomeView {
+	title := "Add context"
+	label := "Context value"
+	placeholder := "Paste a URL, branch, repository, session, or PR"
+	switch kind {
+	case "preview_target":
+		title = "Preview target"
+		label = "Branch, PR, session, or repository"
+		placeholder = "main, https://github.com/acme/api/pull/42, or a session URL"
+	case "pull_request":
+		title = "Pull request"
+		label = "Pull request URL or number"
+		placeholder = "https://github.com/acme/api/pull/42"
+	case "branch":
+		title = "Branch"
+		label = "Branch name"
+		placeholder = "main"
+	}
+	return ingestion.SlackHomeView{
+		Type:            "modal",
+		CallbackID:      "slack_missing_context_modal",
+		PrivateMetadata: privateMetadata,
+		Title:           &ingestion.SlackTextObject{Type: "plain_text", Text: title},
+		Submit:          &ingestion.SlackTextObject{Type: "plain_text", Text: "Continue"},
+		Close:           &ingestion.SlackTextObject{Type: "plain_text", Text: "Cancel"},
+		Blocks: []ingestion.SlackBlock{{
+			Type:    "input",
+			BlockID: "context_value",
+			Label:   &ingestion.SlackTextObject{Type: "plain_text", Text: label},
+			Element: slackMissingContextInputElement(kind, placeholder),
+		}},
+	}
+}
+
+func slackMissingContextInputElement(kind, placeholder string) map[string]any {
+	if kind == "preview_target" || kind == "pull_request" || kind == "branch" {
+		return map[string]any{
+			"type":             "external_select",
+			"action_id":        "value",
+			"min_query_length": 0,
+			"placeholder":      map[string]string{"type": "plain_text", "text": placeholder},
+		}
+	}
+	return map[string]any{
+		"type":        "plain_text_input",
+		"action_id":   "value",
+		"placeholder": map[string]string{"type": "plain_text", "text": placeholder},
+	}
+}
+
+func handleSlackMissingContextModal(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload) error {
+	var metadata struct {
+		OrgID     string `json:"org_id"`
+		SessionID string `json:"session_id"`
+		Kind      string `json:"kind"`
+	}
+	var payload struct {
+		View struct {
+			PrivateMetadata string `json:"private_metadata"`
+		} `json:"view"`
+	}
+	if err := json.Unmarshal(input.RawPayload, &payload); err != nil {
+		return fmt.Errorf("parse Slack missing-context modal payload: %w", err)
+	}
+	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &metadata); err != nil {
+		return fmt.Errorf("parse Slack missing-context metadata: %w", err)
+	}
+	rawOrgID := input.OrgID
+	if rawOrgID == "" {
+		rawOrgID = metadata.OrgID
+	}
+	orgID, sessionID, err := parseSlackSessionJobIDs(rawOrgID, metadata.SessionID)
+	if err != nil {
+		return err
+	}
+	value := slackModalSelectedValue(input.RawPayload, "context_value", "value")
+	if value == "" {
+		value = slackModalStringValue(input.RawPayload, "context_value", "value")
+	}
+	if value == "" {
+		return nil
+	}
+	prompt := slackMissingContextContinuationPrompt(metadata.Kind, value)
+	return enqueueSlackSessionContinuationPrompt(ctx, stores, orgID, sessionID, prompt)
+}
+
+func slackMissingContextContinuationPrompt(kind, value string) string {
+	value = strings.TrimSpace(value)
+	switch kind {
+	case "preview_target":
+		return "Continue this Slack-started session using this preview target: " + value + "\n\nCreate or update the preview and report the URL/status."
+	case "pull_request":
+		return "Continue this Slack-started session using this pull request: " + value + "\n\nInspect or repair the pull request and report the outcome."
+	case "branch":
+		return "Continue this Slack-started session using this branch: " + value + "\n\nProceed with the requested work and report the outcome."
+	default:
+		return "Continue this Slack-started session using this additional context: " + value
+	}
 }
 
 func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessage {
@@ -3433,12 +4012,17 @@ func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessag
 	return encoded
 }
 
-func handleSlackCreatePreview(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+func handleSlackCreatePreview(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
 	if stores == nil || stores.Credentials == nil {
 		return fmt.Errorf("slack preview prompt dependencies are not configured")
 	}
 	var actionValue struct {
-		SessionID string `json:"session_id"`
+		SessionID     string `json:"session_id"`
+		RepositoryID  string `json:"repository_id"`
+		PullRequestID string `json:"pull_request_id"`
+		Branch        string `json:"branch"`
+		CommitSHA     string `json:"commit_sha"`
+		ConfigName    string `json:"config_name"`
 	}
 	if input.Value != "" {
 		_ = json.Unmarshal([]byte(input.Value), &actionValue)
@@ -3448,40 +4032,83 @@ func handleSlackCreatePreview(ctx context.Context, stores *Stores, slackClient *
 		return fmt.Errorf("parse org_id: %w", err)
 	}
 	if actionValue.SessionID != "" {
-		if stores.SessionMessages == nil || stores.Jobs == nil || stores.Sessions == nil {
-			return fmt.Errorf("slack preview creation session dependencies are not configured")
+		if services == nil || services.SlackPreviewControl == nil || stores.Sessions == nil {
+			return fmt.Errorf("slack preview control dependencies are not configured")
 		}
 		sessionID, err := uuid.Parse(actionValue.SessionID)
 		if err != nil {
 			return fmt.Errorf("parse session_id: %w", err)
 		}
+		auth, err := authorizeSlackSessionAction(ctx, stores, input, orgID, sessionID, slackbotsvc.CapabilityPreview, true)
+		if err != nil {
+			return err
+		}
 		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
 		if err != nil {
 			return fmt.Errorf("get session for Slack preview creation: %w", err)
 		}
-		msg := &models.SessionMessage{
-			SessionID:  session.ID,
-			OrgID:      orgID,
-			ThreadID:   session.PrimaryThreadID,
-			UserID:     session.TriggeredByUserID,
-			TurnNumber: session.CurrentTurn,
-			Role:       models.MessageRoleUser,
-			Content:    "Create or refresh a preview for this session and report the preview URL/status.",
+		target := models.SlackPreviewTarget{
+			Kind:      models.SlackPreviewTargetSession,
+			SessionID: &session.ID,
 		}
-		if err := stores.SessionMessages.Create(ctx, msg); err != nil {
-			return fmt.Errorf("create Slack preview request message: %w", err)
+		if session.RepositoryID != nil {
+			target.RepositoryID = *session.RepositoryID
 		}
-		scopeID := session.ID
-		if session.PrimaryThreadID != nil {
-			scopeID = *session.PrimaryThreadID
+		preview, err := services.SlackPreviewControl.CreatePreviewForSlack(ctx, orgID, target, models.SlackActor{
+			UserID:      auth.ActorUserID,
+			SlackTeamID: input.TeamID,
+			SlackUserID: input.UserID,
+		})
+		if err != nil {
+			return fmt.Errorf("create Slack preview: %w", err)
 		}
-		dedupeKey := db.ContinueSessionDedupeKey(scopeID)
-		payload := map[string]string{"org_id": orgID.String(), "session_id": session.ID.String()}
-		if session.PrimaryThreadID != nil {
-			payload["thread_id"] = session.PrimaryThreadID.String()
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Preview requested: "+slackPreviewURL(services, preview.ID))
+	}
+	if actionValue.RepositoryID != "" || actionValue.PullRequestID != "" {
+		if services == nil || services.SlackPreviewControl == nil {
+			return fmt.Errorf("slack preview control dependencies are not configured")
 		}
-		_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
-		return err
+		auth, err := authorizeSlackPreviewAction(ctx, stores, input, orgID)
+		if err != nil {
+			return err
+		}
+		if auth.ActorUserID == uuid.Nil {
+			return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "You need to link your Slack account to 143 before creating previews.")
+		}
+		target := models.SlackPreviewTarget{
+			Kind:       models.SlackPreviewTargetBranch,
+			Branch:     actionValue.Branch,
+			CommitSHA:  actionValue.CommitSHA,
+			ConfigName: actionValue.ConfigName,
+		}
+		if actionValue.PullRequestID != "" {
+			prID, err := uuid.Parse(actionValue.PullRequestID)
+			if err != nil {
+				return fmt.Errorf("parse pull_request_id: %w", err)
+			}
+			target.Kind = models.SlackPreviewTargetPullRequest
+			target.PullRequestID = &prID
+		} else {
+			repoID, err := uuid.Parse(actionValue.RepositoryID)
+			if err != nil {
+				return fmt.Errorf("parse repository_id: %w", err)
+			}
+			target.RepositoryID = repoID
+			if strings.TrimSpace(target.CommitSHA) != "" {
+				target.Kind = models.SlackPreviewTargetCommit
+			} else if strings.TrimSpace(target.Branch) == "" {
+				target.Kind = models.SlackPreviewTargetRepository
+			}
+		}
+		preview, err := services.SlackPreviewControl.CreatePreviewForSlack(ctx, orgID, target, models.SlackActor{
+			UserID:      auth.ActorUserID,
+			SlackTeamID: input.TeamID,
+			SlackUserID: input.UserID,
+		})
+		if err != nil {
+			return fmt.Errorf("create Slack preview: %w", err)
+		}
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Preview requested: "+slackPreviewURL(services, preview.ID))
 	}
 	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
 	if err != nil {
@@ -3523,7 +4150,7 @@ func handleSlackOpenPreview(ctx context.Context, stores *Stores, services *Servi
 	if err != nil {
 		return fmt.Errorf("parse preview_id: %w", err)
 	}
-	if err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
+	if _, err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
 		return err
 	}
 	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
@@ -3534,7 +4161,19 @@ func handleSlackOpenPreview(ctx context.Context, stores *Stores, services *Servi
 	if !ok {
 		return fmt.Errorf("unexpected slack credential type")
 	}
-	text := "Open preview: " + slackPreviewURL(services, previewID)
+	url := slackPreviewURL(services, previewID)
+	if services != nil && services.SlackPreviewControl != nil {
+		actor := models.SlackActor{SlackTeamID: input.TeamID, SlackUserID: input.UserID}
+		if stores.SlackUserLinks != nil {
+			if link, linkErr := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID); linkErr == nil && link.UserID != nil {
+				actor.UserID = *link.UserID
+			}
+		}
+		if resolved, openErr := services.SlackPreviewControl.OpenPreviewURL(ctx, orgID, previewID, actor); openErr == nil && resolved != "" {
+			url = resolved
+		}
+	}
+	text := "Open preview: " + url
 	if input.TriggerID != "" {
 		return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackPreviewOpenModal(text))
 	}
@@ -3591,7 +4230,7 @@ func handleSlackPreviewAction(ctx context.Context, stores *Stores, services *Ser
 	if err != nil {
 		return fmt.Errorf("parse preview_id: %w", err)
 	}
-	if err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
+	if _, err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
 		return err
 	}
 	switch input.ActionID {
@@ -3632,10 +4271,29 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 	if err != nil {
 		return err
 	}
-	if err := authorizeSlackSessionAction(ctx, stores, input, orgID, sessionID, slackbotsvc.CapabilityPRRequest, true); err != nil {
+	capability := slackbotsvc.CapabilityPRRequest
+	if input.ActionID == "slack_claim_team_session" || input.ActionID == "slack_start_work" {
+		capability = slackbotsvc.CapabilitySession
+	}
+	auth, err := authorizeSlackSessionAction(ctx, stores, input, orgID, sessionID, capability, true)
+	if err != nil {
 		return err
 	}
 	switch input.ActionID {
+	case "slack_create_pr":
+		if stores == nil || stores.Jobs == nil {
+			return fmt.Errorf("slack PR creation dependencies are not configured")
+		}
+		payload := map[string]string{
+			"org_id":               orgID.String(),
+			"session_id":           sessionID.String(),
+			"requested_by_user_id": auth.ActorUserID.String(),
+		}
+		dedupeKey := "slack_create_pr:" + sessionID.String()
+		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+			return fmt.Errorf("enqueue Slack PR creation: %w", err)
+		}
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation requested for this session.")
 	case "slack_repair_pr", "slack_start_work":
 		prompt := "Continue this session and repair the pull request or branch publication failure. Report the outcome and any next action."
 		if input.ActionID == "slack_start_work" {
@@ -3650,11 +4308,21 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 		if err != nil {
 			return fmt.Errorf("load pull request for Slack merge: %w", err)
 		}
-		if err := services.PR.ProcessMergeWhenReady(ctx, orgID, pr.ID); err != nil {
+		if _, err := services.PR.QueueMergeWhenReady(ctx, orgID, pr.ID, auth.ActorUserID); err != nil {
 			return fmt.Errorf("merge pull request from Slack: %w", err)
 		}
 		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Merge requested for this pull request.")
 	case "slack_claim_team_session":
+		if stores == nil || stores.SlackSessionLinks == nil {
+			return fmt.Errorf("slack team-session claim dependencies are not configured")
+		}
+		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load Slack session link for claim: %w", err)
+		}
+		if _, err := stores.SlackSessionLinks.ClaimTeamSession(ctx, orgID, link.ID, auth.ActorUserID, input.UserID); err != nil {
+			return fmt.Errorf("claim Slack team session: %w", err)
+		}
 		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Team session claimed. Future personal actions will use your linked 143 account.")
 	default:
 		return nil
@@ -3709,15 +4377,19 @@ func postSlackEphemeralIfPossible(ctx context.Context, stores *Stores, slackClie
 	return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
 }
 
-func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID, sessionID uuid.UUID, capability slackbotsvc.Capability, requireMapped bool) error {
+type slackActionAuthorizationDecision struct {
+	ActorUserID uuid.UUID
+}
+
+func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID, sessionID uuid.UUID, capability slackbotsvc.Capability, requireMapped bool) (slackActionAuthorizationDecision, error) {
 	if stores == nil {
-		return fmt.Errorf("slack action dependencies are not configured")
+		return slackActionAuthorizationDecision{}, fmt.Errorf("slack action dependencies are not configured")
 	}
 	isOriginatingTeamSession := false
 	if stores.SlackSessionLinks != nil {
 		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("load slack session link for action authorization: %w", err)
+			return slackActionAuthorizationDecision{}, fmt.Errorf("load slack session link for action authorization: %w", err)
 		} else if err == nil {
 			isOriginatingTeamSession = link.TeamSession &&
 				link.SlackTeamID == input.TeamID &&
@@ -3725,7 +4397,7 @@ func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
-	_, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
+	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
 		ChannelID:                input.ChannelID,
@@ -3736,12 +4408,18 @@ func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input mode
 		AllowUnmappedTeamSession: true,
 		IsOriginatingTeamSession: isOriginatingTeamSession,
 	})
-	return err
+	if err != nil {
+		return slackActionAuthorizationDecision{}, err
+	}
+	if decision.MappedUserID == nil {
+		return slackActionAuthorizationDecision{}, fmt.Errorf("slack action requires a linked 143 user")
+	}
+	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID}, nil
 }
 
-func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID uuid.UUID) error {
+func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID uuid.UUID) (slackActionAuthorizationDecision, error) {
 	if stores == nil {
-		return fmt.Errorf("slack preview action dependencies are not configured")
+		return slackActionAuthorizationDecision{}, fmt.Errorf("slack preview action dependencies are not configured")
 	}
 	var value struct {
 		SessionID string `json:"session_id"`
@@ -3753,11 +4431,11 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 	if value.SessionID != "" && stores.SlackSessionLinks != nil {
 		sessionID, err := uuid.Parse(value.SessionID)
 		if err != nil {
-			return fmt.Errorf("parse slack preview action session_id: %w", err)
+			return slackActionAuthorizationDecision{}, fmt.Errorf("parse slack preview action session_id: %w", err)
 		}
 		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("load slack session link for preview action: %w", err)
+			return slackActionAuthorizationDecision{}, fmt.Errorf("load slack session link for preview action: %w", err)
 		} else if err == nil {
 			isOriginatingTeamSession = link.TeamSession &&
 				link.SlackTeamID == input.TeamID &&
@@ -3765,7 +4443,7 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
-	_, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
+	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
 		ChannelID:                input.ChannelID,
@@ -3776,7 +4454,13 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 		AllowUnmappedTeamSession: true,
 		IsOriginatingTeamSession: isOriginatingTeamSession,
 	})
-	return err
+	if err != nil {
+		return slackActionAuthorizationDecision{}, err
+	}
+	if decision.MappedUserID == nil {
+		return slackActionAuthorizationDecision{}, nil
+	}
+	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID}, nil
 }
 
 func stringSliceContains(values []string, target string) bool {
@@ -3862,6 +4546,107 @@ func slackHumanInputFreeformModal(privateMetadata string) ingestion.SlackHomeVie
 	}
 }
 
+func handleSlackHumanInputMultiPrompt(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil || stores.HumanInputRequests == nil {
+		return fmt.Errorf("slack human-input multi-choice dependencies are not configured")
+	}
+	var value struct {
+		SessionID string `json:"session_id"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
+		return fmt.Errorf("parse Slack human-input multi-choice value: %w", err)
+	}
+	orgID, sessionID, err := parseSlackSessionJobIDs(input.OrgID, value.SessionID)
+	if err != nil {
+		return err
+	}
+	requestID, err := uuid.Parse(value.RequestID)
+	if err != nil {
+		return fmt.Errorf("parse human input request id: %w", err)
+	}
+	req, err := stores.HumanInputRequests.GetByID(ctx, orgID, sessionID, requestID)
+	if err != nil {
+		return fmt.Errorf("get human input request for Slack multi-choice: %w", err)
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	if input.TriggerID == "" {
+		return nil
+	}
+	return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackHumanInputMultiModal(input.Value, req))
+}
+
+func slackHumanInputMultiModal(privateMetadata string, req models.HumanInputRequest) ingestion.SlackHomeView {
+	options := make([]map[string]any, 0, min(len(req.Choices), 100))
+	for i, choice := range req.Choices {
+		if i >= 100 {
+			break
+		}
+		label := strings.TrimSpace(choice.Label)
+		if label == "" {
+			label = choice.ID
+		}
+		options = append(options, map[string]any{
+			"text":  map[string]string{"type": "plain_text", "text": truncateSlackButtonText(label)},
+			"value": choice.ID,
+		})
+	}
+	return ingestion.SlackHomeView{
+		Type:            "modal",
+		CallbackID:      "slack_human_input_multi_modal",
+		PrivateMetadata: privateMetadata,
+		Title:           &ingestion.SlackTextObject{Type: "plain_text", Text: "Choose options"},
+		Submit:          &ingestion.SlackTextObject{Type: "plain_text", Text: "Send"},
+		Close:           &ingestion.SlackTextObject{Type: "plain_text", Text: "Cancel"},
+		Blocks: []ingestion.SlackBlock{{
+			Type:    "input",
+			BlockID: "choices",
+			Label:   &ingestion.SlackTextObject{Type: "plain_text", Text: "Choices"},
+			Element: map[string]any{
+				"type":      "multi_static_select",
+				"action_id": "selected",
+				"options":   options,
+			},
+		}},
+	}
+}
+
+func handleSlackHumanInputMultiModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	var payload struct {
+		View struct {
+			PrivateMetadata string `json:"private_metadata"`
+		} `json:"view"`
+	}
+	if err := json.Unmarshal(input.RawPayload, &payload); err != nil {
+		return fmt.Errorf("parse Slack human-input multi-choice modal payload: %w", err)
+	}
+	var value struct {
+		SessionID string `json:"session_id"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &value); err != nil {
+		return fmt.Errorf("parse Slack human-input multi-choice modal metadata: %w", err)
+	}
+	selected := slackModalSelectedValues(input.RawPayload, "choices", "selected")
+	encoded, err := json.Marshal(map[string]any{
+		"session_id":          value.SessionID,
+		"request_id":          value.RequestID,
+		"selected_choice_ids": selected,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal Slack human-input multi-choice answer: %w", err)
+	}
+	input.Value = string(encoded)
+	return handleSlackHumanInputAnswer(ctx, stores, services, slackClient, input)
+}
+
 func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
 	var payload struct {
 		View struct {
@@ -3892,9 +4677,10 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 		return fmt.Errorf("slack human-input dependencies are not configured")
 	}
 	var value struct {
-		SessionID string `json:"session_id"`
-		RequestID string `json:"request_id"`
-		Answer    string `json:"answer"`
+		SessionID         string   `json:"session_id"`
+		RequestID         string   `json:"request_id"`
+		Answer            string   `json:"answer"`
+		SelectedChoiceIDs []string `json:"selected_choice_ids"`
 	}
 	if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
 		return fmt.Errorf("parse slack human-input action value: %w", err)
@@ -3911,19 +4697,32 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 		sessionLinks: stores.SlackSessionLinks,
 		userLinks:    stores.SlackUserLinks,
 		memberships:  stores.Memberships,
+		requests:     stores.HumanInputRequests,
 	}, orgID, sessionID, requestID, input)
 	if err != nil {
 		return err
 	}
 	answer := strings.TrimSpace(value.Answer)
-	req, err := stores.HumanInputRequests.AnswerPending(ctx, orgID, sessionID, requestID, &answer, nil, decision.AnsweredByUserID)
+	pendingReq, err := stores.HumanInputRequests.GetByID(ctx, orgID, sessionID, requestID)
+	if err != nil {
+		return fmt.Errorf("get human input request before Slack answer: %w", err)
+	}
+	answerInput := slackHumanInputAnswerInput(pendingReq, answer, value.SelectedChoiceIDs)
+	if err := pendingReq.ValidateAnswer(answerInput); err != nil {
+		return fmt.Errorf("validate Slack human-input answer: %w", err)
+	}
+	answerPayload, err := db.MarshalHumanInputAnswerPayload(answerInput)
+	if err != nil {
+		return fmt.Errorf("marshal Slack human-input answer: %w", err)
+	}
+	req, err := stores.HumanInputRequests.AnswerPending(ctx, orgID, sessionID, requestID, answerInput.AnswerText, answerPayload, decision.AnsweredByUserID)
 	if err != nil {
 		return fmt.Errorf("answer human input request from Slack: %w", err)
 	}
 	if stores.Credentials != nil && input.ChannelID != "" && input.MessageTS != "" {
 		if cred, credErr := stores.Credentials.Get(ctx, orgID, models.ProviderSlack); credErr == nil {
 			if slackCfg, ok := cred.Config.(models.SlackConfig); ok {
-				updateText := fmt.Sprintf("Answered by <@%s>: %s", input.UserID, answer)
+				updateText := slackHumanInputAnsweredText(input.UserID, pendingReq, answer)
 				updateStarted := time.Now()
 				if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, input.ChannelID, input.MessageTS, updateText); err != nil {
 					recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
@@ -3952,6 +4751,64 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	return err
 }
 
+func slackHumanInputAnswerInput(req models.HumanInputRequest, answer string, selectedChoiceIDs []string) models.HumanInputAnswerInput {
+	answer = strings.TrimSpace(answer)
+	switch req.Kind {
+	case models.HumanInputRequestKindMultiChoice:
+		choices := make([]string, 0, len(selectedChoiceIDs))
+		for _, id := range selectedChoiceIDs {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				choices = append(choices, trimmed)
+			}
+		}
+		if len(choices) == 0 && answer != "" {
+			choices = append(choices, answer)
+		}
+		return models.HumanInputAnswerInput{SelectedChoiceIDs: choices}
+	case models.HumanInputRequestKindSingleChoice, models.HumanInputRequestKindToolApproval, models.HumanInputRequestKindActionChoice:
+		if answer != "" {
+			return models.HumanInputAnswerInput{SelectedChoiceIDs: []string{answer}}
+		}
+		return models.HumanInputAnswerInput{}
+	default:
+		return models.HumanInputAnswerInput{AnswerText: &answer}
+	}
+}
+
+func slackHumanInputAnsweredText(slackUserID string, req models.HumanInputRequest, answer string) string {
+	answerLabel := answer
+	for _, choice := range req.Choices {
+		if choice.ID == answer {
+			answerLabel = strings.TrimSpace(choice.Label)
+			if answerLabel == "" {
+				answerLabel = choice.ID
+			}
+			break
+		}
+	}
+	prefix := "Answered"
+	if req.Kind == models.HumanInputRequestKindToolApproval || req.Kind == models.HumanInputRequestKindActionChoice {
+		switch strings.ToLower(answer) {
+		case "approve", "approved", "yes", "allow", "continue":
+			prefix = "Approved"
+		case "deny", "denied", "no", "reject", "stop", "cancel":
+			prefix = "Denied"
+		}
+	}
+	if slackUserID != "" {
+		return fmt.Sprintf("%s by <@%s> at %s: %s", prefix, slackUserID, slackDateToken(time.Now()), answerLabel)
+	}
+	return fmt.Sprintf("%s at %s: %s", prefix, slackDateToken(time.Now()), answerLabel)
+}
+
+func slackDateToken(t time.Time) string {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	unix := t.UTC().Unix()
+	return fmt.Sprintf("<!date^%d^{date_short_pretty} {time}|%s>", unix, t.UTC().Format(time.RFC3339))
+}
+
 type workerSlackHumanInputAuthStores struct {
 	sessionLinks interface {
 		GetBySession(ctx context.Context, orgID, sessionID uuid.UUID) (models.SlackSessionLink, error)
@@ -3961,6 +4818,9 @@ type workerSlackHumanInputAuthStores struct {
 	}
 	memberships interface {
 		Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	}
+	requests interface {
+		GetByID(ctx context.Context, orgID, sessionID, requestID uuid.UUID) (models.HumanInputRequest, error)
 	}
 }
 
@@ -3990,6 +4850,15 @@ func authorizeSlackHumanInputAnswer(ctx context.Context, stores workerSlackHuman
 	if !roleCanAnswerSlackHumanInput(membership.Role) {
 		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack human-input answer requires member access")
 	}
+	if stores.requests != nil {
+		req, err := stores.requests.GetByID(ctx, orgID, sessionID, requestID)
+		if err != nil {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("load human-input request for authorization: %w", err)
+		}
+		if req.AssignedUserID != nil && *req.AssignedUserID != *link.UserID {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("human-input request is assigned to another user")
+		}
+	}
 	decision := slackHumanInputAuthorizationDecision{AnsweredByUserID: *link.UserID}
 	if stores.sessionLinks != nil {
 		sessionLink, err := stores.sessionLinks.GetBySession(ctx, orgID, sessionID)
@@ -4003,11 +4872,19 @@ func authorizeSlackHumanInputAnswer(ctx context.Context, stores workerSlackHuman
 			decision.TeamSessionClaim = true
 		}
 	}
-	_ = requestID
 	return decision, nil
 }
 
 func roleCanAnswerSlackHumanInput(role models.Role) bool {
+	switch role {
+	case models.RoleAdmin, models.RoleMember, models.RoleBuilder:
+		return true
+	default:
+		return false
+	}
+}
+
+func roleCanStartSlackSession(role models.Role) bool {
 	switch role {
 	case models.RoleAdmin, models.RoleMember, models.RoleBuilder:
 		return true
@@ -4028,83 +4905,90 @@ func parseSlackSessionJobIDs(orgIDRaw, sessionIDRaw string) (uuid.UUID, uuid.UUI
 	return orgID, sessionID, nil
 }
 
-func renderSlackFinal(services *Services, content string, sessionID uuid.UUID) string {
-	trimmed := strings.TrimSpace(content)
-	const maxSlackFinal = 2400
-	if len(trimmed) > maxSlackFinal {
-		trimmed = strings.TrimSpace(trimmed[:maxSlackFinal]) + "\n\n[Truncated in Slack]"
-	}
-	if trimmed == "" {
-		trimmed = "143 session completed."
-	}
-	return trimmed + "\n\nSession: " + slackSessionURL(services, sessionID)
-}
-
-func renderSlackFinalBlocks(services *Services, content string, orgID, sessionID uuid.UUID, details slackSessionOutcomeDetails) (string, []ingestion.SlackBlock) {
-	text := appendSlackSessionOutcomeDetails(renderSlackFinal(services, content, sessionID), details)
-	blocks := []ingestion.SlackBlock{{
-		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
-	}}
-	elements := []map[string]any{{
-		"type": "button",
-		"text": map[string]string{"type": "plain_text", "text": "Open session"},
-		"url":  slackSessionURL(services, sessionID),
-	}}
+func renderSlackFinalBlocks(services *Services, content string, orgID, sessionID uuid.UUID, link models.SlackSessionLink, details slackSessionOutcomeDetails) (string, []ingestion.SlackBlock) {
+	actions := []slackbotsvc.SlackAction{}
 	if details.Preview != nil {
 		value := slackActionValue(map[string]string{
 			"org_id":     orgID.String(),
 			"session_id": sessionID.String(),
 			"preview_id": details.Preview.ID.String(),
 		})
-		elements = append(elements, map[string]any{
-			"type":      "button",
-			"action_id": "slack_open_preview",
-			"text":      map[string]string{"type": "plain_text", "text": "Open preview"},
-			"value":     value,
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Open preview",
+			ActionID: "slack_open_preview",
+			Value:    value,
 		})
 	} else {
-		elements = append(elements, map[string]any{
-			"type":      "button",
-			"action_id": "slack_create_preview",
-			"text":      map[string]string{"type": "plain_text", "text": "Create preview"},
-			"value": slackActionValue(map[string]string{
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Create preview",
+			ActionID: "slack_create_preview",
+			Value: slackActionValue(map[string]string{
 				"org_id":     orgID.String(),
 				"session_id": sessionID.String(),
 			}),
 		})
 	}
 	if details.PullRequest != nil && strings.TrimSpace(details.PullRequest.GitHubPRURL) != "" {
-		elements = append(elements, map[string]any{
-			"type": "button",
-			"text": map[string]string{"type": "plain_text", "text": "Open PR"},
-			"url":  strings.TrimSpace(details.PullRequest.GitHubPRURL),
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text: "Review PR",
+			URL:  strings.TrimSpace(details.PullRequest.GitHubPRURL),
 		})
 		if details.PullRequest.Status == models.PullRequestStatusOpen {
-			elements = append(elements, map[string]any{
-				"type":      "button",
-				"action_id": "slack_merge_pr",
-				"text":      map[string]string{"type": "plain_text", "text": "Merge PR"},
-				"value": slackActionValue(map[string]string{
+			actions = append(actions, slackbotsvc.SlackAction{
+				Text:     "Merge PR",
+				ActionID: "slack_merge_pr",
+				Value: slackActionValue(map[string]string{
 					"org_id":     orgID.String(),
 					"session_id": sessionID.String(),
 				}),
+				Confirm: &slackbotsvc.SlackActionConfirm{
+					Title:       "Merge pull request?",
+					Text:        "143 will queue merge-when-ready for this pull request.",
+					ConfirmText: "Queue merge",
+					DenyText:    "Cancel",
+				},
 			})
 		}
+	} else if details.Session.Status == models.SessionStatusCompleted && details.Session.SnapshotKey != nil && strings.TrimSpace(*details.Session.SnapshotKey) != "" {
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Create PR",
+			ActionID: "slack_create_pr",
+			Value: slackActionValue(map[string]string{
+				"org_id":     orgID.String(),
+				"session_id": sessionID.String(),
+			}),
+			Confirm: &slackbotsvc.SlackActionConfirm{
+				Title:       "Create pull request?",
+				Text:        "143 will publish this session's changes and open a pull request.",
+				ConfirmText: "Create PR",
+				DenyText:    "Cancel",
+			},
+		})
 	}
 	if details.Session.PRCreationState == models.PRCreationStateFailed || details.Session.PRPushState == models.PRPushStateFailed {
-		elements = append(elements, map[string]any{
-			"type":      "button",
-			"action_id": "slack_repair_pr",
-			"text":      map[string]string{"type": "plain_text", "text": "Repair PR"},
-			"value": slackActionValue(map[string]string{
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Repair PR",
+			ActionID: "slack_repair_pr",
+			Value: slackActionValue(map[string]string{
 				"org_id":     orgID.String(),
 				"session_id": sessionID.String(),
 			}),
 		})
 	}
-	blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
-	return text, blocks
+	rendered := slackbotsvc.RenderFinalResponse(content, slackbotsvc.SlackSessionRenderInput{
+		Session:    models.Session{ID: sessionID},
+		Link:       link,
+		SessionURL: slackSessionURL(services, sessionID),
+		Outcome: slackbotsvc.SlackSessionOutcome{
+			BranchURL:     strings.TrimSpace(stringValue(details.Session.BranchURL)),
+			PullRequest:   details.PullRequest,
+			PreviewStatus: slackPreviewStatus(details.Preview),
+			PreviewURL:    strings.TrimSpace(details.PreviewURL),
+			DiffStats:     details.Session.DiffStats,
+		},
+		Actions: actions,
+	})
+	return rendered.Text, rendered.Blocks
 }
 
 type slackSessionOutcomeDetails struct {
@@ -4174,7 +5058,27 @@ func slackTeamSessionLine(link models.SlackSessionLink) string {
 	if !link.TeamSession {
 		return ""
 	}
-	return "_This is a team session started from Slack without a linked 143 user._"
+	return slackbotsvc.TeamSessionLine()
+}
+
+func slackPreviewStatus(preview *models.PreviewInstance) models.PreviewStatus {
+	if preview == nil {
+		return ""
+	}
+	return preview.Status
+}
+
+func slackLifecycleStateForProgress(update slackbotsvc.SlackProgressUpdate) slackbotsvc.SessionLifecycleState {
+	switch update.Kind {
+	case slackbotsvc.SlackProgressCompleted:
+		return slackbotsvc.SessionLifecycleComplete
+	case slackbotsvc.SlackProgressFailed:
+		return slackbotsvc.SessionLifecycleFailed
+	case slackbotsvc.SlackProgressWaitingForInput:
+		return slackbotsvc.SessionLifecycleWaiting
+	default:
+		return slackbotsvc.SessionLifecycleRunning
+	}
 }
 
 func slackPullRequestOutcomeLine(pr models.PullRequest) string {
@@ -4342,8 +5246,9 @@ const (
 )
 
 type slackContextReference struct {
-	Kind  slackReferenceKind
-	Value string
+	Kind   slackReferenceKind
+	Value  string
+	Source string
 }
 
 var (
@@ -4357,38 +5262,38 @@ var (
 func detectSlackContextReferences(text string, threadMessages []ingestion.SlackMessage) []slackContextReference {
 	seen := map[string]bool{}
 	refs := []slackContextReference{}
-	addRef := func(kind slackReferenceKind, value string) {
+	addRef := func(kind slackReferenceKind, value, source string) {
 		value = strings.TrimRight(strings.TrimSpace(value), ".,)")
 		if value == "" || seen[string(kind)+":"+value] {
 			return
 		}
 		seen[string(kind)+":"+value] = true
-		refs = append(refs, slackContextReference{Kind: kind, Value: value})
+		refs = append(refs, slackContextReference{Kind: kind, Value: value, Source: source})
 	}
-	addRefs := func(input string) {
+	addRefs := func(input, source string) {
 		for _, rawURL := range slackURLReferencePattern.FindAllString(input, -1) {
 			urlRef := strings.TrimRight(rawURL, ".,)")
 			kind := classifySlackURLReference(urlRef)
-			addRef(kind, urlRef)
+			addRef(kind, urlRef, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, ref := range slackLinearIssuePattern.FindAllString(input, -1) {
-			addRef(slackReferenceKindIssue, ref)
+			addRef(slackReferenceKindIssue, ref, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, ref := range slackRepoIssuePattern.FindAllString(input, -1) {
-			addRef(slackReferenceKindIssue, ref)
+			addRef(slackReferenceKindIssue, ref, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, match := range slackBranchPattern.FindAllStringSubmatch(input, -1) {
 			if len(match) > 1 {
-				addRef(slackReferenceKindBranch, match[1])
+				addRef(slackReferenceKindBranch, match[1], source)
 			}
 			if len(refs) >= 20 {
 				return
@@ -4396,21 +5301,92 @@ func detectSlackContextReferences(text string, threadMessages []ingestion.SlackM
 		}
 		for _, match := range slackFilePathReferencePattern.FindAllStringSubmatch(input, -1) {
 			if len(match) > 1 {
-				addRef(slackReferenceKindFilePath, match[1])
+				addRef(slackReferenceKindFilePath, match[1], source)
 			}
 			if len(refs) >= 20 {
 				return
 			}
 		}
 	}
-	addRefs(text)
+	addRefs(text, "message")
 	for _, msg := range threadMessages {
 		if len(refs) >= 20 {
 			break
 		}
-		addRefs(msg.Text)
+		addRefs(msg.Text, "thread")
 	}
 	return refs
+}
+
+func slackContextReferencesForResolver(refs []slackContextReference) []slackbotsvc.SlackContextReference {
+	converted := make([]slackbotsvc.SlackContextReference, 0, len(refs))
+	for _, ref := range refs {
+		converted = append(converted, slackbotsvc.SlackContextReference{
+			Kind:   slackbotsvc.SlackContextReferenceKind(ref.Kind),
+			Value:  ref.Value,
+			Source: ref.Source,
+		})
+	}
+	return converted
+}
+
+func slackContextReferencesForSessionInput(refs []slackContextReference) models.SessionInputReferences {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make(models.SessionInputReferences, 0, len(refs))
+	for _, ref := range refs {
+		value := strings.TrimSpace(ref.Value)
+		if value == "" {
+			continue
+		}
+		switch ref.Kind {
+		case slackReferenceKindFilePath:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindFile,
+				Token:   "@" + value,
+				Path:    value,
+				Display: value,
+			})
+		case slackReferenceKindSentry:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "sentry",
+				Display: value,
+			})
+		case slackReferenceKindPullRequest, slackReferenceKindRepository:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "github",
+				Display: value,
+			})
+		case slackReferenceKindIssue:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "linear",
+				Display: value,
+			})
+		case slackReferenceKindPreview:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "preview",
+				Display: value,
+			})
+		case slackReferenceKindBranch:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "branch",
+				Display: value,
+			})
+		default:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "url",
+				Display: value,
+			})
+		}
+	}
+	return out
 }
 
 func classifySlackURLReference(value string) slackReferenceKind {
@@ -4484,14 +5460,110 @@ func slackSessionTitle(text string) string {
 }
 
 func slackSessionAckText(services *Services, sessionID uuid.UUID, verb string) string {
-	return fmt.Sprintf("%s a 143 session for this Slack thread...\n\nSession: %s", verb, slackSessionURL(services, sessionID))
+	state := slackbotsvc.SessionLifecycleStarting
+	if strings.EqualFold(strings.TrimSpace(verb), "continuing") {
+		state = slackbotsvc.SessionLifecycleRunning
+	}
+	return slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+		Session:    models.Session{ID: sessionID},
+		State:      state,
+		Title:      strings.TrimSpace(verb) + " a 143 session",
+		SessionURL: slackSessionURL(services, sessionID),
+	}).Text
 }
 
-func slackSessionAckBlocks(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string) []ingestion.SlackBlock {
-	blocks := []ingestion.SlackBlock{{
-		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode) []ingestion.SlackBlock {
+	var sessionID uuid.UUID
+	if session != nil {
+		sessionID = session.ID
+	}
+	loadedContext := slackSessionAckContext(ctx, stores, logger, orgID, teamID, channelID, session)
+	if contextSummary.RepositoryName == "" {
+		contextSummary.RepositoryName = loadedContext.RepositoryName
+	}
+	if contextSummary.Branch == "" {
+		contextSummary.Branch = loadedContext.Branch
+	}
+	if len(contextSummary.Missing) == 0 {
+		contextSummary.Missing = loadedContext.Missing
+	}
+	if routingMode == "" || routingMode == slackbotsvc.SlackRoutingModeAuto {
+		routingMode = slackSessionAckRoutingMode(ctx, stores, logger, orgID, teamID, channelID)
+	}
+	actions := []slackbotsvc.SlackAction{{
+		Text: "Join session",
+		URL:  slackSessionURL(services, sessionID),
 	}}
+	if session != nil {
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Change repo",
+			ActionID: "slack_configure_channel",
+			Value: slackActionValue(map[string]string{
+				"session_id": session.ID.String(),
+				"team_id":    teamID,
+				"channel_id": channelID,
+			}),
+		})
+		if routingMode != slackbotsvc.SlackRoutingModeStartWork {
+			actions = append(actions, slackbotsvc.SlackAction{
+				Text:     "Start work",
+				ActionID: "slack_start_work",
+				Value: slackActionValue(map[string]string{
+					"session_id": session.ID.String(),
+					"org_id":     orgID.String(),
+				}),
+			})
+		}
+		for _, missing := range contextSummary.Missing {
+			switch missing.Kind {
+			case "preview_target":
+				actions = append(actions, slackbotsvc.SlackAction{
+					Text:     "Choose preview target",
+					ActionID: "slack_choose_preview_target",
+					Value: slackActionValue(map[string]string{
+						"org_id":     orgID.String(),
+						"session_id": session.ID.String(),
+						"kind":       "preview_target",
+					}),
+				})
+			case "pull_request":
+				actions = append(actions, slackbotsvc.SlackAction{
+					Text:     "Choose PR",
+					ActionID: "slack_choose_pull_request",
+					Value: slackActionValue(map[string]string{
+						"org_id":     orgID.String(),
+						"session_id": session.ID.String(),
+						"kind":       "pull_request",
+					}),
+				})
+			case "branch":
+				actions = append(actions, slackbotsvc.SlackAction{
+					Text:     "Choose branch",
+					ActionID: "slack_choose_branch",
+					Value: slackActionValue(map[string]string{
+						"org_id":     orgID.String(),
+						"session_id": session.ID.String(),
+						"kind":       "branch",
+					}),
+				})
+			}
+		}
+	}
+	blocks := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+		Session:     models.Session{ID: sessionID},
+		State:       slackbotsvc.SessionLifecycleStarting,
+		Title:       strings.TrimSpace(text),
+		Context:     contextSummary,
+		RoutingMode: routingMode,
+		SessionURL:  "",
+		Actions:     actions,
+	}).Blocks
+	if session == nil {
+		blocks = []ingestion.SlackBlock{{
+			Type: "section",
+			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+		}}
+	}
 	if session == nil || session.RepositoryID != nil || stores == nil || stores.Repositories == nil {
 		return blocks
 	}
@@ -4527,6 +5599,75 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, logger zerolog.L
 		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "I can keep going, but selecting a default repository will make this Slack thread more precise."},
 	}, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	return blocks
+}
+
+func slackSessionAckContext(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID string, session *models.Session) slackbotsvc.SlackSessionContextSummary {
+	summary := slackbotsvc.SlackSessionContextSummary{}
+	if session == nil {
+		return summary
+	}
+	var repoID *uuid.UUID
+	if session.RepositoryID != nil {
+		repoID = session.RepositoryID
+	}
+	if session.TargetBranch != nil {
+		summary.Branch = strings.TrimSpace(*session.TargetBranch)
+	}
+	if stores != nil && stores.SlackChannels != nil && channelID != "" {
+		settings, err := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, teamID, channelID)
+		if err == nil {
+			if repoID == nil {
+				repoID = settings.DefaultRepositoryID
+			}
+			if summary.Branch == "" && settings.DefaultBranch != nil {
+				summary.Branch = strings.TrimSpace(*settings.DefaultBranch)
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack ack effective settings")
+		}
+	}
+	if repoID != nil && stores != nil && stores.Repositories != nil {
+		repo, err := stores.Repositories.GetByID(ctx, orgID, *repoID)
+		if err == nil {
+			summary.RepositoryName = repo.FullName
+			if summary.Branch == "" {
+				summary.Branch = repo.DefaultBranch
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("repository_id", repoID.String()).Msg("failed to load Slack ack repository")
+		}
+	}
+	if summary.RepositoryName == "" {
+		summary.Missing = append(summary.Missing, slackbotsvc.MissingSlackContext{
+			Kind:   "repository",
+			Reason: "Select a default repository to make Slack-started sessions more precise.",
+		})
+	}
+	return summary
+}
+
+func slackSessionAckRoutingMode(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID string) slackbotsvc.SlackRoutingMode {
+	if stores == nil || stores.SlackChannels == nil || channelID == "" {
+		return slackbotsvc.SlackRoutingModeAuto
+	}
+	settings, err := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, teamID, channelID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack ack routing mode")
+		}
+		return slackbotsvc.SlackRoutingModeAuto
+	}
+	return slackbotsvc.SlackRoutingMode(settings.RoutingMode)
+}
+
+func blockingSlackMissingContext(missing []slackbotsvc.MissingSlackContext) bool {
+	for _, item := range missing {
+		switch item.Kind {
+		case "preview_target", "pull_request":
+			return true
+		}
+	}
+	return false
 }
 
 func slackSessionURL(services *Services, sessionID uuid.UUID) string {
@@ -4787,18 +5928,18 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 						true,
 					)
 					enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "failed", "143 could not start this session", errMsg, true)
-					enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.failed", "143 session failed", errMsg)
+					enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 					return &FatalError{Err: fmt.Errorf("session timed out waiting for concurrency slot: %w", err)}
 				}
 				return &RetryableError{Err: err}
 			}
 			enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "failed", "143 session failed", err.Error(), true)
-			enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.failed", "143 session failed", err.Error())
+			enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", err.Error())
 			return err
 		}
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, runID)
 		enqueueSlackFinalIfLinked(ctx, stores, logger, orgID, runID)
-		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.completed", "143 session completed", "The session finished successfully.")
+		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionCompleted), "143 session completed", "The session finished successfully.")
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
 		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
 		return nil
@@ -4938,7 +6079,7 @@ func legacyEvalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model s
 	agentType := legacyEvalRunAgentType(model)
 	baseCommitSHA := task.BaseCommitSHA
 	var modelOverride *string
-	if model != "codex" && model != "gemini-cli" {
+	if model != "codex" {
 		modelOverride = &model
 	}
 	configLine := "Use the repository's default runtime configuration."
@@ -5010,10 +6151,10 @@ func legacyEvalBootstrapSession(orgID, repoID uuid.UUID, createdBy *uuid.UUID) *
 
 func legacyEvalRunAgentType(model string) models.AgentType {
 	switch model {
-	case "gemini-cli":
-		return models.AgentTypeGeminiCLI
 	case "claude-opus-4-6", "claude-sonnet-4-6":
 		return models.AgentTypeClaudeCode
+	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekChat:
+		return models.AgentTypeOpenCode
 	default:
 		return models.AgentTypeCodex
 	}
@@ -6195,6 +7336,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
+		if continueOpts != nil && continueOpts.PRRepair != nil && services.PR != nil {
+			if completionErr := services.PR.CompletePullRequestRepairRun(ctx, orgID, continueOpts.PRRepair.PullRequestID, continueOpts.PRRepair.RepairRunID); completionErr != nil {
+				logger.Warn().
+					Err(completionErr).
+					Str("session_id", sessionID.String()).
+					Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
+					Msg("failed to complete pull request repair run after continue_session")
+			}
+		}
 		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
@@ -6555,10 +7706,12 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-			EventKind: "pr.opened",
-			Title:     "Pull request opened",
-			Body:      "A pull request was opened for the session.",
-			SessionID: &runID,
+			EventKind:      string(models.SlackNotificationPROpened),
+			Title:          "Pull request opened",
+			Body:           "A pull request was opened for the session.",
+			SessionID:      &runID,
+			PullRequestID:  &pr.ID,
+			PullRequestURL: pr.GitHubPRURL,
 		})
 		return nil
 	}
@@ -7168,6 +8321,44 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 			} else {
 				totalDeleted += deleted
 				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup complete")
+			}
+		}
+
+		if stores.SlackInboundEvents != nil && stores.Organizations != nil && retentionCfg.SlackInboundPayloadDays > 0 {
+			batchSize := retentionCfg.SlackInboundPayloadBatch
+			if batchSize <= 0 {
+				batchSize = 1000
+			}
+			cutoff := time.Now().AddDate(0, 0, -retentionCfg.SlackInboundPayloadDays)
+			orgIDs, err := stores.Organizations.ListIDs(ctx)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to list organizations for Slack inbound payload cleanup")
+				errs = append(errs, fmt.Errorf("list organizations for slack payload cleanup: %w", err))
+			} else {
+				var redactedTotal int64
+			outerOrgLoop:
+				for _, orgID := range orgIDs {
+					if ctx.Err() != nil {
+						break
+					}
+					for {
+						redacted, redactErr := stores.SlackInboundEvents.RedactPayloadsOlderThan(ctx, orgID, cutoff, batchSize)
+						if redactErr != nil {
+							logger.Error().Err(redactErr).Str("org_id", orgID.String()).Msg("failed to redact expired Slack inbound payloads")
+							errs = append(errs, fmt.Errorf("redact expired slack payloads for org %s: %w", orgID, redactErr))
+							break
+						}
+						redactedTotal += redacted
+						if redacted < int64(batchSize) {
+							break
+						}
+						if ctx.Err() != nil {
+							break outerOrgLoop
+						}
+					}
+				}
+				totalDeleted += redactedTotal
+				logger.Info().Int64("redacted", redactedTotal).Int("retention_days", retentionCfg.SlackInboundPayloadDays).Msg("Slack inbound payload cleanup complete")
 			}
 		}
 

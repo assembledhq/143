@@ -5,8 +5,8 @@ import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionMessage, SessionThread, SingleResponse, ListResponse } from '@/lib/types';
-import { installSessionDetailPageTestHooks, MockEventSource, changeFieldValue } from './session-detail-test-kit';
+import type { Session, SessionMessage, SessionThread, SingleResponse } from '@/lib/types';
+import { installSessionDetailPageTestHooks, MockEventSource, changeFieldValue, makeTranscriptWindow } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -132,17 +132,10 @@ describe('SessionDetailPage agent tabs and threads', () => {
         sessionMessagePosted = true;
         return HttpResponse.json({ data: {} });
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ params }) => {
-        return HttpResponse.json({
-          data: messagesByThread[params.threadId as string] ?? [],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({
-          data: [],
-          meta: {},
-        });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => {
+        return HttpResponse.json(
+          makeTranscriptWindow(messagesByThread[params.threadId as string] ?? [], []),
+        );
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({
@@ -246,11 +239,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({ data: [], meta: {} });
@@ -343,11 +333,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({ data: [], meta: {} });
@@ -436,11 +423,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({ data: [], meta: {} });
@@ -529,11 +513,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({ data: [], meta: {} });
@@ -604,11 +585,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({ data: [], meta: {} });
@@ -729,11 +707,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.post('/api/v1/sessions/:id/threads', async ({ params }) => {
         const thread: SessionThread = {
@@ -798,11 +773,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
     );
 
@@ -857,23 +829,22 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [{
-            id: 1,
-            session_id: sessionId,
-            org_id: 'org-1',
-            thread_id: thread.id,
-            turn_number: 1,
-            role: 'user',
-            content: 'Start work',
-            created_at: '2026-02-17T07:00:00Z',
-          }],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [{
+              id: 1,
+              session_id: sessionId,
+              org_id: 'org-1',
+              thread_id: thread.id,
+              turn_number: 1,
+              role: 'user',
+              content: 'Start work',
+              created_at: '2026-02-17T07:00:00Z',
+            }],
+            [],
+          ),
+        );
       }),
     );
 
@@ -932,23 +903,22 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [{
-            id: 1,
-            session_id: sessionId,
-            org_id: 'org-1',
-            thread_id: thread.id,
-            turn_number: 1,
-            role: 'user',
-            content: 'Start work',
-            created_at: '2026-02-17T07:00:00Z',
-          }],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [{
+              id: 1,
+              session_id: sessionId,
+              org_id: 'org-1',
+              thread_id: thread.id,
+              turn_number: 1,
+              role: 'user',
+              content: 'Start work',
+              created_at: '2026-02-17T07:00:00Z',
+            }],
+            [],
+          ),
+        );
       }),
     );
 
@@ -985,50 +955,54 @@ describe('SessionDetailPage agent tabs and threads', () => {
       pending_message_count: 0,
     };
     let sessionFetchCount = 0;
+    const servedStatuses: Array<Session["status"]> = [];
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         sessionFetchCount += 1;
+        const status = sessionFetchCount >= 2 ? 'completed' : 'running';
+        servedStatuses.push(status);
         return HttpResponse.json({
           data: {
             ...mockSessions[0],
             id: sessionId,
-            status: sessionFetchCount >= 2 ? 'completed' : 'running',
+            status,
             sandbox_state: sessionFetchCount >= 2 ? 'snapshotted' : 'running',
             threads: [{
               ...thread,
-              status: sessionFetchCount >= 2 ? 'completed' : 'running',
+              status,
             }],
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [{
-            id: 1,
-            session_id: sessionId,
-            org_id: 'org-1',
-            thread_id: thread.id,
-            turn_number: 1,
-            role: 'user',
-            content: 'Start work',
-            created_at: '2026-02-17T07:00:00Z',
-          }],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [{
+              id: 1,
+              session_id: sessionId,
+              org_id: 'org-1',
+              thread_id: thread.id,
+              turn_number: 1,
+              role: 'user',
+              content: 'Start work',
+              created_at: '2026-02-17T07:00:00Z',
+            }],
+            [],
+          ),
+        );
       }),
     );
 
     renderWithProviders(<SessionDetailContent id={sessionId} />);
 
-    expect(await screen.findByText('Agent is working...')).toBeInTheDocument();
+    expect(await screen.findByText('Start work')).toBeInTheDocument();
+    expect(servedStatuses[0]).toBe('running');
 
     await waitFor(() => {
       expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
     }, { timeout: 5000 });
+    expect(servedStatuses).toContain('completed');
     expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
   }, 10000);
 
@@ -1059,23 +1033,22 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [{
-            id: 1,
-            session_id: sessionId,
-            org_id: 'org-1',
-            thread_id: thread.id,
-            turn_number: 1,
-            role: 'user',
-            content: 'Stop this run',
-            created_at: '2026-02-17T07:00:00Z',
-          }],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [{
+              id: 1,
+              session_id: sessionId,
+              org_id: 'org-1',
+              thread_id: thread.id,
+              turn_number: 1,
+              role: 'user',
+              content: 'Stop this run',
+              created_at: '2026-02-17T07:00:00Z',
+            }],
+            [],
+          ),
+        );
       }),
     );
 
@@ -1129,23 +1102,22 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({
-          data: [{
-            id: 1,
-            session_id: sessionId,
-            org_id: 'org-1',
-            thread_id: thread.id,
-            turn_number: 1,
-            role: 'user',
-            content: 'Finish this run',
-            created_at: '2026-02-17T07:00:00Z',
-          }],
-          meta: {},
-        } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [{
+              id: 1,
+              session_id: sessionId,
+              org_id: 'org-1',
+              thread_id: thread.id,
+              turn_number: 1,
+              role: 'user',
+              content: 'Finish this run',
+              created_at: '2026-02-17T07:00:00Z',
+            }],
+            [],
+          ),
+        );
       }),
     );
 
@@ -1215,11 +1187,8 @@ describe('SessionDetailPage agent tabs and threads', () => {
           },
         } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
       }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/messages', () => {
-        return HttpResponse.json({ data: [] as SessionMessage[], meta: {} } satisfies ListResponse<SessionMessage>);
-      }),
-      http.get('/api/v1/sessions/:id/threads/:threadId/logs', () => {
-        return HttpResponse.json({ data: [], meta: {} });
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
       }),
       http.get('/api/v1/sessions/:id/thread-file-events', () => {
         return HttpResponse.json({ data: [], meta: {} });

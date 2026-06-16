@@ -224,7 +224,7 @@ EXPOSE 8080
 CMD ["./server"]
 ```
 
-**Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all five agent CLIs (Claude Code, Codex, Gemini CLI, Amp, and Pi) at pinned versions from `sandbox/versions.json`; Pi now tracks the upstream `@earendil-works/pi-coding-agent` package scope there. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
+**Sandbox Dockerfile**: See `sandbox/Dockerfile` for the full definition. The image installs all five agent CLIs (Claude Code, Codex, OpenCode, Amp, and Pi) at pinned versions from `sandbox/versions.json`; Pi now tracks the upstream `@earendil-works/pi-coding-agent` package scope there. Build with `docker build -t 143-sandbox:latest sandbox/`. CI also builds this image, and local Docker development builds it through the `sandbox` compose target.
 
 This image is used by the Docker sandbox provider. It runs under **gVisor** (`runsc` runtime) by default for syscall-level isolation. The same image works with both `runsc` (gVisor) and `runc` (standard Docker) — no image changes needed when switching runtimes.
 

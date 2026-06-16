@@ -17,9 +17,11 @@ func TestAutopilotQueueEnumValidation(t *testing.T) {
 		{name: "valid queued run state", validate: func() error { return AutopilotRunStateQueued.Validate() }},
 		{name: "valid start run action", validate: func() error { return AutopilotQueueActionStartRun.Validate() }},
 		{name: "valid auto trigger mode", validate: func() error { return AutopilotTriggerModeAuto.Validate() }},
+		{name: "valid target-only preview status", validate: func() error { return AutopilotPreviewStatusTargetCreated.Validate() }},
 		{name: "invalid run state", validate: func() error { return AutopilotRunState("bogus").Validate() }, expectErr: true},
 		{name: "invalid action", validate: func() error { return AutopilotQueueAction("bogus").Validate() }, expectErr: true},
 		{name: "invalid trigger mode", validate: func() error { return AutopilotTriggerMode("bogus").Validate() }, expectErr: true},
+		{name: "invalid preview status", validate: func() error { return AutopilotPreviewStatus("bogus").Validate() }, expectErr: true},
 	}
 
 	for _, tt := range tests {

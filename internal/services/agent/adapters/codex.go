@@ -11,6 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/agentdiagnostics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -229,7 +230,7 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 	// Filter refresh-token errors once and reuse the result.
 	var filteredStderr string
 	if len(stderr) > 0 {
-		filteredStderr = emitCodexStderrLogs(stderr, logCh)
+		filteredStderr = emitCodexStderrLogs(stderr, exitCode, logCh)
 	}
 
 	if exitCode != 0 {
@@ -237,6 +238,30 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		if filteredStderr != "" {
 			result.Error += ": " + filteredStderr
 		}
+
+		// Surface abnormal exits to the structured logger (and thus
+		// VictoriaLogs). Codex's raw stderr otherwise lands only in per-session
+		// logs, so fleet-wide queries — e.g. transport-blip blast radius across
+		// sessions/hosts — have nothing to match. We reuse filteredStderr, which
+		// is already refresh-token- and benign-line-filtered, so no secrets or
+		// Reconnecting... spam ship; the snippet is truncated to bound ingest.
+		// This fires per codex exec, so it also captures intermediate failures
+		// (e.g. a resume that the orchestrator recovers via fallback) that never
+		// reach the terminal FailureService classification.
+		snippet := filteredStderr
+		if len(snippet) > 600 {
+			snippet = snippet[:600]
+		}
+		a.logger.Warn().
+			Str("session_id", sandbox.SessionID).
+			Str("org_id", sandbox.OrgID).
+			Str("agent", "codex").
+			Int("exit_code", exitCode).
+			Bool("resume", prompt.Continuation).
+			Bool("transport_failure", agent.IsUpstreamTransportError(result.Error)).
+			Str("egress_mode", sandbox.Metadata[agent.SandboxMetadataEgressMode]).
+			Str("stderr_snippet", snippet).
+			Msg("codex CLI exited abnormally")
 	}
 
 	// Collect the git diff from the sandbox.
@@ -433,6 +458,15 @@ func parseCodexStreamLine(line []byte, result *agent.AgentResult, logCh chan<- a
 		// Suppress refresh-token errors entirely — they are expected when
 		// tokens are shared and showing them is alarming and unhelpful.
 		if isRefreshTokenError(msg) {
+			return
+		}
+		if kind, _, ok := agentdiagnostics.ClassifyBenignCodexDiagnostic(msg); ok {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   msg,
+				Metadata:  codexHiddenDiagnosticMetadata(kind),
+			}
 			return
 		}
 		logCh <- agent.LogEntry{
@@ -721,7 +755,7 @@ func filterCodexStderrLines(stderr string) string {
 	return strings.Join(visible, "\n")
 }
 
-func emitCodexStderrLogs(stderr []byte, logCh chan<- agent.LogEntry) string {
+func emitCodexStderrLogs(stderr []byte, exitCode int, logCh chan<- agent.LogEntry) string {
 	visible, hidden := splitCodexStderrDiagnostics(string(stderr))
 	for _, diagnostic := range hidden {
 		logCh <- agent.LogEntry{
@@ -733,6 +767,15 @@ func emitCodexStderrLogs(stderr []byte, logCh chan<- agent.LogEntry) string {
 	}
 	filtered := strings.Join(visible, "\n")
 	if filtered != "" {
+		if exitCode == 0 {
+			logCh <- agent.LogEntry{
+				Timestamp: time.Now(),
+				Level:     "debug",
+				Message:   filtered,
+				Metadata:  codexHiddenDiagnosticMetadata("codex_stderr_success"),
+			}
+			return ""
+		}
 		logCh <- agent.LogEntry{
 			Timestamp: time.Now(),
 			Level:     "error",
@@ -759,7 +802,7 @@ func splitCodexStderrDiagnostics(stderr string) ([]string, []codexHiddenDiagnost
 		if isRefreshTokenError(line) {
 			continue
 		}
-		if kind, multiline, ok := classifyBenignCodexDiagnostic(line); ok {
+		if kind, multiline, ok := agentdiagnostics.ClassifyBenignCodexDiagnostic(line); ok {
 			block := []string{line}
 			if multiline {
 				for i+1 < len(lines) && isCodexDiagnosticContinuation(lines[i+1]) {
@@ -780,49 +823,12 @@ func splitCodexStderrDiagnostics(stderr string) ([]string, []codexHiddenDiagnost
 	return visible, hidden
 }
 
-func classifyBenignCodexDiagnostic(msg string) (kind string, multiline bool, ok bool) {
-	trimmed := strings.TrimSpace(msg)
-	if strings.Contains(trimmed, "codex_core::tools::router:") &&
-		strings.Contains(trimmed, "write_stdin failed: stdin is closed for this session") {
-		return "closed_stdin", false, true
-	}
-	if strings.Contains(trimmed, "codex_core::tools::router:") &&
-		strings.Contains(trimmed, "apply_patch verification failed: Failed to find expected lines") {
-		return "apply_patch_verification_failed", true, true
-	}
-	if trimmed == "Reading additional input from stdin..." {
-		return "stdin_notice", false, true
-	}
-	return "", false, false
-}
-
 func isCodexDiagnosticContinuation(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return false
 	}
-	return !isCodexLogRecordStart(trimmed)
-}
-
-func isCodexLogRecordStart(trimmed string) bool {
-	fields := strings.Fields(trimmed)
-	if len(fields) >= 3 {
-		if _, err := time.Parse(time.RFC3339Nano, fields[0]); err == nil &&
-			isCodexLogLevel(fields[1]) &&
-			strings.HasPrefix(fields[2], "codex_core::") {
-			return true
-		}
-	}
-	return len(fields) >= 2 && isCodexLogLevel(fields[0]) && strings.HasPrefix(fields[1], "codex_core::")
-}
-
-func isCodexLogLevel(value string) bool {
-	switch value {
-	case "ERROR", "WARN", "INFO", "DEBUG", "TRACE":
-		return true
-	default:
-		return false
-	}
+	return !agentdiagnostics.IsCodexLogRecordStart(trimmed)
 }
 
 func codexHiddenDiagnosticMetadata(kind string) map[string]interface{} {

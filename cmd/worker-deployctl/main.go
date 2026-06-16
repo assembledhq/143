@@ -3,15 +3,22 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +41,8 @@ func main() {
 	switch os.Args[1] {
 	case "preflight":
 		runPreflight(ctx, store, os.Args[2:])
+	case "preview-auth-check":
+		runPreviewAuthCheck(ctx, store, cfg, os.Args[2:])
 	case "mark-draining":
 		runMarkDraining(ctx, store, os.Args[2:], models.DrainIntentPlannedRollout)
 	case "force-maintenance":
@@ -61,6 +70,261 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func runPreviewAuthCheck(ctx context.Context, store *db.NodeStore, cfg *config.Config, args []string) {
+	fs := flag.NewFlagSet("preview-auth-check", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 5*time.Second, "per-node HTTP timeout")
+	concurrency := fs.Int("concurrency", 16, "maximum concurrent auth-check probes")
+	nodeID := fs.String("node-id", "", "optional worker node id to probe")
+	failOnSkipped := fs.Bool("fail-on-skipped", false, "exit non-zero if any active preview-capable node could not be verified")
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	_ = fs.Parse(args)
+
+	keyring, err := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+	if err != nil {
+		exitErr("preview RPC keyring: %v", err)
+	}
+	nodes, err := store.ListPreviewRPCProbeNodes(ctx)
+	if err != nil {
+		exitErr("list preview RPC probe nodes: %v", err)
+	}
+	probeNodes, err := selectPreviewAuthProbeNodes(nodes, *nodeID)
+	if err != nil {
+		exitErr("%v", err)
+	}
+	checked, skipped, err := probePreviewRPCAuthNodes(probeNodes, keyring, *timeout, *concurrency, &http.Client{})
+	if err != nil {
+		exitErr("%v", err)
+	}
+	// An unverified *active* node is the one that can serve preview traffic
+	// with a secret we never checked — surface those distinctly from benign
+	// draining/dead skips.
+	activeSkipped := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		fmt.Fprintf(os.Stderr, "worker-deployctl: preview RPC auth-check did not verify node %s (%s)\n", s.ID, s.Reason)
+		if s.Active {
+			activeSkipped = append(activeSkipped, s.ID)
+		}
+	}
+	failed := *failOnSkipped && len(activeSkipped) > 0
+	writeOutput(map[string]any{
+		"ok":             !failed,
+		"checked_count":  len(checked),
+		"checked_nodes":  checked,
+		"skipped_count":  len(skipped),
+		"skipped_nodes":  skipped,
+		"active_skipped": activeSkipped,
+	}, *jsonOut)
+	if failed {
+		exitErr("preview RPC auth-check could not verify %d active preview node(s): %s", len(activeSkipped), strings.Join(activeSkipped, ", "))
+	}
+}
+
+type previewAuthProbeNode struct {
+	ID              string
+	BaseURL         string
+	Status          models.NodeStatus
+	LastHeartbeatAt time.Time
+}
+
+type previewAuthUnreachableError struct {
+	err error
+}
+
+const previewAuthFreshHeartbeatWindow = 2 * time.Minute
+
+func (e previewAuthUnreachableError) Error() string {
+	return e.err.Error()
+}
+
+func (e previewAuthUnreachableError) Unwrap() error {
+	return e.err
+}
+
+func selectPreviewAuthProbeNodes(nodes []models.Node, nodeID string) ([]previewAuthProbeNode, error) {
+	probeNodes := make([]previewAuthProbeNode, 0, len(nodes))
+	for _, node := range nodes {
+		if nodeID != "" && node.ID != nodeID {
+			continue
+		}
+		var metadata previewsvc.WorkerNodeMetadata
+		if err := json.Unmarshal(node.Metadata, &metadata); err != nil {
+			return nil, fmt.Errorf("decode preview metadata for node %s: %w", node.ID, err)
+		}
+		baseURL := strings.TrimRight(metadata.PreviewInternalBaseURL, "/")
+		if baseURL == "" {
+			return nil, fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+		}
+		probeNodes = append(probeNodes, previewAuthProbeNode{
+			ID:              node.ID,
+			BaseURL:         baseURL,
+			Status:          node.Status,
+			LastHeartbeatAt: node.LastHeartbeatAt,
+		})
+	}
+	if nodeID != "" && len(probeNodes) == 0 {
+		return nil, fmt.Errorf("node %s is not available for preview RPC auth-check", nodeID)
+	}
+	return probeNodes, nil
+}
+
+// skippedPreviewAuthNode records a preview-capable node whose auth-check could
+// not be performed. Active nodes that are skipped are the dangerous case: the
+// gateway may be routing preview traffic to them with a secret we never
+// verified. Non-active (draining/dead) skips are benign — the node is leaving.
+type skippedPreviewAuthNode struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+	Active bool   `json:"active"`
+}
+
+func probePreviewRPCAuthNodes(nodes []previewAuthProbeNode, keyring auth.PreviewTokenKeyring, timeout time.Duration, concurrency int, client *http.Client) ([]string, []skippedPreviewAuthNode, error) {
+	if len(nodes) == 0 {
+		return []string{}, nil, nil
+	}
+	if timeout <= 0 {
+		return nil, nil, fmt.Errorf("preview RPC auth-check timeout must be positive")
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	if concurrency > len(nodes) {
+		concurrency = len(nodes)
+	}
+	if client == nil {
+		client = &http.Client{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	now := time.Now().UTC()
+	checked := make([]bool, len(nodes))
+	// A non-empty skipReasons[idx] marks a node that was unreachable but
+	// tolerated; each goroutine writes only its own index so no lock is needed.
+	skipReasons := make([]string, len(nodes))
+	jobs := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				if err := probePreviewRPCAuthNode(ctx, client, keyring, nodes[idx], timeout); err != nil {
+					var unreachable previewAuthUnreachableError
+					if errors.As(err, &unreachable) {
+						if reason, tolerate := previewAuthNodeSkipReason(nodes[idx], now); tolerate {
+							fmt.Fprintf(os.Stderr, "worker-deployctl: skipping unreachable preview RPC auth-check node %s (%s): %s: %v\n", nodes[idx].ID, nodes[idx].BaseURL, reason, err)
+							skipReasons[idx] = reason
+							continue
+						}
+					}
+					select {
+					case errCh <- err:
+						cancel()
+					default:
+					}
+					continue
+				}
+				checked[idx] = true
+			}
+		}()
+	}
+
+sendJobs:
+	for idx := range nodes {
+		select {
+		case <-ctx.Done():
+			break sendJobs
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return nil, nil, err
+	default:
+	}
+
+	checkedIDs := make([]string, 0, len(nodes))
+	skipped := make([]skippedPreviewAuthNode, 0)
+	for idx := range nodes {
+		switch {
+		case checked[idx]:
+			checkedIDs = append(checkedIDs, nodes[idx].ID)
+		case skipReasons[idx] != "":
+			skipped = append(skipped, skippedPreviewAuthNode{
+				ID:     nodes[idx].ID,
+				Reason: skipReasons[idx],
+				Active: nodes[idx].Status == models.NodeStatusActive,
+			})
+		}
+	}
+	return checkedIDs, skipped, nil
+}
+
+// previewAuthNodeSkipReason reports whether an unreachable node may be skipped
+// without failing the probe, and a human reason. A draining/dead node is
+// leaving, so skipping it is safe. An active node that has stopped heartbeating
+// is most likely already gone but not yet reaped; we tolerate it so a single
+// wedged node can't block every deploy, but the caller can still escalate a
+// skipped *active* node via --fail-on-skipped.
+func previewAuthNodeSkipReason(node previewAuthProbeNode, now time.Time) (string, bool) {
+	if node.Status != models.NodeStatusActive {
+		return fmt.Sprintf("node status is %s (not active)", node.Status), true
+	}
+	if age := now.Sub(node.LastHeartbeatAt); age > previewAuthFreshHeartbeatWindow {
+		return fmt.Sprintf("active node heartbeat is stale (%s old)", age.Round(time.Second)), true
+	}
+	return "", false
+}
+
+func probePreviewRPCAuthNode(ctx context.Context, client *http.Client, keyring auth.PreviewTokenKeyring, node previewAuthProbeNode, timeout time.Duration) error {
+	baseURL := strings.TrimRight(node.BaseURL, "/")
+	if baseURL == "" {
+		return fmt.Errorf("node %s is preview-capable but has no preview_internal_base_url", node.ID)
+	}
+	token, err := keyring.Generate(auth.PreviewTokenClaims{
+		OrgID:        uuid.Nil,
+		TargetNodeID: node.ID,
+		Action:       "auth_check",
+		ExpiresAt:    time.Now().UTC().Add(30 * time.Second),
+	})
+	if err != nil {
+		return fmt.Errorf("sign preview RPC auth-check token for node %s: %w", node.ID, err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/internal/preview/auth-check", nil)
+	if err != nil {
+		return fmt.Errorf("build preview RPC auth-check request for node %s: %w", node.ID, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return previewAuthUnreachableError{err: fmt.Errorf("preview RPC auth-check unreachable for node %s (%s): %w", node.ID, baseURL, err)}
+	}
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		return fmt.Errorf("read preview RPC auth-check response for node %s (%s): %w", node.ID, baseURL, readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close preview RPC auth-check response for node %s (%s): %w", node.ID, baseURL, closeErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("preview RPC auth-check rejected by node %s (%s): status=%d body=%s", node.ID, baseURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func runExpireBudget(ctx context.Context, nodes *db.NodeStore, executors *db.SessionExecutorStore, args []string) {
@@ -494,7 +758,7 @@ func writeOutput(v any, jsonOut bool) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
+	fmt.Fprintln(os.Stderr, "usage: worker-deployctl preflight|preview-auth-check|mark-draining|status|impact|retire-ready|expire-budget|extend-drain|retain-images|release-retained-images|force-maintenance|wave [flags]")
 }
 
 func exitErr(format string, args ...any) {

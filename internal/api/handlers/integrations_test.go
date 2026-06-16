@@ -19,8 +19,8 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
-	"github.com/assembledhq/143/internal/services/ingestion"
 	ghapp "github.com/assembledhq/143/internal/services/github"
+	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -113,6 +113,18 @@ func (f fakeSlackUserInfoClient) FetchUserInfo(context.Context, string, string) 
 	return f.user, nil
 }
 
+type fakeSlackAuthTestClient struct {
+	info ingestion.SlackAuthInfo
+	err  error
+}
+
+func (f fakeSlackAuthTestClient) AuthTest(context.Context, string) (ingestion.SlackAuthInfo, error) {
+	if f.err != nil {
+		return ingestion.SlackAuthInfo{}, f.err
+	}
+	return f.info, nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ──────────────────────────────────────────────────────────────────────────────
@@ -127,6 +139,100 @@ func TestNewIntegrationHandler(t *testing.T) {
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	require.NotNil(t, handler, "handler should not be nil")
+}
+
+func TestIntegrationHandler_GetSlackHealthReportsMissingScopes(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM slack_installations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", []string{"chat:write"}, models.SlackInstallationStatusActive, nil, now,
+			nil, now, now,
+		))
+
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test"}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackInstallationStore(db.NewSlackInstallationStore(mock)),
+	)
+	handler.slackAuthTestClient = fakeSlackAuthTestClient{info: ingestion.SlackAuthInfo{TeamID: "T123", UserID: "U143"}}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/health", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlackHealth(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "GetSlackHealth should return health for connected Slack")
+	var resp models.SingleResponse[models.SlackInstallationHealth]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "GetSlackHealth response should decode")
+	require.False(t, resp.Data.AuthOK, "missing scopes should mark Slack health unhealthy")
+	require.Contains(t, resp.Data.MissingScopes, "app_mentions:read", "health should include missing required scopes")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetSlackHealth should satisfy expected SQL")
+}
+
+func TestIntegrationHandler_ListSlackChannelsReturnsBotManagementFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test", ChannelIDs: []string{"C123"}}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, slackAPIURL+"/conversations.list", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path, "ListSlackChannels should call Slack conversations.list")
+		require.Equal(t, "Bearer xoxb-test", req.Header.Get("Authorization"), "ListSlackChannels should use the Slack bot token")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"channels":[{"id":"C123","name":"engineering","is_channel":true},{"id":"G123","name":"leadership","is_group":true}]}`)),
+			Request:    req,
+		}, nil
+	})}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/channels", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlackChannels(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "ListSlackChannels should return Slack channel data")
+	var resp struct {
+		Data []struct {
+			ID                string `json:"id"`
+			Name              string `json:"name"`
+			Type              string `json:"type"`
+			Selected          bool   `json:"selected"`
+			MonitoringEnabled bool   `json:"monitoring_enabled"`
+			BotConfigured     bool   `json:"bot_configured"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "ListSlackChannels response should decode")
+	require.Equal(t, 2, len(resp.Data), "ListSlackChannels should return every Slack channel from Slack")
+	require.Equal(t, "channel", resp.Data[0].Type, "public Slack channels should be typed for the settings UI")
+	require.True(t, resp.Data[0].Selected, "legacy selected channels should remain selected")
+	require.True(t, resp.Data[0].MonitoringEnabled, "monitoring_enabled should mirror the legacy selected state")
+	require.Equal(t, "private_channel", resp.Data[1].Type, "private Slack channels should be typed for channel settings")
+	require.False(t, resp.Data[1].BotConfigured, "channels without explicit settings should not report channel overrides")
 }
 
 func TestNewIntegrationHandler_WithOptions(t *testing.T) {
@@ -3918,4 +4024,210 @@ func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnableNotAnOrganization(t *t
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "user-account installation should return 422")
 	require.Contains(t, w.Body.String(), "NOT_AN_ORGANIZATION", "response should name the account type error")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSlackSettingsPatchRequestApply(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+	branch := " main "
+
+	tests := []struct {
+		name      string
+		req       slackSettingsPatchRequest
+		initial   models.SlackBotSettings
+		expected  models.SlackBotSettings
+		expectErr bool
+	}{
+		{
+			name: "applies typed patch fields",
+			req: slackSettingsPatchRequest{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               "start_work",
+				ResponseVisibility:        "dm",
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        "custom",
+				NotificationSubscriptions: json.RawMessage(`{"session.completed":{"channel":true}}`),
+			},
+			expected: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetCustom,
+				NotificationSubscriptions: json.RawMessage(`{"session.completed":{"channel":true}}`),
+			},
+		},
+		{
+			name: "preserves omitted fields",
+			req:  slackSettingsPatchRequest{NotificationPreset: "quiet"},
+			initial: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetCustom,
+				NotificationSubscriptions: json.RawMessage(`{"events":["session.completed"]}`),
+			},
+			expected: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetQuiet,
+				NotificationSubscriptions: json.RawMessage(`{"events":["session.completed"]}`),
+			},
+		},
+		{
+			name: "rejects invalid enum values",
+			req: slackSettingsPatchRequest{
+				RoutingMode: "ship_it",
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := tt.initial
+			if settings.NotificationPreset == "" {
+				settings = models.SlackBotSettings{
+					RoutingMode:               models.SlackRoutingModeAuto,
+					ResponseVisibility:        models.SlackResponseVisibilityThread,
+					AllowedActions:            []string{"session"},
+					NotificationPreset:        models.SlackNotificationPresetBalanced,
+					NotificationSubscriptions: json.RawMessage(`{}`),
+				}
+			}
+
+			err := tt.req.Apply(&settings)
+			if tt.expectErr {
+				require.Error(t, err, "Apply should reject invalid Slack settings")
+				return
+			}
+
+			require.NoError(t, err, "Apply should accept valid Slack settings")
+			require.Equal(t, tt.expected.DefaultRepositoryID, settings.DefaultRepositoryID, "Apply should set default repository")
+			require.Equal(t, tt.expected.DefaultBranch, settings.DefaultBranch, "Apply should set default branch")
+			require.Equal(t, tt.expected.RoutingMode, settings.RoutingMode, "Apply should set routing mode")
+			require.Equal(t, tt.expected.ResponseVisibility, settings.ResponseVisibility, "Apply should set response visibility")
+			require.Equal(t, tt.expected.AllowedActions, settings.AllowedActions, "Apply should set allowed actions")
+			require.Equal(t, tt.expected.NotificationPreset, settings.NotificationPreset, "Apply should set notification preset")
+			require.JSONEq(t, string(tt.expected.NotificationSubscriptions), string(settings.NotificationSubscriptions), "Apply should set notification subscriptions")
+		})
+	}
+}
+
+func TestSlackUserLinkRequestsValidate(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	tests := []struct {
+		name      string
+		req       interface{ Validate() error }
+		expectErr bool
+	}{
+		{name: "admin link valid", req: &slackUserLinkAdminUpsertRequest{UserID: userID, SlackUserID: " U123 "}},
+		{name: "admin link missing user", req: &slackUserLinkAdminUpsertRequest{SlackUserID: "U123"}, expectErr: true},
+		{name: "admin link missing slack user", req: &slackUserLinkAdminUpsertRequest{UserID: userID}, expectErr: true},
+		{name: "self link valid", req: &slackUserLinkSelfRequest{SlackUserID: " U123 "}},
+		{name: "self link missing slack user", req: &slackUserLinkSelfRequest{}, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.req.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject incomplete Slack user-link requests")
+				return
+			}
+			require.NoError(t, err, "Validate should accept complete Slack user-link requests")
+		})
+	}
+}
+
+func TestSlackChannelSettingsPatchRequestToSettings(t *testing.T) {
+	t.Parallel()
+
+	installationID := uuid.New()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	routing := "answer_only"
+	visibility := "thread"
+	preset := "quiet"
+	req := slackChannelSettingsPatchRequest{
+		SlackChannelName:          "eng",
+		ChannelType:               "",
+		DefaultRepositoryID:       &repoID,
+		RoutingMode:               &routing,
+		ResponseVisibility:        &visibility,
+		AllowedActions:            []string{"session"},
+		NotificationPreset:        &preset,
+		NotificationSubscriptions: json.RawMessage(`{"preview.ready":{"channel":true}}`),
+	}
+
+	settings, err := req.ToSettings(orgID, installationID, "T123", "C123")
+
+	require.NoError(t, err, "ToSettings should accept valid channel settings")
+	require.Equal(t, orgID, settings.OrgID, "ToSettings should set org")
+	require.Equal(t, installationID, settings.SlackInstallationID, "ToSettings should set installation")
+	require.Equal(t, "T123", settings.SlackTeamID, "ToSettings should set Slack team")
+	require.Equal(t, "C123", settings.SlackChannelID, "ToSettings should set Slack channel")
+	require.Equal(t, "channel", settings.ChannelType, "ToSettings should default channel type")
+	require.Equal(t, models.SlackRoutingModeAnswerOnly, *settings.RoutingMode, "ToSettings should convert routing mode")
+	require.Equal(t, models.SlackResponseVisibilityThread, *settings.ResponseVisibility, "ToSettings should convert response visibility")
+	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "ToSettings should convert notification preset")
+	require.JSONEq(t, `{"preview.ready":{"channel":true}}`, string(settings.NotificationSubscriptions), "ToSettings should preserve notification subscriptions")
+}
+
+func TestSlackChannelSettingsPatchRequestApplyPreservesOmittedFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	branch := "main"
+	routing := models.SlackRoutingModeStartWork
+	visibility := models.SlackResponseVisibilityDM
+	preset := models.SlackNotificationPresetCustom
+	settings := models.SlackChannelSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installationID,
+		SlackTeamID:               "T123",
+		SlackChannelID:            "C123",
+		SlackChannelName:          "eng",
+		ChannelType:               "channel",
+		DefaultRepositoryID:       &repoID,
+		DefaultBranch:             &branch,
+		RoutingMode:               &routing,
+		ResponseVisibility:        &visibility,
+		AllowedActions:            []string{"session", "preview"},
+		NotificationPreset:        &preset,
+		NotificationSubscriptions: json.RawMessage(`{"events":["preview.ready"]}`),
+		Active:                    true,
+	}
+	nextPreset := "quiet"
+	req := slackChannelSettingsPatchRequest{NotificationPreset: &nextPreset}
+
+	err := req.Apply(&settings)
+
+	require.NoError(t, err, "Apply should accept a partial channel settings patch")
+	require.Equal(t, "eng", settings.SlackChannelName, "Apply should preserve omitted channel name")
+	require.Equal(t, "channel", settings.ChannelType, "Apply should preserve omitted channel type")
+	require.Equal(t, &repoID, settings.DefaultRepositoryID, "Apply should preserve omitted default repository")
+	require.Equal(t, &branch, settings.DefaultBranch, "Apply should preserve omitted default branch")
+	require.Equal(t, &routing, settings.RoutingMode, "Apply should preserve omitted routing mode")
+	require.Equal(t, &visibility, settings.ResponseVisibility, "Apply should preserve omitted response visibility")
+	require.Equal(t, []string{"session", "preview"}, settings.AllowedActions, "Apply should preserve omitted allowed actions")
+	require.NotNil(t, settings.NotificationPreset, "Apply should keep notification preset pointer")
+	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "Apply should update provided notification preset")
+	require.JSONEq(t, `{"events":["preview.ready"]}`, string(settings.NotificationSubscriptions), "Apply should preserve omitted notification subscriptions")
 }

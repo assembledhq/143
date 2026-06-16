@@ -37,22 +37,23 @@ const (
 
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
-	manager         *preview.Manager
-	store           *db.PreviewStore
-	jobStore        *db.JobStore
-	sessionStore    *db.SessionStore
-	orgStore        agent.OrgSettingsReader
-	repoStore       *db.RepositoryStore
-	fileReader      sandbox.FileReader
-	sandboxProvider agent.SandboxProvider
-	sandboxCapacity *agent.SandboxCapacityGate
-	staticEgress    agent.StaticEgressRuntimeConfig
-	snapshots       storage.SnapshotStore
-	workerSelector  *preview.WorkerSelector
-	workerClient    *preview.WorkerPreviewClient
-	localNodeID     string
-	logger          zerolog.Logger
-	audit           *db.AuditEmitter
+	manager           *preview.Manager
+	store             *db.PreviewStore
+	jobStore          *db.JobStore
+	sessionStore      *db.SessionStore
+	orgStore          agent.OrgSettingsReader
+	repoStore         *db.RepositoryStore
+	fileReader        sandbox.FileReader
+	sandboxProvider   agent.SandboxProvider
+	sandboxCapacity   *agent.SandboxCapacityGate
+	staticEgress      agent.StaticEgressRuntimeConfig
+	snapshots         storage.SnapshotStore
+	workerSelector    *preview.WorkerSelector
+	workerClient      *preview.WorkerPreviewClient
+	localNodeID       string
+	restartClassifier preview.PreviewRestartClassifier
+	logger            zerolog.Logger
+	audit             *db.AuditEmitter
 
 	// sandboxBusyRetryDelay overrides sandboxBusyAcquireRetryDelay in tests;
 	// zero means the production default.
@@ -81,15 +82,16 @@ func (h *PreviewHandler) SetStaticEgressRuntime(orgs agent.OrgSettingsReader, ru
 // "NO_SANDBOX"/"SNAPSHOT_EXPIRED" errors in that case.
 func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, repoStore *db.RepositoryStore, fileReader sandbox.FileReader, sandboxProvider agent.SandboxProvider, snapshots storage.SnapshotStore, logger zerolog.Logger) *PreviewHandler {
 	return &PreviewHandler{
-		manager:         manager,
-		store:           store,
-		jobStore:        nil,
-		sessionStore:    sessionStore,
-		repoStore:       repoStore,
-		fileReader:      fileReader,
-		sandboxProvider: sandboxProvider,
-		snapshots:       snapshots,
-		logger:          logger,
+		manager:           manager,
+		store:             store,
+		jobStore:          nil,
+		sessionStore:      sessionStore,
+		repoStore:         repoStore,
+		fileReader:        fileReader,
+		sandboxProvider:   sandboxProvider,
+		snapshots:         snapshots,
+		restartClassifier: preview.DefaultPreviewRestartClassifier{},
+		logger:            logger,
 	}
 }
 
@@ -356,10 +358,15 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	// fall through to hydrate/expired instead of attaching to a dead ID.
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
+		// HomeDir matches the orchestrator/hydrate path so the home-rooted
+		// package-manager cache (npm's ~/.npm, etc.) can restore. Without it,
+		// reused session sandboxes fail package-manager cache restore with
+		// "sandbox home dir is required" and re-download deps every launch.
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
 			WorkDir:   workDir,
+			HomeDir:   agent.DefaultSandboxConfig().HomeDir,
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 			Purpose:   "preview",
@@ -1090,10 +1097,32 @@ func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID 
 			Reason:                            "preview_revision_missing",
 		}
 	}
-	return computePreviewFreshness(&session, instance)
+	restartReasons := h.previewRestartReasons(ctx, orgID, &session, instance)
+	return computePreviewFreshness(&session, instance, restartReasons)
 }
 
-func computePreviewFreshness(session *models.Session, instance *models.PreviewInstance) *models.PreviewFreshness {
+func (h *PreviewHandler) previewRestartReasons(ctx context.Context, orgID uuid.UUID, session *models.Session, instance *models.PreviewInstance) []models.PreviewRestartReason {
+	if h.restartClassifier == nil || h.sessionStore == nil || session == nil || instance == nil {
+		return nil
+	}
+	if session.LatestDiffSnapshotID == nil || !previewStatusCanRefreshForFreshness(instance.Status) {
+		return nil
+	}
+	if instance.SourceWorkspaceRevision == nil || *instance.SourceWorkspaceRevision >= session.WorkspaceRevision {
+		return nil
+	}
+	snapshot, err := h.sessionStore.GetLatestDiffSnapshot(ctx, orgID, session.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview freshness: failed to load latest diff snapshot for restart classification")
+		}
+		return nil
+	}
+	paths := preview.ChangedPathsFromUnifiedDiff(snapshot.Diff)
+	return h.restartClassifier.Classify(paths)
+}
+
+func computePreviewFreshness(session *models.Session, instance *models.PreviewInstance, restartReasons []models.PreviewRestartReason) *models.PreviewFreshness {
 	if session == nil || instance == nil {
 		return nil
 	}
@@ -1103,13 +1132,37 @@ func computePreviewFreshness(session *models.Session, instance *models.PreviewIn
 		CurrentWorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
 		PreviewWorkspaceRevision:          instance.SourceWorkspaceRevision,
 		PreviewWorkspaceRevisionUpdatedAt: instance.SourceWorkspaceRevisionUpdatedAt,
+		RuntimeWorkspaceRevision:          instance.RuntimeWorkspaceRevision,
+		RuntimeWorkspaceRevisionUpdatedAt: instance.RuntimeWorkspaceRevisionUpdatedAt,
+		RuntimeWorkspaceRevisionSource:    instance.RuntimeWorkspaceRevisionSource,
 	}
 	if instance.SourceWorkspaceRevision == nil {
 		freshness.State = models.PreviewFreshnessUnknown
 		freshness.Reason = "preview_revision_missing"
 		return freshness
 	}
-	if *instance.SourceWorkspaceRevision < session.WorkspaceRevision {
+	if instance.Status == models.PreviewStatusStarting && *instance.SourceWorkspaceRevision == session.WorkspaceRevision {
+		freshness.State = models.PreviewFreshnessUpdating
+		freshness.Reason = "preview_starting"
+		return freshness
+	}
+	if *instance.SourceWorkspaceRevision < session.WorkspaceRevision && len(restartReasons) > 0 {
+		if !previewStatusCanRefreshForFreshness(instance.Status) {
+			freshness.State = models.PreviewFreshnessUnknown
+			freshness.Reason = "preview_not_refreshable"
+			return freshness
+		}
+		freshness.State = models.PreviewFreshnessRestartRequired
+		freshness.RestartRequired = true
+		freshness.RestartReasons = restartReasons
+		freshness.Reason = "restart_required"
+		return freshness
+	}
+	latestKnownRevision := instance.SourceWorkspaceRevision
+	if instance.RuntimeWorkspaceRevision != nil && *instance.RuntimeWorkspaceRevision > *latestKnownRevision {
+		latestKnownRevision = instance.RuntimeWorkspaceRevision
+	}
+	if *latestKnownRevision < session.WorkspaceRevision {
 		if !previewStatusCanRefreshForFreshness(instance.Status) {
 			freshness.State = models.PreviewFreshnessUnknown
 			freshness.Reason = "preview_not_refreshable"
@@ -1119,9 +1172,12 @@ func computePreviewFreshness(session *models.Session, instance *models.PreviewIn
 		freshness.Reason = "session_changed_after_preview_start"
 		return freshness
 	}
-	if instance.Status == models.PreviewStatusStarting && *instance.SourceWorkspaceRevision == session.WorkspaceRevision {
-		freshness.State = models.PreviewFreshnessUpdating
-		freshness.Reason = "preview_starting"
+	if instance.RuntimeWorkspaceRevision != nil &&
+		*instance.RuntimeWorkspaceRevision >= session.WorkspaceRevision &&
+		instance.RuntimeWorkspaceRevisionSource == models.PreviewRuntimeRevisionSourceHMR &&
+		*instance.SourceWorkspaceRevision < session.WorkspaceRevision {
+		freshness.State = models.PreviewFreshnessLiveUpdated
+		freshness.Reason = "preview_live_updated"
 		return freshness
 	}
 	return freshness

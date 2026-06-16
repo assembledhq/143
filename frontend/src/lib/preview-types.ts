@@ -124,11 +124,15 @@ export interface PreviewInstance {
     | "deploy_drain_timeout"
     | "host_maintenance"
     | "emergency_force"
-    | "lease_expired";
+    | "lease_expired"
+    | "endpoint_unreachable";
   created_at: string;
   updated_at: string;
   source_workspace_revision?: number;
   source_workspace_revision_updated_at?: string;
+  runtime_workspace_revision?: number;
+  runtime_workspace_revision_updated_at?: string;
+  runtime_workspace_revision_source?: PreviewRuntimeRevisionSource;
   // When set and in the future, the backend has flagged this preview for an
   // imminent restart (recycle grace period). The frontend surfaces a warning
   // so users can save state before the restart.
@@ -137,9 +141,31 @@ export interface PreviewInstance {
 
 export type PreviewFreshnessState =
   | "current"
+  | "live_updated"
+  | "restart_required"
   | "out_of_date"
   | "updating"
   | "unknown";
+
+export type PreviewRuntimeRevisionSource =
+  | ""
+  | "launch"
+  | "recycle"
+  | "hmr"
+  | "file_event";
+
+export type PreviewRestartReasonKind =
+  | "dependency_changed"
+  | "preview_config_changed"
+  | "build_config_changed"
+  | "environment_config_changed"
+  | "database_schema_changed";
+
+export interface PreviewRestartReason {
+  kind: PreviewRestartReasonKind;
+  path?: string;
+  detail?: string;
+}
 
 export interface PreviewFreshness {
   state: PreviewFreshnessState;
@@ -147,6 +173,11 @@ export interface PreviewFreshness {
   current_workspace_revision_updated_at: string;
   preview_workspace_revision?: number;
   preview_workspace_revision_updated_at?: string;
+  runtime_workspace_revision?: number;
+  runtime_workspace_revision_updated_at?: string;
+  runtime_workspace_revision_source?: PreviewRuntimeRevisionSource;
+  restart_required?: boolean;
+  restart_reasons?: PreviewRestartReason[];
   reason?: string;
 }
 
@@ -203,6 +234,14 @@ export interface PreviewStatusResponse {
   infrastructure?: PreviewInfrastructure[];
   preview_origin?: string;
   freshness?: PreviewFreshness;
+  startup_estimate?: PreviewStartupEstimate;
+}
+
+export interface PreviewStartupEstimate {
+  label: string;
+  p50_seconds: number;
+  sample_count: number;
+  confidence: "low" | "medium" | "high" | string;
 }
 
 export interface EnsurePreviewResponse {
