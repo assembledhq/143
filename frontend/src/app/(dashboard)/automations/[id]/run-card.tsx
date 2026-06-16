@@ -287,7 +287,7 @@ function MetadataRail({ run, kind }: { run: AutomationRun; kind: FullCardKind })
 
 function metadataItems(run: AutomationRun, kind: FullCardKind): string[] {
   const items: string[] = [];
-  items.push(run.triggered_by === "manual" ? "Manual run" : "Scheduled run");
+  items.push(automationRunTriggerLabel(run.triggered_by));
   if (run.session?.id) items.push("Linked session");
   if (run.session?.pr) items.push(`PR #${run.session.pr.number}`);
 
@@ -408,7 +408,7 @@ function formatDuration(start: string, end: string): string {
 }
 
 function PendingRow({ run }: { run: AutomationRun }) {
-  const triggerLabel = run.triggered_by === "manual" ? "Manual run" : "Scheduled run";
+  const triggerLabel = automationRunTriggerLabel(run.triggered_by);
   return (
     <Card className="border-dashed border-border/70 bg-muted/10">
       <CardContent className="flex items-center justify-between gap-3 px-4 py-3">
@@ -464,7 +464,7 @@ export function QuietRunRow({
               <p className="truncate text-sm font-medium text-foreground/80">{headline}</p>
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-              <span>{run.triggered_by === "manual" ? "Manual run" : "Scheduled run"}</span>
+              <span>{automationRunTriggerLabel(run.triggered_by)}</span>
               {run.session?.id && (
                 <span className="flex items-center gap-2">
                   <span aria-hidden className="text-muted-foreground/40">·</span>
@@ -492,4 +492,16 @@ export function QuietRunRow({
       </CardContent>
     </Card>
   );
+}
+
+function automationRunTriggerLabel(triggeredBy: AutomationRun["triggered_by"]): string {
+  switch (triggeredBy) {
+    case "manual":
+      return "Manual run";
+    case "github":
+      return "GitHub event";
+    case "schedule":
+    default:
+      return "Scheduled run";
+  }
 }

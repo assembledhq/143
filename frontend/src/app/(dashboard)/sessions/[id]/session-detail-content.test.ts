@@ -1,11 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
-  filterThreadLogsForLoadedMessages,
-  flattenThreadMessageWindows,
   formatDuration,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
-  getVisibleThreadLogTurns,
   hasCleanReviewLoopForSnapshot,
   invalidateSessionHumanInputRequests,
   applyThreadInboxEventToThreads,
@@ -14,11 +11,10 @@ import {
   liveLogsForTimeline,
   mergeSessionLogListResponse,
   mergeSessionDetailStatusUpdate,
-  mergeVisibleThreadLogs,
   trackInFlightAgentUpdate,
   buildChromeThreads,
 } from "./session-detail-content";
-import type { SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread, ThreadMessageWindowResponse } from "@/lib/types";
+import type { SessionDetail, SessionLog, SessionReviewLoop, SessionThread } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
@@ -328,20 +324,7 @@ describe("invalidateSessionHumanInputRequests", () => {
   });
 });
 
-describe("thread message windows", () => {
-  function message(id: number, turn: number): SessionMessage {
-    return {
-      id,
-      session_id: "session-1",
-      org_id: "org-1",
-      thread_id: "thread-1",
-      turn_number: turn,
-      role: "user",
-      content: `message ${id}`,
-      created_at: start,
-    };
-  }
-
+describe("live log merging helpers", () => {
   function log(id: number, turn: number): SessionLog {
     return {
       id,
@@ -357,43 +340,6 @@ describe("thread message windows", () => {
       message_truncated: false,
     };
   }
-
-  it("flattens newest-first window pages into chronological transcript order", () => {
-    const pages: ThreadMessageWindowResponse[] = [
-      {
-        data: [message(3, 2), message(4, 2)],
-        meta: { has_older: true, next_older_cursor: "3", thread_status: "idle" },
-      },
-      {
-        data: [message(1, 1), message(2, 1)],
-        meta: { has_older: false, thread_status: "idle" },
-      },
-    ];
-
-    expect(flattenThreadMessageWindows(pages).map((item) => item.id)).toEqual([1, 2, 3, 4]);
-  });
-
-  it("keeps thread logs only for turns represented by loaded message windows", () => {
-    expect(filterThreadLogsForLoadedMessages(
-      [log(10, 1), log(20, 2), log(30, 3)],
-      [message(1, 1), message(2, 3)],
-    ).map((item) => item.id)).toEqual([10, 30]);
-  });
-
-  it("keeps logs for the current in-flight turn before the assistant message exists", () => {
-    expect(filterThreadLogsForLoadedMessages(
-      [log(10, 0), log(20, 1), log(30, 2)],
-      [message(1, 0)],
-      [1],
-    ).map((item) => item.id)).toEqual([10, 20]);
-  });
-
-  it("keeps logs when a legacy thread has no persisted messages", () => {
-    expect(filterThreadLogsForLoadedMessages(
-      [log(10, 1), log(20, 1)],
-      [],
-    ).map((item) => item.id)).toEqual([10, 20]);
-  });
 
   it("merges streamed logs into cached log responses without duplicating ids", () => {
     const result = mergeSessionLogListResponse(
@@ -443,37 +389,6 @@ describe("thread message windows", () => {
     expect(liveLogsForTimeline(false, liveLogs)).toEqual([]);
   });
 
-  it("keeps live thread logs before their turn is represented in loaded message windows", () => {
-    const result = mergeVisibleThreadLogs(
-      {
-        data: [log(10, 0), log(20, 2)],
-        meta: {},
-      },
-      [log(30, 1)],
-      [message(1, 0)],
-      [],
-    );
-
-    expect(result.map((item) => item.id)).toEqual([10, 30]);
-  });
-
-  it("includes the execution turn for completed threads without assistant messages", () => {
-    expect(getVisibleThreadLogTurns(
-      [message(1, 0)],
-      {
-        id: "thread-1",
-        session_id: "session-1",
-        org_id: "org-1",
-        agent_type: "codex",
-        label: "Main",
-        status: "completed",
-        current_turn: 0,
-        created_at: start,
-        cost_cents: 0,
-        pending_message_count: 0,
-      },
-    )).toEqual([0, 1]);
-  });
 });
 
 describe("trackInFlightAgentUpdate", () => {

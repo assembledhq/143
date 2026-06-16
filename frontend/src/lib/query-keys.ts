@@ -26,6 +26,10 @@ export const queryKeys = {
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
+    threadTranscript: (sessionId: string, threadId: string, anchorKey?: string | null) =>
+      anchorKey
+        ? ["session", sessionId, "thread", threadId, "transcript", anchorKey] as const
+        : ["session", sessionId, "thread", threadId, "transcript"] as const,
     threadRecoverableInbox: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "recoverable-inbox"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
     reviewLoops: (id: string) => ["session", id, "review-loops"] as const,

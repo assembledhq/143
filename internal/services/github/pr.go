@@ -27,6 +27,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
+	automationevents "github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -87,6 +88,7 @@ type PRService struct {
 	previews                *db.PreviewStore
 	previewStopper          PreviewStopper
 	autoPreviewStarter      AutoPreviewStarter
+	automationEventTriggers AutomationEventTriggerer
 	redisClient             *cache.Client
 	prHealthStreams         *cache.PullRequestStreams
 	llmClient               llm.Client
@@ -126,9 +128,17 @@ type PRService struct {
 // linker service and packages a worker enqueue + payload.
 type LinearMilestoneEnqueuer func(ctx context.Context, orgID, sessionID uuid.UUID, event string, prNumber int)
 
+type AutomationEventTriggerer interface {
+	TriggerGitHubEvent(ctx context.Context, req automationevents.GitHubEventTriggerRequest) error
+}
+
 // SetLinearMilestoneEnqueuer wires the Linear post-event hook.
 func (s *PRService) SetLinearMilestoneEnqueuer(enq LinearMilestoneEnqueuer) {
 	s.linearMilestones = enq
+}
+
+func (s *PRService) SetAutomationEventTriggerer(triggerer AutomationEventTriggerer) {
+	s.automationEventTriggers = triggerer
 }
 
 func NewPRService(
@@ -1483,10 +1493,15 @@ type PullRequestEvent struct {
 	Action     string     `json:"action"`
 	Number     int        `json:"number"`
 	OwnerOrgID *uuid.UUID `json:"-"`
-	PR         struct {
+	Sender     struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	PR struct {
 		Merged         bool   `json:"merged"`
 		Draft          bool   `json:"draft"`
 		HTMLURL        string `json:"html_url"`
+		Title          string `json:"title"`
+		Body           string `json:"body"`
 		MergedAt       string `json:"merged_at"`
 		MergeCommitSHA string `json:"merge_commit_sha"`
 		Head           struct {
@@ -1510,6 +1525,17 @@ type PullRequestEvent struct {
 
 // HandlePullRequestEvent processes pull_request webhook events.
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
+	if event.Action == "opened" {
+		s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+			Event:             models.AutomationGitHubEventPullRequestOpened,
+			Repository:        event.Repository.FullName,
+			PullRequestNumber: event.Number,
+			PullRequestURL:    event.PR.HTMLURL,
+			Actor:             event.Sender.Login,
+			Body:              githubPullRequestBody(event.PR.Title, event.PR.Body),
+		}, event.OwnerOrgID, event.Repository.ID)
+	}
+
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
 	if err != nil {
 		// Not a 143-generated PR; repository auto-preview policies still apply.
@@ -1951,7 +1977,10 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 type PullRequestReviewEvent struct {
 	Action     string     `json:"action"`
 	OwnerOrgID *uuid.UUID `json:"-"`
-	Review     struct {
+	Sender     struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Review struct {
 		ID    int64  `json:"id"`
 		State string `json:"state"`
 		Body  string `json:"body"`
@@ -1973,6 +2002,13 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 	if event.Action != "submitted" {
 		return nil
 	}
+	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+		Event:             models.AutomationGitHubEventPullRequestReviewSubmitted,
+		Repository:        event.Repository.FullName,
+		PullRequestNumber: event.PullRequest.Number,
+		Actor:             firstNonEmpty(event.Sender.Login, event.Review.User.Login),
+		Body:              event.Review.Body,
+	}, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
@@ -2029,7 +2065,10 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 type PullRequestReviewCommentEvent struct {
 	Action     string     `json:"action"`
 	OwnerOrgID *uuid.UUID `json:"-"`
-	Comment    struct {
+	Sender     struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Comment struct {
 		ID       int64  `json:"id"`
 		Body     string `json:"body"`
 		Path     string `json:"path"`
@@ -2053,6 +2092,13 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 	if event.Action != "created" {
 		return nil
 	}
+	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+		Event:             models.AutomationGitHubEventPullRequestReviewCommentCreated,
+		Repository:        event.Repository.FullName,
+		PullRequestNumber: event.PullRequest.Number,
+		Actor:             firstNonEmpty(event.Sender.Login, event.Comment.User.Login),
+		Body:              event.Comment.Body,
+	}, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
@@ -2086,6 +2132,86 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 
 	s.enqueueProcessReviewComment(ctx, pr.OrgID, comment.ID, pr.GitHubRepo)
 	return nil
+}
+
+type IssueCommentEvent struct {
+	Action     string     `json:"action"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Sender     struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+	Comment struct {
+		Body string `json:"body"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	} `json:"comment"`
+	Issue struct {
+		Number      int       `json:"number"`
+		PullRequest *struct{} `json:"pull_request"`
+	} `json:"issue"`
+	Repository struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueCommentEvent) error {
+	if event.Action != "created" || event.Issue.PullRequest == nil {
+		return nil
+	}
+	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+		Event:             models.AutomationGitHubEventIssueCommentCreated,
+		Repository:        event.Repository.FullName,
+		PullRequestNumber: event.Issue.Number,
+		Actor:             firstNonEmpty(event.Sender.Login, event.Comment.User.Login),
+		Body:              event.Comment.Body,
+	}, event.OwnerOrgID, event.Repository.ID)
+	return nil
+}
+
+func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automationevents.GitHubEventTriggerRequest, ownerOrgID *uuid.UUID, githubRepoID int64) {
+	if s.automationEventTriggers == nil || s.repos == nil {
+		return
+	}
+	repo, err := s.repositoryFromWebhookRepo(ctx, ownerOrgID, githubRepoID, req.Repository)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).Int64("github_repo_id", githubRepoID).Str("repo", req.Repository).Msg("failed to resolve repository for github automation trigger")
+		}
+		return
+	}
+	req.OrgID = repo.OrgID
+	req.RepositoryID = repo.ID
+	if err := s.automationEventTriggers.TriggerGitHubEvent(ctx, req); err != nil {
+		s.logger.Warn().Err(err).Str("repo", req.Repository).Str("github_event", string(req.Event)).Msg("failed to trigger github event automations")
+	}
+}
+
+func (s *PRService) repositoryFromWebhookRepo(ctx context.Context, ownerOrgID *uuid.UUID, githubRepoID int64, fullName string) (models.Repository, error) {
+	if ownerOrgID != nil && fullName != "" {
+		return s.repos.GetByFullName(ctx, *ownerOrgID, fullName)
+	}
+	if githubRepoID != 0 {
+		owner, err := s.repos.GetActiveOwnerByGitHubID(ctx, githubRepoID)
+		if err != nil {
+			return models.Repository{}, err
+		}
+		return s.repos.GetByID(ctx, owner.OrgID, owner.RepositoryID)
+	}
+	return models.Repository{}, pgx.ErrNoRows
+}
+
+func githubPullRequestBody(title, body string) string {
+	title = strings.TrimSpace(title)
+	body = strings.TrimSpace(body)
+	if title == "" {
+		return body
+	}
+	if body == "" {
+		return title
+	}
+	return title + "\n\n" + body
 }
 
 func (s *PRService) enqueueProcessReviewComment(ctx context.Context, orgID uuid.UUID, commentID uuid.UUID, repo string) {

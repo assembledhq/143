@@ -58,6 +58,18 @@ repair_deploy_sudoers() {
   bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
 }
 
+# repair-deploy-sudoers.sh can ONLY fix one thing: a missing/incorrect NOPASSWD
+# grant for the deploy user. It reaches the host over root SSH, which is disabled
+# on the fleet, so it is a dead end for every other failure. Only route to it
+# when the remote command actually tripped the sudo policy — otherwise a real
+# error inside the invoked script (e.g. a leaked docker network endpoint) gets
+# misreported as a sudoers problem and the operator is sent chasing root SSH that
+# will never work. These signatures are what `sudo -n` prints when it refuses.
+is_sudoers_failure() {
+  printf '%s' "$1" | grep -qiE \
+    'sudo: (a password is required|sorry, a password is required|no tty present)|not allowed to execute|is not in the sudoers file'
+}
+
 warn_log_rotation_skipped() {
   echo "WARNING: docker log rotation was not updated on this deploy; continuing."
   echo "  The service deploy will continue, but local Docker json-file logs may remain unbounded."
@@ -636,19 +648,43 @@ if [ "$ROLE" = "worker" ]; then
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       "docker pull \"$static_egress_probe_image\""
   fi
-  if ! run_worker_host_reconcile; then
-    echo "reconcile-worker-host.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
-    if repair_deploy_sudoers; then
-      echo "Retrying worker host reconciliation after sudoers repair..."
-      run_worker_host_reconcile
+  # Capture the reconcile output (while still streaming it live via tee) so we
+  # can tell a sudoers refusal apart from a genuine reconcile error. PIPESTATUS
+  # gives us the ssh exit status, which propagates the remote script's exit code;
+  # tee almost never fails. set +e keeps the failing pipeline from aborting the
+  # script before we classify it.
+  reconcile_log="$(mktemp)"
+  set +e
+  run_worker_host_reconcile 2>&1 | tee "$reconcile_log"
+  reconcile_rc="${PIPESTATUS[0]}"
+  set -e
+  if [ "$reconcile_rc" -ne 0 ]; then
+    if is_sudoers_failure "$(cat "$reconcile_log")"; then
+      echo "reconcile-worker-host.sh blocked by missing deploy sudoers; trying no-teardown deploy sudoers repair..."
+      if repair_deploy_sudoers; then
+        echo "Retrying worker host reconciliation after sudoers repair..."
+        run_worker_host_reconcile
+      else
+        echo "ERROR: reconcile-worker-host.sh was blocked by sudoers and repair via root SSH did not complete."
+        echo "  Run once from a machine with root SSH access:"
+        echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+        echo "  Then re-run the deploy."
+        rm -f "$reconcile_log"
+        exit 1
+      fi
     else
-      echo "ERROR: reconcile-worker-host.sh failed and sudoers repair via root SSH did not complete."
-      echo "  Run once from a machine with root SSH access:"
-      echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
-      echo "  Then re-run the deploy."
+      echo "ERROR: reconcile-worker-host.sh failed on $HOST. This is NOT a sudoers problem"
+      echo "  (the deploy sudo grant ran); the underlying reconcile error is printed above."
+      echo "  Common cause: a leaked docker network endpoint holding sandbox-dns's pinned IP"
+      echo "  (\"Address already in use\"). reconcile-worker-host.sh now self-heals that on retry;"
+      echo "  if it persists, on the host run: docker network inspect 143-sandbox, then"
+      echo "  docker network disconnect -f 143-sandbox <stale-endpoint>, and re-run the deploy."
+      echo "  If instead you see an SSH 'Permission denied (publickey)', run: make sync-keys APPLY=true"
+      rm -f "$reconcile_log"
       exit 1
     fi
   fi
+  rm -f "$reconcile_log"
 fi
 
 if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then

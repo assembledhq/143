@@ -238,6 +238,30 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		if filteredStderr != "" {
 			result.Error += ": " + filteredStderr
 		}
+
+		// Surface abnormal exits to the structured logger (and thus
+		// VictoriaLogs). Codex's raw stderr otherwise lands only in per-session
+		// logs, so fleet-wide queries — e.g. transport-blip blast radius across
+		// sessions/hosts — have nothing to match. We reuse filteredStderr, which
+		// is already refresh-token- and benign-line-filtered, so no secrets or
+		// Reconnecting... spam ship; the snippet is truncated to bound ingest.
+		// This fires per codex exec, so it also captures intermediate failures
+		// (e.g. a resume that the orchestrator recovers via fallback) that never
+		// reach the terminal FailureService classification.
+		snippet := filteredStderr
+		if len(snippet) > 600 {
+			snippet = snippet[:600]
+		}
+		a.logger.Warn().
+			Str("session_id", sandbox.SessionID).
+			Str("org_id", sandbox.OrgID).
+			Str("agent", "codex").
+			Int("exit_code", exitCode).
+			Bool("resume", prompt.Continuation).
+			Bool("transport_failure", agent.IsUpstreamTransportError(result.Error)).
+			Str("egress_mode", sandbox.Metadata[agent.SandboxMetadataEgressMode]).
+			Str("stderr_snippet", snippet).
+			Msg("codex CLI exited abnormally")
 	}
 
 	// Collect the git diff from the sandbox.
