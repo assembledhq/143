@@ -4376,6 +4376,7 @@ type fakeSandboxAuth struct {
 	listenCount   int
 	closeCount    int
 	lastListenKey uuid.UUID
+	lastCloseKey  uuid.UUID
 }
 
 func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
@@ -4387,8 +4388,9 @@ func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *mode
 	return f.socketPath, nil
 }
 
-func (f *fakeSandboxAuth) Close(_ uuid.UUID) {
+func (f *fakeSandboxAuth) Close(sessionID uuid.UUID) {
 	f.closeCount++
+	f.lastCloseKey = sessionID
 }
 
 // TestPushSessionBranch_RetryOnRejection_Succeeds locks in the self-healing
@@ -4539,11 +4541,12 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Listener keyed by a fresh per-push UUID, NOT the session ID — that's
-	// what keeps a still-active agent listener (e.g. preview holding the
-	// agent container alive) from being yanked.
-	require.Equal(t, 1, auth.listenCount)
-	require.NotEqual(t, run.ID, auth.lastListenKey, "auth listener must be keyed by a per-push UUID, not the session ID")
+	// The auth server API is session-keyed. Its lease client generates a
+	// separate holder ID internally, so PR push callers must pass the real
+	// session ID or the broker rejects the prepared session.
+	require.Equal(t, 1, auth.listenCount, "pushSessionBranch should open one auth listener")
+	require.Equal(t, run.ID, auth.lastListenKey, "auth listener should be keyed by the session ID")
+	require.Equal(t, run.ID, auth.lastCloseKey, "auth listener close should release the same session key")
 
 	// The sandbox config the provider saw must carry the host socket path
 	// + the in-container env var that 143-tools git-credential reads.
@@ -4554,6 +4557,37 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 	// never runs. The push script sets identity directly via `git config`.
 	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitNameEnvVar)
 	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitEmailEnvVar)
+}
+
+func TestPushSessionBranch_AuthSocketListenFailureWrapsSentinel(t *testing.T) {
+	t.Parallel()
+
+	provider := &prTestSandboxProvider{}
+	auth := &fakeSandboxAuth{listenErr: errors.New("broker mismatch")}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     auth,
+		logger:          zerolog.Nop(),
+	}
+
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "owner/repo"},
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+
+	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should classify auth socket listener failures")
+	require.Contains(t, err.Error(), "open sandbox auth socket", "pushSessionBranch should preserve auth socket context")
+	require.Equal(t, 1, auth.listenCount, "pushSessionBranch should attempt to open the auth listener once")
+	require.Equal(t, 0, auth.closeCount, "pushSessionBranch should not close a listener that never opened")
+	require.Equal(t, 0, provider.destroyed, "pushSessionBranch should not destroy a sandbox when hydrate never started")
 }
 
 func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
@@ -4572,6 +4606,7 @@ func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
 		"k", "b", "m", "n", "e@x",
 	)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should preserve the sandbox auth sentinel")
 	require.Contains(t, err.Error(), "sandbox auth socket not configured")
 }
 
