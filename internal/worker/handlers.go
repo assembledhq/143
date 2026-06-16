@@ -7936,6 +7936,8 @@ func userFacingPRError(err error) string {
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return ghservice.PushRejectedPRMessage
+	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
+		return ghservice.SandboxAuthUnavailablePRMessage
 	default:
 		return "Check GitHub access or repo permissions and try again."
 	}
