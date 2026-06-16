@@ -417,6 +417,18 @@ func TestPullRequestHandler_StartRepair_ErrorsAndResolveConflicts(t *testing.T) 
 			expectedCode:   http.StatusConflict,
 			expectedSubstr: "REPAIR_ALREADY_IN_PROGRESS",
 		},
+		{
+			name: "returns conflict when canonical repair session is busy",
+			handler: NewPullRequestHandler(&stubPullRequestHealthService{
+				repairFunc: func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, ghservice.StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
+					return nil, ghservice.ErrRepairSessionBusy
+				},
+			}),
+			pathID:         prID.String(),
+			withUser:       true,
+			expectedCode:   http.StatusConflict,
+			expectedSubstr: "REPAIR_SESSION_BUSY",
+		},
 	}
 
 	for _, tt := range tests {
