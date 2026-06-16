@@ -68,7 +68,7 @@ func TestRemoveGeminiCLIMigrationKeepsHistoricalSessionsReadable(t *testing.T) {
 func TestUsersSecondaryEmailsMigrationIsExpandOnly(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000193_users_secondary_emails.up.sql")
+	body, err := os.ReadFile("../../migrations/000191_users_secondary_emails.up.sql")
 	require.NoError(t, err, "test should read the users secondary emails migration")
 
 	sql := string(body)
@@ -473,7 +473,7 @@ func TestReviewLoopMigrationDoesNotReferenceSessionMessagesByIDOnly(t *testing.T
 func TestSlackHumanInputPrivacyMigrationIsRetrySafe(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000189_slackbot_human_input_privacy.up.sql")
+	body, err := os.ReadFile("../../migrations/000192_slackbot_human_input_privacy.up.sql")
 	require.NoError(t, err, "test should read the Slack human-input privacy migration")
 
 	sql := string(body)
@@ -492,9 +492,9 @@ func TestSlackHumanInputPrivacyMigrationIsRetrySafe(t *testing.T) {
 func TestSlackSessionClaimsMigrationDropsDependentIndexExplicitly(t *testing.T) {
 	t.Parallel()
 
-	upBody, err := os.ReadFile("../../migrations/000190_slack_session_claims.up.sql")
+	upBody, err := os.ReadFile("../../migrations/000193_slack_session_claims.up.sql")
 	require.NoError(t, err, "test should read the Slack session claims up migration")
-	downBody, err := os.ReadFile("../../migrations/000190_slack_session_claims.down.sql")
+	downBody, err := os.ReadFile("../../migrations/000193_slack_session_claims.down.sql")
 	require.NoError(t, err, "test should read the Slack session claims down migration")
 
 	require.Contains(t, string(upBody), "CREATE TABLE IF NOT EXISTS slack_session_claims",
