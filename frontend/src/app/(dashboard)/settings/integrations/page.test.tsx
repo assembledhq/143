@@ -712,9 +712,82 @@ describe("IntegrationsPage", () => {
     await waitFor(() => {
       expect(updateSlackSettingsMock).toHaveBeenCalledWith({
         notification_preset: "custom",
-        notification_subscriptions: { events: ["session.completed", "session.failed"] },
+        notification_subscriptions: { events: ["session.completed", "session.failed"], automations: [], slack_user_ids: [] },
       });
     });
+  });
+
+  it("keeps advanced Slack notification controls behind the custom preset", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+
+    expect(within(sheet).queryByText("Custom notification events")).not.toBeInTheDocument();
+    expect(within(sheet).queryByLabelText("Automation IDs")).not.toBeInTheDocument();
+    expect(within(sheet).queryByLabelText("DM Slack user IDs")).not.toBeInTheDocument();
+
+    await user.click(within(sheet).getByLabelText("Slack notification preset"));
+    await user.click(await screen.findByRole("option", { name: "Custom" }));
+
+    await waitFor(() => {
+      expect(updateSlackSettingsMock).toHaveBeenCalledWith({ notification_preset: "custom" });
+    });
+  });
+
+  it("surfaces Slack health symptoms in the Slack manage sidesheet", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-slack",
+          org_id: "org-1",
+          provider: "slack",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    getSlackHealthMock.mockResolvedValueOnce({
+      data: {
+        installation: {
+          id: "slack-install-1",
+          org_id: "org-1",
+          team_id: "T123",
+          team_name: "Acme",
+          bot_user_id: "U143",
+          scope: ["chat:write"],
+          status: "active",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        required_scopes: ["chat:write"],
+        missing_scopes: [],
+        auth_ok: false,
+        symptoms: ["no_events_observed_check_event_subscriptions_and_signing_secret"],
+      },
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
+    const sheet = await screen.findByRole("dialog", { name: "Slack" });
+
+    expect(await within(sheet).findByText("No Slack events observed. Check event subscriptions and signing secret.")).toBeInTheDocument();
   });
 
   it("deselects a monitored Slack channel in the Slack manage sidesheet", async () => {

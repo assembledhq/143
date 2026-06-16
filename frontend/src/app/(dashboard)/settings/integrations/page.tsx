@@ -83,8 +83,13 @@ const SLACK_NOTIFICATION_EVENTS = [
   { value: "session.completed", label: "Session completed" },
   { value: "session.failed", label: "Session failed" },
   { value: "human_input.requested", label: "Human input requested" },
+  { value: "automation.run.completed", label: "Automation completed" },
   { value: "automation.run.failed", label: "Automation failed" },
   { value: "automation.run.failure_streak", label: "Automation failure streak" },
+  { value: "pr.opened", label: "PR opened" },
+  { value: "preview.ready", label: "Preview ready" },
+  { value: "preview.failed", label: "Preview failed" },
+  { value: "preview.stale", label: "Preview stale" },
   { value: "preview.*", label: "All preview events" },
 ] as const;
 
@@ -127,6 +132,29 @@ function slackPresetLabel(value?: SlackNotificationPreset): string {
 function slackNotificationEvents(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
   const events = settings?.notification_subscriptions?.events;
   return Array.isArray(events) ? events.filter((event): event is string => typeof event === "string") : [];
+}
+
+function slackNotificationAutomations(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
+  const automations = settings?.notification_subscriptions?.automations;
+  return Array.isArray(automations) ? automations.filter((automation): automation is string => typeof automation === "string") : [];
+}
+
+function slackNotificationSlackUsers(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
+  const slackUserIDs = settings?.notification_subscriptions?.slack_user_ids;
+  return Array.isArray(slackUserIDs) ? slackUserIDs.filter((userID): userID is string => typeof userID === "string") : [];
+}
+
+function splitCommaSeparatedIDs(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function slackHealthSymptomLabel(symptom: string): string {
+  switch (symptom) {
+    case "no_events_observed_check_event_subscriptions_and_signing_secret":
+      return "No Slack events observed. Check event subscriptions and signing secret.";
+    default:
+      return symptom.replaceAll("_", " ");
+  }
 }
 
 function claimStatusLabel(repo: GitHubRepositoryClaimCandidate): string {
@@ -424,6 +452,9 @@ function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
   const repoValue = settings?.default_repository_id ?? NO_DEFAULT_REPO_VALUE;
   const actions = settings?.allowed_actions ?? ["session", "preview"];
   const selectedNotificationEvents = slackNotificationEvents(settings);
+  const selectedNotificationAutomations = slackNotificationAutomations(settings);
+  const selectedNotificationSlackUsers = slackNotificationSlackUsers(settings);
+  const showCustomNotificationControls = (settings?.notification_preset ?? "balanced") === "custom";
 
   const patch = (body: SlackBotSettingsUpdate) => updateSettings.mutate(body);
   const toggleAction = (action: SlackChannelAction) => {
@@ -434,7 +465,24 @@ function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
     const next = selectedNotificationEvents.includes(eventName)
       ? selectedNotificationEvents.filter((item) => item !== eventName)
       : [...selectedNotificationEvents, eventName];
-    patch({ notification_preset: "custom", notification_subscriptions: { events: next } });
+    patch({
+      notification_preset: "custom",
+      notification_subscriptions: {
+        events: next,
+        automations: selectedNotificationAutomations,
+        slack_user_ids: selectedNotificationSlackUsers,
+      },
+    });
+  };
+  const patchNotificationSubscriptions = (body: { automations?: string[]; slack_user_ids?: string[] }) => {
+    patch({
+      notification_preset: "custom",
+      notification_subscriptions: {
+        events: selectedNotificationEvents,
+        automations: body.automations ?? selectedNotificationAutomations,
+        slack_user_ids: body.slack_user_ids ?? selectedNotificationSlackUsers,
+      },
+    });
   };
 
   return (
@@ -462,6 +510,13 @@ function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
           <p className="mt-3 text-sm text-muted-foreground">
             Missing Slack scopes: {health.missing_scopes.join(", ")}
           </p>
+        ) : null}
+        {health && health.symptoms && health.symptoms.length > 0 ? (
+          <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+            {health.symptoms.map((symptom) => (
+              <p key={symptom}>{slackHealthSymptomLabel(symptom)}</p>
+            ))}
+          </div>
         ) : null}
       </div>
 
@@ -581,22 +636,50 @@ function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
               </div>
             </div>
 
-            <div className="grid gap-2">
-              <Label>Custom notification events</Label>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {SLACK_NOTIFICATION_EVENTS.map((event) => (
-                  <label key={event.value} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-                    <Checkbox
-                      aria-label={event.label}
-                      checked={selectedNotificationEvents.includes(event.value)}
+            {showCustomNotificationControls ? (
+              <>
+                <div className="grid gap-2">
+                  <Label>Custom notification events</Label>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {SLACK_NOTIFICATION_EVENTS.map((event) => (
+                      <label key={event.value} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+                        <Checkbox
+                          aria-label={event.label}
+                          checked={selectedNotificationEvents.includes(event.value)}
+                          disabled={updateSettings.isPending}
+                          onCheckedChange={() => toggleNotificationEvent(event.value)}
+                        />
+                        <span>{event.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="slack-notification-automations">Automation IDs</Label>
+                    <Input
+                      id="slack-notification-automations"
+                      key={`automations-${selectedNotificationAutomations.join(",")}`}
+                      defaultValue={selectedNotificationAutomations.join(", ")}
                       disabled={updateSettings.isPending}
-                      onCheckedChange={() => toggleNotificationEvent(event.value)}
+                      placeholder="uuid-1, uuid-2"
+                      onBlur={(event) => patchNotificationSubscriptions({ automations: splitCommaSeparatedIDs(event.currentTarget.value) })}
                     />
-                    <span>{event.label}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="slack-notification-users">DM Slack user IDs</Label>
+                    <Input
+                      id="slack-notification-users"
+                      key={`users-${selectedNotificationSlackUsers.join(",")}`}
+                      defaultValue={selectedNotificationSlackUsers.join(", ")}
+                      disabled={updateSettings.isPending}
+                      placeholder="U123ABC, U456DEF"
+                      onBlur={(event) => patchNotificationSubscriptions({ slack_user_ids: splitCommaSeparatedIDs(event.currentTarget.value) })}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : null}
           </>
         )}
       </div>

@@ -28,7 +28,8 @@ func NewSessionHumanInputRequestStore(db DBTX) *SessionHumanInputRequestStore {
 const humanInputRequestSelectColumns = `
 	id, org_id, session_id, thread_id, turn_number, agent_type,
 	provider_request_id, request_kind, status, title, body, context,
-	blocks_phase, choices, response_schema, provider_payload,
+	blocks_phase, assigned_user_id, sensitivity, preferred_channel,
+	choices, response_schema, provider_payload,
 	answer_text, answer_payload, answered_by, answered_at, expires_at, created_at`
 
 func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.HumanInputRequest) error {
@@ -38,18 +39,26 @@ func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.
 	if req.Choices == nil {
 		req.Choices = []models.HumanInputChoice{}
 	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
+	}
 
 	query := `
 		INSERT INTO session_human_input_requests (
 			org_id, session_id, thread_id, turn_number, agent_type,
 			provider_request_id, request_kind, status, title, body, context,
-			blocks_phase, choices, response_schema, provider_payload,
+			blocks_phase, assigned_user_id, sensitivity, preferred_channel,
+			choices, response_schema, provider_payload,
 			answer_text, answer_payload
 		)
 		VALUES (
 			@org_id, @session_id, @thread_id, @turn_number, @agent_type,
 			@provider_request_id, @request_kind, @status, @title, @body, @context,
-			@blocks_phase, @choices, @response_schema, @provider_payload,
+			@blocks_phase, @assigned_user_id, @sensitivity, @preferred_channel,
+			@choices, @response_schema, @provider_payload,
 			@answer_text, @answer_payload
 		)
 		RETURNING id, created_at`
@@ -67,6 +76,9 @@ func (s *SessionHumanInputRequestStore) Create(ctx context.Context, req *models.
 		"body":                req.Body,
 		"context":             req.Context,
 		"blocks_phase":        req.BlocksPhase,
+		"assigned_user_id":    req.AssignedUserID,
+		"sensitivity":         req.Sensitivity,
+		"preferred_channel":   req.PreferredChannel,
 		"choices":             req.Choices,
 		"response_schema":     nullRawMessage(req.ResponseSchema),
 		"provider_payload":    nullRawMessage(req.ProviderPayload),
@@ -443,6 +455,9 @@ func scanHumanInputRequest(rows pgx.Rows) (models.HumanInputRequest, error) {
 		&req.Body,
 		&req.Context,
 		&req.BlocksPhase,
+		&req.AssignedUserID,
+		&req.Sensitivity,
+		&req.PreferredChannel,
 		&choicesJSON,
 		&req.ResponseSchema,
 		&req.ProviderPayload,
@@ -462,6 +477,12 @@ func scanHumanInputRequest(rows pgx.Rows) (models.HumanInputRequest, error) {
 	}
 	if req.Choices == nil {
 		req.Choices = []models.HumanInputChoice{}
+	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
 	}
 	return req, nil
 }

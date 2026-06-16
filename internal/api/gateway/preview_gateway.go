@@ -1399,6 +1399,16 @@ func writeRuntimeUnavailable(w http.ResponseWriter) {
 // activity heartbeats while the preview tab is visible. This keeps the
 // idle timeout tracker accurate even when the user is just viewing (not
 // navigating) the preview.
+//
+// The heartbeat doubles as a session watchdog: it is sent with fetch (not a
+// fire-and-forget Image) so we can observe a 401 PREVIEW_SESSION_EXPIRED. A
+// running SPA whose preview session has lapsed (idle past the sliding window,
+// or the instance was recycled) would otherwise just see every fetch/asset
+// 401 and render a blank screen with no way to recover. When we detect that
+// 401 we surface an in-app reconnect overlay (a Reconnect button plus a short
+// auto-reconnect countdown). Reconnecting is a top-level reload, which re-issues
+// a navigation request — the gateway then serves the full control overlay
+// (status, logs, Restart + auto-reconnect handshake) defined above.
 const activityHeartbeatScript = `
 (function() {
   "use strict";
@@ -1406,17 +1416,111 @@ const activityHeartbeatScript = `
   window.__143_heartbeat = true;
 
   var INTERVAL_MS = 30000; // 30 seconds
+  var RECONNECT_SECONDS = 5; // auto-reconnect countdown once expiry is detected
   var timer = null;
+  var expired = false;
+  var countdownTimer = null;
+
+  // Capture the native fetch at init, before the previewed app's bundles run.
+  // Apps that wrap window.fetch with an auth interceptor often throw or redirect
+  // on 401, which would hide the expiry signal from us; binding it now keeps the
+  // watchdog reading the real response status.
+  var nativeFetch = (window.fetch && window.fetch.bind(window)) || null;
+
+  function reconnect() {
+    // A top-level reload re-issues a navigation request, so the gateway serves
+    // the full control overlay (status, logs, Restart + auto-reconnect).
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    window.location.reload();
+  }
 
   function sendHeartbeat() {
-    var img = new Image();
-    img.src = "/__143_heartbeat?t=" + Date.now();
+    if (expired) return;
+    var url = "/__143_heartbeat?t=" + Date.now();
+    if (!nativeFetch) {
+      // Pre-fetch browsers: keep the idle timer alive but we cannot read a
+      // status, so expiry recovery is unavailable (a reload still works).
+      new Image().src = url;
+      return;
+    }
+    nativeFetch(url, {
+      cache: "no-store",
+      credentials: "same-origin"
+    }).then(function(resp) {
+      // 401 is the gateway's PREVIEW_SESSION_EXPIRED signal. Network errors are
+      // transient (offline, proxy blip) and must not trigger a recovery loop.
+      if (resp && resp.status === 401) onExpired();
+    }).catch(function() {});
+  }
+
+  function onExpired() {
+    if (expired) return;
+    expired = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    renderOverlay();
+  }
+
+  function renderOverlay() {
+    if (document.getElementById("__143-preview-reconnect")) return;
+    var host = document.createElement("div");
+    host.id = "__143-preview-reconnect";
+    host.style.cssText = "position:fixed;inset:0;z-index:2147483647;";
+    // Shadow DOM isolates our styles from the previewed app's CSS.
+    var root = host.attachShadow ? host.attachShadow({mode: "open"}) : host;
+    root.innerHTML =
+      "<style>" +
+      ":host,*{box-sizing:border-box}" +
+      ".scrim{position:fixed;inset:0;display:grid;place-items:center;" +
+      "background:color-mix(in srgb, black 55%, transparent);" +
+      "font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}" +
+      ".panel{color-scheme:light dark;width:min(92vw,380px);border-radius:12px;padding:24px;" +
+      "background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 14%,transparent);" +
+      "box-shadow:0 18px 60px color-mix(in srgb,black 45%,transparent)}" +
+      ".eyebrow{margin:0 0 8px;font-size:12px;color:color-mix(in srgb,CanvasText 56%,transparent)}" +
+      "h1{margin:0;font-size:20px;line-height:1.2}" +
+      "p{margin:10px 0 0;font-size:14px;line-height:1.5;color:color-mix(in srgb,CanvasText 68%,transparent)}" +
+      ".count{margin-top:14px;font-weight:600;color:CanvasText;font-size:13px}" +
+      "button{margin-top:20px;width:100%;min-height:38px;border-radius:8px;border:0;cursor:pointer;" +
+      "font-size:14px;font-weight:600;background:CanvasText;color:Canvas}" +
+      "</style>" +
+      "<div class='scrim'><div class='panel'>" +
+      "<p class='eyebrow'>143 preview</p>" +
+      "<h1>Preview disconnected</h1>" +
+      "<p>This preview's session expired — it may have been idle or restarted. Reconnect to pick up where you left off.</p>" +
+      "<p class='count' id='pv-count'></p>" +
+      "<button id='pv-reconnect' type='button'>Reconnect now</button>" +
+      "</div></div>";
+    (document.body || document.documentElement).appendChild(host);
+
+    var btn = root.querySelector("#pv-reconnect");
+    var countEl = root.querySelector("#pv-count");
+    if (btn) btn.addEventListener("click", reconnect);
+
+    var remaining = RECONNECT_SECONDS;
+    function paint() {
+      if (!countEl) return;
+      countEl.textContent = remaining > 0
+        ? "Reconnecting in " + remaining + "s…"
+        : "Reconnecting…";
+    }
+    paint();
+    countdownTimer = setInterval(function() {
+      // Only count down while the tab is visible so a backgrounded tab does not
+      // silently reload itself out from under the user.
+      if (document.visibilityState !== "visible") return;
+      remaining -= 1;
+      paint();
+      if (remaining <= 0) {
+        clearInterval(countdownTimer);
+        reconnect();
+      }
+    }, 1000);
   }
 
   function onVisibilityChange() {
     if (document.visibilityState === "visible") {
       sendHeartbeat();
-      if (!timer) {
+      if (!expired && !timer) {
         timer = setInterval(sendHeartbeat, INTERVAL_MS);
       }
     } else {
