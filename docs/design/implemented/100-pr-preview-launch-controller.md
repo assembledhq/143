@@ -1,7 +1,7 @@
 # Design: PR Preview Launch Controller
 
-> **Status:** Future
-> **Last reviewed:** 2026-06-13
+> **Status:** Implemented
+> **Last reviewed:** 2026-06-16
 
 ## Summary
 
@@ -22,7 +22,7 @@ The answer may be immediate, resumable, starting, failed, stale, or blocked, but
 - 143-generated PRs append a `Preview:` footer after PR creation.
 - `/previews/github/{owner}/{repo}/pull/{number}` is the stable app route for a GitHub PR.
 - `GET /api/v1/previews/github/{owner}/{repo}/pull/{number}` resolves the PR head through GitHub, finds or creates a preview target, starts a runtime when allowed, and reports stale active previews with `new_commits_available`.
-- `OpenPreviewButton` bootstraps access before opening the preview origin. It opens `about:blank`, loads `<preview-origin>/bootstrap` in a hidden iframe, mints a short-lived token from the app API, posts it to the preview origin, waits for completion, and navigates the popup.
+- `OpenPreviewButton` bootstraps access before opening the preview origin. It opens `about:blank` for manual button clicks, loads `<preview-origin>/bootstrap` in a hidden iframe, mints a short-lived token from the app API, posts it to the preview origin, waits for completion, and navigates the popup. Stable PR launch sessions use the same bootstrap flow and then replace the current PR-launch tab with the preview origin.
 - Preview-origin traffic remains isolated from the app origin and is gateway-routed to the worker that owns the runtime.
 
 This is close, but product behavior is still page/button oriented instead of intent oriented. The response does not expose a single launch decision, and the frontend does not have a reusable auto-launch state machine.
@@ -42,7 +42,7 @@ This is close, but product behavior is still page/button oriented instead of int
 Each 143-generated PR should contain exactly one durable preview link:
 
 ```text
-Preview: https://app.143.dev/previews/github/{owner}/{repo}/pull/{number}
+Preview: https://app.143.dev/previews/github/{owner}/{repo}/pull/{number}?launch=1
 ```
 
 Use the app stable route as the default PR footer link. It is the most reliable control-plane entry because it can authenticate the app user, resolve current GitHub head state, show diagnostics, and choose whether to open, resume, start, retry, or block.
@@ -73,7 +73,7 @@ Auto-open is allowed only when all are true:
 - The action was initiated by a user gesture on the stable app page or a 143 PR surface.
 - The returned launch decision says the preview represents the latest PR head.
 - The runtime is `ready` or transitions to `ready` during the page's launch session.
-- The browser popup was opened synchronously from the original click, or the UI asks for a second click because the browser blocked deferred popup navigation.
+- The launch session came from a stable app route with `launch=1` or from an explicit in-page start/retry action; the PR-launch tab bootstraps access and navigates itself to the preview origin. Manual `Open preview` buttons may still use a popup opened synchronously from the click.
 
 Auto-open is not allowed for stale previews, failed previews, permission-blocked previews, or closed PRs.
 
@@ -513,7 +513,7 @@ Add:
 
 ```ts
 export function usePreviewLauncher(): {
-  launchPreview: (input: { previewId: string; previewUrl: string; popup?: Window | null }) => Promise<void>;
+  launchPreview: (input: { previewId: string; previewUrl: string; popup?: Window | null; target?: "new_tab" | "current_tab" }) => Promise<void>;
   isOpening: boolean;
   error: Error | null;
 }
@@ -539,7 +539,7 @@ File:
 Behavior:
 
 - On first render from a direct navigation, call `getPullRequest(..., { intent: "open" })`.
-- If user arrived from clicking a 143 `Preview` button, synchronously open `about:blank` before awaiting status so popup blockers do not block later navigation.
+- If user arrived from clicking a 143 `Preview` button, open the stable PR route in a new tab with `launch=1`; that stable page owns bootstrap and replaces its own tab with the preview origin when ready.
 - If `launch.action === "open"`, call `launchPreview`.
 - If `launch.action === "wait"` and `launch.auto_open`, poll until `open` or terminal.
 - If `resume/start/start_latest/retry`, show the primary action and optionally execute it immediately only when the original click explicitly requested open.
@@ -621,7 +621,7 @@ Required cases:
 - resumable launch shows resume estimate and calls `start-latest` or restart path.
 - failed launch shows retry and logs/phase summary.
 - blocked role/token/capacity launch renders specific copy.
-- popup blocked state gives a visible retry/open button.
+- bootstrap or navigation errors are visible, and the normal `Open preview` button remains available for manual retry.
 - bootstrap token is sent only to the expected preview origin.
 
 ### Verification
@@ -660,11 +660,11 @@ go test ./...
 
 Record:
 
-- `preview_pr_launch_total{action,reason,repo,org}`
+- `preview.pr_launch.decisions{preview.launch_action,preview.launch_reason,repository.full_name,org.id,preview.intent,preview.auto_open}`
 - `preview_pr_click_to_open_seconds{path=active|warm|cold}`
 - `preview_pr_launch_blocked_total{reason}`
 - `preview_pr_stale_open_attempt_total`
-- `preview_pr_auto_open_popup_blocked_total`
+- manual preview-button popup-blocked errors are surfaced through the shared launcher hook.
 - existing startup phase duration metrics by initiator
 
 Success criteria:

@@ -34,6 +34,7 @@ type PendingOpen = {
   previewURL: string;
   origin: string;
   popup: Window | null;
+  currentTab: boolean;
   tokenRequested: boolean;
 };
 
@@ -52,6 +53,7 @@ type LaunchPreviewInput = {
   previewId: string;
   previewUrl: string;
   popup?: Window | null;
+  target?: "new_tab" | "current_tab";
 };
 
 export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Promise<BootstrapToken>): {
@@ -84,7 +86,9 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
   const failOpen = useCallback(
     (message: string) => {
       const pending = pendingRef.current;
-      pending?.popup?.close();
+      if (pending && !pending.currentTab) {
+        pending.popup?.close();
+      }
       resetPendingOpen();
       setError(new Error(message));
       toast.error(message);
@@ -115,7 +119,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     },
   });
 
-  const launchPreview = useCallback(async ({ previewId, previewUrl, popup: providedPopup }: LaunchPreviewInput) => {
+  const launchPreview = useCallback(async ({ previewId, previewUrl, popup: providedPopup, target = "new_tab" }: LaunchPreviewInput) => {
     const safePreview = parsePreviewURL(previewUrl);
     if (!previewId || !safePreview) {
       toast.error("Preview link is unavailable.");
@@ -125,7 +129,8 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     const { href: safePreviewURL, origin: previewOrigin } = safePreview;
 
     let popup: Window | null = providedPopup ?? null;
-    if (!popup) {
+    const currentTab = target === "current_tab";
+    if (!popup && !currentTab) {
       try {
         popup = window.open("about:blank", "_blank");
         if (popup) {
@@ -138,7 +143,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       }
     }
 
-    if (!popup) {
+    if (!popup && !currentTab) {
       toast.error("Your browser blocked the preview tab. Allow pop-ups and try again.");
       setError(new Error("Your browser blocked the preview tab. Allow pop-ups and try again."));
       return;
@@ -150,6 +155,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       previewURL: safePreviewURL,
       origin: previewOrigin,
       popup,
+      currentTab,
       tokenRequested: false,
     };
     pendingRef.current = nextPending;
@@ -174,7 +180,9 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       }
 
       if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
-        if (pending.popup) {
+        if (pending.currentTab) {
+          window.open(pending.previewURL, "_self");
+        } else if (pending.popup) {
           pending.popup.location.href = pending.previewURL;
         }
         resetPendingOpen();
@@ -188,7 +196,9 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
   useEffect(() => {
     return () => {
       clearTimeoutRef();
-      pendingRef.current?.popup?.close();
+      if (pendingRef.current && !pendingRef.current.currentTab) {
+        pendingRef.current.popup?.close();
+      }
       pendingRef.current = null;
     };
   }, [clearTimeoutRef]);

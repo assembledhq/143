@@ -166,7 +166,7 @@ func TestPRService_PRPreviewURLReturnsStableAppRouteAfterCreatingPreviewMetadata
 
 	url := svc.prPreviewURL(context.Background(), run, repo, "acme", "web", 42, "feature/preview", headSHA, "https://github.com/acme/web/pull/42")
 
-	require.Equal(t, "https://app.143.dev/previews/github/acme/web/pull/42", url, "PR preview URL should use the stable app route even when preview target metadata is created")
+	require.Equal(t, "https://app.143.dev/previews/github/acme/web/pull/42?launch=1", url, "PR preview URL should use the stable app route even when preview target metadata is created")
 	require.NoError(t, mock.ExpectationsWereMet(), "all preview metadata expectations should be met")
 }
 

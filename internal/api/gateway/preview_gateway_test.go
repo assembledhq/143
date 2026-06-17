@@ -44,6 +44,10 @@ var previewGatewayInstanceColumns = []string{
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
+var previewGatewayLinkColumns = []string{
+	"id", "org_id", "preview_target_id", "link_type", "slug", "repository_id", "pr_number", "created_at", "updated_at",
+}
+
 func previewGatewayInstanceRow(id, sessionID uuid.UUID, targetID *uuid.UUID, orgID, userID uuid.UUID, status models.PreviewStatus, now time.Time, stoppedAt *time.Time) []any {
 	return []any{
 		id, sessionID, targetID, orgID, userID, "default", "preview", string(status),
@@ -52,6 +56,12 @@ func previewGatewayInstanceRow(id, sessionID uuid.UUID, targetID *uuid.UUID, org
 		"/", 512, 500, 10240, []byte(`{}`), []byte(`{}`), string(status), nil, "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 		false,
+	}
+}
+
+func previewGatewayLinkRow(id, orgID, targetID, repoID uuid.UUID, slug string, prNumber int, now time.Time) []any {
+	return []any{
+		id, orgID, targetID, string(models.PreviewLinkTypePullRequest), slug, &repoID, &prNumber, now, now,
 	}
 }
 
@@ -724,6 +734,9 @@ func TestGateway_ServeHTTP_Proxy_NoCookieStoppedTarget(t *testing.T) {
 				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
 			),
 		)
+	mock.ExpectQuery("SELECT .+ FROM preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
 
 	gw := NewGateway(GatewayConfig{
 		Store:     db.NewPreviewStore(mock),
@@ -743,6 +756,55 @@ func TestGateway_ServeHTTP_Proxy_NoCookieStoppedTarget(t *testing.T) {
 	require.Contains(t, w.Body.String(), "Stopped · May 26, 2026 20:05 UTC", "stopped target overlay should show when the preview stopped")
 	require.Contains(t, w.Body.String(), `"restartable":true`, "stopped target overlay should enable the in-place restart script")
 	require.NotContains(t, w.Body.String(), "%!", "overlay template verbs should match the formatted arguments")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGateway_ServeHTTP_Proxy_NoCookieStoppedPRTargetLinksToPRLaunchRoute(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Date(2026, 5, 26, 20, 15, 0, 0, time.UTC)
+	stoppedAt := now.Add(-10 * time.Minute)
+	targetID := uuid.New()
+	previewID := uuid.New()
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	linkID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayInstanceColumns).AddRow(
+				previewGatewayInstanceRow(previewID, sessionID, &targetID, orgID, userID, models.PreviewStatusStopped, now, &stoppedAt)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewGatewayLinkColumns).AddRow(
+				previewGatewayLinkRow(linkID, orgID, targetID, repoID, "github/acme/web/pull/42", 42, now)...,
+			),
+		)
+
+	gw := NewGateway(GatewayConfig{
+		Store:     db.NewPreviewStore(mock),
+		Logger:    zerolog.Nop(),
+		AppOrigin: "https://app.143.dev",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/some-page", nil)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Host = targetID.String() + ".preview.143.dev"
+	w := httptest.NewRecorder()
+
+	gw.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "stopped PR target visits should render the recovery overlay")
+	require.Contains(t, w.Body.String(), "https://app.143.dev/previews/github/acme/web/pull/42?launch=1", "PR target overlay should link back to the stable PR launch controller")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
