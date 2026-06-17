@@ -635,14 +635,14 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 
 const automationRunColumns = `id, automation_id, org_id, triggered_at, triggered_by,
 	triggered_by_user_id, scheduled_time, goal_snapshot, config_snapshot,
-	status, completed_at, result_summary, created_at, updated_at`
+	status, capability_snapshot, completed_at, result_summary, created_at, updated_at`
 
 func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 	var r models.AutomationRun
 	err := row.Scan(
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
 		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot, &r.ConfigSnapshot,
-		&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
+		&r.Status, &r.CapabilitySnapshot, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
 	)
 	return r, err
 }
@@ -658,10 +658,10 @@ type runInserter interface {
 const createAutomationRunSQL = `
 	INSERT INTO automation_runs (
 		automation_id, org_id, triggered_by, triggered_by_user_id, scheduled_time,
-		goal_snapshot, config_snapshot, status
+		goal_snapshot, config_snapshot, status, capability_snapshot
 	) VALUES (
 		@automation_id, @org_id, @triggered_by, @triggered_by_user_id, @scheduled_time,
-		@goal_snapshot, @config_snapshot, @status
+		@goal_snapshot, @config_snapshot, @status, @capability_snapshot
 	)
 	ON CONFLICT (automation_id, scheduled_time) WHERE scheduled_time IS NOT NULL
 	DO NOTHING
@@ -686,6 +686,7 @@ func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (boo
 		"goal_snapshot":        r.GoalSnapshot,
 		"config_snapshot":      configJSON,
 		"status":               r.Status,
+		"capability_snapshot":  r.CapabilitySnapshot,
 	})
 	err = row.Scan(&r.ID, &r.TriggeredAt, &r.CreatedAt, &r.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

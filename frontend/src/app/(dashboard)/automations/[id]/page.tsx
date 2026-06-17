@@ -30,6 +30,11 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { MarkdownContent } from "@/components/markdown";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
+import {
+  AutomationCapabilitiesEditor,
+  capabilitySummary,
+  normalizeCapabilityGrants,
+} from "@/components/automation-capabilities-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
@@ -37,7 +42,7 @@ import { agentTypeForModel } from "@/lib/agents";
 import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
-import type { Automation, AutomationRun } from "@/lib/types";
+import type { AgentCapabilityDefinition, AgentCapabilityGrant, Automation, AutomationRun, ListResponse } from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import {
   getCodingAgentReasoningOptions,
@@ -106,6 +111,7 @@ function SettingsTab({
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
   const [prePRReviewLoops, setPrePRReviewLoops] = useState(automation.pre_pr_review_loops ?? 0);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
+  const [capabilityDraft, setCapabilityDraft] = useState<AgentCapabilityGrant[] | null>(null);
 
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -126,6 +132,20 @@ function SettingsTab({
   }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
+  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+    queryKey: ["agent-capabilities"],
+    queryFn: () => api.settings.getAgentCapabilities(),
+  });
+  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+  const { data: automationCapabilityResponse } = useQuery({
+    queryKey: ["automation-capabilities", automation.id],
+    queryFn: () => api.automations.getCapabilities(automation.id),
+  });
+  const savedCapabilityGrants = useMemo(
+    () => normalizeCapabilityGrants(capabilityCatalog, automationCapabilityResponse?.data?.capabilities ?? []),
+    [automationCapabilityResponse?.data?.capabilities, capabilityCatalog],
+  );
+  const capabilityGrants = capabilityDraft ?? savedCapabilityGrants;
   const goalLength = automationGoalLengthState(goal);
   const parsedIntervalValue = Number(intervalValue.trim());
   const intervalValueIsValid = intervalValue.trim() !== ""
@@ -153,6 +173,13 @@ function SettingsTab({
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["automation", automation.id] });
+    },
+  });
+  const capabilityMutation = useMutation({
+    mutationFn: (capabilities: AgentCapabilityGrant[]) => api.automations.updateCapabilities(automation.id, capabilities),
+    onSuccess: () => {
+      setCapabilityDraft(null);
+      queryClient.invalidateQueries({ queryKey: ["automation-capabilities", automation.id] });
     },
   });
 
@@ -346,6 +373,39 @@ function SettingsTab({
               buttonClassName="w-full justify-between"
               contentClassName="w-[var(--radix-popover-trigger-width)]"
             />
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label>Capabilities</Label>
+              <span className="truncate text-xs text-muted-foreground">
+                {capabilitySummary(capabilityCatalog, capabilityGrants)}
+              </span>
+            </div>
+            <AutomationCapabilitiesEditor
+              catalog={capabilityCatalog}
+              grants={capabilityGrants}
+              onChange={setCapabilityDraft}
+              disabled={!canManage}
+            />
+            {capabilityDraft ? (
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => capabilityMutation.mutate(capabilityDraft)}
+                  disabled={capabilityMutation.isPending}
+                >
+                  {capabilityMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save capabilities
+                </Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => setCapabilityDraft(null)}>
+                  Reset
+                </Button>
+                {capabilityMutation.isError ? (
+                  <span className="text-xs text-destructive">Failed to save capabilities.</span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>

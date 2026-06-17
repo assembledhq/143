@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 )
 
 type githubAutomationStore interface {
@@ -37,10 +38,15 @@ type GitHubEventTriggerRequest struct {
 }
 
 type GitHubEventTriggerService struct {
-	automations githubAutomationStore
-	runs        githubAutomationRunStore
-	jobs        githubAutomationJobStore
-	logger      zerolog.Logger
+	automations  githubAutomationStore
+	runs         githubAutomationRunStore
+	jobs         githubAutomationJobStore
+	capabilities githubCapabilityResolver
+	logger       zerolog.Logger
+}
+
+type githubCapabilityResolver interface {
+	ResolveForSession(ctx context.Context, in agentcapabilities.ResolveInput) ([]models.AgentCapabilitySnapshotItem, error)
 }
 
 func NewGitHubEventTriggerService(automations githubAutomationStore, runs githubAutomationRunStore, jobs githubAutomationJobStore, logger zerolog.Logger) *GitHubEventTriggerService {
@@ -50,6 +56,10 @@ func NewGitHubEventTriggerService(automations githubAutomationStore, runs github
 		jobs:        jobs,
 		logger:      logger,
 	}
+}
+
+func (s *GitHubEventTriggerService) SetCapabilityResolver(resolver githubCapabilityResolver) {
+	s.capabilities = resolver
 }
 
 func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req GitHubEventTriggerRequest) error {
@@ -88,6 +98,18 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		GoalSnapshot:   githubEventGoalSnapshot(automation.Goal, req),
 		ConfigSnapshot: configSnapshot,
 		Status:         models.AutomationRunStatusPending,
+	}
+	if s.capabilities != nil {
+		snapshot, err := s.capabilities.ResolveForSession(ctx, agentcapabilities.ResolveInput{
+			OrgID:         automation.OrgID,
+			RepositoryID:  automation.RepositoryID,
+			SessionOrigin: models.SessionOriginAutomation,
+			AutomationID:  &automation.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve github-triggered automation capabilities: %w", err)
+		}
+		run.CapabilitySnapshot = snapshot
 	}
 	created, err := s.runs.CreateRun(ctx, &run)
 	if err != nil {

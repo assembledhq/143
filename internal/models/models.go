@@ -415,8 +415,9 @@ type Session struct {
 	// LinearPrepareState reflects the pre-start preparation step. "ready"
 	// gates turn 1 from starting until the primary Linear context snapshot
 	// has been captured.
-	LinearPrepareState LinearPrepareState `db:"linear_prepare_state" json:"linear_prepare_state"`
-	DeletedAt          *time.Time         `db:"deleted_at" json:"-"`
+	LinearPrepareState LinearPrepareState            `db:"linear_prepare_state" json:"linear_prepare_state"`
+	DeletedAt          *time.Time                    `db:"deleted_at" json:"-"`
+	CapabilitySnapshot []AgentCapabilitySnapshotItem `db:"capability_snapshot" json:"capability_snapshot,omitempty"`
 	// GitIdentitySource records which token authority the agent used for
 	// git pushes ("user" — the triggering user's GitHub OAuth token; "app"
 	// — the GitHub App installation token). Stamped at session-start by
@@ -967,17 +968,17 @@ type LatestJobError struct {
 
 // Job type constants for async work queue items.
 const (
-	JobTypePMAnalyze           = "pm_analyze"
-	JobTypePMBootstrap         = "pm_bootstrap"
-	JobTypePMContextRefresh    = "pm_context_refresh"
-	JobTypeProjectCycle        = "project_cycle"
-	JobTypeAutomationRun       = "automation_run"
-	JobTypeStartPreview        = "start_preview"
-	JobTypeStartBranchPreview  = "start_branch_preview"
-	JobTypeAutoPreviewDeferred = "auto_preview_deferred"
-	JobTypeSyncGitHubOrgRoster = "sync_github_org_roster"
-	JobTypePreviewCachePrewarm        = "preview_cache_prewarm"
-	JobTypeBackfillPreviewGroups      = "backfill_preview_groups"
+	JobTypePMAnalyze             = "pm_analyze"
+	JobTypePMBootstrap           = "pm_bootstrap"
+	JobTypePMContextRefresh      = "pm_context_refresh"
+	JobTypeProjectCycle          = "project_cycle"
+	JobTypeAutomationRun         = "automation_run"
+	JobTypeStartPreview          = "start_preview"
+	JobTypeStartBranchPreview    = "start_branch_preview"
+	JobTypeAutoPreviewDeferred   = "auto_preview_deferred"
+	JobTypeSyncGitHubOrgRoster   = "sync_github_org_roster"
+	JobTypePreviewCachePrewarm   = "preview_cache_prewarm"
+	JobTypeBackfillPreviewGroups = "backfill_preview_groups"
 )
 
 // Job represents an async work queue item.

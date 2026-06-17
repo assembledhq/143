@@ -557,7 +557,7 @@ func TestAutomationRunStore_CreateRun_Inserts(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -588,7 +588,7 @@ func TestAutomationRunStore_CreateRun_DuplicateReturnsFalse(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnError(pgx.ErrNoRows)
 
 	created, err := store.CreateRun(context.Background(), r)
@@ -926,7 +926,7 @@ func TestAutomationRunStore_CreateRunInTx_Inserts(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -963,7 +963,7 @@ func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectRollback()
 

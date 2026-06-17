@@ -149,7 +149,7 @@ const sessionSelectColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, git_identity_source, git_identity_user_id, created_at`
+	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
 
 const (
 	sessionDiffMaxChars        = 2 * 1024 * 1024
@@ -186,7 +186,7 @@ const sessionListColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, git_identity_source, git_identity_user_id, created_at`
+	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
 
 // sessionAPIDetailColumns is used by the session-detail HTTP endpoint. It keeps
 // the same metadata as a full session fetch, but leaves the large diff payloads
@@ -209,7 +209,7 @@ const sessionAPIDetailColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, git_identity_source, git_identity_user_id, created_at`
+	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -660,14 +660,14 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
 			model_override, reasoning_effort, triggered_by_user_id, target_branch, base_commit_sha, repository_id, input_manifest, automation_run_id,
 			origin, interaction_mode, validation_policy,
-			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state
+			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state, capability_snapshot
 		)
 		VALUES (
 			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
 			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @base_commit_sha, @repository_id, @input_manifest, @automation_run_id,
 			@origin, @interaction_mode, @validation_policy,
-			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state
+			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state, @capability_snapshot
 		)
 		RETURNING id, created_at, last_activity_at`
 
@@ -700,6 +700,7 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		"linear_state_sync_disabled": run.LinearStateSyncDisabled,
 		"linear_identifier_hint":     run.LinearIdentifierHint,
 		"linear_prepare_state":       run.LinearPrepareState,
+		"capability_snapshot":        run.CapabilitySnapshot,
 	}
 
 	row := q.QueryRow(ctx, query, args)

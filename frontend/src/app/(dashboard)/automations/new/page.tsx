@@ -40,6 +40,11 @@ import { automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationComposer } from "@/components/automation-composer";
+import {
+  AutomationCapabilitiesEditor,
+  capabilitySummary,
+  normalizeCapabilityGrants,
+} from "@/components/automation-capabilities-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
@@ -56,7 +61,7 @@ import {
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import type { AutomationGitHubEvent } from "@/lib/types";
+import type { AgentCapabilityDefinition, AgentCapabilityGrant, AutomationGitHubEvent, ListResponse } from "@/lib/types";
 import {
   browserTimezone,
   hourOptions,
@@ -107,6 +112,7 @@ export default function NewAutomationPage() {
   const [prePRReviewLoops, setPrePRReviewLoops] = useState(1);
   const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
+  const [capabilityOverride, setCapabilityOverride] = useState<AgentCapabilityGrant[] | null>(null);
   const [redirecting, setRedirecting] = useState(false);
 
   const { data: settingsResponse } = useQuery({
@@ -120,6 +126,16 @@ export default function NewAutomationPage() {
     queryFn: () => api.repositories.list(),
   });
   const repos = reposData?.data ?? [];
+
+  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+    queryKey: ["agent-capabilities"],
+    queryFn: () => api.settings.getAgentCapabilities(),
+  });
+  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+  const capabilityGrants = useMemo(
+    () => capabilityOverride ?? normalizeCapabilityGrants(capabilityCatalog, []),
+    [capabilityCatalog, capabilityOverride],
+  );
 
   const repoId = selectedRepoId || repos[0]?.id || "";
   const selectedRepo = repos.find((repo) => repo.id === repoId);
@@ -178,6 +194,7 @@ export default function NewAutomationPage() {
         ...(showReasoningSelector && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
+        ...(capabilityOverride ? { capabilities: capabilityOverride } : {}),
       }),
     onSuccess: (res) => {
       setRedirecting(true);
@@ -428,6 +445,19 @@ export default function NewAutomationPage() {
                             <SelectItem value="75">Low</SelectItem>
                           </SelectContent>
                         </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <Label>Capabilities</Label>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {capabilityOverride ? capabilitySummary(capabilityCatalog, capabilityOverride) : "Org defaults"}
+                          </span>
+                        </div>
+                        <AutomationCapabilitiesEditor
+                          catalog={capabilityCatalog}
+                          grants={capabilityGrants}
+                          onChange={setCapabilityOverride}
+                        />
                       </div>
                       <div className="space-y-1.5">
                         <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>

@@ -58,20 +58,21 @@ type Automation struct {
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
 type AutomationRun struct {
-	ID                uuid.UUID             `db:"id"                    json:"id"`
-	AutomationID      uuid.UUID             `db:"automation_id"         json:"automation_id"`
-	OrgID             uuid.UUID             `db:"org_id"                json:"org_id"`
-	TriggeredAt       time.Time             `db:"triggered_at"          json:"triggered_at"`
-	TriggeredBy       AutomationTriggeredBy `db:"triggered_by"          json:"triggered_by"`
-	TriggeredByUserID *uuid.UUID            `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
-	ScheduledTime     *time.Time            `db:"scheduled_time"        json:"scheduled_time,omitempty"`
-	GoalSnapshot      string                `db:"goal_snapshot"         json:"goal_snapshot"`
-	ConfigSnapshot    json.RawMessage       `db:"config_snapshot"       json:"config_snapshot,omitempty"`
-	Status            AutomationRunStatus   `db:"status"                json:"status"`
-	CompletedAt       *time.Time            `db:"completed_at"          json:"completed_at,omitempty"`
-	ResultSummary     *string               `db:"result_summary"        json:"result_summary,omitempty"`
-	CreatedAt         time.Time             `db:"created_at"            json:"created_at"`
-	UpdatedAt         time.Time             `db:"updated_at"            json:"updated_at"`
+	ID                 uuid.UUID                     `db:"id"                    json:"id"`
+	AutomationID       uuid.UUID                     `db:"automation_id"         json:"automation_id"`
+	OrgID              uuid.UUID                     `db:"org_id"                json:"org_id"`
+	TriggeredAt        time.Time                     `db:"triggered_at"          json:"triggered_at"`
+	TriggeredBy        AutomationTriggeredBy         `db:"triggered_by"          json:"triggered_by"`
+	TriggeredByUserID  *uuid.UUID                    `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
+	ScheduledTime      *time.Time                    `db:"scheduled_time"        json:"scheduled_time,omitempty"`
+	GoalSnapshot       string                        `db:"goal_snapshot"         json:"goal_snapshot"`
+	ConfigSnapshot     json.RawMessage               `db:"config_snapshot"       json:"config_snapshot,omitempty"`
+	Status             AutomationRunStatus           `db:"status"                json:"status"`
+	CapabilitySnapshot []AgentCapabilitySnapshotItem `db:"capability_snapshot" json:"capability_snapshot,omitempty"`
+	CompletedAt        *time.Time                    `db:"completed_at"          json:"completed_at,omitempty"`
+	ResultSummary      *string                       `db:"result_summary"        json:"result_summary,omitempty"`
+	CreatedAt          time.Time                     `db:"created_at"            json:"created_at"`
+	UpdatedAt          time.Time                     `db:"updated_at"            json:"updated_at"`
 
 	// Session is a compact view of the session this run spawned, populated
 	// only by list/detail endpoints that join sessions (currently

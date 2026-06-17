@@ -163,6 +163,36 @@ func (s *SessionMessageStore) ListByThread(ctx context.Context, orgID, threadID 
 	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionMessage])
 }
 
+// ListByThreadLatest returns the most recent limit messages for a thread,
+// ordered oldest-first within that window. It is used by the internal
+// session-history API to avoid unbounded payloads on long sessions.
+func (s *SessionMessageStore) ListByThreadLatest(ctx context.Context, orgID, threadID uuid.UUID, limit int) ([]models.SessionMessage, error) {
+	query := `
+		SELECT ` + sessionMessageSelectColumns + `
+		FROM session_messages
+		WHERE org_id = @org_id AND thread_id = @thread_id
+		ORDER BY turn_number DESC, id DESC
+		LIMIT @limit`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":    orgID,
+		"thread_id": threadID,
+		"limit":     limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query thread messages (latest): %w", err)
+	}
+	msgs, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionMessage])
+	if err != nil {
+		return nil, err
+	}
+	// Reverse so the caller receives oldest-first order.
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
 func (s *SessionMessageStore) ListWindowByThread(ctx context.Context, orgID, threadID uuid.UUID, opts SessionMessageWindowOptions) (SessionMessageWindow, error) {
 	position := normalizeSessionMessageWindowPosition(opts)
 	switch position {
