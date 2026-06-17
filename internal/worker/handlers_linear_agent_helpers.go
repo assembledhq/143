@@ -199,12 +199,7 @@ func enqueueRunAgentForLinearAgent(ctx context.Context, stores *Stores, orgID, s
 		return nil
 	}
 
-	dedupe := db.RunAgentDedupeKey(sessionID)
-	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", map[string]any{
-		"org_id":     orgID.String(),
-		"session_id": sessionID.String(),
-	}, 5, &dedupe)
-	return err
+	return enqueueRunAgentForSession(ctx, stores, session)
 }
 
 func linearAgentCreatedShouldEnqueueRun(status models.SessionStatus) bool {
