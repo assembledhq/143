@@ -119,7 +119,42 @@ func TestServiceApplyApprovedGrantAppendsUserApprovedSnapshot(t *testing.T) {
 	require.Equal(t, &requestID, appender.item.HumanInputRequestID, "snapshot item should record approval request id")
 }
 
+func TestServiceResolveForSessionSkipsGrantsInvalidatedByCatalogChange(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+	// Policy contains a grant for a capability ID that no longer exists in the
+	// catalog (simulates a catalog change after the grant was stored).
+	staleGrants := []models.AgentCapabilityGrant{
+		{CapabilityID: "nonexistent_capability", AccessLevel: models.AgentCapabilityAccessRead, Enabled: true, Config: json.RawMessage(`{}`)},
+		{CapabilityID: models.AgentCapabilityRepoContext, AccessLevel: models.AgentCapabilityAccessRead, Enabled: true, Config: json.RawMessage(`{}`)},
+	}
+	store := &fixedPolicyStore{grants: staleGrants}
+	svc := NewService(store)
+
+	snapshot, err := svc.ResolveForSession(context.Background(), ResolveInput{
+		OrgID:         uuid.New(),
+		RepositoryID:  &repoID,
+		SessionOrigin: models.SessionOriginManual,
+	})
+	require.NoError(t, err, "a stale grant should not cause resolution to fail")
+	require.Equal(t, []models.AgentCapabilityID{models.AgentCapabilityRepoContext}, snapshotIDs(snapshot),
+		"the stale grant should be skipped and the valid grant should be included")
+}
+
 type memoryPolicyStore struct{}
+
+type fixedPolicyStore struct {
+	grants []models.AgentCapabilityGrant
+}
+
+func (f *fixedPolicyStore) GetSessionDefaultPolicy(ctx context.Context, orgID uuid.UUID) (models.AgentCapabilityPolicy, error) {
+	return models.AgentCapabilityPolicy{Grants: f.grants}, nil
+}
+
+func (f *fixedPolicyStore) GetAutomationPolicy(ctx context.Context, orgID, automationID uuid.UUID) (models.AgentCapabilityPolicy, error) {
+	return models.AgentCapabilityPolicy{}, ErrPolicyNotFound
+}
 
 func (m *memoryPolicyStore) GetSessionDefaultPolicy(ctx context.Context, orgID uuid.UUID) (models.AgentCapabilityPolicy, error) {
 	return models.AgentCapabilityPolicy{}, ErrPolicyNotFound

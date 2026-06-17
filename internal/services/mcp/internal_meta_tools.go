@@ -41,7 +41,6 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 			"capability_id": {Type: "string", Description: "Capability ID to request"},
 			"access_level":  {Type: "string", Description: "Minimum access level", Enum: []string{"read", "write", "publish"}, Default: "read"},
 			"reason":        {Type: "string", Description: "Why this capability is needed"},
-			"thread_id":     {Type: "string", Description: "Optional current thread ID"},
 		}, Required: []string{"capability_id", "access_level", "reason"}}},
 		Tool{Name: "session_history_search", Description: "Search prior 143 sessions for this org and repository.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
 			"q":              {Type: "string", Description: "Search text"},

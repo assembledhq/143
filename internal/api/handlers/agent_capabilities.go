@@ -59,20 +59,15 @@ func (h *InternalAgentCapabilitiesHandler) Request(w http.ResponseWriter, r *htt
 		CapabilityID models.AgentCapabilityID          `json:"capability_id"`
 		AccessLevel  models.AgentCapabilityAccessLevel `json:"access_level"`
 		Reason       string                            `json:"reason"`
-		ThreadID     *uuid.UUID                        `json:"thread_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
-	threadID := claims.ThreadID
-	if body.ThreadID != nil {
-		threadID = body.ThreadID
-	}
 	req, err := h.svc.RequestGrant(r.Context(), agentcapabilities.GrantRequestInput{
 		OrgID:       claims.OrgID,
 		SessionID:   *claims.SessionID,
-		ThreadID:    threadID,
+		ThreadID:    claims.ThreadID,
 		TurnNumber:  session.CurrentTurn,
 		AgentType:   session.AgentType,
 		Capability:  body.CapabilityID,

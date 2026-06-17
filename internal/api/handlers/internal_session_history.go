@@ -33,15 +33,30 @@ func (h *InternalSessionHistoryHandler) Search(w http.ResponseWriter, r *http.Re
 	}
 	filters := db.SessionHistoryFilters{
 		Query:  strings.TrimSpace(r.URL.Query().Get("q")),
-		Status: strings.TrimSpace(r.URL.Query().Get("status")),
 		Cursor: strings.TrimSpace(r.URL.Query().Get("cursor")),
 		Limit:  10,
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("status")); raw != "" {
+		status := models.SessionStatus(raw)
+		switch status {
+		case models.SessionStatusPending, models.SessionStatusRunning, models.SessionStatusIdle,
+			models.SessionStatusAwaitingInput, models.SessionStatusNeedsHumanGuidance,
+			models.SessionStatusCompleted, models.SessionStatusPRCreated,
+			models.SessionStatusFailed, models.SessionStatusCancelled, models.SessionStatusSkipped:
+			filters.Status = raw
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "unknown session status", nil)
+			return
+		}
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_LIMIT", "limit must be a number", err)
 			return
+		}
+		if limit > 50 {
+			limit = 50
 		}
 		filters.Limit = limit
 	}

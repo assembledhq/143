@@ -242,7 +242,10 @@ func (s *Service) ResolveForSession(ctx context.Context, in ResolveInput) ([]mod
 			Enabled:      grant.Enabled,
 			Config:       grant.Config,
 		}); err != nil {
-			return nil, err
+			// Grant was valid when stored but is now rejected by the catalog
+			// (e.g. capability removed or MaxAccessLevel lowered). Skip it so a
+			// catalog update does not break existing sessions.
+			continue
 		}
 		def := s.catalog[grant.CapabilityID]
 		if def.Scope == models.AgentCapabilityScopeRepository && in.RepositoryID == nil {

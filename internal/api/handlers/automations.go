@@ -510,6 +510,11 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Capabilities != nil {
 		if err := h.replaceAutomationCapabilities(r, orgID, automation.ID, userIDPtr(user), *req.Capabilities); err != nil {
+			// Automation was committed before capability write; attempt cleanup so
+			// the caller doesn't end up with an orphaned automation.
+			if delErr := h.automationStore.SoftDelete(r.Context(), orgID, automation.ID); delErr != nil {
+				h.logger.Error().Err(delErr).Str("automation_id", automation.ID.String()).Msg("failed to soft-delete automation after capability write failure")
+			}
 			if errors.Is(err, agentcapabilities.ErrInvalidGrant) {
 				writeError(w, r, http.StatusBadRequest, "INVALID_CAPABILITY", err.Error(), err)
 			} else if errors.Is(err, db.ErrAutomationNotFound) {
