@@ -38,7 +38,7 @@ Primary anatomy:
 - A seamless title row inside the composer sheet with the automation emoji picker and name. The emoji starts as the existing gear default and can be changed before creation.
 - Compact inline controls in the composer footer:
   - repository,
-  - schedule,
+  - triggers, including schedule cadence and PR event entry points,
   - run identity,
   - model,
   - reasoning when supported,
