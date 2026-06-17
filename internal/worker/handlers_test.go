@@ -392,6 +392,83 @@ func TestDetectSlackContextReferencesClassifiesProductContext(t *testing.T) {
 	}, refs, "Slack context detection should preserve ordered typed references")
 }
 
+func TestSlackContextReferencesForResolverResolvesRepositoryURL(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id, full_name").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(workerRepositoryRows(models.Repository{
+			ID:            repoID,
+			OrgID:         orgID,
+			IntegrationID: uuid.New(),
+			GitHubID:      1234,
+			FullName:      "acme/api",
+			DefaultBranch: "main",
+			Status:        models.RepositoryStatusActive,
+			CreatedAt:     time.Now(),
+			UpdatedAt:     time.Now(),
+		}))
+
+	got := slackContextReferencesForResolver(context.Background(), &Stores{Repositories: db.NewRepositoryStore(mock)}, zerolog.Nop(), orgID, []slackContextReference{
+		{Kind: slackReferenceKindRepository, Value: "https://github.com/acme/api", Source: "message"},
+	})
+
+	require.Len(t, got, 1, "resolver references should include the repository URL")
+	require.NotNil(t, got[0].ResolvedID, "repository URL should resolve to the org repository id")
+	require.Equal(t, repoID, *got[0].ResolvedID, "resolved repository id should match the active org repository")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository lookup should be scoped to the org")
+}
+
+func TestSlackRepositoryDefaultsForContextUsesMatchingInstallationDefault(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	branch := "main"
+	stores := &Stores{
+		SlackChannels:    db.NewSlackChannelSettingsStore(mock),
+		SlackBotSettings: db.NewSlackBotSettingsStore(mock),
+	}
+
+	mock.ExpectQuery("SELECT id, org_id, slack_installation_id").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "slack_team_id", "slack_channel_id", "slack_channel_name",
+			"channel_type", "default_repository_id", "default_branch", "routing_mode", "response_visibility", "allowed_actions",
+			"notification_preset", "notification_subscriptions", "active", "created_at", "updated_at",
+		}))
+	mock.ExpectQuery("FROM slack_bot_settings").
+		WithArgs(orgID, installationID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "default_repository_id", "default_branch",
+			"routing_mode", "response_visibility", "allowed_actions", "notification_preset",
+			"notification_subscriptions", "active", "created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, installationID, &repoID, &branch,
+			models.SlackRoutingModeAuto, models.SlackResponseVisibilityThread, []string{"session"}, models.SlackNotificationPresetBalanced,
+			json.RawMessage(`{}`), true, now, now,
+		))
+
+	defaults := slackRepositoryDefaultsForContext(context.Background(), stores, zerolog.Nop(), orgID, installationID, "T123", "C123")
+
+	require.Len(t, defaults, 1, "helper should return the matching install default")
+	require.Equal(t, repoID, defaults[0].RepositoryID, "install default should come from the inbound Slack installation")
+	require.Equal(t, slackbotsvc.SlackRepositoryResolutionSourceInstallDefault, defaults[0].Source, "install default source should remain stable")
+	require.NoError(t, mock.ExpectationsWereMet(), "helper should scope Slack install default lookup to installation id")
+}
+
 func TestSlackContextReferencesForSessionInput(t *testing.T) {
 	t.Parallel()
 
@@ -591,7 +668,191 @@ func TestSlackMissingContextHelpers(t *testing.T) {
 	require.Contains(t, string(blocksJSON), repoID.String(), "preview target options should carry the repository id for direct preview creation")
 	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "preview_target"}}), "preview target should block vague preview work")
 	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "pull_request"}}), "missing PR should block vague PR repair work")
-	require.False(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "repository"}}), "missing repository alone should not block answer-only or exploratory work")
+	require.True(t, blockingSlackMissingContext([]slackbotsvc.MissingSlackContext{{Kind: "repository"}}), "missing repository should block durable Slack-started work from enqueueing run_agent")
+}
+
+func TestShouldEnqueueSlackStartedRunRequiresRepository(t *testing.T) {
+	t.Parallel()
+
+	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
+	resolved := slackbotsvc.SlackContextResolveResult{}
+
+	require.False(t, shouldEnqueueSlackStartedRun(session, resolved), "Slack-started durable work should not enqueue without a repository")
+
+	repoID := uuid.New()
+	session.RepositoryID = &repoID
+
+	require.True(t, shouldEnqueueSlackStartedRun(session, resolved), "Slack-started durable work should enqueue once repository context exists and no blocking context is missing")
+	require.False(t, shouldEnqueueSlackStartedRun(session, slackbotsvc.SlackContextResolveResult{
+		Missing: []slackbotsvc.MissingSlackContext{{Kind: "pull_request"}},
+	}), "Slack-started durable work should remain blocked when other required context is missing")
+}
+
+func TestPostSlackMessageWithFallback_InvalidBlocksRetriesPlainTextAndRecordsFallback(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	sessionID := uuid.New()
+	link := models.SlackSessionLink{
+		ID:             linkID,
+		OrgID:          orgID,
+		SessionID:      sessionID,
+		SlackTeamID:    "T123",
+		SlackChannelID: "C123",
+		SlackThreadTS:  "1700000000.000100",
+		SlackRootTS:    "1700000000.000100",
+		SlackUserID:    "U123",
+		TeamSession:    true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	stores := &Stores{SlackOutbound: db.NewSlackOutboundMessageStore(mock)}
+	expectSlackOutboundUpsert(t, mock, orgID, linkID, "T123", "C123", models.SlackOutboundMessageKindAck, "failed_invalid_blocks")
+	expectSlackOutboundUpsert(t, mock, orgID, linkID, "T123", "C123", models.SlackOutboundMessageKindAck, "sent_fallback")
+
+	poster := &fakeSlackMessagePoster{
+		blocksErr:  errors.New("slack chat.postMessage: invalid_blocks"),
+		textPosted: ingestion.SlackPostedMessage{Channel: "C123", Timestamp: "1700000000.000200"},
+	}
+
+	posted, err := postSlackMessageWithFallback(
+		context.Background(),
+		poster,
+		stores,
+		&Services{},
+		zerolog.Nop(),
+		link,
+		"xoxb-token",
+		"C123",
+		"1700000000.000100",
+		"Starting a 143 session",
+		[]ingestion.SlackBlock{{Type: "section", Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Starting*"}}},
+		models.SlackOutboundMessageKindAck,
+	)
+
+	require.NoError(t, err, "invalid_blocks should retry successfully as plain text")
+	require.Equal(t, "1700000000.000200", posted.Timestamp, "fallback post should return the plain-text Slack timestamp")
+	require.Equal(t, 1, poster.blockCalls, "helper should try the block payload first")
+	require.Equal(t, 1, poster.textCalls, "helper should retry with plain text after invalid_blocks")
+	require.NoError(t, mock.ExpectationsWereMet(), "helper should record failed block and fallback delivery attempts")
+}
+
+func TestEnqueueSlackFinalIfLinkedEnqueuesFinalResponseForAssistantMessage(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	linkID := uuid.New()
+	installationID := uuid.New()
+	now := time.Now()
+	link := models.SlackSessionLink{
+		ID:                  linkID,
+		OrgID:               orgID,
+		SessionID:           sessionID,
+		SlackInstallationID: installationID,
+		SlackTeamID:         "T123",
+		SlackChannelID:      "C123",
+		SlackThreadTS:       "1700000000.000100",
+		SlackRootTS:         "1700000000.000100",
+		SlackUserID:         "U123",
+		TeamSession:         true,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+
+	mock.ExpectQuery("SELECT id, org_id, session_id, slack_installation_id").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(slackSessionLinkRows(link))
+	mock.ExpectQuery("SELECT .+ FROM session_messages").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(sessionMessageRows(
+			models.SessionMessage{ID: 41, SessionID: sessionID, OrgID: orgID, TurnNumber: 0, Role: models.MessageRoleUser, Content: "fix this", CreatedAt: now},
+			models.SessionMessage{ID: 42, SessionID: sessionID, OrgID: orgID, TurnNumber: 0, Role: models.MessageRoleAssistant, Content: "done", CreatedAt: now},
+		))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "default", "slack_post_final_response", pgxmock.AnyArg(), 3, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	stores := &Stores{
+		SlackSessionLinks: db.NewSlackSessionLinkStore(mock),
+		SessionMessages:   db.NewSessionMessageStore(mock),
+		Jobs:              db.NewJobStore(mock),
+	}
+
+	enqueueSlackFinalIfLinked(context.Background(), stores, zerolog.Nop(), orgID, sessionID)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack-linked successful run should enqueue one final response job")
+}
+
+func TestSlackSelectRepositoryUpdatesIdleSessionAndEnqueuesRun(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	defaultBranch := "main"
+	routingMode := models.SlackRoutingModeAuto
+	responseVisibility := models.SlackResponseVisibilityThread
+	notificationPreset := models.SlackNotificationPresetBalanced
+	row := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumnValue(row, "status", models.SessionStatusPending)
+	setWorkerSessionColumnValue(row, "repository_id", &repoID)
+	setWorkerSessionColumnValue(row, "target_branch", &defaultBranch)
+
+	mock.ExpectQuery("INSERT INTO slack_channel_settings").
+		WithArgs(workerAnyArgs(13)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "slack_team_id", "slack_channel_id", "slack_channel_name",
+			"channel_type", "default_repository_id", "default_branch", "routing_mode", "response_visibility", "allowed_actions",
+			"notification_preset", "notification_subscriptions", "active", "created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, installationID, "T123", "C123", "",
+			"channel", &repoID, &defaultBranch, &routingMode, &responseVisibility, []string{"session", "preview"},
+			&notificationPreset, json.RawMessage(`{}`), true, now, now,
+		))
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(4)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "agent", "run_agent", pgxmock.AnyArg(), 5, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	err = handleSlackSelectRepository(context.Background(), &Stores{
+		SlackChannels: db.NewSlackChannelSettingsStore(mock),
+		Sessions:      db.NewSessionStore(mock),
+		Jobs:          db.NewJobStore(mock),
+	}, models.SlackInteractionJobPayload{
+		OrgID:               orgID.String(),
+		SlackInstallationID: installationID.String(),
+		TeamID:              "T123",
+		ChannelID:           "C123",
+		Value: slackActionValue(map[string]string{
+			"installation_id": installationID.String(),
+			"team_id":         "T123",
+			"channel_id":      "C123",
+			"repository_id":   repoID.String(),
+			"default_branch":  defaultBranch,
+			"session_id":      sessionID.String(),
+		}),
+	})
+
+	require.NoError(t, err, "selecting a repository should update and start the pending Slack session")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository selection should persist channel default, update session context, and enqueue run_agent")
 }
 
 func TestSlackMissingContextModalCreatesPreviewFromStructuredTarget(t *testing.T) {
@@ -1853,6 +2114,88 @@ func workerAnyArgs(n int) []interface{} {
 		args[i] = pgxmock.AnyArg()
 	}
 	return args
+}
+
+type fakeSlackMessagePoster struct {
+	blocksErr    error
+	textErr      error
+	blocksPosted ingestion.SlackPostedMessage
+	textPosted   ingestion.SlackPostedMessage
+	blockCalls   int
+	textCalls    int
+}
+
+func (f *fakeSlackMessagePoster) PostMessage(_ context.Context, _, _, _, _ string) (ingestion.SlackPostedMessage, error) {
+	f.textCalls++
+	if f.textErr != nil {
+		return ingestion.SlackPostedMessage{}, f.textErr
+	}
+	return f.textPosted, nil
+}
+
+func (f *fakeSlackMessagePoster) PostMessageWithBlocks(_ context.Context, _, _, _, _ string, _ []ingestion.SlackBlock) (ingestion.SlackPostedMessage, error) {
+	f.blockCalls++
+	if f.blocksErr != nil {
+		return ingestion.SlackPostedMessage{}, f.blocksErr
+	}
+	return f.blocksPosted, nil
+}
+
+func expectSlackOutboundUpsert(t *testing.T, mock pgxmock.PgxPoolIface, orgID, linkID uuid.UUID, teamID, channelID string, kind models.SlackOutboundMessageKind, status string) {
+	t.Helper()
+	mock.ExpectQuery("INSERT INTO slack_outbound_messages").
+		WithArgs(workerAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_session_link_id", "notification_id", "slack_team_id",
+			"slack_channel_id", "slack_message_ts", "message_kind", "status",
+			"last_payload_hash", "created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, &linkID, nil, teamID,
+			channelID, "test-ts-"+status, kind, status,
+			"hash", time.Now(), time.Now(),
+		))
+}
+
+func slackSessionLinkRows(link models.SlackSessionLink) *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "slack_installation_id", "slack_team_id", "slack_channel_id",
+		"slack_thread_ts", "slack_root_ts", "slack_message_permalink", "slack_user_id", "mapped_user_id",
+		"team_session", "latest_status_message_ts", "latest_progress_kind", "final_message_ts", "created_at", "updated_at",
+	}).AddRow(
+		link.ID, link.OrgID, link.SessionID, link.SlackInstallationID, link.SlackTeamID, link.SlackChannelID,
+		link.SlackThreadTS, link.SlackRootTS, link.SlackMessagePermalink, link.SlackUserID, link.MappedUserID,
+		link.TeamSession, link.LatestStatusMessageTS, link.LatestProgressKind, link.FinalMessageTS, link.CreatedAt, link.UpdatedAt,
+	)
+}
+
+func sessionMessageRows(messages ...models.SessionMessage) *pgxmock.Rows {
+	rows := pgxmock.NewRows([]string{
+		"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content",
+		"attachments", "references", "commands", "token_usage", "source", "created_at",
+	})
+	for _, msg := range messages {
+		rows.AddRow(
+			msg.ID, msg.SessionID, msg.OrgID, msg.ThreadID, msg.UserID, msg.TurnNumber, msg.Role, msg.Content,
+			msg.Attachments, msg.References, msg.Commands, msg.TokenUsage, msg.Source, msg.CreatedAt,
+		)
+	}
+	return rows
+}
+
+func workerRepositoryRows(repos ...models.Repository) *pgxmock.Rows {
+	rows := pgxmock.NewRows([]string{
+		"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+		"private", "language", "description", "clone_url", "installation_id", "status",
+		"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+	})
+	for _, repo := range repos {
+		rows.AddRow(
+			repo.ID, repo.OrgID, repo.IntegrationID, repo.GitHubID, repo.FullName, repo.DefaultBranch,
+			repo.Private, repo.Language, repo.Description, repo.CloneURL, repo.InstallationID, repo.Status,
+			repo.LastSyncedAt, repo.ContextQuality, repo.Settings, repo.CreatedAt, repo.UpdatedAt,
+		)
+	}
+	return rows
 }
 
 type capturingStringArg struct {

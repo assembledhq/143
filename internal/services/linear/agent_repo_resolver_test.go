@@ -31,8 +31,9 @@ func (f *fakeRepoLookup) GetByFullName(_ context.Context, _ uuid.UUID, fullName 
 // fallback tier. err lets a test simulate a misconfigured org_settings
 // JSONB blob without standing up the OrgStore.
 type fakeSettingsLoader struct {
-	settings models.LinearAgentSettings
-	err      error
+	settings          models.LinearAgentSettings
+	defaultWorkRepoID *uuid.UUID
+	err               error
 }
 
 func (f *fakeSettingsLoader) LoadAgentSettings(_ context.Context, _ uuid.UUID) (models.LinearAgentSettings, error) {
@@ -40,6 +41,13 @@ func (f *fakeSettingsLoader) LoadAgentSettings(_ context.Context, _ uuid.UUID) (
 		return models.LinearAgentSettings{}, f.err
 	}
 	return f.settings, nil
+}
+
+func (f *fakeSettingsLoader) LoadDefaultWorkRepositoryID(_ context.Context, _ uuid.UUID) (*uuid.UUID, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.defaultWorkRepoID, nil
 }
 
 type resolverRig struct {
@@ -207,6 +215,44 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 		require.Equal(t, orgRepo, got.RepositoryID)
 		require.Equal(t, "org_default", got.Source)
 		require.NoError(t, rig.mock.ExpectationsWereMet())
+	})
+
+	t.Run("linear default wins over shared org default", func(t *testing.T) {
+		t.Parallel()
+		rig := newResolverRig(t)
+		expectMappingMiss(t, rig.mock)
+		linearRepo := uuid.New()
+		sharedRepo := uuid.New()
+		rig.settings.settings = models.LinearAgentSettings{DefaultRepoID: &linearRepo}
+		rig.settings.defaultWorkRepoID = &sharedRepo
+
+		got, err := rig.resolver.Resolve(context.Background(), AgentRepoResolveInput{
+			OrgID:           rig.orgID,
+			LinearTeamID:    "team_X",
+			LinearProjectID: "proj_Y",
+		})
+		require.NoError(t, err, "resolver should use a configured Linear-specific default")
+		require.Equal(t, linearRepo, got.RepositoryID, "Linear default repo should take priority over shared org default")
+		require.Equal(t, "org_default", got.Source, "Linear default source label should remain stable for operators")
+		require.NoError(t, rig.mock.ExpectationsWereMet(), "all mapping expectations should be met")
+	})
+
+	t.Run("falls through to shared org default when linear default is unset", func(t *testing.T) {
+		t.Parallel()
+		rig := newResolverRig(t)
+		expectMappingMiss(t, rig.mock)
+		sharedRepo := uuid.New()
+		rig.settings.defaultWorkRepoID = &sharedRepo
+
+		got, err := rig.resolver.Resolve(context.Background(), AgentRepoResolveInput{
+			OrgID:           rig.orgID,
+			LinearTeamID:    "team_X",
+			LinearProjectID: "proj_Y",
+		})
+		require.NoError(t, err, "resolver should fall back to the shared default work repository")
+		require.Equal(t, sharedRepo, got.RepositoryID, "shared org default should be used when Linear has no specific default")
+		require.Equal(t, "org_default", got.Source, "shared default should use the stable org_default source label")
+		require.NoError(t, rig.mock.ExpectationsWereMet(), "all mapping expectations should be met")
 	})
 
 	t.Run("returns ErrAgentRepoUnmapped when every tier misses", func(t *testing.T) {
