@@ -15,6 +15,8 @@ import {
 } from "@/lib/preview-bootstrap";
 
 const BOOTSTRAP_TIMEOUT_MS = 5_000;
+const POPUP_NAVIGATION_POLL_MS = 250;
+const POPUP_NAVIGATION_TIMEOUT_MS = 30_000;
 
 // Document shown in the popup while the preview connects. Once the bootstrap
 // handshake completes we navigate the popup to the preview origin; because that
@@ -65,6 +67,9 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const pendingRef = useRef<PendingOpen | null>(null);
   const timeoutRef = useRef<number | null>(null);
+  const popupLoadCleanupRef = useRef<(() => void) | null>(null);
+  const popupNavigationPollRef = useRef<number | null>(null);
+  const popupNavigationTimeoutRef = useRef<number | null>(null);
   const [iframeSrc, setIframeSrc] = useState<string | undefined>();
   const [isOpening, setIsOpening] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -78,10 +83,53 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
 
   const resetPendingOpen = useCallback(() => {
     clearTimeoutRef();
+    popupLoadCleanupRef.current?.();
+    popupLoadCleanupRef.current = null;
+    if (popupNavigationPollRef.current !== null) {
+      window.clearInterval(popupNavigationPollRef.current);
+      popupNavigationPollRef.current = null;
+    }
+    if (popupNavigationTimeoutRef.current !== null) {
+      window.clearTimeout(popupNavigationTimeoutRef.current);
+      popupNavigationTimeoutRef.current = null;
+    }
     pendingRef.current = null;
     setIframeSrc(undefined);
     setIsOpening(false);
   }, [clearTimeoutRef]);
+
+  const completeOpenWhenPopupLoads = useCallback(
+    (popup: Window) => {
+      popupLoadCleanupRef.current?.();
+
+      const onLoad = () => {
+        resetPendingOpen();
+      };
+
+      popup.addEventListener("load", onLoad, { once: true });
+      popupLoadCleanupRef.current = () => {
+        popup.removeEventListener("load", onLoad);
+      };
+
+      popupNavigationPollRef.current = window.setInterval(() => {
+        if (popup.closed) {
+          resetPendingOpen();
+          return;
+        }
+
+        try {
+          void popup.document;
+        } catch {
+          resetPendingOpen();
+        }
+      }, POPUP_NAVIGATION_POLL_MS);
+
+      popupNavigationTimeoutRef.current = window.setTimeout(() => {
+        resetPendingOpen();
+      }, POPUP_NAVIGATION_TIMEOUT_MS);
+    },
+    [resetPendingOpen],
+  );
 
   const failOpen = useCallback(
     (message: string) => {
@@ -180,22 +228,34 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       }
 
       if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
+        clearTimeoutRef();
+        setIframeSrc(undefined);
         if (pending.currentTab) {
           window.open(pending.previewURL, "_self");
         } else if (pending.popup) {
+          completeOpenWhenPopupLoads(pending.popup);
           pending.popup.location.href = pending.previewURL;
         }
-        resetPendingOpen();
       }
     };
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [bootstrapMutation, resetPendingOpen]);
+  }, [bootstrapMutation, clearTimeoutRef, completeOpenWhenPopupLoads]);
 
   useEffect(() => {
     return () => {
       clearTimeoutRef();
+      popupLoadCleanupRef.current?.();
+      popupLoadCleanupRef.current = null;
+      if (popupNavigationPollRef.current !== null) {
+        window.clearInterval(popupNavigationPollRef.current);
+        popupNavigationPollRef.current = null;
+      }
+      if (popupNavigationTimeoutRef.current !== null) {
+        window.clearTimeout(popupNavigationTimeoutRef.current);
+        popupNavigationTimeoutRef.current = null;
+      }
       if (pendingRef.current && !pendingRef.current.currentTab) {
         pendingRef.current.popup?.close();
       }
