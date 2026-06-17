@@ -640,12 +640,16 @@ Audit notes:
 
 Implemented:
 
-- Slack starts inherit default repository, branch, and routing mode from
-  effective Slack settings.
+- Slack starts resolve repository context from explicit Slack references,
+  channel defaults, install defaults, the shared org default work repository,
+  and finally a single active repository fallback. The resolver exposes stable
+  source labels: `slack_explicit_reference`, `slack_channel_default`,
+  `slack_install_default`, `org_default`, `single_repo_fallback`, and
+  `missing`.
 - `@143 ask ...` and `@143 start ...` override the default routing mode.
 - The resolver classifies missing repository, preview target, and PR context,
-  and blocking preview/PR missing context prevents vague agent work from
-  starting until the user supplies the target.
+  and blocking repository/preview/PR missing context prevents vague agent work
+  from starting until the user supplies the target.
 - Slack acks show inferred repo, branch, PR, preview, and routing mode when
   known, with correction actions such as `Change repo`, `Start work`, `Choose
   preview target`, and `Choose PR`.
@@ -676,6 +680,7 @@ type SlackContextResolveInput struct {
 type SlackContextResolveResult struct {
     References []SlackContextReference
     RepositoryID *uuid.UUID
+    RepositoryResolutionSource SlackRepositoryResolutionSource
     Branch string
     PullRequestID *uuid.UUID
     PreviewID *uuid.UUID
@@ -705,6 +710,8 @@ Acceptance criteria:
 - `@143 ask ...` and `@143 start ...` override the default routing mode.
 - Slack acks expose inferred repo, branch, PR, preview, and mode with correction
   actions when useful.
+- Slack-started durable work with no resolved repository creates/keeps the
+  session idle and must not enqueue `run_agent`.
 - Slack modal submissions continue the original session or start it with the
   selected structured context.
 
@@ -918,6 +925,9 @@ Audit notes:
   dropped updates, dedupe hits, install health, missing scopes, signature
   failures, and message-update latency. Slack delivery paths include
   org/team/channel/action/session fields in operational logs where available.
+- Slack outbound delivery records failed attempts as well as successful
+  messages. Block Kit delivery retries as plain text on Slack `invalid_blocks`
+  responses and records the fallback attempt.
 - Slack install health reports missing scopes, token auth failures, event
   delivery state, and UI-visible symptom hints for installed workspaces that
   have not delivered events, which is the common signing-secret/event-
