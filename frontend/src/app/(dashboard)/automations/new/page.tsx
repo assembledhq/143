@@ -4,14 +4,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  CheckCircle2,
   ChevronDown,
-  Clock,
-  GitCommit,
-  GitMerge,
-  GitPullRequest,
   Loader2,
-  MessageSquare,
   Minus,
   Plus,
   Settings2,
@@ -316,29 +310,28 @@ export default function NewAutomationPage() {
                   </SelectContent>
                 </Select>
 
-                <div className="flex w-full flex-col rounded-md border border-border bg-background">
-                  <div className="border-b border-border px-3 py-2">
+                <div
+                  role="group"
+                  aria-label="Automation triggers"
+                  className="flex w-full flex-col gap-2 rounded-md border border-border bg-background px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                     <span className="text-sm font-medium leading-none text-muted-foreground">
                       Triggers
                     </span>
+                    <Label className="flex min-h-7 cursor-pointer items-center gap-2 text-sm font-normal">
+                      <Checkbox
+                        checked={scheduleEnabled}
+                        onCheckedChange={(checked) =>
+                          setScheduleEnabled(checked === true)
+                        }
+                        aria-label="On a schedule"
+                      />
+                      <span>On a schedule</span>
+                    </Label>
                   </div>
-                  <Label className="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2 text-sm font-normal">
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-muted/40 text-muted-foreground">
-                      <Clock className="h-3.5 w-3.5" />
-                    </span>
-                    <span className="min-w-0 flex-1 font-medium text-foreground">
-                      On a schedule
-                    </span>
-                    <Checkbox
-                      checked={scheduleEnabled}
-                      onCheckedChange={(checked) =>
-                        setScheduleEnabled(checked === true)
-                      }
-                      aria-label="On a schedule"
-                    />
-                  </Label>
                   {scheduleEnabled ? (
-                    <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2 pl-[3.25rem]">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium leading-none text-muted-foreground">
                         Run every
                       </span>
@@ -425,43 +418,35 @@ export default function NewAutomationPage() {
                       />
                     </div>
                   ) : null}
-                  <div className="border-t border-border">
-                    <div className="px-3 pb-1.5 pt-2">
-                      <span className="text-xs font-medium text-muted-foreground">
-                        Pull request events
-                      </span>
-                    </div>
-                    <div className="divide-y divide-border">
-                      {automationProductTriggerOptions.map((option) => {
-                        const Icon = automationTriggerIcon(option.value);
-                        return (
-                          <Label
-                            key={option.value}
-                            className="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2 text-sm font-normal"
-                          >
-                            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-muted/40 text-muted-foreground">
-                              <Icon className="h-3.5 w-3.5" />
-                            </span>
-                            <span className="min-w-0 flex-1 leading-snug">
-                              {option.label}
-                            </span>
-                            <Checkbox
-                              checked={productTriggers.includes(option.value)}
-                              onCheckedChange={(checked) =>
-                                toggleProductTrigger(
-                                  option.value,
-                                  checked === true,
-                                )
-                              }
-                              aria-label={option.label}
-                            />
-                          </Label>
-                        );
-                      })}
+                  <div className="space-y-1">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Pull request events
+                    </span>
+                    <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                      {automationProductTriggerOptions.map((option) => (
+                        <Label
+                          key={option.value}
+                          className="flex min-h-6 cursor-pointer items-center gap-2 text-sm font-normal"
+                        >
+                          <Checkbox
+                            checked={productTriggers.includes(option.value)}
+                            onCheckedChange={(checked) =>
+                              toggleProductTrigger(
+                                option.value,
+                                checked === true,
+                              )
+                            }
+                            aria-label={option.label}
+                          />
+                          <span className="min-w-0 leading-snug">
+                            {option.label}
+                          </span>
+                        </Label>
+                      ))}
                     </div>
                   </div>
                   {!scheduleEnabled && productTriggers.length === 0 ? (
-                    <p className="border-t border-border px-3 py-2 text-xs text-destructive">
+                    <p className="text-xs text-destructive">
                       Select at least one trigger.
                     </p>
                   ) : null}
@@ -777,21 +762,6 @@ export default function NewAutomationPage() {
       </div>
     </PageContainer>
   );
-}
-
-function automationTriggerIcon(trigger: AutomationProductTrigger) {
-  switch (trigger) {
-    case "github.pr.opened":
-      return GitPullRequest;
-    case "github.pr.updated":
-      return GitCommit;
-    case "github.pr.feedback":
-      return MessageSquare;
-    case "github.checks.completed":
-      return CheckCircle2;
-    case "github.pr.merged":
-      return GitMerge;
-  }
 }
 
 function TemplatePicker({

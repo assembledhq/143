@@ -185,7 +185,7 @@ describe("NewAutomationPage", () => {
     expect(within(sheet).queryByText("Timezone")).not.toBeInTheDocument();
   });
 
-  it("presents schedule and PR events as grouped trigger rows", async () => {
+  it("presents schedule and PR events as compact trigger controls", async () => {
     server.use(
       http.get("/api/v1/repositories", () =>
         HttpResponse.json({
@@ -214,6 +214,9 @@ describe("NewAutomationPage", () => {
     renderWithProviders(<NewAutomationPage />);
 
     expect(await screen.findByText("Triggers")).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: "Automation triggers" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Pull request events")).toBeInTheDocument();
     expect(screen.getByLabelText("On a schedule")).toBeChecked();
     expect(screen.getByLabelText("When a PR is opened")).not.toBeChecked();
