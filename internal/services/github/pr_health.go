@@ -15,7 +15,7 @@ import (
 // Tests are indeterminate when any test-category check_run is queued, waiting,
 // or in progress. Callers use these flags to avoid clobbering prior actionable
 // state on the same head SHA with a transient-blank snapshot.
-func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns []gitHubCheckRun) (mergeStateIndeterminate, testsIndeterminate bool) {
+func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns []gitHubCheckRun, commitStatuses []gitHubCommitStatus) (mergeStateIndeterminate, testsIndeterminate bool) {
 	state := strings.ToLower(strings.TrimSpace(githubState))
 	mergeStateIndeterminate = mergeable == nil && !isDefinitiveNullMergeabilityState(state)
 	for _, check := range checkRuns {
@@ -24,6 +24,15 @@ func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns [
 		}
 		switch strings.ToLower(strings.TrimSpace(check.Status)) {
 		case "in_progress", "queued", "waiting":
+			testsIndeterminate = true
+			return
+		}
+	}
+	for _, status := range commitStatuses {
+		if classifyCheckRunCategory(status.Context) != models.PullRequestCheckCategoryTest {
+			continue
+		}
+		if normalizeCommitStatus(status) == models.PullRequestCheckStatusPending {
 			testsIndeterminate = true
 			return
 		}
@@ -146,6 +155,29 @@ func normalizeCheckRunStatus(check gitHubCheckRun) models.PullRequestCheckStatus
 			return models.PullRequestCheckStatusFailed
 		}
 		return models.PullRequestCheckStatusPending
+	}
+}
+
+func normalizeCommitStatus(status gitHubCommitStatus) models.PullRequestCheckStatus {
+	switch strings.ToLower(strings.TrimSpace(status.State)) {
+	case "success":
+		return models.PullRequestCheckStatusPassed
+	case "failure", "error":
+		return models.PullRequestCheckStatusFailed
+	default:
+		return models.PullRequestCheckStatusPending
+	}
+}
+
+func commitStatusProvider(context string) string {
+	name := strings.ToLower(strings.TrimSpace(context))
+	switch {
+	case strings.Contains(name, "circleci"):
+		return "circleci"
+	case strings.Contains(name, "github"):
+		return "github"
+	default:
+		return "github_status"
 	}
 }
 

@@ -79,6 +79,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handleCheckSuite(w, r, body)
 	case "check_run":
 		h.handleCheckRun(w, r, body)
+	case "status":
+		h.handleStatus(w, r, body)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
@@ -446,6 +448,33 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 
 	if err := h.prService.HandleCheckRunEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CHECK_RUN_FAILED", "failed to process check_run event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handleStatus(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.StatusEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse status event")
+		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+
+	if err := h.prService.HandleStatusEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "STATUS_FAILED", "failed to process status event", err)
 		return
 	}
 
