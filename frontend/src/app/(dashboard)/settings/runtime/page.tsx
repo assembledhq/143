@@ -722,6 +722,7 @@ function CapacityLimitsSection() {
 function SessionsAndCleanupSection() {
   const { data: settingsResponse } = useOrgSettingsQuery();
   const autosave = useOrgSettingsAutosave();
+  const [open, setOpen] = useState(false);
 
   const settings = getSettings(settingsResponse);
   const lifecycle = settings.sandbox_lifecycle ?? {};
@@ -779,105 +780,149 @@ function SessionsAndCleanupSection() {
       ),
   });
 
+  const summary = settingsResponse
+    ? `Session max ${formatMinutes(sessionMinutes)} · preview idle ${formatMinutes(idlePreviewTTLMinutes)}`
+    : null;
+
   return (
     <section className="space-y-3">
-      <SectionHeader title="Sessions and cleanup" status={autosave.status} />
-      <Card>
-        <CardContent>
-          <SettingRow
-            id="max-session-minutes"
-            label="Maximum session length"
-            description="Stop an agent turn when it exceeds this organization limit."
-            helper={`Range ${MIN_SESSION_DURATION_MINUTES}-${MAX_SESSION_DURATION_MINUTES} minutes`}
-            tooltip="Longer limits help large changes finish, but they also hold sandbox capacity longer."
-          >
-            <BoundedNumberInput
-              id="max-session-minutes"
-              label="Maximum session length"
-              min={MIN_SESSION_DURATION_MINUTES}
-              max={MAX_SESSION_DURATION_MINUTES}
-              value={maxSessionMinutesField.value}
-              onChange={maxSessionMinutesField.onChange}
-              onBlur={maxSessionMinutesField.onBlur}
-              unit="min"
-            />
-          </SettingRow>
-          <SettingRow
-            id="completed-session-retention"
-            label="Keep completed sessions for"
-            description="Keep completed sandboxes available briefly for inspection and preview reuse."
-            helper={`Range ${MIN_COMPLETED_SESSION_RETENTION_MINUTES}-${MAX_COMPLETED_SESSION_RETENTION_MINUTES} minutes`}
-            tooltip="Use 0 minutes when completed sandboxes should be cleaned up immediately."
-          >
-            <BoundedNumberInput
-              id="completed-session-retention"
-              label="Keep completed sessions for"
-              min={MIN_COMPLETED_SESSION_RETENTION_MINUTES}
-              max={MAX_COMPLETED_SESSION_RETENTION_MINUTES}
-              value={completedRetentionField.value}
-              onChange={completedRetentionField.onChange}
-              onBlur={completedRetentionField.onBlur}
-              unit="min"
-            />
-          </SettingRow>
-          <SettingRow
-            id="idle-preview-ttl"
-            label="Idle preview timeout"
-            description="Stop a preview sandbox after it sits idle for this long."
-            helper={`Range ${MIN_IDLE_PREVIEW_TTL_MINUTES}-${MAX_IDLE_PREVIEW_TTL_MINUTES} minutes`}
-            tooltip="Active previews are still stopped when they hit this idle window."
-          >
-            <BoundedNumberInput
-              id="idle-preview-ttl"
-              label="Idle preview timeout"
-              min={MIN_IDLE_PREVIEW_TTL_MINUTES}
-              max={MAX_IDLE_PREVIEW_TTL_MINUTES}
-              value={idlePreviewTTLField.value}
-              onChange={idlePreviewTTLField.onChange}
-              onBlur={idlePreviewTTLField.onBlur}
-              unit="min"
-            />
-          </SettingRow>
-          <SettingRow
-            id="preview-holds-sandbox"
-            label="Keep sandbox while preview is active"
-            description="Preserve the backing sandbox while a preview is still running."
-            tooltip="Disable this only if preview cost is more important than fast preview reuse."
-          >
-            <Switch
-              id="preview-holds-sandbox"
-              checked={previewHoldsSandbox}
-              onCheckedChange={(checked) => {
-                autosave.save({
-                  settings: {
-                    sandbox_lifecycle: { preview_holds_sandbox: checked },
-                  },
-                });
-              }}
-              aria-label="Keep sandbox while preview is active"
-              className="sm:ml-auto"
-            />
-          </SettingRow>
-          <SettingRow
-            id="sandbox-tab-tools"
-            label="Agent tab tools"
-            description="Allow sibling agent tabs in the same session to coordinate through 143 tools."
-            tooltip="This only exposes scoped tab coordination for the current session and repository."
-          >
-            <Switch
-              id="sandbox-tab-tools"
-              checked={tabToolsEnabled}
-              onCheckedChange={(checked) => {
-                autosave.save({
-                  settings: { coding_agent_tab_tools_enabled: checked },
-                });
-              }}
-              aria-label="Agent tab tools"
-              className="sm:ml-auto"
-            />
-          </SettingRow>
-        </CardContent>
-      </Card>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <Card>
+          <CardContent>
+            <CollapsibleTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                aria-label={
+                  open
+                    ? "Hide session lifecycle controls"
+                    : "Show session lifecycle controls"
+                }
+                className="flex h-auto w-full items-center justify-between gap-4 rounded-none px-0 py-4 text-left hover:bg-transparent"
+              >
+                <span className="block min-w-0 space-y-1">
+                  <span className="flex items-center gap-2 text-xs font-medium text-foreground">
+                    Sessions and cleanup
+                    <AutosaveIndicator status={autosave.status} />
+                  </span>
+                  {summary && (
+                    <span className="block text-sm font-medium text-foreground">
+                      {summary}
+                    </span>
+                  )}
+                  <span className="block text-xs leading-5 whitespace-normal text-muted-foreground">
+                    Lifecycle, retention, preview idle behavior, and advanced agent tab coordination.
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                  {open ? "Hide" : "Show"}
+                  <ChevronDown
+                    className={cn(
+                      "h-4 w-4 transition-transform",
+                      open && "rotate-180",
+                    )}
+                    aria-hidden="true"
+                  />
+                </span>
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="border-t border-border/70">
+              <SettingRow
+                id="max-session-minutes"
+                label="Maximum session length"
+                description="Stop an agent turn when it exceeds this organization limit."
+                helper={`Range ${MIN_SESSION_DURATION_MINUTES}-${MAX_SESSION_DURATION_MINUTES} minutes`}
+                tooltip="Longer limits help large changes finish, but they also hold sandbox capacity longer."
+              >
+                <BoundedNumberInput
+                  id="max-session-minutes"
+                  label="Maximum session length"
+                  min={MIN_SESSION_DURATION_MINUTES}
+                  max={MAX_SESSION_DURATION_MINUTES}
+                  value={maxSessionMinutesField.value}
+                  onChange={maxSessionMinutesField.onChange}
+                  onBlur={maxSessionMinutesField.onBlur}
+                  unit="min"
+                />
+              </SettingRow>
+              <SettingRow
+                id="completed-session-retention"
+                label="Keep completed sessions for"
+                description="Keep completed sandboxes available briefly for inspection and preview reuse."
+                helper={`Range ${MIN_COMPLETED_SESSION_RETENTION_MINUTES}-${MAX_COMPLETED_SESSION_RETENTION_MINUTES} minutes`}
+                tooltip="Use 0 minutes when completed sandboxes should be cleaned up immediately."
+              >
+                <BoundedNumberInput
+                  id="completed-session-retention"
+                  label="Keep completed sessions for"
+                  min={MIN_COMPLETED_SESSION_RETENTION_MINUTES}
+                  max={MAX_COMPLETED_SESSION_RETENTION_MINUTES}
+                  value={completedRetentionField.value}
+                  onChange={completedRetentionField.onChange}
+                  onBlur={completedRetentionField.onBlur}
+                  unit="min"
+                />
+              </SettingRow>
+              <SettingRow
+                id="idle-preview-ttl"
+                label="Idle preview timeout"
+                description="Stop a preview sandbox after it sits idle for this long."
+                helper={`Range ${MIN_IDLE_PREVIEW_TTL_MINUTES}-${MAX_IDLE_PREVIEW_TTL_MINUTES} minutes`}
+                tooltip="Active previews are still stopped when they hit this idle window."
+              >
+                <BoundedNumberInput
+                  id="idle-preview-ttl"
+                  label="Idle preview timeout"
+                  min={MIN_IDLE_PREVIEW_TTL_MINUTES}
+                  max={MAX_IDLE_PREVIEW_TTL_MINUTES}
+                  value={idlePreviewTTLField.value}
+                  onChange={idlePreviewTTLField.onChange}
+                  onBlur={idlePreviewTTLField.onBlur}
+                  unit="min"
+                />
+              </SettingRow>
+              <SettingRow
+                id="preview-holds-sandbox"
+                label="Keep sandbox while preview is active"
+                description="Preserve the backing sandbox while a preview is still running."
+                tooltip="Disable this only if preview cost is more important than fast preview reuse."
+              >
+                <Switch
+                  id="preview-holds-sandbox"
+                  checked={previewHoldsSandbox}
+                  onCheckedChange={(checked) => {
+                    autosave.save({
+                      settings: {
+                        sandbox_lifecycle: { preview_holds_sandbox: checked },
+                      },
+                    });
+                  }}
+                  aria-label="Keep sandbox while preview is active"
+                  className="sm:ml-auto"
+                />
+              </SettingRow>
+              <SettingRow
+                id="sandbox-tab-tools"
+                label="Agent tab tools"
+                description="Allow sibling agent tabs in the same session to coordinate through 143 tools."
+                tooltip="This only exposes scoped tab coordination for the current session and repository."
+              >
+                <Switch
+                  id="sandbox-tab-tools"
+                  checked={tabToolsEnabled}
+                  onCheckedChange={(checked) => {
+                    autosave.save({
+                      settings: { coding_agent_tab_tools_enabled: checked },
+                    });
+                  }}
+                  aria-label="Agent tab tools"
+                  className="sm:ml-auto"
+                />
+              </SettingRow>
+            </CollapsibleContent>
+          </CardContent>
+        </Card>
+      </Collapsible>
     </section>
   );
 }
@@ -1132,14 +1177,14 @@ function ResourceDefaultsSection() {
 }
 
 export default function RuntimeSettingsPage() {
-  usePageTitle("Runtime settings");
+  usePageTitle("Sandboxes");
 
   return (
     <PageContainer size="default">
       <TooltipProvider delayDuration={150}>
         <div className="space-y-8">
           <PageHeader
-            title="Runtime"
+            title="Sandboxes"
             description="Configure sandbox networking, capacity, and lifecycle defaults."
           />
           <RuntimeSummary />

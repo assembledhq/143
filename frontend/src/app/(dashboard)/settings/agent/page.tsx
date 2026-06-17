@@ -112,6 +112,29 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
   }
 }
 
+function AuthResolutionNotice() {
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/30 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="space-y-1">
+        <p className="text-xs font-medium text-foreground">
+          Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Shared sandbox networking, lifecycle, and capacity controls live in Sandboxes.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button asChild variant="outline" size="sm">
+          <Link href="/settings/account">Personal auths</Link>
+        </Button>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/settings/runtime">Sandboxes</Link>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function AgentPage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -290,14 +313,7 @@ export default function AgentPage() {
             <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
-          <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
-            <p className="text-xs text-muted-foreground">
-              Shared sandbox networking, lifecycle, and capacity controls live in Runtime.
-            </p>
-            <Button asChild variant="outline" size="sm">
-              <Link href="/settings/runtime">Runtime settings</Link>
-            </Button>
-          </div>
+          <AuthResolutionNotice />
 
           <section className="space-y-3">
             <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
@@ -359,14 +375,7 @@ export default function AgentPage() {
             </Button>
           )}
         />
-        <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-3">
-          <p className="text-xs text-muted-foreground">
-            Shared sandbox networking, lifecycle, and capacity controls live in Runtime.
-          </p>
-          <Button asChild variant="outline" size="sm">
-            <Link href="/settings/runtime">Runtime settings</Link>
-          </Button>
-        </div>
+        <AuthResolutionNotice />
 
         <section className="space-y-4">
           <div className="space-y-1.5">
