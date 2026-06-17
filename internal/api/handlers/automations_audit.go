@@ -23,7 +23,11 @@ func automationAuditSnapshot(a *models.Automation) map[string]any {
 		"schedule_type":  a.ScheduleType,
 	}
 	if len(a.GitHubEventTriggers) > 0 {
+		snap["triggers"] = automationProductTriggerSummary(a.GitHubEventTriggers)
 		snap["github_event_triggers"] = automationGitHubEventStrings(a.GitHubEventTriggers)
+	}
+	if len(a.GitHubEventFilters) > 0 && string(a.GitHubEventFilters) != "{}" {
+		snap["github_event_filters"] = json.RawMessage(a.GitHubEventFilters)
 	}
 	switch a.ScheduleType {
 	case models.AutomationScheduleInterval:
@@ -82,10 +86,56 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("cron_expression", optString(old.CronExpression), optString(new_.CronExpression))
 	track("timezone", old.Timezone, new_.Timezone)
 	track("github_event_triggers", automationGitHubEventStrings(old.GitHubEventTriggers), automationGitHubEventStrings(new_.GitHubEventTriggers))
+	track("triggers", automationProductTriggerSummary(old.GitHubEventTriggers), automationProductTriggerSummary(new_.GitHubEventTriggers))
+	track("github_event_filters", auditJSONRaw(old.GitHubEventFilters), auditJSONRaw(new_.GitHubEventFilters))
 	track("priority", old.Priority, new_.Priority)
 	track("repository_id", optUUIDString(old.RepositoryID), optUUIDString(new_.RepositoryID))
 
 	return changes
+}
+
+func automationProductTriggerSummary(events []models.AutomationGitHubEvent) []string {
+	if len(events) == 0 {
+		return nil
+	}
+	eventSet := map[models.AutomationGitHubEvent]struct{}{}
+	for _, event := range events {
+		eventSet[event] = struct{}{}
+	}
+	var out []string
+	if _, ok := eventSet[models.AutomationGitHubEventPullRequestOpened]; ok {
+		out = append(out, string(models.AutomationProductTriggerPROpened))
+	}
+	if _, ok := eventSet[models.AutomationGitHubEventPullRequestUpdated]; ok {
+		out = append(out, string(models.AutomationProductTriggerPRUpdated))
+	}
+	if _, ok := eventSet[models.AutomationGitHubEventIssueCommentCreated]; ok {
+		out = append(out, string(models.AutomationProductTriggerPRFeedback))
+	} else if _, ok := eventSet[models.AutomationGitHubEventPullRequestReviewSubmitted]; ok {
+		out = append(out, string(models.AutomationProductTriggerPRFeedback))
+	} else if _, ok := eventSet[models.AutomationGitHubEventPullRequestReviewCommentCreated]; ok {
+		out = append(out, string(models.AutomationProductTriggerPRFeedback))
+	}
+	if _, ok := eventSet[models.AutomationGitHubEventCheckSuiteCompleted]; ok {
+		out = append(out, string(models.AutomationProductTriggerChecksCompleted))
+	} else if _, ok := eventSet[models.AutomationGitHubEventCheckRunCompleted]; ok {
+		out = append(out, string(models.AutomationProductTriggerChecksCompleted))
+	}
+	if _, ok := eventSet[models.AutomationGitHubEventPullRequestMerged]; ok {
+		out = append(out, string(models.AutomationProductTriggerPRMerged))
+	}
+	return out
+}
+
+func auditJSONRaw(raw json.RawMessage) any {
+	if len(raw) == 0 || string(raw) == "{}" {
+		return nil
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return string(raw)
+	}
+	return decoded
 }
 
 func automationGitHubEventStrings(events []models.AutomationGitHubEvent) []string {
