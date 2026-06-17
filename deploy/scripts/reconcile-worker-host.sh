@@ -89,17 +89,56 @@ ensure_bridge() {
 # ALL future deploys on the host until the endpoint is cleared by hand. This
 # helper finds whichever endpoint currently owns a pinned IP and force-detaches
 # it so the recreate can reclaim the address.
+endpoint_owner_for_ip() {
+  local network="$1"
+  local ip="$2"
+
+  docker network inspect "$network" \
+    -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' 2>/dev/null \
+    | awk -v want="$ip/" 'index($2, want) == 1 {print $1}' | head -n1
+}
+
 disconnect_endpoint_for_ip() {
   local network="$1"
   local ip="$2"
   local endpoint
 
-  endpoint="$(docker network inspect "$network" \
-    -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' 2>/dev/null \
-    | awk -v want="$ip/" 'index($2, want) == 1 {print $1}' | head -n1)"
+  endpoint="$(endpoint_owner_for_ip "$network" "$ip")"
   if [ -n "$endpoint" ]; then
     echo "Detaching stale endpoint '$endpoint' holding $ip on $network..." >&2
     docker network disconnect -f "$network" "$endpoint" >/dev/null 2>&1 || true
+  fi
+}
+
+sandbox_dns_running_with_pinned_ips() {
+  local status health sandbox_owner static_owner
+
+  status="$(docker inspect 143-sandbox-dns-1 --format '{{.State.Status}}' 2>/dev/null || true)"
+  if [ "$status" != "running" ]; then
+    return 1
+  fi
+
+  health="$(docker inspect 143-sandbox-dns-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
+  if [ "$health" != "healthy" ]; then
+    return 1
+  fi
+
+  sandbox_owner="$(endpoint_owner_for_ip "$SANDBOX_NETWORK" 172.30.0.2)"
+  static_owner="$(endpoint_owner_for_ip "$STATIC_EGRESS_NETWORK" "$STATIC_EGRESS_DNS_IP")"
+  if [ "$sandbox_owner" != "143-sandbox-dns-1" ] || [ "$static_owner" != "143-sandbox-dns-1" ]; then
+    return 1
+  fi
+  return 0
+}
+
+warn_if_sandbox_dns_image_drift() {
+  local running_image local_image
+
+  running_image="$(docker inspect 143-sandbox-dns-1 --format '{{.Image}}' 2>/dev/null || true)"
+  local_image="$(docker image inspect 143-sandbox-dns:local --format '{{.Id}}' 2>/dev/null || true)"
+  if [ -n "$running_image" ] && [ -n "$local_image" ] && [ "$running_image" != "$local_image" ]; then
+    echo "WARNING: routine deploy leaves healthy sandbox-dns in place even though 143-sandbox-dns:local points at a different image." >&2
+    echo "  Run DEPLOY_MODE=maintenance after reviewing active runtimes to activate support-service changes." >&2
   fi
 }
 
@@ -155,6 +194,12 @@ ensure_static_egress_dns() {
   # claims them before DNS starts.
   (
     cd "$compose_dir"
+    if [ "${DEPLOY_MODE:-routine}" = "routine" ] && sandbox_dns_running_with_pinned_ips; then
+      warn_if_sandbox_dns_image_drift
+      echo "sandbox-dns healthy on pinned IPs; routine deploy leaves it in place."
+      exit 0
+    fi
+
     if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
       docker compose -f "$compose_file" build sandbox-dns
     fi
