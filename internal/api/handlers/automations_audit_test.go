@@ -188,6 +188,91 @@ func TestAutomationAuditDiff_RepositoryIDTransitions(t *testing.T) {
 	})
 }
 
+func TestAutomationProductTriggerSummary(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		events []models.AutomationGitHubEvent
+		want   []string
+	}{
+		{
+			name:   "nil events returns nil",
+			events: nil,
+			want:   nil,
+		},
+		{
+			name:   "empty events returns nil",
+			events: []models.AutomationGitHubEvent{},
+			want:   nil,
+		},
+		{
+			name:   "pr.opened maps to github.pr.opened",
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
+			want:   []string{string(models.AutomationProductTriggerPROpened)},
+		},
+		{
+			name: "all three feedback events emit one github.pr.feedback label",
+			events: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventIssueCommentCreated,
+				models.AutomationGitHubEventPullRequestReviewSubmitted,
+				models.AutomationGitHubEventPullRequestReviewCommentCreated,
+			},
+			want: []string{string(models.AutomationProductTriggerPRFeedback)},
+		},
+		{
+			name:   "single feedback event still emits one github.pr.feedback label",
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestReviewSubmitted},
+			want:   []string{string(models.AutomationProductTriggerPRFeedback)},
+		},
+		{
+			name:   "check_suite.completed maps to github.checks.completed",
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventCheckSuiteCompleted},
+			want:   []string{string(models.AutomationProductTriggerChecksCompleted)},
+		},
+		{
+			name:   "legacy check_run.completed also maps to github.checks.completed",
+			events: []models.AutomationGitHubEvent{models.AutomationGitHubEventCheckRunCompleted},
+			want:   []string{string(models.AutomationProductTriggerChecksCompleted)},
+		},
+		{
+			name: "check_suite and check_run together emit one github.checks.completed label",
+			events: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventCheckSuiteCompleted,
+				models.AutomationGitHubEventCheckRunCompleted,
+			},
+			want: []string{string(models.AutomationProductTriggerChecksCompleted)},
+		},
+		{
+			name: "full set of product triggers maps in order",
+			events: []models.AutomationGitHubEvent{
+				models.AutomationGitHubEventPullRequestOpened,
+				models.AutomationGitHubEventPullRequestUpdated,
+				models.AutomationGitHubEventIssueCommentCreated,
+				models.AutomationGitHubEventPullRequestReviewSubmitted,
+				models.AutomationGitHubEventPullRequestReviewCommentCreated,
+				models.AutomationGitHubEventCheckSuiteCompleted,
+				models.AutomationGitHubEventPullRequestMerged,
+			},
+			want: []string{
+				string(models.AutomationProductTriggerPROpened),
+				string(models.AutomationProductTriggerPRUpdated),
+				string(models.AutomationProductTriggerPRFeedback),
+				string(models.AutomationProductTriggerChecksCompleted),
+				string(models.AutomationProductTriggerPRMerged),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := automationProductTriggerSummary(tc.events)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestMarshalAuditDetails(t *testing.T) {
 	t.Parallel()
 
