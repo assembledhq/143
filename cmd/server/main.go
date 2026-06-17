@@ -1687,7 +1687,7 @@ func buildServices(
 	// worker handler: disabling the flag must stop new inbound events while
 	// still allowing already-enqueued linear_agent_event jobs to drain.
 	if linearService != nil {
-		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore, Repos: repoStore}
 		repoResolver := linear.NewAgentRepoResolver(
 			db.NewLinearTeamRepoMappingStore(pool),
 			linearAgentSettingsView,

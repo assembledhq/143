@@ -479,7 +479,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// uses the same actor=app token the rest of the writes do. Metrics
 	// recorder is shared with linearService.HandleAgentMilestone so a
 	// single OTel meter sees both inbound dispatches and outbound emits.
-	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore, Repos: repoStore}
 	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
 		Logger:         logger,
 		AgentSessions:  linearService.AgentSessionStore(),

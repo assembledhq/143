@@ -21,7 +21,7 @@ func automationColumnSlice() []string {
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
 		"identity_scope", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
-		"github_event_triggers",
+		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
 		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
 	}
@@ -32,13 +32,17 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 	if len(metadata) == 0 {
 		metadata = []byte(`{}`)
 	}
+	githubEventFilters := a.GitHubEventFilters
+	if len(githubEventFilters) == 0 {
+		githubEventFilters = []byte(`{}`)
+	}
 	return rows.AddRow(
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.IconType.OrDefault(), a.IconValue,
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
 		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
-		automationGitHubEventsToStrings(a.GitHubEventTriggers),
+		automationGitHubEventsToStrings(a.GitHubEventTriggers), githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
 		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
 	)
@@ -82,7 +86,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(27)...).
+		WithArgs(anyArgs(28)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -164,6 +168,7 @@ func TestAutomationStore_ListEnabledByGitHubEvent(t *testing.T) {
 		IdentityScope: models.AutomationIdentityScopeOrg,
 		ScheduleType:  models.AutomationScheduleInterval, Timezone: "UTC",
 		GitHubEventTriggers: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
+		GitHubEventFilters:  json.RawMessage(`{}`),
 		Enabled:             true, Priority: 50, ExternalMetadata: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now,
 	}
 
@@ -246,11 +251,61 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(29)...).
+		WithArgs(anyArgs(30)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_ClaimTriggerDedupe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(pgxmock.PgxPoolIface)
+		expected  bool
+		expectErr bool
+	}{
+		{
+			name: "claims new key",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("WITH cleanup AS").
+					WithArgs(anyArgs(4)...).
+					WillReturnRows(pgxmock.NewRows([]string{"dedupe_key"}).AddRow("feedback:review:1"))
+			},
+			expected: true,
+		},
+		{
+			name: "returns false for existing key",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery("WITH cleanup AS").
+					WithArgs(anyArgs(4)...).
+					WillReturnError(pgx.ErrNoRows)
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "mock pool should be created")
+			defer mock.Close()
+			tt.setupMock(mock)
+
+			store := NewAutomationRunStore(mock)
+			got, err := store.ClaimTriggerDedupe(context.Background(), uuid.New(), uuid.New(), "feedback:review:1", time.Now().Add(time.Minute))
+			if tt.expectErr {
+				require.Error(t, err, "dedupe claim should return error")
+				return
+			}
+			require.NoError(t, err, "dedupe claim should not error")
+			require.Equal(t, tt.expected, got, "dedupe claim should return expected inserted state")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestAutomationStore_SoftDelete(t *testing.T) {

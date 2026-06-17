@@ -120,6 +120,27 @@ func TestLatestUserMessageInScope_ThreadScopedSelection(t *testing.T) {
 	require.Equal(t, "A turn 9", scopedA.Content, "scoped lookup should return thread A's most recent user when asked for thread A")
 }
 
+func TestLatestUserMessageInScope_UsesNewestMessageIDWithinThread(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.New()
+
+	// Regression: PR repair used to insert a thread-bound message with the
+	// session turn number. That older repair message can therefore sort after
+	// a newer thread-local follow-up in ListBySession's (turn_number, id)
+	// ordering. The scoped selector must choose the newest row in the thread,
+	// not the last row in the DB ordering.
+	messages := []models.SessionMessage{
+		{ID: 5127, Role: models.MessageRoleUser, Content: "new design follow-up", ThreadID: &threadID, TurnNumber: 5},
+		{ID: 5113, Role: models.MessageRoleUser, Content: "old repair prompt", ThreadID: &threadID, TurnNumber: 27},
+		{ID: 5114, Role: models.MessageRoleAssistant, Content: "old repair reply", ThreadID: &threadID, TurnNumber: 27},
+	}
+
+	got := latestUserMessageInScope(messages, &threadID)
+	require.NotNil(t, got, "should find a user message in the thread")
+	require.Equal(t, "new design follow-up", got.Content, "scoped lookup should prefer the newest message row over an older higher-turn repair prompt")
+}
+
 func TestLatestUserMessageInScope_NoThreadFallback(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +153,23 @@ func TestLatestUserMessageInScope_NoThreadFallback(t *testing.T) {
 	got := latestUserMessageInScope(messages, nil)
 	require.NotNil(t, got)
 	require.Equal(t, "session-level", got.Content, "nil scope should ignore threaded messages and return the latest no-thread user")
+}
+
+func TestUnprocessedUserMessagesThrough_UsesMessageIDBoundaryWithinThread(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.New()
+
+	messages := []models.SessionMessage{
+		{ID: 5127, Role: models.MessageRoleUser, Content: "new design follow-up", ThreadID: &threadID, TurnNumber: 5},
+		{ID: 5113, Role: models.MessageRoleUser, Content: "old repair prompt", ThreadID: &threadID, TurnNumber: 27},
+		{ID: 5114, Role: models.MessageRoleAssistant, Content: "old repair reply", ThreadID: &threadID, TurnNumber: 27},
+	}
+
+	got := unprocessedUserMessagesThrough(messages, &threadID, 5127)
+	require.Equal(t, []models.SessionMessage{
+		{ID: 5127, Role: models.MessageRoleUser, Content: "new design follow-up", ThreadID: &threadID, TurnNumber: 5},
+	}, got, "unprocessed lookup should ignore older high-turn assistant rows that sort after the newer user message")
 }
 
 func TestUnprocessedUserMessages_SessionScope(t *testing.T) {

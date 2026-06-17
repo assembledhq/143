@@ -43,6 +43,7 @@ type Automation struct {
 	// timezone='UTC' only when meaningful.
 	Timezone            string                  `db:"timezone"        json:"timezone"`
 	GitHubEventTriggers []AutomationGitHubEvent `db:"github_event_triggers" json:"github_event_triggers,omitempty"`
+	GitHubEventFilters  json.RawMessage         `db:"github_event_filters" json:"github_event_filters,omitempty"`
 	NextRunAt           *time.Time              `db:"next_run_at"     json:"next_run_at,omitempty"`
 	LastRunAt           *time.Time              `db:"last_run_at"     json:"last_run_at,omitempty"`
 	Enabled             bool                    `db:"enabled"         json:"enabled"`
@@ -157,6 +158,10 @@ type AutomationGitHubEvent string
 
 const (
 	AutomationGitHubEventPullRequestOpened               AutomationGitHubEvent = "github.pull_request.opened"
+	AutomationGitHubEventPullRequestUpdated              AutomationGitHubEvent = "github.pull_request.updated"
+	AutomationGitHubEventPullRequestMerged               AutomationGitHubEvent = "github.pull_request.merged"
+	AutomationGitHubEventCheckSuiteCompleted             AutomationGitHubEvent = "github.check_suite.completed"
+	AutomationGitHubEventCheckRunCompleted               AutomationGitHubEvent = "github.check_run.completed"
 	AutomationGitHubEventIssueCommentCreated             AutomationGitHubEvent = "github.issue_comment.created"
 	AutomationGitHubEventPullRequestReviewSubmitted      AutomationGitHubEvent = "github.pull_request_review.submitted"
 	AutomationGitHubEventPullRequestReviewCommentCreated AutomationGitHubEvent = "github.pull_request_review_comment.created"
@@ -165,6 +170,10 @@ const (
 func (e AutomationGitHubEvent) Validate() error {
 	switch e {
 	case AutomationGitHubEventPullRequestOpened,
+		AutomationGitHubEventPullRequestUpdated,
+		AutomationGitHubEventPullRequestMerged,
+		AutomationGitHubEventCheckSuiteCompleted,
+		AutomationGitHubEventCheckRunCompleted,
 		AutomationGitHubEventIssueCommentCreated,
 		AutomationGitHubEventPullRequestReviewSubmitted,
 		AutomationGitHubEventPullRequestReviewCommentCreated:
@@ -174,11 +183,43 @@ func (e AutomationGitHubEvent) Validate() error {
 	}
 }
 
+type AutomationProductTrigger string
+
+const (
+	AutomationProductTriggerPROpened        AutomationProductTrigger = "github.pr.opened"
+	AutomationProductTriggerPRUpdated       AutomationProductTrigger = "github.pr.updated"
+	AutomationProductTriggerPRFeedback      AutomationProductTrigger = "github.pr.feedback"
+	AutomationProductTriggerChecksCompleted AutomationProductTrigger = "github.checks.completed"
+	AutomationProductTriggerPRMerged        AutomationProductTrigger = "github.pr.merged"
+)
+
+func (t AutomationProductTrigger) Validate() error {
+	switch t {
+	case AutomationProductTriggerPROpened,
+		AutomationProductTriggerPRUpdated,
+		AutomationProductTriggerPRFeedback,
+		AutomationProductTriggerChecksCompleted,
+		AutomationProductTriggerPRMerged:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation trigger: %q", t)
+	}
+}
+
+type AutomationGitHubEventFilters struct {
+	BaseBranches  []string `json:"base_branches,omitempty"`
+	Authors       []string `json:"authors,omitempty"`
+	Paths         []string `json:"paths,omitempty"`
+	FeedbackTypes []string `json:"feedback_types,omitempty"`
+	ReviewStates  []string `json:"review_states,omitempty"`
+}
+
 type AutomationScheduleType string
 
 const (
 	AutomationScheduleInterval AutomationScheduleType = "interval"
 	AutomationScheduleCron     AutomationScheduleType = "cron"
+	AutomationScheduleNone     AutomationScheduleType = "none"
 )
 
 // AutomationIdentityScope controls whose credentials an automation uses when
@@ -264,10 +305,10 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 
 func (t AutomationScheduleType) Validate() error {
 	switch t {
-	case AutomationScheduleInterval, AutomationScheduleCron:
+	case AutomationScheduleInterval, AutomationScheduleCron, AutomationScheduleNone:
 		return nil
 	default:
-		return fmt.Errorf("invalid schedule_type: %q (must be interval or cron)", t)
+		return fmt.Errorf("invalid schedule_type: %q (must be interval, cron, or none)", t)
 	}
 }
 
@@ -355,6 +396,8 @@ func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
 			tz = "UTC"
 		}
 		return NextCronRunTime(*a.CronExpression, tz, from)
+	case AutomationScheduleNone:
+		return time.Time{}, nil
 	default:
 		return time.Time{}, fmt.Errorf("unknown schedule_type: %q", a.ScheduleType)
 	}

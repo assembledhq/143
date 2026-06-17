@@ -34,29 +34,53 @@ type SlackContextOption struct {
 	Value string `json:"value"`
 }
 
+type SlackRepositoryResolutionSource string
+
+const (
+	SlackRepositoryResolutionSourceExplicitReference SlackRepositoryResolutionSource = "slack_explicit_reference"
+	SlackRepositoryResolutionSourceChannelDefault    SlackRepositoryResolutionSource = "slack_channel_default"
+	SlackRepositoryResolutionSourceInstallDefault    SlackRepositoryResolutionSource = "slack_install_default"
+	SlackRepositoryResolutionSourceOrgDefault        SlackRepositoryResolutionSource = "org_default"
+	SlackRepositoryResolutionSourceSingleRepo        SlackRepositoryResolutionSource = "single_repo_fallback"
+	SlackRepositoryResolutionSourceMissing           SlackRepositoryResolutionSource = "missing"
+)
+
+type SlackRepositoryDefault struct {
+	RepositoryID   uuid.UUID                       `json:"repository_id"`
+	RepositoryName string                          `json:"repository_name,omitempty"`
+	Branch         string                          `json:"branch,omitempty"`
+	Source         SlackRepositoryResolutionSource `json:"source"`
+}
+
 type SlackContextResolveInput struct {
 	Settings              models.EffectiveSlackChannelSettings
 	Text                  string
 	References            []SlackContextReference
+	RepositoryDefaults    []SlackRepositoryDefault
 	TriggeringSlackUserID string
 }
 
 type SlackContextResolveResult struct {
-	References     []SlackContextReference
-	RepositoryID   *uuid.UUID
-	Branch         string
-	PullRequestID  *uuid.UUID
-	PreviewID      *uuid.UUID
-	RoutingMode    SlackRoutingMode
-	ContextSummary SlackSessionContextSummary
-	Missing        []MissingSlackContext
+	References                 []SlackContextReference
+	RepositoryID               *uuid.UUID
+	RepositoryResolutionSource SlackRepositoryResolutionSource
+	Branch                     string
+	PullRequestID              *uuid.UUID
+	PreviewID                  *uuid.UUID
+	RoutingMode                SlackRoutingMode
+	ContextSummary             SlackSessionContextSummary
+	Missing                    []MissingSlackContext
 }
 
 func ResolveSlackContext(input SlackContextResolveInput) SlackContextResolveResult {
 	result := SlackContextResolveResult{
-		References:   append([]SlackContextReference(nil), input.References...),
-		RepositoryID: input.Settings.DefaultRepositoryID,
-		RoutingMode:  SlackRoutingMode(input.Settings.RoutingMode),
+		References:                 append([]SlackContextReference(nil), input.References...),
+		RepositoryID:               input.Settings.DefaultRepositoryID,
+		RepositoryResolutionSource: SlackRepositoryResolutionSourceMissing,
+		RoutingMode:                SlackRoutingMode(input.Settings.RoutingMode),
+	}
+	if result.RepositoryID != nil {
+		result.RepositoryResolutionSource = SlackRepositoryResolutionSourceInstallDefault
 	}
 	if result.RoutingMode == "" {
 		result.RoutingMode = SlackRoutingModeAuto
@@ -67,6 +91,8 @@ func ResolveSlackContext(input SlackContextResolveInput) SlackContextResolveResu
 	if override := RoutingOverrideFromText(input.Text); override != "" {
 		result.RoutingMode = override
 	}
+	hasExplicitRepositoryReference := false
+	hasResolvedExplicitRepositoryReference := false
 	for _, ref := range input.References {
 		switch ref.Kind {
 		case SlackContextBranch:
@@ -74,8 +100,14 @@ func ResolveSlackContext(input SlackContextResolveInput) SlackContextResolveResu
 				result.Branch = strings.TrimSpace(ref.Value)
 			}
 		case SlackContextRepository:
+			hasExplicitRepositoryReference = true
 			if result.ContextSummary.RepositoryName == "" {
 				result.ContextSummary.RepositoryName = strings.TrimSpace(ref.Value)
+			}
+			if ref.ResolvedID != nil {
+				hasResolvedExplicitRepositoryReference = true
+				result.RepositoryID = ref.ResolvedID
+				result.RepositoryResolutionSource = SlackRepositoryResolutionSourceExplicitReference
 			}
 		case SlackContextPullRequest:
 			if result.ContextSummary.PullRequestURL == "" {
@@ -93,13 +125,43 @@ func ResolveSlackContext(input SlackContextResolveInput) SlackContextResolveResu
 			}
 		}
 	}
+	missingRepositoryReason := "Choose a repository before starting durable work from Slack."
+	if hasExplicitRepositoryReference && !hasResolvedExplicitRepositoryReference {
+		result.RepositoryID = nil
+		result.RepositoryResolutionSource = SlackRepositoryResolutionSourceMissing
+		result.Branch = ""
+		missingRepositoryReason = "Choose a connected repository before starting durable work from Slack."
+	}
+	if result.RepositoryID == nil {
+		for _, candidate := range input.RepositoryDefaults {
+			if hasExplicitRepositoryReference && !hasResolvedExplicitRepositoryReference {
+				break
+			}
+			if candidate.RepositoryID == uuid.Nil {
+				continue
+			}
+			repoID := candidate.RepositoryID
+			result.RepositoryID = &repoID
+			result.RepositoryResolutionSource = candidate.Source
+			if result.RepositoryResolutionSource == "" {
+				result.RepositoryResolutionSource = SlackRepositoryResolutionSourceMissing
+			}
+			if result.Branch == "" {
+				result.Branch = strings.TrimSpace(candidate.Branch)
+			}
+			if result.ContextSummary.RepositoryName == "" {
+				result.ContextSummary.RepositoryName = strings.TrimSpace(candidate.RepositoryName)
+			}
+			break
+		}
+	}
 	if result.ContextSummary.Branch == "" {
 		result.ContextSummary.Branch = result.Branch
 	}
 	if result.RepositoryID == nil && result.RoutingMode != SlackRoutingModeAnswerOnly {
 		result.Missing = append(result.Missing, MissingSlackContext{
 			Kind:   "repository",
-			Reason: "Choose a repository before starting durable work from Slack.",
+			Reason: missingRepositoryReason,
 		})
 	}
 	text := normalizeSlackCommandText(input.Text)

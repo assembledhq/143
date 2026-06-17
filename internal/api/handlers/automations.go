@@ -229,7 +229,9 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		IntervalRunAt       *string                                   `json:"interval_run_at"`
 		CronExpression      *string                                   `json:"cron_expression"`
 		Timezone            *string                                   `json:"timezone"`
+		ProductTriggers     []models.AutomationProductTrigger         `json:"triggers"`
 		GitHubEventTriggers []models.AutomationGitHubEvent            `json:"github_event_triggers"`
+		GitHubEventFilters  json.RawMessage                           `json:"github_event_filters"`
 		Metadata            json.RawMessage                           `json:"metadata"`
 		Priority            *int                                      `json:"priority"`
 		PrePRReviewLoops    *int                                      `json:"pre_pr_review_loops"`
@@ -319,6 +321,10 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if scheduleType == models.AutomationScheduleInterval && req.CronExpression != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
+		return
+	}
+	if scheduleType == models.AutomationScheduleNone && (req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil || req.CronExpression != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "schedule fields must not be set when schedule_type is none")
 		return
 	}
 
@@ -439,9 +445,18 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PRE_PR_REVIEW_LOOPS", err.Error())
 		return
 	}
-	githubEventTriggers, err := validateAutomationGitHubEventTriggers(req.GitHubEventTriggers)
+	githubEventTriggers, err := resolveAutomationGitHubEventTriggers(req.ProductTriggers, req.GitHubEventTriggers)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_TRIGGERS", err.Error())
+		return
+	}
+	githubEventFilters, err := validateAutomationGitHubEventFilters(req.GitHubEventFilters)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
+		return
+	}
+	if scheduleType == models.AutomationScheduleNone && len(githubEventTriggers) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one GitHub event trigger")
 		return
 	}
 
@@ -468,6 +483,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		CronExpression:      cronExpressionPtr,
 		Timezone:            timezone,
 		GitHubEventTriggers: githubEventTriggers,
+		GitHubEventFilters:  githubEventFilters,
 		Enabled:             true,
 		Priority:            priority,
 		ExternalMetadata:    req.Metadata,
@@ -476,15 +492,17 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		automation.CreatedBy = &user.ID
 	}
 
-	// Centralise schedule branching in ComputeNextRunAt so a new schedule kind
-	// (event-based, combined interval+cron, etc.) only has to be added there.
-	now := time.Now()
-	next, err := automation.ComputeNextRunAt(now)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
-		return
+	if automation.ScheduleType != models.AutomationScheduleNone {
+		// Centralise schedule branching in ComputeNextRunAt so a new schedule
+		// kind only has to be added there.
+		now := time.Now()
+		next, err := automation.ComputeNextRunAt(now)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+			return
+		}
+		automation.NextRunAt = &next
 	}
-	automation.NextRunAt = &next
 
 	if err := h.automationStore.Create(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create automation", err)
@@ -635,6 +653,78 @@ func validateAutomationGitHubEventTriggers(events []models.AutomationGitHubEvent
 	return out, nil
 }
 
+func resolveAutomationGitHubEventTriggers(productTriggers []models.AutomationProductTrigger, rawEvents []models.AutomationGitHubEvent) ([]models.AutomationGitHubEvent, error) {
+	if len(productTriggers) > 0 && len(rawEvents) > 0 {
+		return nil, fmt.Errorf("send either triggers or github_event_triggers, not both")
+	}
+	if len(productTriggers) == 0 {
+		return validateAutomationGitHubEventTriggers(rawEvents)
+	}
+	events := make([]models.AutomationGitHubEvent, 0, len(productTriggers))
+	for _, trigger := range productTriggers {
+		if err := trigger.Validate(); err != nil {
+			return nil, err
+		}
+		switch trigger {
+		case models.AutomationProductTriggerPROpened:
+			events = append(events, models.AutomationGitHubEventPullRequestOpened)
+		case models.AutomationProductTriggerPRUpdated:
+			events = append(events, models.AutomationGitHubEventPullRequestUpdated)
+		case models.AutomationProductTriggerPRFeedback:
+			events = append(events,
+				models.AutomationGitHubEventIssueCommentCreated,
+				models.AutomationGitHubEventPullRequestReviewSubmitted,
+				models.AutomationGitHubEventPullRequestReviewCommentCreated,
+			)
+		case models.AutomationProductTriggerChecksCompleted:
+			events = append(events,
+				models.AutomationGitHubEventCheckSuiteCompleted,
+				models.AutomationGitHubEventCheckRunCompleted,
+			)
+		case models.AutomationProductTriggerPRMerged:
+			events = append(events, models.AutomationGitHubEventPullRequestMerged)
+		}
+	}
+	return validateAutomationGitHubEventTriggers(events)
+}
+
+func validateAutomationGitHubEventFilters(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	var filters models.AutomationGitHubEventFilters
+	if err := json.Unmarshal(raw, &filters); err != nil {
+		return nil, fmt.Errorf("github_event_filters must be a JSON object")
+	}
+	normalize := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		seen := map[string]struct{}{}
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			key := strings.ToLower(value)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, value)
+		}
+		return out
+	}
+	filters.BaseBranches = normalize(filters.BaseBranches)
+	filters.Authors = normalize(filters.Authors)
+	filters.Paths = normalize(filters.Paths)
+	filters.FeedbackTypes = normalize(filters.FeedbackTypes)
+	filters.ReviewStates = normalize(filters.ReviewStates)
+	out, err := json.Marshal(filters)
+	if err != nil {
+		return nil, fmt.Errorf("encode github_event_filters: %w", err)
+	}
+	return out, nil
+}
+
 func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -673,7 +763,9 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		IntervalRunAt       *string                                   `json:"interval_run_at"`
 		CronExpression      *string                                   `json:"cron_expression"`
 		Timezone            *string                                   `json:"timezone"`
+		ProductTriggers     *[]models.AutomationProductTrigger        `json:"triggers"`
 		GitHubEventTriggers *[]models.AutomationGitHubEvent           `json:"github_event_triggers"`
+		GitHubEventFilters  *json.RawMessage                          `json:"github_event_filters"`
 		Priority            *int                                      `json:"priority"`
 		PrePRReviewLoops    *int                                      `json:"pre_pr_review_loops"`
 		Capabilities        *[]models.AgentCapabilityPolicyGrantInput `json:"capabilities"`
@@ -841,13 +933,29 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		automation.Timezone = *req.Timezone
 	}
-	if req.GitHubEventTriggers != nil {
-		githubEventTriggers, err := validateAutomationGitHubEventTriggers(*req.GitHubEventTriggers)
+	if req.ProductTriggers != nil || req.GitHubEventTriggers != nil {
+		var productTriggers []models.AutomationProductTrigger
+		if req.ProductTriggers != nil {
+			productTriggers = *req.ProductTriggers
+		}
+		var rawTriggers []models.AutomationGitHubEvent
+		if req.GitHubEventTriggers != nil {
+			rawTriggers = *req.GitHubEventTriggers
+		}
+		githubEventTriggers, err := resolveAutomationGitHubEventTriggers(productTriggers, rawTriggers)
 		if err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_TRIGGERS", err.Error())
 			return
 		}
 		automation.GitHubEventTriggers = githubEventTriggers
+	}
+	if req.GitHubEventFilters != nil {
+		githubEventFilters, err := validateAutomationGitHubEventFilters(*req.GitHubEventFilters)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
+			return
+		}
+		automation.GitHubEventFilters = githubEventFilters
 	}
 	if req.Priority != nil {
 		if *req.Priority < 0 || *req.Priority > 100 {
@@ -880,6 +988,15 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "cron_expression must not be set for interval schedules")
 		return
 	}
+	if effectiveScheduleType == models.AutomationScheduleNone &&
+		(req.IntervalValue != nil || req.IntervalUnit != nil || req.IntervalRunAt != nil || req.CronExpression != nil) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", "schedule fields must not be set when schedule_type is none")
+		return
+	}
+	if effectiveScheduleType == models.AutomationScheduleNone && len(automation.GitHubEventTriggers) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one GitHub event trigger")
+		return
+	}
 
 	if req.ScheduleType != nil {
 		// A schedule_type *switch* must carry the new type's companion fields
@@ -908,6 +1025,12 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 				automation.IntervalValue = nil
 				automation.IntervalUnit = nil
 				automation.IntervalRunAt = nil
+			case models.AutomationScheduleNone:
+				automation.IntervalValue = nil
+				automation.IntervalUnit = nil
+				automation.IntervalRunAt = nil
+				automation.CronExpression = nil
+				automation.NextRunAt = nil
 			}
 		}
 		automation.ScheduleType = *req.ScheduleType
@@ -977,12 +1100,16 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if scheduleChanged && automation.Enabled {
-		next, err := automation.ComputeNextRunAt(time.Now())
-		if err != nil {
-			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
-			return
+		if automation.ScheduleType == models.AutomationScheduleNone {
+			automation.NextRunAt = nil
+		} else {
+			next, err := automation.ComputeNextRunAt(time.Now())
+			if err != nil {
+				writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+				return
+			}
+			automation.NextRunAt = &next
 		}
-		automation.NextRunAt = &next
 	}
 
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
@@ -1107,16 +1234,19 @@ func (h *AutomationHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	automation.PausedBy = nil
 	automation.PausedAt = nil
 
-	// Centralised schedule branching — see ComputeNextRunAt. If the stored
-	// schedule fields are malformed (e.g. a cron row with a missing expression
-	// from a legacy import), surface the error instead of silently leaving
-	// next_run_at stale so the scheduler never fires it.
-	next, err := automation.ComputeNextRunAt(time.Now())
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
-		return
+	if automation.ScheduleType == models.AutomationScheduleNone {
+		automation.NextRunAt = nil
+	} else {
+		// Centralised schedule branching — see ComputeNextRunAt. If the stored
+		// schedule fields are malformed, surface the error instead of silently
+		// leaving next_run_at stale so the scheduler never fires it.
+		next, err := automation.ComputeNextRunAt(time.Now())
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SCHEDULE", err.Error())
+			return
+		}
+		automation.NextRunAt = &next
 	}
-	automation.NextRunAt = &next
 
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to resume automation", err)

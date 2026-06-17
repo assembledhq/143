@@ -92,6 +92,10 @@ function shouldShowRunAt(value: number, unit: NonNullable<Automation["interval_u
 }
 
 export function formatAutomationSchedule(schedule: AutomationScheduleFields): string {
+  if (schedule.schedule_type === "none") {
+    return "No schedule";
+  }
+
   const timezone = schedule.timezone || "UTC";
   if (schedule.schedule_type === "cron" && schedule.cron_expression) {
     return `cron: ${schedule.cron_expression} (${timezone})`;

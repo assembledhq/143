@@ -155,7 +155,7 @@ func (s *SessionTranscriptStore) listDistinctTurns(
 		SELECT DISTINCT turn_number FROM (
 			` + strings.Join(branches, "\nUNION\n") + `
 		) t
-		WHERE turn_number > 0
+		WHERE turn_number >= 0
 		` + whereClause + `
 		ORDER BY turn_number ` + orderDir + `
 		LIMIT @limit`
@@ -239,6 +239,7 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 		FROM session_logs
 		WHERE org_id = @org_id AND thread_id = @thread_id
 		  AND turn_number = ANY(@turns)
+		  AND turn_number > 0
 		ORDER BY turn_number ASC, id ASC`
 
 		logRows, err := s.db.Query(ctx, logQuery, pgx.NamedArgs{
@@ -279,6 +280,7 @@ func (s *SessionTranscriptStore) fetchEntriesForTurns(
 		FROM session_human_input_requests
 		WHERE org_id = @org_id AND thread_id = @thread_id
 		  AND turn_number = ANY(@turns)
+		  AND turn_number > 0
 		ORDER BY turn_number ASC, created_at ASC, id ASC`
 
 		hirRows, err := s.db.Query(ctx, hirQuery, pgx.NamedArgs{
@@ -892,13 +894,13 @@ func transcriptTurnSelectBranches(include TranscriptInclude) []string {
 				WHERE org_id = @org_id AND thread_id = @thread_id`)
 	}
 	if include.Tools || include.System {
-		logFilter := ""
+		logFilter := " AND turn_number > 0"
 		toolLogPredicate := "(level = 'tool_use' OR metadata->>'type' = 'tool_result')"
 		switch {
 		case include.Tools && !include.System:
-			logFilter = " AND " + toolLogPredicate
+			logFilter += " AND " + toolLogPredicate
 		case include.System && !include.Tools:
-			logFilter = " AND NOT " + toolLogPredicate
+			logFilter += " AND NOT " + toolLogPredicate
 		}
 		branches = append(branches, `
 			SELECT turn_number FROM session_logs
@@ -907,7 +909,7 @@ func transcriptTurnSelectBranches(include TranscriptInclude) []string {
 	if include.HumanInputs {
 		branches = append(branches, `
 			SELECT turn_number FROM session_human_input_requests
-				WHERE org_id = @org_id AND thread_id = @thread_id`)
+				WHERE org_id = @org_id AND thread_id = @thread_id AND turn_number > 0`)
 	}
 	return branches
 }

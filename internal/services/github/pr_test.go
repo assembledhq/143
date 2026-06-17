@@ -451,24 +451,15 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			newPRTestRow(prID, nil, orgID, repoName, time.Now(), nil)...,
 		))
-	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
-		Action: "completed",
-		CheckRun: struct {
-			PullRequests []struct {
-				Number int `json:"number"`
-			} `json:"pull_requests"`
-		}{
-			PullRequests: []struct {
-				Number int `json:"number"`
-			}{{Number: 42}},
-		},
-		Repository: struct {
-			ID       int64  `json:"id"`
-			FullName string `json:"full_name"`
-		}{
-			FullName: repoName,
-		},
-	})
+	checkRunEvent := CheckRunEvent{Action: "completed"}
+	checkRunEvent.CheckRun.PullRequests = append(checkRunEvent.CheckRun.PullRequests, struct {
+		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 42})
+	checkRunEvent.Repository.FullName = repoName
+	err = service.HandleCheckRunEvent(context.Background(), checkRunEvent)
 	require.NoError(t, err, "HandleCheckRunEvent should enqueue state sync for completed check runs")
 
 	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{Action: "created"})
@@ -477,24 +468,15 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
-	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
-		Action: "completed",
-		CheckRun: struct {
-			PullRequests []struct {
-				Number int `json:"number"`
-			} `json:"pull_requests"`
-		}{
-			PullRequests: []struct {
-				Number int `json:"number"`
-			}{{Number: 99}},
-		},
-		Repository: struct {
-			ID       int64  `json:"id"`
-			FullName string `json:"full_name"`
-		}{
-			FullName: repoName,
-		},
-	})
+	checkRunEvent = CheckRunEvent{Action: "completed"}
+	checkRunEvent.CheckRun.PullRequests = append(checkRunEvent.CheckRun.PullRequests, struct {
+		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 99})
+	checkRunEvent.Repository.FullName = repoName
+	err = service.HandleCheckRunEvent(context.Background(), checkRunEvent)
 	require.NoError(t, err, "HandleCheckRunEvent should ignore check runs for unmanaged pull requests")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check_run expectations should be met")
 }

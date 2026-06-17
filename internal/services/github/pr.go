@@ -1536,14 +1536,16 @@ type PullRequestEvent struct {
 
 // HandlePullRequestEvent processes pull_request webhook events.
 func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullRequestEvent) error {
-	if event.Action == "opened" {
+	if automationEvent, ok := automationGitHubEventForPullRequest(event); ok {
 		s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
-			Event:             models.AutomationGitHubEventPullRequestOpened,
+			Event:             automationEvent,
 			Repository:        event.Repository.FullName,
 			PullRequestNumber: event.Number,
 			PullRequestURL:    event.PR.HTMLURL,
 			Actor:             event.Sender.Login,
 			Body:              githubPullRequestBody(event.PR.Title, event.PR.Body),
+			EventID:           fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
+			BaseBranch:        event.PR.Base.Ref,
 		}, event.OwnerOrgID, event.Repository.ID)
 	}
 
@@ -1569,6 +1571,20 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
+}
+
+func automationGitHubEventForPullRequest(event PullRequestEvent) (models.AutomationGitHubEvent, bool) {
+	switch event.Action {
+	case "opened":
+		return models.AutomationGitHubEventPullRequestOpened, true
+	case "synchronize", "edited", "reopened", "ready_for_review", "converted_to_draft":
+		return models.AutomationGitHubEventPullRequestUpdated, true
+	case "closed":
+		if event.PR.Merged {
+			return models.AutomationGitHubEventPullRequestMerged, true
+		}
+	}
+	return "", false
 }
 
 func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.UUID, repo string, number int) (models.PullRequest, error) {
@@ -2001,6 +2017,9 @@ type PullRequestReviewEvent struct {
 	} `json:"review"`
 	PullRequest struct {
 		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	} `json:"pull_request"`
 	Repository struct {
 		ID       int64  `json:"id"`
@@ -2017,8 +2036,12 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		Event:             models.AutomationGitHubEventPullRequestReviewSubmitted,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
+		BaseBranch:        event.PullRequest.Base.Ref,
 		Actor:             firstNonEmpty(event.Sender.Login, event.Review.User.Login),
 		Body:              event.Review.Body,
+		EventID:           githubIDEventKey("review", event.Review.ID),
+		DedupeGroupID:     githubIDEventKey("review", event.Review.ID),
+		ReviewState:       event.Review.State,
 	}, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
@@ -2080,16 +2103,20 @@ type PullRequestReviewCommentEvent struct {
 		Login string `json:"login"`
 	} `json:"sender"`
 	Comment struct {
-		ID       int64  `json:"id"`
-		Body     string `json:"body"`
-		Path     string `json:"path"`
-		Position *int   `json:"position"`
-		User     struct {
+		ID                  int64  `json:"id"`
+		PullRequestReviewID int64  `json:"pull_request_review_id"`
+		Body                string `json:"body"`
+		Path                string `json:"path"`
+		Position            *int   `json:"position"`
+		User                struct {
 			Login string `json:"login"`
 		} `json:"user"`
 	} `json:"comment"`
 	PullRequest struct {
 		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	} `json:"pull_request"`
 	Repository struct {
 		ID       int64  `json:"id"`
@@ -2107,8 +2134,12 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		Event:             models.AutomationGitHubEventPullRequestReviewCommentCreated,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
+		BaseBranch:        event.PullRequest.Base.Ref,
 		Actor:             firstNonEmpty(event.Sender.Login, event.Comment.User.Login),
 		Body:              event.Comment.Body,
+		EventID:           githubIDEventKey("review_comment", event.Comment.ID),
+		DedupeGroupID:     githubReviewCommentDedupeGroup(event.Comment.PullRequestReviewID),
+		Path:              event.Comment.Path,
 	}, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
@@ -2152,6 +2183,7 @@ type IssueCommentEvent struct {
 		Login string `json:"login"`
 	} `json:"sender"`
 	Comment struct {
+		ID   int64  `json:"id"`
 		Body string `json:"body"`
 		User struct {
 			Login string `json:"login"`
@@ -2177,6 +2209,7 @@ func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueComm
 		PullRequestNumber: event.Issue.Number,
 		Actor:             firstNonEmpty(event.Sender.Login, event.Comment.User.Login),
 		Body:              event.Comment.Body,
+		EventID:           githubIDEventKey("issue_comment", event.Comment.ID),
 	}, event.OwnerOrgID, event.Repository.ID)
 	return nil
 }
@@ -2197,6 +2230,20 @@ func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automation
 	if err := s.automationEventTriggers.TriggerGitHubEvent(ctx, req); err != nil {
 		s.logger.Warn().Err(err).Str("repo", req.Repository).Str("github_event", string(req.Event)).Msg("failed to trigger github event automations")
 	}
+}
+
+func githubReviewCommentDedupeGroup(reviewID int64) string {
+	if reviewID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("review:%d", reviewID)
+}
+
+func githubIDEventKey(prefix string, id int64) string {
+	if id == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", prefix, id)
 }
 
 func (s *PRService) repositoryFromWebhookRepo(ctx context.Context, ownerOrgID *uuid.UUID, githubRepoID int64, fullName string) (models.Repository, error) {
@@ -3692,6 +3739,9 @@ type CheckSuiteEvent struct {
 		HeadBranch   string  `json:"head_branch"`
 		PullRequests []struct {
 			Number int `json:"number"`
+			Base   struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
 		} `json:"pull_requests"`
 	} `json:"check_suite"`
 	Repository struct {
@@ -3707,6 +3757,19 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 	}
 
 	for _, prRef := range event.CheckSuite.PullRequests {
+		conclusion := "unknown"
+		if event.CheckSuite.Conclusion != nil && *event.CheckSuite.Conclusion != "" {
+			conclusion = *event.CheckSuite.Conclusion
+		}
+		s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+			Event:             models.AutomationGitHubEventCheckSuiteCompleted,
+			Repository:        event.Repository.FullName,
+			PullRequestNumber: prRef.Number,
+			BaseBranch:        prRef.Base.Ref,
+			Actor:             "github",
+			Body:              "Checks completed: " + conclusion,
+		}, event.OwnerOrgID, event.Repository.ID)
+
 		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
@@ -3734,8 +3797,13 @@ type CheckRunEvent struct {
 	Action     string     `json:"action"`
 	OwnerOrgID *uuid.UUID `json:"-"`
 	CheckRun   struct {
+		ID           int64   `json:"id"`
+		Conclusion   *string `json:"conclusion"`
 		PullRequests []struct {
 			Number int `json:"number"`
+			Base   struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
 		} `json:"pull_requests"`
 	} `json:"check_run"`
 	Repository struct {
@@ -3751,6 +3819,24 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 	}
 
 	for _, prRef := range event.CheckRun.PullRequests {
+		conclusion := "unknown"
+		if event.CheckRun.Conclusion != nil && *event.CheckRun.Conclusion != "" {
+			conclusion = *event.CheckRun.Conclusion
+		}
+		// The product trigger "github.checks.completed" expands to check_suite.completed
+		// only. check_run.completed is preserved here so that automations configured
+		// directly with the raw event type (via github_event_triggers) still fire.
+		// In typical usage ListEnabledByGitHubEvent returns empty for this event.
+		s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+			Event:             models.AutomationGitHubEventCheckRunCompleted,
+			Repository:        event.Repository.FullName,
+			PullRequestNumber: prRef.Number,
+			BaseBranch:        prRef.Base.Ref,
+			Actor:             "github",
+			Body:              "Check run completed: " + conclusion,
+			EventID:           githubIDEventKey("check_run", event.CheckRun.ID),
+		}, event.OwnerOrgID, event.Repository.ID)
+
 		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
 		if err != nil {
 			continue // Not a 143-managed PR.
@@ -3759,4 +3845,53 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 	}
 
 	return nil
+}
+
+// StatusEvent represents a GitHub commit status webhook payload.
+type StatusEvent struct {
+	State      string     `json:"state"`
+	SHA        string     `json:"sha"`
+	Context    string     `json:"context"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Repository struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// HandleStatusEvent processes classic commit status webhooks, used by providers
+// such as CircleCI, and refreshes repairable PR state for matching PR heads.
+func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) error {
+	if strings.TrimSpace(event.SHA) == "" || strings.TrimSpace(event.Repository.FullName) == "" {
+		return nil
+	}
+	if event.OwnerOrgID == nil {
+		s.logger.Debug().
+			Str("repo", event.Repository.FullName).
+			Str("head_sha", event.SHA).
+			Msg("ignoring status event without resolved repository owner")
+		return nil
+	}
+
+	prs, err := s.pullRequests.ListOpenByOrgRepoAndHeadSHA(ctx, *event.OwnerOrgID, event.Repository.FullName, event.SHA)
+	if err != nil {
+		return err
+	}
+	scope := statusSyncScope(event.Context, event.State)
+	for _, pr := range prs {
+		s.enqueuePullRequestStateSyncWithScope(ctx, pr, scope)
+	}
+	return nil
+}
+
+func statusSyncScope(contextName, state string) string {
+	contextName = strings.TrimSpace(contextName)
+	if contextName == "" {
+		contextName = "unknown"
+	}
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		state = "unknown"
+	}
+	return fmt.Sprintf("status:%s:%s", contextName, state)
 }

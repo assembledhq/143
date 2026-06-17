@@ -6433,6 +6433,54 @@ func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T)
 		"assistant reply must be tagged with the Codex 2 thread, not Main — pre-fix this was the load-bearing assertion that failed in prod")
 }
 
+func TestContinueSession_UsesQueuedMessageIDAsExactCarrier(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	queuedMessageID := int64(10)
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 3
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 9, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "previous reply"},
+		{ID: queuedMessageID, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 3, Role: models.MessageRoleUser, Content: "change the code from this queued message"},
+		{ID: 11, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 4, Role: models.MessageRoleUser, Content: "newer message that belongs to a later drain"},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, "change the code from this queued message", prompt.UserMessage, "queued_message_id should make ContinueSession use the exact queued message instead of inferring the newest row")
+		return &agent.AgentResult{
+			Summary:  "queued reply",
+			ExitCode: 0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		ThreadID:        &threadID,
+		QueuedMessageID: &queuedMessageID,
+	})
+	require.NoError(t, err, "ContinueSession should process the exact queued message")
+}
+
 func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {
 	t.Parallel()
 

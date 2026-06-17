@@ -1225,6 +1225,32 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return nil
 }
 
+func (s *SessionStore) SetRepositoryContext(ctx context.Context, orgID, sessionID, repositoryID uuid.UUID, targetBranch *string) (models.Session, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET repository_id = @repository_id,
+			target_branch = NULLIF(@target_branch::text, ''),
+			last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING `+sessionSelectColumns,
+		pgx.NamedArgs{
+			"id":            sessionID,
+			"org_id":        orgID,
+			"repository_id": repositoryID,
+			"target_branch": targetBranch,
+		})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("set session repository context: %w", err)
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, fmt.Errorf("collect session repository context: %w", err)
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return session, nil
+}
+
 // UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
 // method is self-contained — callers do not have to remember to pair it with
 // a separate activity bump. Today's sole caller already calls UpdateResult
