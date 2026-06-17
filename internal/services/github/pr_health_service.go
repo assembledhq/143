@@ -59,6 +59,11 @@ type gitHubCheckRunsResponse struct {
 	CheckRuns []gitHubCheckRun `json:"check_runs"`
 }
 
+type gitHubCombinedStatusResponse struct {
+	State    string               `json:"state"`
+	Statuses []gitHubCommitStatus `json:"statuses"`
+}
+
 type gitHubBranchResponse struct {
 	Protected  bool `json:"protected"`
 	Protection struct {
@@ -90,6 +95,13 @@ type gitHubCheckRun struct {
 		AnnotationsCount int    `json:"annotations_count"`
 		AnnotationsURL   string `json:"annotations_url"`
 	} `json:"output"`
+}
+
+type gitHubCommitStatus struct {
+	Context     string `json:"context"`
+	State       string `json:"state"`
+	TargetURL   string `json:"target_url"`
+	Description string `json:"description"`
 }
 
 type gitHubCheckRunAnnotation struct {
@@ -364,9 +376,18 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 	if err != nil {
 		return err
 	}
+	commitStatuses, err := s.listCommitStatusesForRef(ctx, token, owner, repoName, details.Head.SHA)
+	if err != nil {
+		s.logger.Warn().
+			Err(err).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("head_sha", details.Head.SHA).
+			Msg("failed to fetch GitHub commit statuses during pull request health sync")
+		commitStatuses = nil
+	}
 
 	requiredChecksConfigured := false
-	if len(checkRuns) == 0 {
+	if len(checkRuns) == 0 && len(commitStatuses) == 0 {
 		requiredChecksConfigured, err = s.branchRequiresStatusChecksCached(ctx, orgID.String(), token, owner, repoName, details.Base.Ref)
 		if err != nil {
 			return err
@@ -403,10 +424,25 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Summary:    firstNonEmpty(check.Output.Title, truncateText(stripWhitespace(check.Output.Summary), 240)),
 		})
 	}
+	for _, status := range commitStatuses {
+		category := classifyCheckRunCategory(status.Context)
+		checkStatus := normalizeCommitStatus(status)
+		if category == models.PullRequestCheckCategoryTest && checkStatus == models.PullRequestCheckStatusFailed {
+			summary.FailingTestCount++
+		}
+		summary.Checks = append(summary.Checks, models.PullRequestCheckSummary{
+			Name:       status.Context,
+			Category:   category,
+			Status:     checkStatus,
+			Provider:   commitStatusProvider(status.Context),
+			DetailsURL: status.TargetURL,
+			Summary:    truncateText(stripWhitespace(status.Description), 240),
+		})
+	}
 	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, requiredChecksConfigured)
-	summary.NeedsAgentAction = summary.HasConflicts || summary.FailingTestCount > 0
+	summary.NeedsAgentAction = summary.HasConflicts || healthSummaryHasRepairableFailedChecks(summary)
 
-	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns)
+	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns, commitStatuses)
 	if mergeStateIndeterminate || testsIndeterminate {
 		if prior != nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, *prior) {
 			s.logger.Debug().
@@ -486,6 +522,15 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	if err != nil {
 		return err
 	}
+	commitStatuses, err := s.listCommitStatusesForRef(ctx, token, owner, repoName, details.Head.SHA)
+	if err != nil {
+		s.logger.Warn().
+			Err(err).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("head_sha", details.Head.SHA).
+			Msg("failed to fetch GitHub commit statuses during pull request health enrichment")
+		commitStatuses = nil
+	}
 
 	conflictPayload, err := json.Marshal(map[string]any{
 		"pull_request_id":  pr.ID,
@@ -530,6 +575,18 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 			DetailsURL:  firstNonEmpty(check.DetailsURL, check.HTMLURL),
 			LogExcerpt:  truncateText(stripWhitespace(firstNonEmpty(check.Output.Text, check.Output.Summary)), 1200),
 			Annotations: annotations,
+		})
+	}
+	for _, status := range commitStatuses {
+		if normalizeCommitStatus(status) != models.PullRequestCheckStatusFailed {
+			continue
+		}
+		payloadChecks = append(payloadChecks, failingCheckPayload{
+			Name:       status.Context,
+			Category:   classifyCheckRunCategory(status.Context),
+			Provider:   commitStatusProvider(status.Context),
+			Summary:    truncateText(stripWhitespace(status.Description), 240),
+			DetailsURL: status.TargetURL,
 		})
 	}
 
@@ -957,6 +1014,19 @@ func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo,
 	return dedupeCheckRunsByName(resp.CheckRuns), nil
 }
 
+func (s *PRService) listCommitStatusesForRef(ctx context.Context, token, owner, repo, ref string) ([]gitHubCommitStatus, error) {
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/status", owner, repo, ref)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp gitHubCombinedStatusResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode GitHub commit statuses: %w", err)
+	}
+	return dedupeCommitStatusesByContext(resp.Statuses), nil
+}
+
 func (s *PRService) branchRequiresStatusChecks(ctx context.Context, token, owner, repo, branch string) (bool, error) {
 	path := fmt.Sprintf("/repos/%s/%s/branches/%s", owner, repo, url.PathEscape(branch))
 	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
@@ -1049,6 +1119,26 @@ func dedupeCheckRunsByName(checkRuns []gitHubCheckRun) []gitHubCheckRun {
 		if bestIdx[key] == i {
 			deduped = append(deduped, check)
 		}
+	}
+	return deduped
+}
+
+func dedupeCommitStatusesByContext(statuses []gitHubCommitStatus) []gitHubCommitStatus {
+	if len(statuses) <= 1 {
+		return statuses
+	}
+	seen := make(map[string]struct{}, len(statuses))
+	deduped := make([]gitHubCommitStatus, 0, len(statuses))
+	for _, status := range statuses {
+		key := strings.ToLower(strings.TrimSpace(status.Context))
+		if key == "" {
+			key = strings.ToLower(strings.TrimSpace(status.TargetURL))
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, status)
 	}
 	return deduped
 }
