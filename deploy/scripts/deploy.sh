@@ -353,7 +353,9 @@ if [ "$mode" = "routine" ] && [ "$support_expected" != "$support_fingerprint" ];
   if repair_stale_worker_fingerprint "support-service" /opt/143/.worker-support-services.v2.fingerprint "$support_expected" "$support_fingerprint" "$active_support_fingerprint"; then
     support_expected="$support_fingerprint"
   else
-    echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "ERROR: worker support-service config changed during routine deploy; this can recreate sandbox-dns/chrome while sessions are active." >&2
+    echo "  Routine deploys verify support services but do not activate support-service changes." >&2
+    echo "  Run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
     echo "current=$support_expected candidate=$support_fingerprint" >&2
     exit 1
   fi
@@ -1592,7 +1594,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ "$mode" = "routine" ] && [ "$WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT" != "$WORKER_SUPPORT_SERVICE_FINGERPRINT" ]; then
-      echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+      echo "ERROR: worker support-service config changed during routine deploy; this can recreate sandbox-dns/chrome while sessions are active." >&2
+      echo "  Routine deploys verify support services but do not activate support-service changes." >&2
+      echo "  Run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
       echo "current=$WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT candidate=$WORKER_SUPPORT_SERVICE_FINGERPRINT" >&2
       return 1
     fi
@@ -2043,10 +2047,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
   if [ "$ROLE" = "worker" ]; then
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
-    # Build sandbox-dns explicitly. Compose's auto-build on `up` only fires when
-    # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
-    # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
-    docker compose -f "$COMPOSE_FILE" build sandbox-dns
+    if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
+      if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
+        echo "sandbox-dns image missing; building local support image for routine worker deploy..."
+        docker compose -f "$COMPOSE_FILE" build sandbox-dns
+      else
+        echo "Skipping sandbox-dns build for routine worker deploy; use DEPLOY_MODE=maintenance to activate support-service changes."
+      fi
+    else
+      # Maintenance deploys intentionally rebuild locally-built support images
+      # before recreating support services below.
+      docker compose -f "$COMPOSE_FILE" build sandbox-dns
+    fi
   elif [ "$ROLE" = "app" ]; then
     CADDY_DOCKERFILE_CHANGED=0
     if stage_caddy_dockerfile_if_changed; then
