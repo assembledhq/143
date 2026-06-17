@@ -131,6 +131,30 @@ sandbox_dns_running_with_pinned_ips() {
   return 0
 }
 
+wait_for_sandbox_dns_pinned_ips() {
+  local timeout="${1:-30}"
+  local waited=0
+
+  case "$timeout" in
+    ""|*[!0-9]*) timeout=30 ;;
+  esac
+
+  while [ "$waited" -le "$timeout" ]; do
+    if sandbox_dns_running_with_pinned_ips; then
+      return 0
+    fi
+    if [ "$waited" -eq "$timeout" ]; then
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+    if [ "$waited" -gt "$timeout" ]; then
+      waited="$timeout"
+    fi
+  done
+  return 1
+}
+
 warn_if_sandbox_dns_image_drift() {
   local running_image local_image
 
@@ -194,10 +218,28 @@ ensure_static_egress_dns() {
   # claims them before DNS starts.
   (
     cd "$compose_dir"
-    if [ "${DEPLOY_MODE:-routine}" = "routine" ] && sandbox_dns_running_with_pinned_ips; then
-      warn_if_sandbox_dns_image_drift
-      echo "sandbox-dns healthy on pinned IPs; routine deploy leaves it in place."
-      exit 0
+    if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
+      if sandbox_dns_running_with_pinned_ips; then
+        warn_if_sandbox_dns_image_drift
+        echo "sandbox-dns healthy on pinned IPs; routine deploy leaves it in place."
+        exit 0
+      fi
+
+      if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
+        docker compose -f "$compose_file" build sandbox-dns
+      fi
+
+      if docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns \
+        && wait_for_sandbox_dns_pinned_ips "${SANDBOX_DNS_ROUTINE_WAIT_SECONDS:-30}"; then
+        warn_if_sandbox_dns_image_drift
+        echo "sandbox-dns verified on pinned IPs without recreation."
+        exit 0
+      fi
+
+      echo "ERROR: routine worker reconciliation could not verify healthy sandbox-dns without recreating it." >&2
+      echo "  Routine deploys do not recreate sandbox-dns because recreating the pinned-IP sidecar can race active sandboxes." >&2
+      echo "  Run DEPLOY_MODE=maintenance after reviewing active runtimes, or inspect docker compose/network state on the worker." >&2
+      exit 1
     fi
 
     if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then

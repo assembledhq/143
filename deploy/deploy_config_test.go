@@ -612,14 +612,20 @@ func TestRoutineWorkerDeployDoesNotRecreateHealthySandboxDNS(t *testing.T) {
 	require.Contains(t, reconcileText, "sandbox_dns_running_with_pinned_ips", "worker reconciliation should have a health check for the pinned sandbox DNS sidecar")
 	require.Contains(t, reconcileText, "172.30.0.2", "worker reconciliation should verify the default sandbox DNS pinned IP")
 	require.Contains(t, reconcileText, "STATIC_EGRESS_DNS_IP", "worker reconciliation should verify the static-egress sandbox DNS pinned IP")
-	require.Contains(t, ensureDNS, `if [ "${DEPLOY_MODE:-routine}" = "routine" ] && sandbox_dns_running_with_pinned_ips; then`, "routine reconciliation should short-circuit when sandbox-dns is already healthy on its pinned IPs")
+	require.Contains(t, ensureDNS, `if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then`, "worker reconciliation should split routine handling from maintenance handling")
+	require.Contains(t, ensureDNS, `if sandbox_dns_running_with_pinned_ips; then`, "routine reconciliation should short-circuit when sandbox-dns is already healthy on its pinned IPs")
 	require.Contains(t, ensureDNS, "routine deploy leaves it in place", "routine reconciliation should explain that healthy sandbox-dns is intentionally left running")
+	require.Contains(t, ensureDNS, `docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns`, "routine reconciliation should only start or create sandbox-dns without recreating an existing sidecar")
+	require.Contains(t, ensureDNS, "routine worker reconciliation could not verify healthy sandbox-dns without recreating it", "routine reconciliation should fail with a clear error instead of recreating an unhealthy sidecar")
 
 	shortCircuitIndex := strings.Index(ensureDNS, `sandbox_dns_running_with_pinned_ips`)
-	composeUpIndex := strings.Index(ensureDNS, `docker compose -f "$compose_file" up -d --no-deps sandbox-dns`)
+	noRecreateIndex := strings.Index(ensureDNS, `docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns`)
+	recreateRetryIndex := strings.Index(ensureDNS, `clear_sandbox_dns_endpoints`)
 	require.NotEqual(t, -1, shortCircuitIndex, "routine reconciliation should check sandbox-dns health")
-	require.NotEqual(t, -1, composeUpIndex, "reconciliation should still be able to start sandbox-dns when it is missing or unhealthy")
-	require.Less(t, shortCircuitIndex, composeUpIndex, "routine reconciliation must verify a healthy pinned sandbox-dns before any compose up that could recreate it")
+	require.NotEqual(t, -1, noRecreateIndex, "reconciliation should still be able to start or create sandbox-dns without recreating an existing sidecar")
+	require.NotEqual(t, -1, recreateRetryIndex, "maintenance reconciliation should still have the leaked-endpoint cleanup path")
+	require.Less(t, shortCircuitIndex, noRecreateIndex, "routine reconciliation must verify a healthy pinned sandbox-dns before any compose up")
+	require.Less(t, noRecreateIndex, recreateRetryIndex, "routine reconciliation should fail before the maintenance-only recreate cleanup path")
 }
 
 func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
