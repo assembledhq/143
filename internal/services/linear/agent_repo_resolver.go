@@ -32,6 +32,13 @@ type AgentSettingsLoader interface {
 	LoadAgentSettings(ctx context.Context, orgID uuid.UUID) (models.LinearAgentSettings, error)
 }
 
+// DefaultWorkRepositoryLoader optionally extends AgentSettingsLoader with the
+// shared org default used across integrations when a provider-specific
+// fallback is unset.
+type DefaultWorkRepositoryLoader interface {
+	LoadDefaultWorkRepositoryID(ctx context.Context, orgID uuid.UUID) (*uuid.UUID, error)
+}
+
 // AgentRepoLookup is the narrow surface the resolver needs from the
 // repository store: "given a name within this org, give me the repo".
 // Used to honor the `repo:<name>` label override.
@@ -80,7 +87,8 @@ type AgentRepoResolveResult struct {
 //  1. label override (`repo:<full-name>`)
 //  2. exact (team, project) mapping
 //  3. team default mapping (project NULL)
-//  4. org default (org_settings.linear_agent.default_repo_id)
+//  4. provider default (org_settings.linear_agent.default_repo_id)
+//  5. shared org default (org_settings.default_work_repository_id)
 //
 // Returns ErrAgentRepoUnmapped when none match. The dispatcher is expected
 // to convert that error into a graceful AgentSession `response` activity
@@ -140,7 +148,7 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 		return AgentRepoResolveResult{}, fmt.Errorf("resolve mapping: %w", err)
 	}
 
-	// 4. Org default.
+	// 4. Provider-specific org default, then shared org default.
 	if r.settings != nil {
 		settings, err := r.settings.LoadAgentSettings(ctx, in.OrgID)
 		if err != nil {
@@ -151,6 +159,18 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 				RepositoryID: *settings.DefaultRepoID,
 				Source:       "org_default",
 			}, nil
+		}
+		if sharedLoader, ok := r.settings.(DefaultWorkRepositoryLoader); ok {
+			defaultRepoID, err := sharedLoader.LoadDefaultWorkRepositoryID(ctx, in.OrgID)
+			if err != nil {
+				return AgentRepoResolveResult{}, fmt.Errorf("load shared default work repository: %w", err)
+			}
+			if defaultRepoID != nil {
+				return AgentRepoResolveResult{
+					RepositoryID: *defaultRepoID,
+					Source:       "org_default",
+				}, nil
+			}
 		}
 	}
 

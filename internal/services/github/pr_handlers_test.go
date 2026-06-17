@@ -2344,6 +2344,54 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthSync(t *testing.T) {
 	require.NoError(t, jobMock.ExpectationsWereMet(), "check run completion should enqueue a scoped health sync")
 }
 
+func TestHandleStatusEvent_EnqueuesHealthSyncForHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		jobs:         db.NewJobStore(jobMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id = .+ AND github_repo = .+ AND head_sha = .+ AND status = 'open'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "testorg/testrepo", "head_sha": "head-sha"}).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
+		)
+	dedupeKey := pullRequestStateSyncDedupeKey(prID, "status:ci/circleci: frontend_lint_format_license:failure")
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"queue":      prHealthSyncQueue,
+			"job_type":   prHealthSyncJobType,
+			"payload":    pgxmock.AnyArg(),
+			"priority":   6,
+			"dedupe_key": &dedupeKey,
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := StatusEvent{
+		State:      "failure",
+		SHA:        "head-sha",
+		Context:    "ci/circleci: frontend_lint_format_license",
+		OwnerOrgID: &orgID,
+	}
+	event.Repository.FullName = "testorg/testrepo"
+
+	err := svc.HandleStatusEvent(context.Background(), event)
+	require.NoError(t, err, "HandleStatusEvent should enqueue a health sync for matching open PR heads")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all pull request expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "status event should enqueue a scoped health sync")
+}
+
 func TestHandleCheckSuiteEvent_PRNotFound(t *testing.T) {
 	t.Parallel()
 

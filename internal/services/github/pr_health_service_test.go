@@ -53,6 +53,45 @@ func (a repairJobPayloadArg) Match(value interface{}) bool {
 		payload["health_version"] == float64(a.wantHealthVersion)
 }
 
+type pullRequestHealthSummaryArg struct {
+	wantCheckName        string
+	wantCheckStatus      models.PullRequestCheckStatus
+	wantCheckCategory    models.PullRequestCheckCategory
+	wantFailingTestCount int
+	wantNeedsAgentAction bool
+	wantChecksConfirmed  bool
+}
+
+func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {
+	var payload []byte
+	switch v := value.(type) {
+	case []byte:
+		payload = v
+	case string:
+		payload = []byte(v)
+	default:
+		return false
+	}
+
+	var summary models.PullRequestHealthSummary
+	if err := json.Unmarshal(payload, &summary); err != nil {
+		return false
+	}
+	if summary.FailingTestCount != a.wantFailingTestCount ||
+		summary.NeedsAgentAction != a.wantNeedsAgentAction ||
+		summary.ChecksConfirmed != a.wantChecksConfirmed {
+		return false
+	}
+	for _, check := range summary.Checks {
+		if check.Name == a.wantCheckName &&
+			check.Status == a.wantCheckStatus &&
+			check.Category == a.wantCheckCategory {
+			return true
+		}
+	}
+	return false
+}
+
 func TestPRServiceBuildPullRequestHealthResponseUsesCurrentSummaryForRepairActions(t *testing.T) {
 	t.Parallel()
 
@@ -839,6 +878,124 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
 	require.NoError(t, err, "SyncPullRequestState should synchronize GitHub pull request state")
 	require.NoError(t, mock.ExpectationsWereMet(), "all sync expectations should be met")
+}
+
+func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	statusSummary := pullRequestHealthSummaryArg{
+		wantCheckName:        "ci/circleci: frontend_lint_format_license",
+		wantCheckStatus:      models.PullRequestCheckStatusFailed,
+		wantCheckCategory:    models.PullRequestCheckCategoryLint,
+		wantFailingTestCount: 0,
+		wantNeedsAgentAction: true,
+		wantChecksConfirmed:  true,
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/assembledhq/143/pulls/42":
+			_, _ = w.Write([]byte(`{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42","state":"open","mergeable":true,"mergeable_state":"blocked","head":{"ref":"feature","sha":"head-status"},"base":{"ref":"main","sha":"base-status"}}`))
+		case "/repos/assembledhq/143/commits/head-status/check-runs":
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
+		case "/repos/assembledhq/143/commits/head-status/status":
+			_, _ = w.Write([]byte(`{"state":"failure","total_count":2,"statuses":[{"context":"ci/circleci: frontend_lint_format_license","state":"failure","target_url":"https://circleci.com/gh/assembledhq/143/123","description":"Your tests failed on CircleCI"},{"context":"ci/circleci: frontend_build","state":"success","target_url":"https://circleci.com/gh/assembledhq/143/124","description":"Your tests passed on CircleCI!"}]}`))
+		case "/repos/assembledhq/143/branches/main":
+			_, _ = w.Write([]byte(`{"protected":true,"protection":{"required_status_checks":{"contexts":["ci/circleci: frontend_lint_format_license"]}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+			pullRequestID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+			models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	mock.ExpectExec("INSERT INTO pull_request_health_snapshots").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id":   pullRequestID,
+			"org_id":            orgID,
+			"version":           int64(1),
+			"head_sha":          "head-status",
+			"base_sha":          "base-status",
+			"summary_json":      statusSummary,
+			"enrichment_status": models.PullRequestHealthEnrichmentStatusNotRequested,
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(1), "head_sha": "head-status"}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("INSERT INTO pull_request_health_current").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id":      pullRequestID,
+			"org_id":               orgID,
+			"version":              int64(1),
+			"head_sha":             "head-status",
+			"base_sha":             "base-status",
+			"summary_json":         statusSummary,
+			"summary_preview_json": pgxmock.AnyArg(),
+			"enrichment_status":    models.PullRequestHealthEnrichmentStatusNotRequested,
+			"enriched_at":          (*time.Time)(nil),
+			"created_at":           pgxmock.AnyArg(),
+			"updated_at":           pgxmock.AnyArg(),
+		}).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec("UPDATE pull_requests").
+		WithArgs(pgx.NamedArgs{
+			"pull_request_id":    pullRequestID,
+			"org_id":             orgID,
+			"head_sha":           "head-status",
+			"base_sha":           "base-status",
+			"merge_state":        models.PullRequestMergeStateBlocked,
+			"has_conflicts":      false,
+			"failing_test_count": 0,
+			"needs_agent_action": true,
+			"version":            int64(1),
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	mock.ExpectExec("UPDATE pull_requests SET ci_status").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	service := &PRService{
+		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
+		pullRequests:  db.NewPullRequestStore(mock),
+		repos:         db.NewRepositoryStore(mock),
+		logger:        zerolog.New(io.Discard),
+		baseURL:       server.URL,
+		httpClient:    server.Client(),
+	}
+	service.tokenProvider.cache[123] = &cachedToken{Token: "install-token", ExpiresAt: time.Now().Add(time.Hour)}
+
+	err = service.SyncPullRequestState(context.Background(), orgID, pullRequestID)
+	require.NoError(t, err, "SyncPullRequestState should preserve CircleCI commit statuses as repairable checks")
+	require.NoError(t, mock.ExpectationsWereMet(), "all status-only sync expectations should be met")
 }
 
 // When GitHub reports a PR closed-and-merged but our DB still has it open, the
@@ -2466,6 +2623,8 @@ func TestPRServiceDirectErrorBranches(t *testing.T) {
 			_, _ = w.Write([]byte(`{bad json`))
 		case "/repos/assembledhq/143/commits/head/check-runs":
 			_, _ = w.Write([]byte(`{bad json`))
+		case "/repos/assembledhq/143/commits/head/status":
+			_, _ = w.Write([]byte(`{bad json`))
 		case "/repos/assembledhq/143/check-runs/1/annotations":
 			_, _ = w.Write([]byte(`{bad json`))
 		default:
@@ -2483,6 +2642,10 @@ func TestPRServiceDirectErrorBranches(t *testing.T) {
 	_, err = service.listCheckRunsForRef(context.Background(), "token", "assembledhq", "143", "head")
 	require.Error(t, err, "listCheckRunsForRef should reject malformed GitHub JSON")
 	require.Contains(t, err.Error(), "decode GitHub check runs", "listCheckRunsForRef should wrap decode failures")
+
+	_, err = service.listCommitStatusesForRef(context.Background(), "token", "assembledhq", "143", "head")
+	require.Error(t, err, "listCommitStatusesForRef should reject malformed GitHub JSON")
+	require.Contains(t, err.Error(), "decode GitHub commit statuses", "listCommitStatusesForRef should wrap decode failures")
 
 	_, err = service.fetchCheckRunAnnotations(context.Background(), "token", "assembledhq", "143", 1)
 	require.Error(t, err, "fetchCheckRunAnnotations should reject malformed GitHub JSON")

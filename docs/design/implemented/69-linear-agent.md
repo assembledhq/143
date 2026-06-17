@@ -38,7 +38,8 @@ worker job linear_agent_event
   │  case "created":
   │    - fetch issue from Linear (live, not cached webhook payload)
   │    - resolve repo via team→repo mapping (label override → exact →
-  │      team default → org default → fail-with-message)
+  │      team default → Linear default → shared org default →
+  │      fail-with-message)
   │    - upsert issues row
   │    - create models.Session (Origin = SessionOriginIssueTrigger,
   │      AgentType = OrgSettings.DefaultAgentType)
@@ -103,7 +104,9 @@ The `(team, project) → repo` lookup the dispatcher consults so an
 inbound AgentSession knows which repo to clone.
 `UNIQUE (org_id, team_id, COALESCE(project_id, ''))` lets a team have
 both project-specific mappings and a team-default row. Resolver
-priority: label override → exact match → team default → org default.
+priority: label override → exact match → team default → Linear default
+(`org_settings.linear_agent.default_repo_id`) → shared org default
+(`org_settings.default_work_repository_id`).
 
 ### `LinearProviderState.AgentSessionID`
 JSONB-side field added to the existing `session_issue_link_provider_state`
@@ -116,6 +119,10 @@ manual way; the milestone fan-out silently no-ops when empty.
 per_team_enabled }`. Per-org opt-in; `enabled` defaults to false. The
 process-wide `LINEAR_AGENT_ENABLED` env var is the kill switch above
 the per-org toggle.
+
+`default_repo_id` is the Linear-specific override. When it is unset, the
+resolver falls back to `OrgSettings.DefaultWorkRepositoryID`, the shared
+default used by other inbound integration starts such as Slack mentions.
 
 The per-team `enabled` gate is applied when the `created` event starts a
 new session. `prompted` follow-ups on an existing AgentSession do not

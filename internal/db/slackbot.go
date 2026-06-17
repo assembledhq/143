@@ -255,6 +255,25 @@ func (s *SlackBotSettingsStore) GetByOrg(ctx context.Context, orgID uuid.UUID) (
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackBotSettings])
 }
 
+func (s *SlackBotSettingsStore) GetByInstallation(ctx context.Context, orgID, installationID uuid.UUID) (models.SlackBotSettings, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT bs.id, bs.org_id, bs.slack_installation_id, bs.default_repository_id, bs.default_branch,
+			bs.routing_mode, bs.response_visibility, bs.allowed_actions, bs.notification_preset,
+			bs.notification_subscriptions, bs.active, bs.created_at, bs.updated_at
+		FROM slack_bot_settings bs
+		JOIN slack_installations si
+		  ON si.org_id = bs.org_id AND si.id = bs.slack_installation_id
+		WHERE bs.org_id = @org_id
+		  AND bs.slack_installation_id = @slack_installation_id
+		  AND bs.active = true
+		  AND si.status = 'active'`,
+		pgx.NamedArgs{"org_id": orgID, "slack_installation_id": installationID})
+	if err != nil {
+		return models.SlackBotSettings{}, fmt.Errorf("query slack bot settings by installation: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackBotSettings])
+}
+
 func (s *SlackBotSettingsStore) Upsert(ctx context.Context, settings *models.SlackBotSettings) error {
 	rows, err := s.db.Query(ctx, `
 		INSERT INTO slack_bot_settings (

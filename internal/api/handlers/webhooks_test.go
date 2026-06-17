@@ -236,6 +236,18 @@ func TestWebhook_HandleGitHub(t *testing.T) {
 			expectedBody: "pr_service_not_configured",
 		},
 		{
+			name:    "status event ignored when pr service not configured",
+			secret:  "test-secret",
+			event:   "status",
+			payload: `{"state":"failure","sha":"head-sha","context":"ci/circleci: frontend_lint_format_license"}`,
+			signature: func(secret string, body []byte) string {
+				return computeTestSignature(secret, body)
+			},
+			setupMock:    func(mock pgxmock.PgxPoolIface) {},
+			expectedCode: http.StatusOK,
+			expectedBody: "pr_service_not_configured",
+		},
+		{
 			name:   "installation_repositories event removes repos",
 			secret: "test-secret",
 			event:  "installation_repositories",

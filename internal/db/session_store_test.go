@@ -49,6 +49,16 @@ func anyDBArgs(count int) []interface{} {
 	return args
 }
 
+func setSessionTestColumnValue(row []interface{}, column string, value interface{}) {
+	for i, col := range sessionTestColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown session test column: " + column)
+}
+
 func sqlFragmentPattern(fragment string) string {
 	fields := strings.Fields(fragment)
 	for i := range fields {
@@ -1225,6 +1235,39 @@ func TestSessionStore_UpdateStatusTerminalClearsStaleFailureDetails(t *testing.T
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionStore_SetRepositoryContextScopesToOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	branch := "main"
+	row := newAgentSessionRow(sessionID, uuid.Nil, orgID, now)
+	setSessionTestColumnValue(row, "repository_id", &repoID)
+	setSessionTestColumnValue(row, "target_branch", &branch)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
+
+	got, err := store.SetRepositoryContext(context.Background(), orgID, sessionID, repoID, &branch)
+	require.NoError(t, err, "SetRepositoryContext should update the session repository inside the org")
+	require.NotNil(t, got.RepositoryID, "SetRepositoryContext should return the selected repository")
+	require.Equal(t, repoID, *got.RepositoryID, "SetRepositoryContext should persist the selected repository")
+	require.NotNil(t, got.TargetBranch, "SetRepositoryContext should return the selected branch")
+	require.Equal(t, branch, *got.TargetBranch, "SetRepositoryContext should persist the selected branch")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository context update should be scoped by org_id")
 }
 
 func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
