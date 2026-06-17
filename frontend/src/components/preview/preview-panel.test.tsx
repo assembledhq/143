@@ -629,6 +629,9 @@ describe("PreviewPanel component", () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
     const openedWindow = {
       close: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      closed: false,
       document: {
         close: vi.fn(),
         write: vi.fn(),

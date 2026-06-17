@@ -220,6 +220,9 @@ describe("PullRequestPreviewPage", () => {
     let bootstrapCalls = 0;
     const openedWindow = {
       close: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      closed: false,
       document: {
         close: vi.fn(),
         write: vi.fn(),
