@@ -330,18 +330,6 @@ export function getInitialComposerSelectedModel(thread: SessionThread): string {
   return thread.model_override ?? "";
 }
 
-function buildPRPreviewLaunchURL(prURL: string | null | undefined): string | null {
-  if (!prURL) return null;
-  try {
-    const url = new URL(prURL);
-    const [, owner, repo, segment, number] = url.pathname.split("/");
-    if (!owner || !repo || segment !== "pull" || !number) return null;
-    return `/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${encodeURIComponent(number)}?launch=1`;
-  } catch {
-    return null;
-  }
-}
-
 export function hasCleanReviewLoopForSnapshot(loops: SessionReviewLoop[] | undefined, snapshotKey: string | undefined): boolean {
   if (!snapshotKey) return false;
   return (loops ?? []).some((loop) => loop.status === "clean" && loop.latest_checkpoint_key === snapshotKey);
@@ -3885,7 +3873,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   // every render.
   const prevPRStateRef = useRef<string | undefined>(undefined);
   const prUrl = prData?.data?.github_pr_url;
-  const prPreviewLaunchURL = useMemo(() => buildPRPreviewLaunchURL(prUrl), [prUrl]);
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
     localPRState === "queued" &&
@@ -5598,14 +5585,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                {prPreviewLaunchURL ? (
-                  <Button asChild size="sm" className="h-7 text-xs gap-1.5" title="Preview">
-                    <a href={prPreviewLaunchURL} target="_blank" rel="noopener noreferrer">
-                      <ExternalLink className="h-3 w-3" />
-                      Preview
-                    </a>
-                  </Button>
-                ) : null}
                 <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
                   <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
