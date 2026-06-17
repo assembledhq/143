@@ -107,6 +107,10 @@ Cursor rules:
   direction the cursor came from.
 - When an `around` anchor is provided but not found, the server falls back to
   `latest` and sets `anchor_found: false`.
+- Initial user prompts are persisted as turn 0 and are included in transcript
+  windows when the messages include is enabled. Logs and human-input requests
+  remain positive-turn-only so historical turn-0 runtime noise does not render
+  as conversation content.
 
 Response shape:
 
