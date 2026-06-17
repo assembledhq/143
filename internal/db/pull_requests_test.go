@@ -94,6 +94,49 @@ func TestPullRequestStore_GetByOrgRepoAndNumber(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPullRequestStore_ListOpenByOrgRepoAndHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	cols := []string{
+		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
+		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+	}
+
+	prID := uuid.New()
+	sessionID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now()
+	headSHA := "head-sha"
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id = .+ AND github_repo = .+ AND head_sha = .+ AND status = 'open'").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "org/repo", "head_sha": headSHA}).
+		WillReturnRows(
+			pgxmock.NewRows(cols).
+				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
+					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", &headSHA, nil, nil,
+					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
+		)
+
+	prs, err := store.ListOpenByOrgRepoAndHeadSHA(context.Background(), orgID, "org/repo", headSHA)
+	require.NoError(t, err, "ListOpenByOrgRepoAndHeadSHA should find open PRs for the org/repo/head SHA")
+	require.Len(t, prs, 1, "ListOpenByOrgRepoAndHeadSHA should return the matching PR")
+	require.Equal(t, prID, prs[0].ID, "ListOpenByOrgRepoAndHeadSHA should preserve the PR id")
+	require.Equal(t, orgID, prs[0].OrgID, "ListOpenByOrgRepoAndHeadSHA should preserve the owning org")
+	require.Equal(t, &headSHA, prs[0].HeadSHA, "ListOpenByOrgRepoAndHeadSHA should return the matching head SHA")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPullRequestStore_UpdateCIStatus(t *testing.T) {
 	t.Parallel()
 

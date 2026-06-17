@@ -3715,3 +3715,52 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 
 	return nil
 }
+
+// StatusEvent represents a GitHub commit status webhook payload.
+type StatusEvent struct {
+	State      string     `json:"state"`
+	SHA        string     `json:"sha"`
+	Context    string     `json:"context"`
+	OwnerOrgID *uuid.UUID `json:"-"`
+	Repository struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// HandleStatusEvent processes classic commit status webhooks, used by providers
+// such as CircleCI, and refreshes repairable PR state for matching PR heads.
+func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) error {
+	if strings.TrimSpace(event.SHA) == "" || strings.TrimSpace(event.Repository.FullName) == "" {
+		return nil
+	}
+	if event.OwnerOrgID == nil {
+		s.logger.Debug().
+			Str("repo", event.Repository.FullName).
+			Str("head_sha", event.SHA).
+			Msg("ignoring status event without resolved repository owner")
+		return nil
+	}
+
+	prs, err := s.pullRequests.ListOpenByOrgRepoAndHeadSHA(ctx, *event.OwnerOrgID, event.Repository.FullName, event.SHA)
+	if err != nil {
+		return err
+	}
+	scope := statusSyncScope(event.Context, event.State)
+	for _, pr := range prs {
+		s.enqueuePullRequestStateSyncWithScope(ctx, pr, scope)
+	}
+	return nil
+}
+
+func statusSyncScope(contextName, state string) string {
+	contextName = strings.TrimSpace(contextName)
+	if contextName == "" {
+		contextName = "unknown"
+	}
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		state = "unknown"
+	}
+	return fmt.Sprintf("status:%s:%s", contextName, state)
+}
