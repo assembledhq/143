@@ -3,6 +3,12 @@ import { cleanup } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, vi } from 'vitest';
 import { server } from './mocks/server';
 
+(
+  globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT?: boolean;
+  }
+).IS_REACT_ACT_ENVIRONMENT = true;
+
 // Shrink polling/backoff delays so tests that wait on poll-driven state
 // transitions (PR creation, thread refetch, SSE reconnect, debounced
 // inputs) resolve in tens of milliseconds instead of sitting through real

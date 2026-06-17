@@ -839,6 +839,24 @@ func (s *PreviewStore) GetPreviewLinkBySlug(ctx context.Context, orgID uuid.UUID
 	return &row, nil
 }
 
+// GetPreviewLinkByTarget returns the stable preview link for a target and link
+// namespace, scoped to org.
+func (s *PreviewStore) GetPreviewLinkByTarget(ctx context.Context, orgID, targetID uuid.UUID, linkType models.PreviewLinkType) (*models.PreviewLink, error) {
+	query := fmt.Sprintf(`SELECT %s FROM preview_links
+		WHERE org_id = @org_id AND preview_target_id = @target_id AND link_type = @link_type
+		ORDER BY updated_at DESC
+		LIMIT 1`, previewLinkColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "target_id": targetID, "link_type": linkType})
+	if err != nil {
+		return nil, fmt.Errorf("query preview link by target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewLink])
+	if err != nil {
+		return nil, fmt.Errorf("get preview link by target: %w", err)
+	}
+	return &row, nil
+}
+
 // CreatePreviewInstance inserts a new preview instance.
 func (s *PreviewStore) CreatePreviewInstance(ctx context.Context, p *models.PreviewInstance) error {
 	query := fmt.Sprintf(`
