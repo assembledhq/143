@@ -318,6 +318,31 @@ func TestPreviewStore_UpsertPreviewLink(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_GetPreviewLinkByTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	now := time.Now()
+	linkID := uuid.New()
+	orgID := uuid.New()
+	targetID := uuid.New()
+	repoID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_links").
+		WithArgs(previewAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(previewLinkTestCols).AddRow(newPreviewLinkRow(linkID, orgID, targetID, repoID, now)...))
+
+	link, err := store.GetPreviewLinkByTarget(context.Background(), orgID, targetID, models.PreviewLinkTypePullRequest)
+	require.NoError(t, err, "GetPreviewLinkByTarget should return the stable link for the target")
+	require.Equal(t, linkID, link.ID, "GetPreviewLinkByTarget should return the matching preview link")
+	require.Equal(t, targetID, link.PreviewTargetID, "GetPreviewLinkByTarget should preserve the target ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_CreatePreviewInstance(t *testing.T) {
 	t.Parallel()
 
