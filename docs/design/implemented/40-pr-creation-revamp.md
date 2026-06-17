@@ -3,7 +3,7 @@
 > **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
 > **Implementation notes:** PR template detection and caching implemented (`pr_templates` store). The on-demand `Create PR` authorization flow uses encrypted `github_app_user` credentials with refresh-aware validation, app fallback, and frontend auto-resume after callback. The implementation reuses `/api/v1/users/me/github/*` routes for PR authorship instead of introducing separate `/github-app/*` endpoints. The session UI distinguishes stale GitHub PR resume tokens from snapshot-unavailable PR creation states instead of collapsing both into a generic "session expired" banner. Issueless session support is tracked separately and is no longer considered part of this doc's scope.
-> PR content generation also includes bounded summaries from all visible session threads so a recently-created review loop is treated as supporting context, not as the whole PR story. The diff and files changed remain the reviewer-facing source of truth; issue/session title and thread summaries help explain intent and validation.
+> PR content generation also includes bounded summaries from all visible session threads so a recently-created review loop is treated as supporting context, not as the whole PR story. The diff and files changed remain the reviewer-facing source of truth; issue/session title and thread summaries help explain intent and validation. Generated PR bodies should stay concise and lead with the product problem, user workflow gap, reliability risk, or developer pain before listing implementation details.
 
 **Depends on**: [08-pr-and-ship.md](08-pr-and-ship.md), [13-repository-onboarding.md](13-repository-onboarding.md), [34-personal-team-coding-agents.md](34-personal-team-coding-agents.md)
 

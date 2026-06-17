@@ -25,7 +25,37 @@ var (
 	// ErrLegacySessionWorkerOwnership reports that a live session predates
 	// worker ownership tracking, so preview reuse cannot be routed safely.
 	ErrLegacySessionWorkerOwnership = errors.New("live session is missing worker ownership metadata")
+	// ErrWorkerNodeNotRoutable reports that a known worker node cannot receive
+	// preview traffic because its cluster status is not active/draining.
+	ErrWorkerNodeNotRoutable = errors.New("worker node is not routable")
 )
+
+// LiveSessionWorkerOwnerNotRoutableError reports that a session's recorded
+// live sandbox owner is no longer routable. Active previews must stay pinned
+// to their runtime owner, but live-session reuse can recover by clearing the
+// stale session container ownership and hydrating from a snapshot.
+type LiveSessionWorkerOwnerNotRoutableError struct {
+	WorkerNodeID string
+	ContainerID  string
+	Err          error
+}
+
+func (e *LiveSessionWorkerOwnerNotRoutableError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("live session worker owner %s is not routable: %s", e.WorkerNodeID, e.Err.Error())
+	}
+	return fmt.Sprintf("live session worker owner %s is not routable", e.WorkerNodeID)
+}
+
+func (e *LiveSessionWorkerOwnerNotRoutableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // rendezvousTopN is the number of top-scored rendezvous candidates to check
 // for capacity before falling through to the least-loaded fallback.
@@ -215,7 +245,7 @@ func (s *WorkerSelector) ResolveNode(ctx context.Context, nodeID string) (Worker
 		return WorkerNode{}, err
 	}
 	if !isResolvableNodeStatus(node.Status) {
-		return WorkerNode{}, fmt.Errorf("node %s is not routable", nodeID)
+		return WorkerNode{}, fmt.Errorf("node %s is not routable: %w", nodeID, ErrWorkerNodeNotRoutable)
 	}
 	return parseRoutableWorkerNode(*node)
 }
@@ -228,7 +258,7 @@ func (s *WorkerSelector) ResolveNodeWithRequirements(ctx context.Context, nodeID
 		return WorkerNode{}, err
 	}
 	if !isResolvableNodeStatus(node.Status) {
-		return WorkerNode{}, fmt.Errorf("node %s is not routable", nodeID)
+		return WorkerNode{}, fmt.Errorf("node %s is not routable: %w", nodeID, ErrWorkerNodeNotRoutable)
 	}
 	return parseWorkerNodeWithRequirements(*node, req)
 }
@@ -276,7 +306,18 @@ func (s *WorkerSelector) SelectStartNodeWithCachePlacementsAndRequirements(ctx c
 			return WorkerNode{}, ErrLegacySessionWorkerOwnership
 		}
 		metrics.RecordSessionDependencyCacheSchedulerDecision(ctx, orgID.String(), "live_session")
-		return s.ResolveNode(ctx, *session.WorkerNodeID)
+		worker, err := s.ResolveNode(ctx, *session.WorkerNodeID)
+		if err != nil {
+			if errors.Is(err, ErrWorkerNodeNotRoutable) {
+				return WorkerNode{}, &LiveSessionWorkerOwnerNotRoutableError{
+					WorkerNodeID: *session.WorkerNodeID,
+					ContainerID:  *session.ContainerID,
+					Err:          err,
+				}
+			}
+			return WorkerNode{}, err
+		}
+		return worker, nil
 	}
 
 	placements = normalizeWorkerCachePlacements(placements)

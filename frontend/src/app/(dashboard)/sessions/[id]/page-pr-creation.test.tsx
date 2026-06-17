@@ -90,6 +90,19 @@ describe('SessionDetailPage PR creation', () => {
     expect(screen.getByText('5m 30s')).toBeInTheDocument();
   });
 
+  it('keeps repository branch metadata separate so duration does not start with an orphan dot', async () => {
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+
+    const repoBranchRow = screen.getByTestId('session-overview-repo-branch');
+    expect(repoBranchRow).toHaveTextContent('assembledhq/143 · 143/feature-session-details');
+    expect(repoBranchRow).not.toHaveTextContent(/feature-session-details\s*·/);
+
+    const timingRow = screen.getByTestId('session-overview-timing');
+    expect(timingRow).not.toHaveTextContent('assembledhq/143');
+    expect(timingRow.textContent).toMatch(/^5m 30s/);
+  });
+
   it('shows pass selector when session has diff_history with multiple passes', async () => {
     const pass1Diff = 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);';
     const pass2Diff = 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);\ndiff --git a/src/new.ts b/src/new.ts\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const x = 1;';

@@ -559,12 +559,6 @@ type Services struct {
 	// so listener goroutines and on-disk socket files don't outlive the
 	// process.
 	SandboxAuthShutdown func()
-	// SandboxAuthSweep removes per-session subdirs in the socket dir whose
-	// UUID isn't in the keep set. Called once at startup, after the
-	// rehydrate pass has re-Listen'd for every still-alive container, so
-	// leftover dirs from prior worker generations don't accumulate. nil
-	// when no SandboxAuthSocketDir is configured.
-	SandboxAuthSweep func(keep map[uuid.UUID]struct{})
 	// SandboxAuthBroker is the worker-owned lease manager exposed through
 	// signed internal RPCs for detached session executors.
 	SandboxAuthBroker SandboxAuthBroker

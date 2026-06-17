@@ -1,12 +1,13 @@
 "use client";
 
-import { use } from "react";
+import { use, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, GitBranch, GitPullRequest, Loader2, RotateCw } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
-import { OpenPreviewButton } from "@/components/preview/open-preview-button";
+import { OpenPreviewButton, usePreviewLauncher } from "@/components/preview/open-preview-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -36,10 +37,17 @@ export function PullRequestPreviewContent({
   number: string;
 }) {
   const queryClient = useQueryClient();
-  const queryKey = ["branch-preview-pr", owner, repo, number];
+  const searchParams = useSearchParams();
+  const launchRequested = searchParams.get("launch") === "1";
+  const intent = launchRequested ? "open" : "status";
+  const queryKey = useMemo(() => ["branch-preview-pr", owner, repo, number, intent], [intent, number, owner, repo]);
+  const [launchSessionActive, setLaunchSessionActive] = useState(false);
+  const autoLaunchKeyRef = useRef<string | null>(null);
+  const autoActionKeyRef = useRef<string | null>(null);
+  const { launchPreview, isOpening, error: launchError, bootstrapFrame } = usePreviewLauncher();
   const previewQuery = useQuery<SingleResponse<BranchPreviewResponse>>({
     queryKey,
-    queryFn: () => api.previews.getPullRequest(owner, repo, number),
+    queryFn: () => api.previews.getPullRequest(owner, repo, number, { intent }),
     refetchInterval: (query) => {
       const preview = query.state.data?.data;
       const status = preview?.status;
@@ -63,13 +71,77 @@ export function PullRequestPreviewContent({
   const preview = previewQuery.data?.data;
   const title = `${owner}/${repo}#${number}`;
   const status = preview?.status ? formatPreviewStatus(preview.status) : "Loading";
-  const canStartLatest = preview?.target_id || preview?.preview_id;
+  const canStartLatest = preview?.target_id;
   const isExpired = preview?.status === "expired";
   const launch = preview?.launch;
   const launchState = launchStateCopy(preview);
+  const launchSessionShouldOpen = launchRequested || launchSessionActive;
   const showStartAction =
     canStartLatest &&
     (!launch || launch.action === "start" || launch.action === "start_latest" || launch.action === "resume");
+  const safePreviewURL = safeExternalUrl(preview?.preview_url);
+
+  useEffect(() => {
+    if (!preview || !launchSessionShouldOpen || !launch?.auto_open) return;
+    if (startLatest.isPending || restart.isPending) return;
+
+    if ((launch.action === "start" || launch.action === "start_latest" || launch.action === "resume") && preview.target_id) {
+      const key = `${launch.action}:${preview.target_id}:${preview.latest_commit_sha ?? preview.commit_sha ?? ""}`;
+      if (autoActionKeyRef.current === key) return;
+      autoActionKeyRef.current = key;
+      startLatest.mutate(preview.target_id);
+      return;
+    }
+
+    if ((launch.action === "retry" || launch.action === "restart") && preview.preview_id) {
+      const key = `${launch.action}:${preview.preview_id}:${preview.latest_commit_sha ?? preview.commit_sha ?? ""}`;
+      if (autoActionKeyRef.current === key) return;
+      autoActionKeyRef.current = key;
+      restart.mutate(preview.preview_id);
+    }
+  }, [
+    launch?.action,
+    launch?.auto_open,
+    launchSessionShouldOpen,
+    preview,
+    restart,
+    startLatest,
+  ]);
+
+  useEffect(() => {
+    if (!preview || !launchSessionShouldOpen || !launch?.auto_open || launch.action !== "open") return;
+    if (!preview.preview_id || !safePreviewURL || isOpening || launch.represents_latest === false) return;
+
+    const key = `${preview.preview_id}:${safePreviewURL}`;
+    if (autoLaunchKeyRef.current === key) return;
+    autoLaunchKeyRef.current = key;
+    void launchPreview({
+      previewId: preview.preview_id,
+      previewUrl: safePreviewURL,
+      target: "current_tab",
+    });
+  }, [
+    isOpening,
+    launch?.action,
+    launch?.auto_open,
+    launch?.represents_latest,
+    launchPreview,
+    launchSessionShouldOpen,
+    preview,
+    safePreviewURL,
+  ]);
+
+  const handleStartLatest = () => {
+    if (!preview?.target_id) return;
+    setLaunchSessionActive(true);
+    startLatest.mutate(preview.target_id);
+  };
+
+  const handleRetry = () => {
+    if (!preview?.preview_id) return;
+    setLaunchSessionActive(true);
+    restart.mutate(preview.preview_id);
+  };
 
   return (
     <PageContainer size="default">
@@ -150,6 +222,11 @@ export function PullRequestPreviewContent({
                     {preview.error}
                   </ErrorText>
                 ) : null}
+                {launchError ? (
+                  <ErrorText className="rounded-md border border-destructive/20 bg-destructive/5 p-3 text-sm">
+                    {launchError.message}
+                  </ErrorText>
+                ) : null}
 
                 {preview.phase_steps?.length ? (
                   <div className="space-y-2">
@@ -189,8 +266,8 @@ export function PullRequestPreviewContent({
                 ) : null}
 
                 <div className="flex flex-col gap-2 sm:flex-row">
-                  {safeExternalUrl(preview.preview_url) && preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" && launch?.action !== "wait" && !preview.new_commits_available ? (
-                    <OpenPreviewButton previewId={preview.preview_id} previewUrl={preview.preview_url} label={launch?.primary_label ?? "Open preview"} />
+                  {safePreviewURL && preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" && launch?.action !== "wait" && !preview.new_commits_available ? (
+                    <OpenPreviewButton previewId={preview.preview_id} previewUrl={safePreviewURL} label={launch?.primary_label ?? "Open preview"} />
                   ) : null}
                   {preview.new_commits_available && safeExternalUrl(launch?.stale_preview_url ?? preview.preview_url) && preview.preview_id ? (
                     <OpenPreviewButton
@@ -220,7 +297,7 @@ export function PullRequestPreviewContent({
                     <Button
                       type="button"
                       variant={launch?.action === "start_latest" || launch?.action === "start" || launch?.action === "resume" ? "default" : "outline"}
-                      onClick={() => startLatest.mutate(preview.target_id)}
+                      onClick={handleStartLatest}
                       disabled={startLatest.isPending}
                     >
                       <GitBranch className="h-4 w-4" />
@@ -231,7 +308,7 @@ export function PullRequestPreviewContent({
                     <Button
                       type="button"
                       variant={launch?.action === "retry" ? "default" : "outline"}
-                      onClick={() => restart.mutate(preview.preview_id!)}
+                      onClick={handleRetry}
                       disabled={restart.isPending}
                     >
                       <RotateCw className="h-4 w-4" />
@@ -239,6 +316,7 @@ export function PullRequestPreviewContent({
                     </Button>
                   ) : null}
                 </div>
+                {bootstrapFrame}
               </>
             ) : null}
           </CardContent>

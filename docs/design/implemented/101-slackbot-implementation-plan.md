@@ -4,7 +4,7 @@
 > retargeting for multi-org Slack workspaces.
 > **Last reviewed:** 2026-06-16
 >
-> **Builds on:** [92-slackbot-product-surface.md](92-slackbot-product-surface.md)
+> **Builds on:** [../future/92-slackbot-product-surface.md](../future/92-slackbot-product-surface.md)
 
 ## Purpose
 
@@ -1075,5 +1075,5 @@ Operational:
 8. Add retention controls and explicit per-user multi-org retargeting for
    enterprise Slack workspace behavior.
 
-Each phase should update [92-slackbot-product-surface.md](92-slackbot-product-surface.md)
+Each phase should update [../future/92-slackbot-product-surface.md](../future/92-slackbot-product-surface.md)
 when implementation status changes.

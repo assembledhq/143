@@ -1,4 +1,4 @@
-# Design: Agent Run Capabilities
+# Design: Agent Capabilities
 
 > **Status:** Not Started | **Last reviewed:** 2026-06-16
 

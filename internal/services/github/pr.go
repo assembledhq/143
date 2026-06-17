@@ -682,10 +682,13 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
-	if previewLink := s.prPreviewURL(ctx, run, &repo, owner, repoName, prNumber, branchName, pushed.HeadSHA, prURL); previewLink != "" && !strings.Contains(body, previewLink) {
-		body = strings.TrimSpace(body) + fmt.Sprintf("\n\nPreview: %s", previewLink)
-		if bodyErr := s.updatePullRequestBody(ctx, token, owner, repoName, prNumber, body); bodyErr != nil {
-			s.logger.Warn().Err(bodyErr).Int("pr_number", prNumber).Msg("failed to append preview link to PR body")
+	if previewLink := s.prPreviewURL(ctx, run, &repo, owner, repoName, prNumber, branchName, pushed.HeadSHA, prURL); previewLink != "" {
+		updatedBody := upsertPRPreviewFooter(body, previewLink)
+		if updatedBody != strings.TrimSpace(body) {
+			body = updatedBody
+			if bodyErr := s.updatePullRequestBody(ctx, token, owner, repoName, prNumber, body); bodyErr != nil {
+				s.logger.Warn().Err(bodyErr).Int("pr_number", prNumber).Msg("failed to append preview link to PR body")
+			}
 		}
 	}
 
@@ -2592,7 +2595,7 @@ func (s *PRService) stablePRPreviewURL(owner, repo string, number int) string {
 	if baseURL == "" {
 		baseURL = defaultAppBaseURL
 	}
-	return fmt.Sprintf("%s/previews/github/%s/%s/pull/%d", baseURL, owner, repo, number)
+	return fmt.Sprintf("%s/previews/github/%s/%s/pull/%d?launch=1", baseURL, owner, repo, number)
 }
 
 func (s *PRService) prPreviewURL(ctx context.Context, run *models.Session, repo *models.Repository, owner, repoName string, number int, branchName, headSHA, prURL string) string {
@@ -2640,6 +2643,48 @@ func (s *PRService) prPreviewURL(ctx context.Context, run *models.Session, repo 
 	s.attachMatchingSessionPreview(ctx, run, target, headSHA)
 
 	return stableURL
+}
+
+func upsertPRPreviewFooter(body, previewLink string) string {
+	previewLink = strings.TrimSpace(previewLink)
+	trimmed := strings.TrimSpace(body)
+	if previewLink == "" {
+		return trimmed
+	}
+	lines := strings.Split(trimmed, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isReplaceablePRPreviewFooterLine(line, previewLink) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	base := strings.TrimSpace(strings.Join(kept, "\n"))
+	if base == "" {
+		return "Preview: " + previewLink
+	}
+	return base + "\n\nPreview: " + previewLink
+}
+
+func isReplaceablePRPreviewFooterLine(line, previewLink string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "Preview: ") {
+		return false
+	}
+	value := strings.TrimSpace(strings.TrimPrefix(trimmed, "Preview: "))
+	if value == "" {
+		return false
+	}
+	existing, err := url.Parse(value)
+	if err != nil || existing.Scheme == "" || existing.Host == "" {
+		return false
+	}
+	canonical, err := url.Parse(previewLink)
+	if err == nil && canonical.Path != "" && existing.Path == canonical.Path {
+		return true
+	}
+	host := strings.ToLower(existing.Hostname())
+	return strings.HasSuffix(host, ".preview.143.dev")
 }
 
 func (s *PRService) attachMatchingSessionPreview(ctx context.Context, run *models.Session, target *models.PreviewTarget, headSHA string) {
