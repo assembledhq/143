@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -761,16 +762,23 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err != nil {
 		return nil, fmt.Errorf("list session threads for repair message: %w", err)
 	}
-	threadID, err := selectRepairThreadID(threads, requestedThreadID)
+	selectedThread, err := selectRepairThread(threads, requestedThreadID)
 	if err != nil {
 		return nil, err
+	}
+	var threadID *uuid.UUID
+	turnNumber := claimed.CurrentTurn + 1
+	if selectedThread != nil {
+		id := selectedThread.ID
+		threadID = &id
+		turnNumber = selectedThread.CurrentTurn + 1
 	}
 	msg := &models.SessionMessage{
 		SessionID:  claimed.ID,
 		OrgID:      pr.OrgID,
 		ThreadID:   threadID,
 		UserID:     &userID,
-		TurnNumber: claimed.CurrentTurn + 1,
+		TurnNumber: turnNumber,
 		Role:       models.MessageRoleUser,
 		Content:    shortPrompt,
 	}
@@ -806,6 +814,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"head_sha":            headSHA,
 		"workspace_mode":      string(workspaceMode),
 		"pull_request_number": pr.GitHubPRNumber,
+		"queued_message_id":   strconv.FormatInt(msg.ID, 10),
 	}
 	if threadID != nil {
 		payload["thread_id"] = threadID.String()
@@ -856,7 +865,27 @@ func (s *PRService) CompletePullRequestRepairRun(ctx context.Context, orgID, pul
 		}
 		return fmt.Errorf("load pull request health for repair completion event: %w", err)
 	}
+	if err := s.clearRepairRevisionContextIfIdle(ctx, pr, current); err != nil {
+		return err
+	}
 	s.publishPullRequestUpdated(ctx, pr, current)
+	return nil
+}
+
+func (s *PRService) clearRepairRevisionContextIfIdle(ctx context.Context, pr models.PullRequest, current models.PullRequestHealthCurrent) error {
+	if s.sessions == nil || s.pullRequests == nil || pr.SessionID == nil {
+		return nil
+	}
+	activeRuns, err := s.pullRequests.ListActiveRepairRunsByHead(ctx, pr.OrgID, pr.ID, current.HeadSHA)
+	if err != nil {
+		return fmt.Errorf("list active repair runs before clearing revision context: %w", err)
+	}
+	if len(activeRuns) > 0 {
+		return nil
+	}
+	if err := s.sessions.UpdateRevisionContext(ctx, pr.OrgID, *pr.SessionID, nil); err != nil {
+		return fmt.Errorf("clear repair revision context: %w", err)
+	}
 	return nil
 }
 
@@ -872,11 +901,20 @@ var ErrRepairAlreadyInProgress = errors.New("a repair session is already in prog
 var ErrRepairSessionBusy = errors.New("canonical pull request session is busy")
 
 func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*uuid.UUID, error) {
+	thread, err := selectRepairThread(threads, requestedThreadID)
+	if err != nil || thread == nil {
+		return nil, err
+	}
+	id := thread.ID
+	return &id, nil
+}
+
+func selectRepairThread(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*models.SessionThread, error) {
 	if requestedThreadID != nil {
-		for _, thread := range threads {
+		for i := range threads {
+			thread := threads[i]
 			if thread.ID == *requestedThreadID {
-				id := thread.ID
-				return &id, nil
+				return &thread, nil
 			}
 		}
 		return nil, ErrRepairThreadNotFound
@@ -884,8 +922,8 @@ func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uui
 	if len(threads) == 0 {
 		return nil, nil
 	}
-	id := threads[0].ID
-	return &id, nil
+	thread := threads[0]
+	return &thread, nil
 }
 
 func repairResponseMode(workspaceMode models.PullRequestRepairWorkspaceMode) string {

@@ -7102,24 +7102,20 @@ func newDeliverThreadInboxHandler(services *Services, logger zerolog.Logger) Job
 	}
 }
 
-func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID string, logger zerolog.Logger) (*uuid.UUID, error) {
+func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID int64, logger zerolog.Logger) (*uuid.UUID, error) {
 	if stores == nil || stores.HumanInputRequests == nil || stores.SessionMessages == nil {
 		return nil, nil
 	}
-	messageID, err := strconv.ParseInt(queuedMessageID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("parse queued message ID: %w", err)
-	}
-	queued, err := stores.SessionMessages.GetByID(ctx, orgID, messageID)
+	queued, err := stores.SessionMessages.GetByID(ctx, orgID, queuedMessageID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch queued message for human input answer: %w", err)
 	}
 	if queued.SessionID != sessionID {
-		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", messageID, queued.SessionID, sessionID)
+		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", queuedMessageID, queued.SessionID, sessionID)
 	}
 	if hasThread {
 		if queued.ThreadID == nil || *queued.ThreadID != threadID {
-			return nil, fmt.Errorf("queued message %d does not belong to thread %s", messageID, threadID)
+			return nil, fmt.Errorf("queued message %d does not belong to thread %s", queuedMessageID, threadID)
 		}
 	}
 	if queued.UserID == nil {
@@ -7139,7 +7135,7 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 		logger.Warn().Err(err).
 			Str("session_id", sessionID.String()).
 			Str("thread_id", threadID.String()).
-			Int64("queued_message_id", messageID).
+			Int64("queued_message_id", queuedMessageID).
 			Msg("failed to answer pending human-input request from queued message")
 		return nil, nil
 	}
@@ -7205,12 +7201,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
 		var humanInputRequestID *uuid.UUID
+		var queuedMessageID *int64
 		if input.HumanInputRequestID != "" {
 			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
 			if parseErr != nil {
 				return fmt.Errorf("parse human input request ID: %w", parseErr)
 			}
 			humanInputRequestID = &parsedHumanInputRequestID
+		}
+		if input.QueuedMessageID != "" {
+			parsedQueuedMessageID, parseErr := strconv.ParseInt(input.QueuedMessageID, 10, 64)
+			if parseErr != nil {
+				return fmt.Errorf("parse queued message ID: %w", parseErr)
+			}
+			queuedMessageID = &parsedQueuedMessageID
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
@@ -7290,6 +7294,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
 					HumanInputRequestID:  humanInputRequestID,
+					QueuedMessageID:      queuedMessageID,
 					ThreadID:             &threadIDLocal,
 					OnTurnComplete: func(result *agent.AgentResult) {
 						lastTurnResult = result
@@ -7305,17 +7310,24 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts = threadOpts
 			}
 		}
-		if humanInputRequestID == nil && input.QueuedMessageID != "" {
-			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, input.QueuedMessageID, logger)
+		isPRRepairContinuation := continueOpts != nil && continueOpts.PRRepair != nil
+		if humanInputRequestID == nil && queuedMessageID != nil && !isPRRepairContinuation {
+			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, *queuedMessageID, logger)
 			if answerErr != nil {
 				return answerErr
 			}
 			humanInputRequestID = answeredID
 		}
-		if continueOpts == nil && humanInputRequestID != nil {
-			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
-		} else if continueOpts != nil && humanInputRequestID != nil {
-			continueOpts.HumanInputRequestID = humanInputRequestID
+		if continueOpts == nil && (humanInputRequestID != nil || queuedMessageID != nil) {
+			continueOpts = &agent.ContinueSessionOptions{
+				HumanInputRequestID: humanInputRequestID,
+				QueuedMessageID:     queuedMessageID,
+			}
+		} else if continueOpts != nil {
+			if humanInputRequestID != nil {
+				continueOpts.HumanInputRequestID = humanInputRequestID
+			}
+			continueOpts.QueuedMessageID = queuedMessageID
 		}
 
 		var dispatchThreadID *uuid.UUID

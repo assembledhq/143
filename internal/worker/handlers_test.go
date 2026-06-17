@@ -7454,6 +7454,106 @@ func TestContinueSessionHandler_PassesPRRepairCommandOptions(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestContinueSessionHandler_PassesQueuedMessageID(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.HumanInputRequests = nil
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	queuedMessageID := int64(5127)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "queued_message_id should force continue_session options even without human input")
+			require.NotNil(t, opts.QueuedMessageID, "continue_session should pass the queued message id to the orchestrator")
+			require.Equal(t, queuedMessageID, *opts.QueuedMessageID, "continue_session should preserve the queued message id from the job payload")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":        sessionID.String(),
+		"org_id":            orgID.String(),
+		"queued_message_id": "5127",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.NoError(t, err, "continue_session should accept queued_message_id")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_DoesNotAnswerHumanInputFromPRRepairQueuedMessage(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionMessages = db.NewSessionMessageStore(mock)
+	stores.HumanInputRequests = db.NewSessionHumanInputRequestStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	repairRunID := uuid.New()
+	queuedMessageID := int64(5127)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "PR repair continue_session should pass options")
+			require.NotNil(t, opts.PRRepair, "PR repair metadata should still reach the orchestrator")
+			require.Nil(t, opts.HumanInputRequestID, "PR repair queued_message_id should not be converted into a human-input answer")
+			require.NotNil(t, opts.QueuedMessageID, "PR repair should preserve queued_message_id as the exact carrier")
+			require.Equal(t, queuedMessageID, *opts.QueuedMessageID, "PR repair should pass the queued repair prompt id to the orchestrator")
+			return nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":          sessionID.String(),
+		"org_id":              orgID.String(),
+		"pull_request_id":     prID.String(),
+		"repair_run_id":       repairRunID.String(),
+		"command_type":        "resolve_conflicts",
+		"health_version":      12,
+		"head_sha":            "head-sha",
+		"workspace_mode":      "pr_head_reconstruction",
+		"pull_request_number": 42,
+		"queued_message_id":   "5127",
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.NoError(t, err, "PR repair queued_message_id should not be treated as a human-input answer")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestContinueSessionHandler_CompletesPRRepairAfterSuccess(t *testing.T) {
 	t.Parallel()
 
