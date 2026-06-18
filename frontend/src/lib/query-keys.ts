@@ -51,6 +51,8 @@ export const queryKeys = {
   },
   settings: {
     all: ["settings"] as const,
+    agentCapabilities: ["settings", "agent", "capabilities"] as const,
+    agentCapabilityCatalog: ["agent-capabilities"] as const,
     network: ["settings", "network"] as const,
     runtimeStatus: ["settings", "runtime", "status"] as const,
   },

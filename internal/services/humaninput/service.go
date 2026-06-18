@@ -46,11 +46,20 @@ type Tx interface {
 }
 
 type Service struct {
-	repo Repository
+	repo               Repository
+	capabilityApprover CapabilityApprover
 }
 
 func New(repo Repository) *Service {
 	return &Service{repo: repo}
+}
+
+type CapabilityApprover interface {
+	ApplyApprovedGrant(ctx context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) ([]models.AgentCapabilitySnapshotItem, error)
+}
+
+func (s *Service) SetCapabilityApprover(approver CapabilityApprover) {
+	s.capabilityApprover = approver
 }
 
 func NewDBService(
@@ -125,6 +134,9 @@ func (s *Service) Answer(ctx context.Context, input AnswerInput) (Result, error)
 			}
 			return err
 		}
+		if err := s.applyApprovedCapabilityGrant(txCtx, request, input); err != nil {
+			return err
+		}
 
 		content := MessageContent(request, input.Answer)
 		if LegacyQuestionCompatible(request.Kind) {
@@ -165,6 +177,49 @@ func (s *Service) Answer(ctx context.Context, input AnswerInput) (Result, error)
 	}
 	s.repo.NotifyJob(ctx, result.JobID)
 	return result, nil
+}
+
+func (s *Service) applyApprovedCapabilityGrant(ctx context.Context, request models.HumanInputRequest, input AnswerInput) error {
+	if s.capabilityApprover == nil || !humanInputAnswerApproved(input.Answer) {
+		return nil
+	}
+	var payload struct {
+		Type         string                            `json:"type"`
+		CapabilityID models.AgentCapabilityID          `json:"capability_id"`
+		AccessLevel  models.AgentCapabilityAccessLevel `json:"access_level"`
+	}
+	if len(request.ProviderPayload) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(request.ProviderPayload, &payload); err != nil {
+		return nil
+	}
+	if payload.Type != "agent_capability_request" {
+		return nil
+	}
+	_, err := s.capabilityApprover.ApplyApprovedGrant(ctx, input.OrgID, input.SessionID, input.RequestID, payload.CapabilityID, payload.AccessLevel)
+	if errors.Is(err, db.ErrCapabilityAlreadyGranted) {
+		return nil
+	}
+	return err
+}
+
+func humanInputAnswerApproved(input models.HumanInputAnswerInput) bool {
+	for _, id := range input.SelectedChoiceIDs {
+		if id == "approve" {
+			return true
+		}
+	}
+	if len(input.AnswerPayload) == 0 {
+		return false
+	}
+	var payload struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(input.AnswerPayload, &payload); err != nil {
+		return false
+	}
+	return payload.Decision == "approve"
 }
 
 func (s *Service) Cancel(ctx context.Context, input CancelInput) (Result, error) {

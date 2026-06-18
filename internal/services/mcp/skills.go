@@ -8,7 +8,7 @@ import (
 // GenerateSkillsDoc produces a compact markdown skills document from the tool
 // registry. It is injected into the agent's prompt, so it intentionally teaches
 // discovery rather than listing every command schema.
-func GenerateSkillsDoc(tr *ToolRegistry) string {
+func GenerateSkillsDoc(tr ToolSource) string {
 	commands := buildCLICommands(tr.ListTools())
 	if len(commands) == 0 {
 		return ""

@@ -13,6 +13,7 @@ import {
   type SettingsPatch,
 } from "@/lib/settings-autosave";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -242,8 +243,13 @@ export default function LLMPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="LLM"
-          description="Configure app-level LLMs for PR descriptions, session titles, validation, and project generation. These are separate from coding agents on the Agent page."
+          title="App LLM"
+          description="Configure models for app-generated titles, PR descriptions, validation, prioritization, and project generation. Coding-agent credentials are managed separately on Coding agents."
+          action={(
+            <Button asChild variant="outline" size="sm">
+              <Link href="/settings/agent">Coding agents</Link>
+            </Button>
+          )}
         />
 
         {!hasPlatformLLM && (

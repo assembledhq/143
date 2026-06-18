@@ -601,6 +601,60 @@ func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {
 	require.Contains(t, reconcileText, "chmod 0750 /var/cache/143/preview-dependency-cache", "worker reconcile should keep the dependency cache directory private")
 }
 
+func TestRoutineWorkerDeployDoesNotRecreateHealthySandboxDNS(t *testing.T) {
+	t.Parallel()
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read reconcile-worker-host.sh")
+	reconcileText := string(reconcileScript)
+	ensureDNS := extractTopLevelShellBlock(t, reconcileText, "ensure_static_egress_dns", "\n# Ensure the shared sandbox bridges exist")
+
+	require.Contains(t, reconcileText, "sandbox_dns_running_with_pinned_ips", "worker reconciliation should have a health check for the pinned sandbox DNS sidecar")
+	require.Contains(t, reconcileText, "172.30.0.2", "worker reconciliation should verify the default sandbox DNS pinned IP")
+	require.Contains(t, reconcileText, "STATIC_EGRESS_DNS_IP", "worker reconciliation should verify the static-egress sandbox DNS pinned IP")
+	require.Contains(t, ensureDNS, `if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then`, "worker reconciliation should split routine handling from maintenance handling")
+	require.Contains(t, ensureDNS, `if sandbox_dns_running_with_pinned_ips; then`, "routine reconciliation should short-circuit when sandbox-dns is already healthy on its pinned IPs")
+	require.Contains(t, ensureDNS, "routine deploy leaves it in place", "routine reconciliation should explain that healthy sandbox-dns is intentionally left running")
+	require.Contains(t, ensureDNS, `docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns`, "routine reconciliation should only start or create sandbox-dns without recreating an existing sidecar")
+	require.Contains(t, ensureDNS, "routine worker reconciliation could not verify healthy sandbox-dns without recreating it", "routine reconciliation should fail with a clear error instead of recreating an unhealthy sidecar")
+
+	shortCircuitIndex := strings.Index(ensureDNS, `sandbox_dns_running_with_pinned_ips`)
+	noRecreateIndex := strings.Index(ensureDNS, `docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns`)
+	recreateRetryIndex := strings.Index(ensureDNS, `clear_sandbox_dns_endpoints`)
+	require.NotEqual(t, -1, shortCircuitIndex, "routine reconciliation should check sandbox-dns health")
+	require.NotEqual(t, -1, noRecreateIndex, "reconciliation should still be able to start or create sandbox-dns without recreating an existing sidecar")
+	require.NotEqual(t, -1, recreateRetryIndex, "maintenance reconciliation should still have the leaked-endpoint cleanup path")
+	require.Less(t, shortCircuitIndex, noRecreateIndex, "routine reconciliation must verify a healthy pinned sandbox-dns before any compose up")
+	require.Less(t, noRecreateIndex, recreateRetryIndex, "routine reconciliation should fail before the maintenance-only recreate cleanup path")
+}
+
+func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	start := strings.Index(deployText, "# Ensure gVisor runtime is configured")
+	require.NotEqual(t, -1, start, "deploy.sh should contain the worker runtime setup block")
+	end := strings.Index(deployText[start:], "\n  # Run migrations BEFORE restarting the app")
+	require.NotEqual(t, -1, end, "deploy.sh should contain the migration block after worker runtime setup")
+	remoteBody := deployText[start : start+end]
+
+	require.Contains(t, remoteBody, `if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then`, "worker deploy should branch routine sandbox-dns handling from maintenance handling")
+	require.Contains(t, remoteBody, `docker image inspect 143-sandbox-dns:local >/dev/null 2>&1`, "routine worker deploy should only build sandbox-dns when the local image is absent")
+	require.Contains(t, remoteBody, "Skipping sandbox-dns build for routine worker deploy", "routine worker deploy should explain why it leaves the support-service image untouched")
+	require.Contains(t, remoteBody, "DEPLOY_MODE=maintenance", "routine worker deploy should tell operators how to intentionally activate support-service changes")
+	require.Contains(t, remoteBody, "Maintenance deploys intentionally rebuild locally-built support images", "maintenance worker deploy should document that support images are intentionally rebuilt")
+	require.Contains(t, remoteBody, `docker compose -f "$COMPOSE_FILE" build sandbox-dns`, "maintenance worker deploy should still rebuild sandbox-dns so intentional support-service changes can be activated")
+	require.NotContains(t, remoteBody, strings.Join([]string{
+		`docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"`,
+		"    # Build sandbox-dns explicitly. Compose's auto-build on `up` only fires when",
+		"    # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take",
+		"    # effect on a host that already has 143-sandbox-dns:local from a prior deploy.",
+		`    docker compose -f "$COMPOSE_FILE" build sandbox-dns`,
+	}, "\n"), "routine worker deploy must not rebuild sandbox-dns unconditionally because that primes the next reconcile to recreate the sidecar")
+}
+
 func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	t.Parallel()
 
@@ -911,6 +965,8 @@ func TestRoutineWorkerDeployBlocksOnlyRuntimeFingerprints(t *testing.T) {
 	require.Contains(t, compatibility, `.worker-docker-daemon.fingerprint`, "routine compatibility should persist docker-daemon fingerprints separately")
 	require.Contains(t, compatibility, `.worker-process.fingerprint`, "routine compatibility should persist worker-process fingerprints for preflight reporting")
 	require.Contains(t, compatibility, `support-service config changed during routine deploy`, "routine deploy should block support-service changes")
+	require.Contains(t, compatibility, `sandbox-dns`, "routine support-service drift errors should name sandbox-dns so operators know this is the pinned-IP sidecar path")
+	require.Contains(t, compatibility, `Routine deploys verify support services but do not activate support-service changes`, "routine support-service drift errors should explain the verify-only routine deploy contract")
 	require.Contains(t, compatibility, `worker host-runtime config changed during routine deploy`, "routine deploy should block host-runtime changes")
 	require.Contains(t, compatibility, `worker docker-daemon config changed during routine deploy`, "routine deploy should block docker-daemon changes")
 	require.NotContains(t, compatibility, `"worker process config changed during routine deploy"`, "routine deploy should allow worker-process config changes through blue-green")

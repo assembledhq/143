@@ -588,7 +588,7 @@ func automationRunColumnSlice() []string {
 	return []string{
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
 		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
-		"status", "completed_at", "result_summary", "created_at", "updated_at",
+		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
 	}
 }
 
@@ -612,7 +612,7 @@ func TestAutomationRunStore_CreateRun_Inserts(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -643,7 +643,7 @@ func TestAutomationRunStore_CreateRun_DuplicateReturnsFalse(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnError(pgx.ErrNoRows)
 
 	created, err := store.CreateRun(context.Background(), r)
@@ -671,7 +671,7 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 			pgxmock.NewRows(automationRunColumnSlice()).AddRow(
 				runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 				nil, nil, "goal", []byte(`{}`),
-				models.AutomationRunStatusPending, nil, nil, now, now,
+				models.AutomationRunStatusPending, nil, nil, nil, now, now,
 			),
 		)
 
@@ -981,7 +981,7 @@ func TestAutomationRunStore_CreateRunInTx_Inserts(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -1018,7 +1018,7 @@ func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(8)...).
+		WithArgs(anyArgs(9)...).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectRollback()
 

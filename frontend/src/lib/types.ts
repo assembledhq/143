@@ -73,6 +73,73 @@ export interface UserSettingsUpdateRequest {
   diff_viewer_full_screen?: boolean | null;
 }
 
+export type AgentCapabilityID =
+  | 'repo_context'
+  | 'pr_history'
+  | 'session_history'
+  | 'review_feedback'
+  | 'ci_history'
+  | 'issue_sources'
+  | 'team_docs'
+  | 'production_diagnostics'
+  | 'external_comments'
+  | 'project_proposals'
+  | 'eval_authoring'
+  | 'publishing';
+
+export type AgentCapabilityAccessLevel = 'read' | 'write' | 'publish';
+export type AgentCapabilityRisk = 'low' | 'medium' | 'high';
+export type AgentCapabilityScope = 'repository' | 'org' | 'integration';
+
+export interface AgentCapabilityAvailability {
+  available: boolean;
+  reason?: string;
+}
+
+export interface AgentCapabilityDefinition {
+  id: AgentCapabilityID;
+  display_name: string;
+  description: string;
+  category: string;
+  max_access_level: AgentCapabilityAccessLevel;
+  risk: AgentCapabilityRisk;
+  scope: AgentCapabilityScope;
+  requirements?: string[];
+  default_config?: Record<string, unknown>;
+  availability?: AgentCapabilityAvailability;
+}
+
+export interface AgentCapabilityGrant {
+  id?: string;
+  capability_id: AgentCapabilityID;
+  access_level: AgentCapabilityAccessLevel;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface AgentCapabilitySnapshotItem {
+  id: AgentCapabilityID;
+  display_name: string;
+  access_level: AgentCapabilityAccessLevel;
+  risk: AgentCapabilityRisk;
+  scope: AgentCapabilityScope;
+  config?: Record<string, unknown>;
+  source: 'session_default' | 'automation' | 'launch_default' | 'user_approved';
+  granted_at: string;
+  human_input_request_id?: string;
+}
+
+export interface AgentCapabilityPolicyResponse {
+  policy?: {
+    id: string;
+    org_id: string;
+    policy_type: 'session_default' | 'automation';
+    automation_id?: string;
+    created_at: string;
+  };
+  capabilities: AgentCapabilityGrant[];
+}
+
 export interface AuthProviders {
   github: boolean;
   google: boolean;
@@ -765,6 +832,7 @@ export interface Session {
   archived_at?: string;
   archived_by_user_id?: string;
   automation_run_id?: string;
+  capability_snapshot?: AgentCapabilitySnapshotItem[];
   created_at: string;
 }
 
@@ -2718,6 +2786,7 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+  capability_snapshot?: AgentCapabilitySnapshotItem[];
   // Compact view of the session this run spawned. Populated by the list
   // endpoint via a LATERAL join (see internal/db/automations.go); absent
   // when the run hasn't spawned a session yet (pending/skipped, or

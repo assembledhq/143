@@ -38,6 +38,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
@@ -749,6 +750,7 @@ func main() {
 		)
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
 		scheduler.SetDomainRecheck(
 			db.NewOrganizationDomainStore(pool),

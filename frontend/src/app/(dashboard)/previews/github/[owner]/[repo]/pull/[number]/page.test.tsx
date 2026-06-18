@@ -225,6 +225,7 @@ describe("PullRequestPreviewPage", () => {
     const openedWindow = {
       addEventListener: vi.fn(),
       close: vi.fn(),
+      closed: false,
       document: popupDocument,
       location: {
         href: "about:blank",

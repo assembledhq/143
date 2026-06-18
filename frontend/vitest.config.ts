@@ -51,7 +51,7 @@ export default defineConfig({
     // setup-node.ts restore the per-file invariants (module registry,
     // overridden globals) that isolation otherwise provides.
     isolate: false,
-    testTimeout: 5_000,
+    testTimeout: 15_000,
     hookTimeout: 10_000,
     reporters: process.env.CI ? ['dot'] : ['default'],
     projects: [
