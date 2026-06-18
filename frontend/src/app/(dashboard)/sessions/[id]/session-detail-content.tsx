@@ -2133,6 +2133,132 @@ function appendMessageToTranscriptCache(
   };
 }
 
+interface DefaultEntryAnchorOptions {
+  activeThreadId: string | null | undefined;
+  sessionId: string;
+  /** True only when there is no stored anchor, an active thread, and the session is not running. */
+  isEligible: boolean;
+  firstThreadWindow: SessionTranscriptWindowResponse | undefined;
+  timelineEntries: TimelineEntry[];
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  syncScrollState: (el: HTMLDivElement) => void;
+  activeThreadTranscriptQueryKey: readonly unknown[] | null;
+  queryClient: ReturnType<typeof useQueryClient>;
+  scrollToLiveEdgePosition: () => void;
+  initialAnchorAppliedRef: React.MutableRefObject<boolean>;
+  initialAnchorCancelledRef: React.MutableRefObject<boolean>;
+}
+
+/**
+ * Handles scrolling to the latest assistant transcript entry when reopening an
+ * inactive thread that has no stored scroll anchor. Owns the synchronous
+ * layout-effect fast path (when the target element is already in the DOM) and
+ * the three progressive fallbacks: a requestAnimationFrame retry, a remote
+ * "around" fetch, and a live-edge fallback on error.
+ *
+ * Returns `tryApply(el)` to be called from the parent's initial-anchor effect;
+ * it returns `true` when it has handled (or scheduled) the scroll so the
+ * caller can return early.
+ */
+function useDefaultEntryAnchor({
+  activeThreadId,
+  sessionId,
+  isEligible,
+  firstThreadWindow,
+  timelineEntries,
+  scrollRef,
+  syncScrollState,
+  activeThreadTranscriptQueryKey,
+  queryClient,
+  scrollToLiveEdgePosition,
+  initialAnchorAppliedRef,
+  initialAnchorCancelledRef,
+}: DefaultEntryAnchorOptions): (el: HTMLDivElement) => boolean {
+  const fetchRef = useRef<string | null>(null);
+  const appliedRef = useRef(false);
+
+  const latestAssistantEntryID = firstThreadWindow?.meta.latest_assistant_entry_id;
+
+  useEffect(() => {
+    fetchRef.current = null;
+    appliedRef.current = false;
+  }, [activeThreadId, sessionId]);
+
+  // Synchronous fast path: scroll as soon as the target node is in the DOM.
+  useLayoutEffect(() => {
+    if (!isEligible || appliedRef.current || !latestAssistantEntryID) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const target = el.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
+    if (!target) return;
+    el.scrollTop = target.offsetTop;
+    syncScrollState(el);
+    initialAnchorAppliedRef.current = true;
+    appliedRef.current = true;
+  }, [isEligible, latestAssistantEntryID, syncScrollState, timelineEntries]);
+
+  return useCallback((el: HTMLDivElement): boolean => {
+    if (!isEligible || !latestAssistantEntryID) return false;
+
+    // DOM target is already present.
+    const target = el.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
+    if (target) {
+      el.scrollTop = target.offsetTop;
+      syncScrollState(el);
+      initialAnchorAppliedRef.current = true;
+      return true;
+    }
+
+    // Target is in the entry list but the DOM hasn't updated yet — retry after paint.
+    if (timelineEntries.some((entry) => entry.transcriptEntryId === latestAssistantEntryID)) {
+      requestAnimationFrame(() => {
+        if (initialAnchorAppliedRef.current || initialAnchorCancelledRef.current) return;
+        const currentEl = scrollRef.current;
+        if (!currentEl) return;
+        const delayedTarget = currentEl.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
+        if (!delayedTarget) return;
+        currentEl.scrollTop = delayedTarget.offsetTop;
+        syncScrollState(currentEl);
+        initialAnchorAppliedRef.current = true;
+        appliedRef.current = true;
+      });
+      return true;
+    }
+
+    // Entry isn't in the current page — fetch an "around" window.
+    const fetchKey = `${activeThreadId}:${latestAssistantEntryID}`;
+    if (activeThreadTranscriptQueryKey && fetchRef.current !== fetchKey) {
+      fetchRef.current = fetchKey;
+      void api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId!, {
+        position: "around",
+        anchorEntryId: latestAssistantEntryID,
+      }).then((window) => {
+        queryClient.setQueryData<TranscriptWindowInfiniteData>(
+          activeThreadTranscriptQueryKey,
+          { pages: [window], pageParams: [{ position: "around", anchorEntryId: latestAssistantEntryID }] },
+        );
+      }).catch((error) => {
+        toast.error(error instanceof ApiError ? error.message : "Failed to load latest assistant message");
+        scrollToLiveEdgePosition();
+        initialAnchorAppliedRef.current = true;
+      });
+      return true;
+    }
+
+    return false;
+  }, [
+    activeThreadId,
+    activeThreadTranscriptQueryKey,
+    isEligible,
+    latestAssistantEntryID,
+    queryClient,
+    scrollToLiveEdgePosition,
+    sessionId,
+    syncScrollState,
+    timelineEntries,
+  ]);
+}
+
 type ChatPanelProps = {
   session: Session;
   sessionId: string;
@@ -2175,8 +2301,6 @@ function ChatPanel({
   const initialAnchorAppliedRef = useRef(false);
   const initialAnchorCancelledRef = useRef(false);
   const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
-  const defaultEntryAnchorFetchRef = useRef<string | null>(null);
-  const defaultEntryAnchorAppliedRef = useRef(false);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
@@ -2514,6 +2638,21 @@ function ChatPanel({
     el.scrollTop = el.scrollHeight;
     isNearBottomRef.current = true;
   }, []);
+
+  const tryApplyDefaultEntryAnchor = useDefaultEntryAnchor({
+    activeThreadId,
+    sessionId,
+    isEligible: !!activeThreadId && !initialThreadAnchorPosition && !isRunning,
+    firstThreadWindow: threadTranscriptQuery.data?.pages[0],
+    timelineEntries,
+    scrollRef,
+    syncScrollState,
+    activeThreadTranscriptQueryKey,
+    queryClient,
+    scrollToLiveEdgePosition,
+    initialAnchorAppliedRef,
+    initialAnchorCancelledRef,
+  });
 
   // Jump to the true bottom and keep it pinned across late layout growth. Lazy
   // markdown/code/images expand a few frames after the first scroll, so a single
@@ -2908,8 +3047,6 @@ function ChatPanel({
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
     initialAnchorCancelledRef.current = false;
-    defaultEntryAnchorFetchRef.current = null;
-    defaultEntryAnchorAppliedRef.current = false;
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -2923,31 +3060,6 @@ function ChatPanel({
       }
     };
   }, [persistScrollPosition]);
-
-  useLayoutEffect(() => {
-    if (
-      defaultEntryAnchorAppliedRef.current ||
-      !activeThreadId ||
-      initialThreadAnchorPosition ||
-      isRunning
-    ) {
-      return;
-    }
-
-    const latestAssistantEntryID = threadTranscriptQuery.data?.pages[0]?.meta.latest_assistant_entry_id;
-    if (!latestAssistantEntryID) return;
-
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const target = el.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
-    if (!target) return;
-
-    el.scrollTop = target.offsetTop;
-    syncScrollState(el);
-    initialAnchorAppliedRef.current = true;
-    defaultEntryAnchorAppliedRef.current = true;
-  }, [activeThreadId, initialThreadAnchorPosition, isRunning, syncScrollState, threadTranscriptQuery.data?.pages, timelineEntries]);
 
   useEffect(() => {
     if (
@@ -2978,58 +3090,7 @@ function ChatPanel({
       }
     }
 
-    if (
-      activeThreadId &&
-      !initialThreadAnchorPosition &&
-      !isRunning &&
-      firstThreadWindow?.meta.latest_assistant_entry_id
-    ) {
-      const latestAssistantEntryID = firstThreadWindow.meta.latest_assistant_entry_id;
-      const target = el.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
-      if (target) {
-        el.scrollTop = target.offsetTop;
-        syncScrollState(el);
-        initialAnchorAppliedRef.current = true;
-        return;
-      }
-
-      if (timelineEntries.some((entry) => entry.transcriptEntryId === latestAssistantEntryID)) {
-        requestAnimationFrame(() => {
-          if (initialAnchorAppliedRef.current || initialAnchorCancelledRef.current) return;
-          const currentEl = scrollRef.current;
-          if (!currentEl) return;
-          const delayedTarget = currentEl.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
-          if (!delayedTarget) return;
-          currentEl.scrollTop = delayedTarget.offsetTop;
-          syncScrollState(currentEl);
-          initialAnchorAppliedRef.current = true;
-          defaultEntryAnchorAppliedRef.current = true;
-        });
-        return;
-      }
-
-      const fetchKey = `${activeThreadId}:${latestAssistantEntryID}`;
-      if (
-        activeThreadTranscriptQueryKey &&
-        defaultEntryAnchorFetchRef.current !== fetchKey
-      ) {
-        defaultEntryAnchorFetchRef.current = fetchKey;
-        void api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId, {
-          position: "around",
-          anchorEntryId: latestAssistantEntryID,
-        }).then((window) => {
-          queryClient.setQueryData<TranscriptWindowInfiniteData>(
-            activeThreadTranscriptQueryKey,
-            { pages: [window], pageParams: [{ position: "around", anchorEntryId: latestAssistantEntryID }] },
-          );
-        }).catch((error) => {
-          toast.error(error instanceof ApiError ? error.message : "Failed to load latest assistant message");
-          scrollToLiveEdgePosition();
-          initialAnchorAppliedRef.current = true;
-        });
-        return;
-      }
-    }
+    if (tryApplyDefaultEntryAnchor(el)) return;
 
     const ignoreStoredScrollTop =
       activeThreadId &&
@@ -3074,7 +3135,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, activeThreadTranscriptQueryKey, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, queryClient, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, viewerScope]);
+  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, tryApplyDefaultEntryAnchor, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
