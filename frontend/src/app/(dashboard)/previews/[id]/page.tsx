@@ -44,12 +44,13 @@ import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+  PREVIEW_BOOTSTRAP_TIMEOUT_ERROR,
+  PREVIEW_BOOTSTRAP_TIMEOUT_MS,
   PREVIEW_LAUNCH_COMPLETE_EVENT,
+  previewBootstrapTimeoutDetails,
 } from "@/lib/preview-bootstrap";
 import { cn, safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
-
-const PREVIEW_LAUNCH_BOOTSTRAP_TIMEOUT_MS = 5_000;
 
 type PreviewStepTone = "complete" | "active" | "failed" | "pending";
 
@@ -171,8 +172,8 @@ export function PreviewLandingContent({ id }: { id: string }) {
       if (completed) return;
       timedOut = true;
       bootstrappedPreviewIdRef.current = null;
-      setBootstrapError("Preview bootstrap timed out. Try opening it again.");
-    }, PREVIEW_LAUNCH_BOOTSTRAP_TIMEOUT_MS);
+      setBootstrapError(`${PREVIEW_BOOTSTRAP_TIMEOUT_ERROR} ${previewBootstrapTimeoutDetails()}`);
+    }, PREVIEW_BOOTSTRAP_TIMEOUT_MS);
 
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== previewOrigin) return;
@@ -401,7 +402,7 @@ function PreviewCommandState({
         </div>
 
         {launchError ? (
-          <PreviewError title="Preview could not start" message={launchError} />
+          <PreviewError title={launchMode ? "Preview could not open" : "Preview could not start"} message={launchError} />
         ) : null}
 
         {preview.error && !launchError ? (

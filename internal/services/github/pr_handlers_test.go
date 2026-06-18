@@ -429,15 +429,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		event           models.AutomationGitHubEvent
-		withPR          bool
-		run             func(*testing.T, *PRService, uuid.UUID, int64, string)
-		wantActor       string
-		wantBody        string
-		wantEventID     string
-		wantGroupID     string
-		wantBaseBranch  string
+		name           string
+		event          models.AutomationGitHubEvent
+		withPR         bool
+		run            func(*testing.T, *PRService, uuid.UUID, int64, string)
+		wantActor      string
+		wantBody       string
+		wantEventID    string
+		wantGroupID    string
+		wantBaseBranch string
 	}{
 		{
 			name:   "pull request opened",
