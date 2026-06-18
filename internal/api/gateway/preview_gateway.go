@@ -291,6 +291,11 @@ func newGatewayProxyTransport() *http.Transport {
 // ServeHTTP implements http.Handler. Each request is routed based on the Host
 // header (preview ID) and the request path.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if isGatewayHealthzRequest(r) && !isPreviewHost(r.Host) {
+		g.serveHealthz(w, r)
+		return
+	}
+
 	previewID, err := extractPreviewID(r.Host)
 	if err != nil {
 		http.Error(w, "invalid preview hostname", http.StatusBadRequest)
@@ -309,13 +314,41 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func isGatewayHealthzRequest(r *http.Request) bool {
+	return r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+}
+
+func isPreviewHost(host string) bool {
+	normalized := hostWithoutPort(host)
+	if _, err := extractPreviewID(normalized); err == nil {
+		return true
+	}
+	return strings.Contains(normalized, ".preview.")
+}
+
+func hostWithoutPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func (g *Gateway) serveHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := io.WriteString(w, `{"status":"ok"}`); err != nil {
+		g.logger.Warn().Err(err).Msg("failed to write preview gateway health response")
+	}
+}
+
 // extractPreviewID parses the preview UUID from the first subdomain
 // component of the Host header (e.g., "abc123.preview.143.dev" → abc123).
 func extractPreviewID(host string) (uuid.UUID, error) {
 	// Strip port if present.
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host = hostWithoutPort(host)
 	parts := strings.SplitN(host, ".", 2)
 	if len(parts) == 0 {
 		return uuid.UUID{}, fmt.Errorf("no subdomain in host %q", host)

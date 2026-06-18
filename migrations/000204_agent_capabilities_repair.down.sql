@@ -1,0 +1,5 @@
+-- Intentionally no-op.
+--
+-- Migration 000204 repairs production databases that had already advanced past
+-- version 199 before 000199_agent_capabilities was merged. Fresh databases run
+-- 000199 first, so rolling back only 000204 must not drop schema owned by 000199.

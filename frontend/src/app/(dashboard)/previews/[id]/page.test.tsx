@@ -201,9 +201,13 @@ describe("PreviewLandingPage launch mode", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("Preview could not open")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Preview could not open" })).toBeInTheDocument();
     });
-    expect(screen.getByText("Preview bootstrap timed out. Try opening it again.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Preview connection timed out. The preview gateway did not answer in time. The preview gateway did not answer the browser bootstrap handshake within 5 seconds. The runtime may still be starting, or the preview edge may be temporarily unavailable.",
+      ),
+    ).toBeInTheDocument();
     const retry = screen.getByRole("button", { name: "Retry preview" });
     expect(retry).toBeEnabled();
 
