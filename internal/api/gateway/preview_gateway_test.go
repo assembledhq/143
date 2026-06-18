@@ -216,6 +216,82 @@ func TestShouldRecordPreviewLastPath(t *testing.T) {
 	}
 }
 
+func TestGateway_ServeHTTP_HealthzDoesNotRequirePreviewHost(t *testing.T) {
+	t.Parallel()
+
+	gw := NewGateway(GatewayConfig{Logger: zerolog.Nop()})
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = "api:9090"
+	rr := httptest.NewRecorder()
+
+	gw.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "preview gateway health checks should not require a preview hostname")
+	require.Equal(t, "application/json", rr.Header().Get("Content-Type"), "preview gateway health check should return JSON")
+	require.JSONEq(t, `{"status":"ok"}`, rr.Body.String(), "preview gateway health check should return the expected status payload")
+}
+
+func TestGateway_ServeHTTP_HealthzOnPreviewHostProxiesToApp(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	accessSessionID := uuid.New()
+	now := time.Now().UTC()
+	secret := []byte("test-secret")
+
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/internal/preview/"+previewID.String()+"/proxy/healthz", r.URL.Path, "preview app /healthz should be proxied through the worker endpoint")
+		_, writeErr := io.WriteString(w, "app-health")
+		require.NoError(t, writeErr, "worker test server should write a response body")
+	}))
+	defer workerServer.Close()
+
+	store := db.NewPreviewStore(mock)
+	gw := NewGateway(GatewayConfig{
+		Store:              store,
+		Logger:             zerolog.Nop(),
+		AppOrigin:          "https://app.143.dev",
+		CookieSecret:       secret,
+		PreviewTokenSecret: "preview-secret",
+	})
+	gw.putCachedSession(accessSessionID, &sessionCacheEntry{
+		validUntil:        now.Add(time.Hour),
+		orgID:             orgID,
+		hostID:            previewID,
+		previewInstanceID: previewID,
+		expiresAt:         now.Add(time.Hour),
+	})
+	gw.accessRecordedAt[previewID] = now
+
+	mock.ExpectQuery("SELECT .+ FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, previewID, 1, "worker-1",
+			workerServer.URL, "handle-1", 3000, string(models.PreviewRuntimeStatusReady), now.Add(time.Minute),
+			now, nil, nil, "", "", now, now,
+		))
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = previewID.String() + ".preview.143.dev"
+	req.AddCookie(&http.Cookie{Name: "preview_session", Value: encodeCookieValue(secret, orgID, previewID, accessSessionID)})
+	rr := httptest.NewRecorder()
+
+	gw.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "preview host /healthz should return the proxied app response")
+	require.Equal(t, "app-health", rr.Body.String(), "preview host /healthz should not be shadowed by gateway health")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestEncodeDecode_CookieValue(t *testing.T) {
 	t.Parallel()
 	secret := []byte("test-secret-key-for-hmac")
