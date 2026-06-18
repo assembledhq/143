@@ -298,6 +298,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        pullRequestStore,
 	}
+	wireSessionExecutorSlackStores(stores, pool)
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
 	}
@@ -320,4 +321,19 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		HeartbeatInterval: 10 * time.Second,
 		RenewInterval:     20 * time.Second,
 	}, shutdown, nil
+}
+
+func wireSessionExecutorSlackStores(stores *worker.Stores, database db.DBTX) {
+	if stores == nil || database == nil {
+		return
+	}
+	stores.SlackInstallations = db.NewSlackInstallationStore(database)
+	stores.SlackOrgSelections = db.NewSlackOrgSelectionStore(database)
+	stores.SlackBotSettings = db.NewSlackBotSettingsStore(database)
+	stores.SlackUserLinks = db.NewSlackUserLinkStore(database)
+	stores.SlackChannels = db.NewSlackChannelSettingsStore(database)
+	stores.SlackSessionLinks = db.NewSlackSessionLinkStore(database)
+	stores.SlackInboundEvents = db.NewSlackInboundEventStore(database)
+	stores.SlackOutbound = db.NewSlackOutboundMessageStore(database)
+	stores.HumanInputRequests = db.NewSessionHumanInputRequestStore(database)
 }
