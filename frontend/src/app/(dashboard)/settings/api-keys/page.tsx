@@ -221,8 +221,8 @@ export default function APIKeysSettingsPage() {
       setReveal({
         token: response.data.token.token,
         prefix: response.data.token.token_prefix,
-        scopes: response.data.token.scopes,
-        repositoryIDs: response.data.token.repository_ids,
+        scopes: response.data.token.scopes ?? [],
+        repositoryIDs: response.data.token.repository_ids ?? [],
       });
       setDialog(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys.clients });
@@ -236,8 +236,8 @@ export default function APIKeysSettingsPage() {
       setReveal({
         token: response.data.token,
         prefix: response.data.token_prefix,
-        scopes: response.data.scopes,
-        repositoryIDs: response.data.repository_ids,
+        scopes: response.data.scopes ?? [],
+        repositoryIDs: response.data.repository_ids ?? [],
       });
       setDialog(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.apiKeys.tokens(response.data.api_client_id) });

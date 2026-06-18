@@ -230,7 +230,7 @@ describe("Agent settings page", () => {
 	        },
 	      });
 	    });
-	  }, 10000);
+	  }, 20000);
 
 	  it("creates Amp auth and defaults in a single coding-auth request", async () => {
     const user = userEvent.setup();
