@@ -31,6 +31,15 @@ vi.mock("@/lib/api", () => ({
 }));
 
 describe("RuntimeSettingsPage", () => {
+  async function openSessionLifecycleControls(user = userEvent.setup()) {
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Show session lifecycle controls",
+      }),
+    );
+    return user;
+  }
+
   beforeEach(() => {
     settingsGetMock.mockReset();
     settingsUpdateMock.mockReset();
@@ -103,7 +112,7 @@ describe("RuntimeSettingsPage", () => {
     renderWithProviders(<RuntimeSettingsPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "Runtime" }),
+      await screen.findByRole("heading", { name: "Sandboxes" }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -120,7 +129,9 @@ describe("RuntimeSettingsPage", () => {
     expect(screen.getByText("5 hours")).toBeInTheDocument();
     expect(screen.getByText("Sandbox network")).toBeInTheDocument();
     expect(screen.getByText("Capacity")).toBeInTheDocument();
-    expect(screen.getByText("Sessions and cleanup")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Show session lifecycle controls" }),
+    ).toHaveTextContent("Sessions and cleanup");
     expect(screen.getByText("Sandbox defaults")).toBeInTheDocument();
     expect(screen.getByText("Advanced resource limits")).toBeInTheDocument();
     expect(screen.queryByText("Usage limits")).not.toBeInTheDocument();
@@ -141,15 +152,13 @@ describe("RuntimeSettingsPage", () => {
     expect(screen.getAllByText("203.0.113.10").length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Concurrent agent runs")).toHaveValue(5);
     expect(screen.getByLabelText("Active previews per user")).toHaveValue(7);
-    expect(screen.getByLabelText("Maximum session length")).toHaveValue(25);
-    expect(screen.getByLabelText("Agent tab tools")).not.toBeChecked();
-    expect(screen.getByLabelText("Keep completed sessions for")).toHaveValue(
-      120,
-    );
-    expect(screen.getByLabelText("Idle preview timeout")).toHaveValue(300);
+    expect(screen.queryByLabelText("Maximum session length")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Keep completed sessions for")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Idle preview timeout")).not.toBeInTheDocument();
     expect(
-      screen.getByLabelText("Keep sandbox while preview is active"),
-    ).not.toBeChecked();
+      screen.queryByLabelText("Keep sandbox while preview is active"),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "Agent sandbox size" }),
     ).toHaveTextContent("Standard");
@@ -201,6 +210,33 @@ describe("RuntimeSettingsPage", () => {
         "Use this when external services need to allowlist sandbox traffic.",
       ),
     ).not.toHaveLength(0);
+  });
+
+  it("keeps session lifecycle controls collapsed until requested", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Show session lifecycle controls",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Maximum session length")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
+
+    await openSessionLifecycleControls();
+
+    expect(
+      screen.getByRole("button", { name: "Hide session lifecycle controls" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Maximum session length")).toHaveValue(25);
+    expect(screen.getByLabelText("Agent tab tools")).not.toBeChecked();
+    expect(screen.getByLabelText("Keep completed sessions for")).toHaveValue(
+      120,
+    );
+    expect(screen.getByLabelText("Idle preview timeout")).toHaveValue(300);
+    expect(
+      screen.getByLabelText("Keep sandbox while preview is active"),
+    ).not.toBeChecked();
   });
 
   it("keeps repository resource requests visible while exact resource caps stay advanced", async () => {
@@ -328,6 +364,7 @@ describe("RuntimeSettingsPage", () => {
       });
     });
 
+    await openSessionLifecycleControls(user);
     await user.click(screen.getByLabelText("Agent tab tools"));
     await waitFor(() => {
       expect(settingsUpdateMock).toHaveBeenCalledWith({
@@ -353,6 +390,7 @@ describe("RuntimeSettingsPage", () => {
       });
     });
 
+    await openSessionLifecycleControls(user);
     const sessionDuration = screen.getByLabelText("Maximum session length");
     await user.click(sessionDuration);
     await user.keyboard("{Control>}a{/Control}30");
@@ -491,7 +529,7 @@ describe("RuntimeSettingsPage", () => {
       });
     renderWithProviders(<RuntimeSettingsPage />);
 
-    const user = userEvent.setup();
+    const user = await openSessionLifecycleControls();
     const retention = await screen.findByLabelText(
       "Keep completed sessions for",
     );

@@ -15,6 +15,7 @@ import {
   ScrollText,
   BarChart3,
   KeyRound,
+  Globe,
   ChevronRight,
   type LucideIcon,
 } from "lucide-react";
@@ -49,25 +50,40 @@ const settingsGroups: SettingsGroup[] = [
     ],
   },
   {
-    label: "PLATFORM",
+    label: "CONNECTIONS",
     items: [
       { label: "Integrations", icon: Plug, href: "/settings/integrations", hideForRoles: ["viewer", "builder"] },
-      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
-      { label: "LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
-      { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
-      { label: "Runtime", icon: Activity, href: "/settings/runtime", adminOnly: true },
-      { label: "Preview", icon: KeyRound, href: "/settings/previews", adminOnly: true },
-      { label: "API keys", icon: KeyRound, href: "/settings/api-keys", adminOnly: true },
-      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
   {
-    label: "ORGANIZATION",
+    label: "AGENTS",
     items: [
-      { label: "General", icon: Settings, href: "/settings", adminOnly: true },
+      { label: "Coding agents", icon: Bot, href: "/settings/agent", hideForRoles: ["viewer"] },
+      { label: "App LLM", icon: Sparkles, href: "/settings/llm", adminOnly: true },
+      { label: "Autopilot", icon: Target, href: "/settings/autopilot", adminOnly: true },
+    ],
+  },
+  {
+    label: "RUNTIME",
+    items: [
+      { label: "Sandboxes", icon: Activity, href: "/settings/runtime", adminOnly: true },
+      { label: "Previews", icon: Globe, href: "/settings/previews", adminOnly: true },
+    ],
+  },
+  {
+    label: "SECURITY & ADMIN",
+    items: [
+      { label: "Organization", icon: Settings, href: "/settings", adminOnly: true },
       { label: "Team", icon: Users, href: "/settings/team", hideForRoles: ["viewer", "builder"] },
+      { label: "API keys", icon: KeyRound, href: "/settings/api-keys", adminOnly: true },
+    ],
+  },
+  {
+    label: "OPERATIONS",
+    items: [
       { label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
+      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
 ];

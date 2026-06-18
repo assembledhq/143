@@ -14,7 +14,7 @@ function changeFieldValue(element: HTMLElement, value: string) {
   fireEvent.change(element, { target: { value } });
 }
 
-async function renderPreviewSettingsTab(tabName: "Secrets") {
+async function renderPreviewSettingsTab(tabName: "Secret bundles") {
   renderWithProviders(<PreviewSettingsPage />);
   await userEvent.click(await screen.findByRole("tab", { name: tabName }));
 }
@@ -92,7 +92,7 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    expect(await screen.findByRole("tab", { name: "Auto-preview" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: "Auto-start policy" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByText("assembledhq/143")).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
 
@@ -152,7 +152,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     expect(await screen.findByRole("heading", { level: 1, name: "Preview" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "API tokens" })).not.toBeInTheDocument();
@@ -176,7 +176,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("combobox", { name: /filter by repository/i }));
     await userEvent.click(await screen.findByRole("option", { name: "assembledhq/docs" }));
@@ -204,7 +204,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "staging");
@@ -244,7 +244,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     await userEvent.click(screen.getByRole("combobox", { name: "Bundle repository" }));
@@ -266,7 +266,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
 
@@ -300,7 +300,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "file-only");
@@ -335,7 +335,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "mixed");
@@ -386,7 +386,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "no-outputs");
@@ -407,7 +407,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "my-bundle");
@@ -441,7 +441,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit dual-delivery/i }))[0]);
 
@@ -468,7 +468,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
 
@@ -485,7 +485,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "bad-json");
@@ -504,7 +504,7 @@ describe("PreviewSettingsPage", () => {
       http.get("*/api/v1/repositories/repo-1/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click(await screen.findByRole("button", { name: /new bundle/i }));
     changeFieldValue(screen.getByLabelText("Bundle name"), "json-file");
@@ -544,7 +544,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
     // In edit mode the key is pre-filled from the existing bundle outputs; only the value needs re-entry.
@@ -575,7 +575,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
     await userEvent.click(screen.getByLabelText("Secret value"));
@@ -613,7 +613,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
     changeFieldValue(screen.getByLabelText("Secret file path"), "development.conf.json");
@@ -657,7 +657,7 @@ describe("PreviewSettingsPage", () => {
       }),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
     await userEvent.click(screen.getByLabelText("Secret file contents"));
@@ -699,7 +699,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit file-bundle/i }))[0]);
 
@@ -734,7 +734,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle/i }))[0]);
 
@@ -761,7 +761,7 @@ describe("PreviewSettingsPage", () => {
       ),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit env-bundle-err/i }))[0]);
 
@@ -781,7 +781,7 @@ describe("PreviewSettingsPage", () => {
       })),
     );
 
-    await renderPreviewSettingsTab("Secrets");
+    await renderPreviewSettingsTab("Secret bundles");
 
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
 
