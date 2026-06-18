@@ -219,6 +219,7 @@ describe("PullRequestPreviewPage", () => {
   it("bootstraps preview access before opening the preview origin", async () => {
     let bootstrapCalls = 0;
     const openedWindow = {
+      addEventListener: vi.fn(),
       close: vi.fn(),
       document: {
         close: vi.fn(),
@@ -228,6 +229,7 @@ describe("PullRequestPreviewPage", () => {
         href: "about:blank",
       },
       opener: null,
+      removeEventListener: vi.fn(),
     } as unknown as Window;
     const openSpy = vi.spyOn(window, "open").mockReturnValue(openedWindow);
 
