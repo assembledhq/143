@@ -683,6 +683,12 @@ export const api = {
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
+    getAgentCapabilities: () =>
+      get<import('./types').ListResponse<import('./types').AgentCapabilityDefinition>>('/api/v1/agent-capabilities'),
+    getAgentCapabilityPolicy: () =>
+      get<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>('/api/v1/settings/agent/capabilities'),
+    updateAgentCapabilityPolicy: (capabilities: import('./types').AgentCapabilityGrant[]) =>
+      patch<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>('/api/v1/settings/agent/capabilities', { capabilities }),
     getNetworkStatus: () => get<import('./types').SingleResponse<import('./types').NetworkSettingsStatus>>('/api/v1/settings/network'),
     getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
@@ -1062,6 +1068,10 @@ export const api = {
     },
     getRun: (id: string, runId: string) =>
       get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
+    getCapabilities: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>(`/api/v1/automations/${id}/capabilities`),
+    updateCapabilities: (id: string, capabilities: import('./types').AgentCapabilityGrant[]) =>
+      patch<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>(`/api/v1/automations/${id}/capabilities`, { capabilities }),
     stats: (id: string, params?: { since?: string; until?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.since) searchParams.set('since', params.since);

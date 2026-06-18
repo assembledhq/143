@@ -15,7 +15,7 @@ import {
   PI_MODEL_CLAUDE_OPUS_48,
 } from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
-import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { AgentCapabilityDefinition, AgentCapabilityGrant, CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
 import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
@@ -31,8 +31,10 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Switch } from "@/components/ui/switch";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
+import { capabilityAccessFor, normalizeCapabilityGrants } from "@/components/automation-capabilities-editor";
 import { capitalizeWords } from "@/lib/utils";
 
 type ModalProvider = "codex" | "claude_code" | "amp" | "pi" | "opencode";
@@ -172,6 +174,46 @@ export default function AgentPage() {
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+
+  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+    queryKey: queryKeys.settings.agentCapabilityCatalog,
+    queryFn: () => api.settings.getAgentCapabilities(),
+  });
+  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+
+  const { data: capabilityPolicyResponse } = useQuery({
+    queryKey: queryKeys.settings.agentCapabilities,
+    queryFn: () => api.settings.getAgentCapabilityPolicy(),
+  });
+  const capabilityGrants = useMemo(
+    () => normalizeCapabilityGrants(capabilityCatalog, capabilityPolicyResponse?.data?.capabilities ?? []),
+    [capabilityCatalog, capabilityPolicyResponse?.data?.capabilities],
+  );
+
+  const capabilityMutation = useMutation({
+    mutationFn: (nextGrants: AgentCapabilityGrant[]) => api.settings.updateAgentCapabilityPolicy(nextGrants),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.settings.agentCapabilities });
+      toast.success("Default capabilities updated");
+    },
+    onError: (error) => {
+      captureError(error, { feature: "agent-capabilities-update" });
+      toast.error("Could not update default capabilities");
+    },
+  });
+
+  function setCapabilityEnabled(definition: AgentCapabilityDefinition, enabled: boolean) {
+    if (enabled && definition.risk === "high") {
+      const confirmed = window.confirm(`${definition.display_name} is high-risk. Changes apply to future runs only.`);
+      if (!confirmed) return;
+    }
+    const next = capabilityGrants.map((grant) => (
+      grant.capability_id === definition.id
+        ? { ...grant, enabled, access_level: capabilityAccessFor(definition) }
+        : grant
+    ));
+    capabilityMutation.mutate(next);
+  }
 
   const reorderMutation = useMutation({
     mutationFn: async (nextRows: CodingCredentialSummary[]) => {
@@ -318,6 +360,29 @@ export default function AgentPage() {
           <AuthResolutionNotice isAdmin={isAdmin} />
 
           <section className="space-y-3">
+            <h2 className="text-xs font-medium text-foreground">Default capabilities</h2>
+            <Card>
+              <CardContent className="divide-y divide-border/50 p-0">
+                {capabilityCatalog.map((definition) => {
+                  const grant = capabilityGrants.find((item) => item.capability_id === definition.id);
+                  return (
+                    <div key={definition.id} className="flex items-center justify-between gap-4 px-4 py-3">
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium text-foreground">{definition.display_name}</p>
+                          <Badge variant="outline" className="text-xs capitalize">{definition.risk}</Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{definition.description}</p>
+                      </div>
+                      <Switch checked={Boolean(grant?.enabled)} disabled aria-label={`${definition.display_name} default capability`} />
+                    </div>
+                  );
+                })}
+              </CardContent>
+            </Card>
+          </section>
+
+          <section className="space-y-3">
             <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
             {rows.length === 0 ? (
               <Card>
@@ -378,6 +443,43 @@ export default function AgentPage() {
           )}
         />
         <AuthResolutionNotice isAdmin={isAdmin} />
+
+        <section className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-xs font-medium text-foreground">Default capabilities</h2>
+            <p className="text-xs text-muted-foreground">
+              Controls what future manual coding-agent sessions can inspect or do by default.
+            </p>
+          </div>
+          <Card>
+            <CardContent className="divide-y divide-border/50 p-0">
+              {capabilityCatalog.map((definition) => {
+                const grant = capabilityGrants.find((item) => item.capability_id === definition.id);
+                const unavailable = definition.availability && !definition.availability.available;
+                return (
+                  <div key={definition.id} className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium text-foreground">{definition.display_name}</p>
+                        <Badge variant={definition.risk === "high" ? "destructive" : "outline"} className="text-xs capitalize">
+                          {definition.risk}
+                        </Badge>
+                        <Badge variant="outline" className="text-xs">{definition.category}</Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{unavailable ? definition.availability?.reason : definition.description}</p>
+                    </div>
+                    <Switch
+                      checked={Boolean(grant?.enabled)}
+                      disabled={capabilityMutation.isPending || unavailable}
+                      onCheckedChange={(checked) => setCapabilityEnabled(definition, checked)}
+                      aria-label={`${definition.display_name} default capability`}
+                    />
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        </section>
 
         <section className="space-y-4">
           <div className="space-y-1.5">

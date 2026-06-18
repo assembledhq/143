@@ -1217,18 +1217,19 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		}
 
 		session := &models.Session{
-			OrgID:             orgID,
-			AgentType:         agentType,
-			Status:            "pending",
-			AutonomyLevel:     models.DefaultSessionAutonomy,
-			TokenMode:         "low",
-			ModelOverride:     automation.ModelOverride,
-			ReasoningEffort:   automation.ReasoningEffort,
-			TriggeredByUserID: sessionTriggeredByUserID,
-			TargetBranch:      targetBranch,
-			RepositoryID:      automation.RepositoryID,
-			AutomationRunID:   &runID,
-			PMApproach:        goalSeed,
+			OrgID:              orgID,
+			AgentType:          agentType,
+			Status:             "pending",
+			AutonomyLevel:      models.DefaultSessionAutonomy,
+			TokenMode:          "low",
+			ModelOverride:      automation.ModelOverride,
+			ReasoningEffort:    automation.ReasoningEffort,
+			TriggeredByUserID:  sessionTriggeredByUserID,
+			TargetBranch:       targetBranch,
+			RepositoryID:       automation.RepositoryID,
+			AutomationRunID:    &runID,
+			PMApproach:         goalSeed,
+			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			// Session creation failed after we claimed the row — flip
