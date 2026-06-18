@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse } from '@/lib/types';
+import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -915,6 +915,21 @@ export const handlers = [
         ],
       },
     });
+  }),
+
+  http.get('/api/v1/agent-capabilities', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<AgentCapabilityDefinition>);
+  }),
+
+  http.get('/api/v1/automations/:id/capabilities', () => {
+    return HttpResponse.json({
+      data: {
+        capabilities: [],
+      },
+    } satisfies SingleResponse<AgentCapabilityPolicyResponse>);
   }),
 
   // Default to no pending invites — the org-switcher polls this on mount, so

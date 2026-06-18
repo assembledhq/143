@@ -322,7 +322,7 @@ export default function NewAutomationPage() {
               <>
                 <Select value={repoId} onValueChange={setSelectedRepoId}>
                   <SelectTrigger
-                    className="h-9 w-full sm:w-[210px]"
+                    className="h-8 w-full border-transparent bg-muted/25 shadow-none hover:bg-muted/50 sm:w-[210px]"
                     aria-label="Repository"
                   >
                     <SelectValue placeholder="Select repo" />
@@ -339,7 +339,7 @@ export default function NewAutomationPage() {
                 <div
                   role="group"
                   aria-label="Automation triggers"
-                  className="flex w-full flex-col gap-2 rounded-md border border-border bg-background px-3 py-2"
+                  className="flex w-full flex-col gap-2 rounded-lg bg-muted/25 px-3 py-2"
                 >
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                     <span className="text-sm font-medium leading-none text-muted-foreground">

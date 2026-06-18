@@ -9,6 +9,19 @@ describe("AutomationEmojiPicker", () => {
     return option as HTMLElement;
   };
 
+  it("renders the selected emoji as a quiet icon button", () => {
+    renderWithProviders(
+      <AutomationEmojiPicker
+        value="⚙️"
+        onChange={() => undefined}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Automation emoji" });
+    expect(trigger).toHaveClass("size-10", "border-transparent", "bg-transparent", "shadow-none");
+    expect(trigger.querySelector("svg")).toBeNull();
+  });
+
   it("shows a broad emoji dropdown and selects an emoji", async () => {
     const selected: string[] = [];
     window.localStorage.clear();
@@ -43,8 +56,8 @@ describe("AutomationEmojiPicker", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Automation emoji" }));
 
-    expect(await screen.findByText("Frequently Used")).toBeInTheDocument();
-    expect(screen.getByText("Smileys & People")).toBeInTheDocument();
+    expect(await screen.findByText("Recently used")).toBeInTheDocument();
+    expect(screen.getByText("Smileys and people")).toBeInTheDocument();
     expect(screen.getByText("Objects")).toBeInTheDocument();
     expect(screen.getByText("Symbols")).toBeInTheDocument();
 
