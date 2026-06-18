@@ -538,3 +538,30 @@ func TestGitHubInstallationClaimsDownMigrationDropsChildLinksFirst(t *testing.T)
 	require.Less(t, linkDrop, installationDrop,
 		"down migration should drop child org-link table before parent installations table")
 }
+
+func TestAgentCapabilitiesRepairMigrationIsIdempotentAndExpandOnly(t *testing.T) {
+	t.Parallel()
+
+	upBody, err := os.ReadFile("../../migrations/000204_agent_capabilities_repair.up.sql")
+	require.NoError(t, err, "test should read the agent capabilities repair up migration")
+	downBody, err := os.ReadFile("../../migrations/000204_agent_capabilities_repair.down.sql")
+	require.NoError(t, err, "test should read the agent capabilities repair down migration")
+
+	upSQL := string(upBody)
+	require.Contains(t, upSQL, "CREATE TABLE IF NOT EXISTS agent_capability_policies",
+		"repair migration should tolerate databases where 000199 already created policy tables")
+	require.Contains(t, upSQL, "CREATE TABLE IF NOT EXISTS agent_capability_policy_grants",
+		"repair migration should tolerate databases where 000199 already created grant tables")
+	require.Contains(t, upSQL, "ADD COLUMN IF NOT EXISTS capability_snapshot",
+		"repair migration should tolerate databases where 000199 already added snapshot columns")
+	require.Contains(t, upSQL, "chk_sessions_capability_snapshot_array",
+		"repair migration should add the sessions snapshot array check when the skipped migration left it missing")
+	require.Contains(t, upSQL, "chk_automation_runs_capability_snapshot_array",
+		"repair migration should add the automation_runs snapshot array check when the skipped migration left it missing")
+
+	downSQL := strings.ToUpper(string(downBody))
+	require.NotContains(t, downSQL, "DROP TABLE",
+		"repair down migration must not drop tables owned by 000199 on databases where 000199 did run")
+	require.NotContains(t, downSQL, "DROP COLUMN",
+		"repair down migration must not drop columns owned by 000199 on databases where 000199 did run")
+}
