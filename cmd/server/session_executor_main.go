@@ -290,6 +290,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		Repositories:        repoStore,
 		SessionMessages:     sessionMessageStore,
 		SessionThreads:      sessionThreadStore,
+		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
 		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 		Automations:         db.NewAutomationStore(pool),
 		AutomationRuns:      automationRunStore,
@@ -297,6 +298,14 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        pullRequestStore,
+		SlackInstallations:  db.NewSlackInstallationStore(pool),
+		SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
+		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
+		SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+		SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+		SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+		SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+		SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
 	}
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
