@@ -5885,7 +5885,7 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 				"channel_id": channelID,
 			}),
 		})
-		if routingMode != slackbotsvc.SlackRoutingModeStartWork {
+		if routingMode == slackbotsvc.SlackRoutingModeAnswerOnly {
 			actions = append(actions, slackbotsvc.SlackAction{
 				Text:     "Start work",
 				ActionID: "slack_start_work",
