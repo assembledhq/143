@@ -1185,37 +1185,62 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 	}
 }
 
-// installSandboxDependencies reads .143/config.json from the sandbox
-// workspace and installs the tools the repo declared (golangci-lint, etc.)
-// before bootstrap/validation commands run. Best-effort: a missing config,
-// malformed config, unknown dependency name, or install failure is logged
-// but never aborts the session — the agent can still run, just without the
-// linter. See sandboxdeps for the install/check contract.
-func (o *Orchestrator) installSandboxDependencies(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) {
+// prepareSandboxRepository reads .143/config.json from the sandbox workspace,
+// installs supported platform-managed tools, then runs repo-declared bootstrap
+// commands before the agent starts. Missing or malformed config stays
+// best-effort for compatibility. Explicit bootstrap command failures are
+// returned because the workspace is not ready for normal agent work.
+func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
 	if sandbox == nil || workDir == "" {
-		return
+		return nil
 	}
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
 	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
-			return
+			return nil
 		}
 		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
-		return
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
 	}
 	cfg, err := repoconfig.Parse(raw)
 	if err != nil {
 		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
-		return
+		return nil
 	}
-	if len(cfg.Dependencies) == 0 {
-		return
+	if len(cfg.Dependencies) > 0 {
+		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+		}
+		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
-		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+}
+
+func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
+	for _, command := range commands {
+		shellCmd := fmt.Sprintf("cd '%s' && %s", shellEscapeSingleQuote(workDir), command)
+		var stderr bytes.Buffer
+		exitCode, execErr := o.provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
+		stderrText := strings.TrimSpace(stderr.String())
+		if execErr != nil || exitCode != 0 {
+			log.Warn().
+				Err(execErr).
+				Int("exit_code", exitCode).
+				Str("command", command).
+				Str("stderr", stderrText).
+				Msg("repo bootstrap command failed")
+			if execErr != nil {
+				return fmt.Errorf("repo bootstrap command %q failed: exit=%d err=%w stderr=%s", command, exitCode, execErr, stderrText)
+			}
+			return fmt.Errorf("repo bootstrap command %q exited with code %d: %s", command, exitCode, stderrText)
+		}
+		log.Info().Str("command", command).Msg("repo bootstrap command completed")
 	}
-	sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
+	return nil
 }
 
 // RecoverSession resumes an interrupted session from its latest committed
@@ -2639,7 +2664,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
+			return fmt.Errorf("prepare repository: %w", err)
+		}
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -3898,7 +3926,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-			o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+			if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
+				return fmt.Errorf("prepare repository: %w", err)
+			}
 		}
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
@@ -4034,7 +4065,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		authBillingMode = authMode
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
+			return fmt.Errorf("prepare repository: %w", err)
+		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
