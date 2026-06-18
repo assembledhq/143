@@ -2034,6 +2034,7 @@ function threadLiveLogsQueryKey(sessionId: string, threadId: string): readonly u
 // through newerThreadMessagePages, mirroring the legacy message-window flow.
 type TranscriptWindowPageParam =
   | { position: "latest" }
+  | { position: "around"; anchorEntryId: string }
   | { position: "around"; anchorMessageId: number }
   | { before: string };
 
@@ -2042,14 +2043,29 @@ type TranscriptWindowInfiniteData = {
   pageParams: unknown[];
 };
 
-function transcriptWindowQueryKey(sessionId: string, threadId: string): readonly unknown[] {
-  return queryKeys.sessions.threadTranscript(sessionId, threadId);
+function transcriptAnchorKey(anchor?: SessionAnchorPosition | null): string | null {
+  if (!anchor) return null;
+  return anchor.anchor.kind === "entry"
+    ? `entry:${anchor.anchor.id}`
+    : `message:${anchor.anchor.id}`;
 }
 
-function transcriptInitialPageParam(anchorMessageId?: number | null): TranscriptWindowPageParam {
-  return anchorMessageId != null
-    ? { position: "around", anchorMessageId }
-    : { position: "latest" };
+function transcriptWindowQueryKey(sessionId: string, threadId: string, anchorKey?: string | null): readonly unknown[] {
+  return queryKeys.sessions.threadTranscript(sessionId, threadId, anchorKey);
+}
+
+function transcriptInitialPageParam(anchor?: SessionAnchorPosition | null): TranscriptWindowPageParam {
+  if (!anchor) return { position: "latest" };
+  return anchor.anchor.kind === "entry"
+    ? { position: "around", anchorEntryId: anchor.anchor.id }
+    : { position: "around", anchorMessageId: anchor.anchor.id };
+}
+
+function transcriptEntryIDSelector(entryID: string): string {
+  const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(entryID)
+    : entryID.replace(/["\\]/g, "\\$&");
+  return `[data-session-entry-id="${escaped}"]`;
 }
 
 // flattenTranscriptPages returns the turns of the infinite query (newest page
@@ -2159,6 +2175,8 @@ function ChatPanel({
   const initialAnchorAppliedRef = useRef(false);
   const initialAnchorCancelledRef = useRef(false);
   const olderMessagesPrependSnapshotRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const defaultEntryAnchorFetchRef = useRef<string | null>(null);
+  const defaultEntryAnchorAppliedRef = useRef(false);
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
@@ -2174,6 +2192,14 @@ function ChatPanel({
     if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;
     return readStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
   }, [activeThreadId, sessionId, viewerScope]);
+  const initialThreadAnchorKey = useMemo(
+    () => transcriptAnchorKey(initialThreadAnchorPosition),
+    [initialThreadAnchorPosition],
+  );
+  const activeThreadTranscriptQueryKey = useMemo(
+    () => activeThreadId ? transcriptWindowQueryKey(sessionId, activeThreadId, initialThreadAnchorKey) : null,
+    [activeThreadId, initialThreadAnchorKey, sessionId],
+  );
 
   const timelineQuery = useQuery({
     queryKey: ["session", sessionId, "timeline"],
@@ -2195,10 +2221,10 @@ function ChatPanel({
     readonly unknown[],
     TranscriptWindowPageParam
   >({
-    queryKey: activeThreadId ? transcriptWindowQueryKey(sessionId, activeThreadId) : ["session", sessionId, "thread", "none", "transcript"],
+    queryKey: activeThreadTranscriptQueryKey ?? ["session", sessionId, "thread", "none", "transcript"],
     queryFn: ({ pageParam }) =>
       api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId!, pageParam),
-    initialPageParam: transcriptInitialPageParam(initialThreadAnchorPosition?.anchor.id ?? null),
+    initialPageParam: transcriptInitialPageParam(initialThreadAnchorPosition),
     getNextPageParam: (lastPage) =>
       lastPage.meta.has_older && lastPage.meta.next_older_cursor
         ? { before: lastPage.meta.next_older_cursor }
@@ -2211,7 +2237,13 @@ function ChatPanel({
     () => flattenTranscriptPages(threadTranscriptQuery.data?.pages, newerThreadMessagePages),
     [newerThreadMessagePages, threadTranscriptQuery.data?.pages],
   );
-  const { messages: threadMessages, logs: threadTranscriptLogs } = useMemo(
+  const {
+    messages: threadMessages,
+    logs: threadTranscriptLogs,
+    messageEntryIds: threadMessageEntryIds,
+    logEntryIds: threadLogEntryIds,
+    humanInputEntryIds: threadHumanInputEntryIds,
+  } = useMemo(
     () => flattenTranscriptWindows(threadTranscriptTurns),
     [threadTranscriptTurns],
   );
@@ -2337,11 +2369,16 @@ function ChatPanel({
       ).data;
       const threadHumanInputEntries: TimelineEntry[] = (humanInputQuery.data?.data ?? [])
         .filter((request) => request.thread_id === activeThreadId)
-        .map((request) => ({ kind: "human_input" as const, data: request }));
+        .map((request) => ({
+          kind: "human_input" as const,
+          data: request,
+          transcriptEntryId: threadHumanInputEntryIds.get(request.id),
+        }));
       return sortTimelineEntries([
         ...buildTimeline(
           mergePendingMessages(threadMessages, optimisticForCurrentView),
           loadedThreadLogs,
+          { messageEntryIds: threadMessageEntryIds, logEntryIds: threadLogEntryIds },
         ),
         ...threadHumanInputEntries,
       ]);
@@ -2369,7 +2406,7 @@ function ChatPanel({
       created_at: session.created_at,
     };
     return [{ kind: "message" as const, data: syntheticMsg }, ...entries];
-  }, [activeThread, activeThreadId, optimisticMessages, threadMessages, threadTranscriptLogs, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, session.status, humanInputQuery.data?.data]);
+  }, [activeThread, activeThreadId, optimisticMessages, threadMessages, threadTranscriptLogs, threadMessageEntryIds, threadLogEntryIds, threadHumanInputEntryIds, liveLogsQuery.data?.data, timelineQuery.data?.data, issueQuery.data?.data?.description, sessionId, session.org_id, session.created_at, session.status, humanInputQuery.data?.data]);
 
   const baseTimelineHumanInputIds = useMemo(() => {
     const humanInputIds = new Set<string>();
@@ -2418,17 +2455,16 @@ function ChatPanel({
     writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, scrollTop, activeThreadId);
   }, [activeThreadId, sessionId, viewerScope]);
 
-  const findFirstVisibleMessageAnchor = useCallback((el: HTMLDivElement) => {
+  const findFirstVisibleTranscriptAnchor = useCallback((el: HTMLDivElement) => {
     const containerTop = el.getBoundingClientRect().top;
-    const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-session-message-id]"));
+    const nodes = Array.from(el.querySelectorAll<HTMLElement>("[data-session-entry-id]"));
     for (const node of nodes) {
       const rect = node.getBoundingClientRect();
       if (rect.bottom < containerTop) continue;
-      const rawID = node.dataset.sessionMessageId;
-      const id = rawID ? Number(rawID) : NaN;
-      if (!Number.isInteger(id) || id <= 0) continue;
+      const id = node.dataset.sessionEntryId;
+      if (!id) continue;
       return {
-        anchor: { kind: "message" as const, id },
+        anchor: { kind: "entry" as const, id },
         offsetPx: Math.max(0, containerTop - rect.top),
         scrollTopFallback: el.scrollTop,
       };
@@ -2438,13 +2474,13 @@ function ChatPanel({
 
   const persistCurrentScrollPosition = useCallback((el: HTMLDivElement) => {
     if (typeof window === "undefined" || !viewerScope) return;
-    const anchorPosition = activeThreadId ? findFirstVisibleMessageAnchor(el) : null;
+    const anchorPosition = activeThreadId ? findFirstVisibleTranscriptAnchor(el) : null;
     if (anchorPosition) {
       writeStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, anchorPosition, activeThreadId);
       return;
     }
     writeStoredSessionScrollPosition(window.localStorage, sessionId, viewerScope, el.scrollTop, activeThreadId);
-  }, [activeThreadId, findFirstVisibleMessageAnchor, sessionId, viewerScope]);
+  }, [activeThreadId, findFirstVisibleTranscriptAnchor, sessionId, viewerScope]);
 
   const schedulePersistScrollPosition = useCallback((scrollTop: number) => {
     if (saveScrollTimerRef.current) {
@@ -2530,9 +2566,16 @@ function ChatPanel({
       void api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId, {
         position: "latest",
       }).then((window) => {
+        const latestData = { pages: [window], pageParams: [{ position: "latest" }] } satisfies TranscriptWindowInfiniteData;
+        if (activeThreadTranscriptQueryKey) {
+          queryClient.setQueryData<TranscriptWindowInfiniteData>(
+            activeThreadTranscriptQueryKey,
+            latestData,
+          );
+        }
         queryClient.setQueryData<TranscriptWindowInfiniteData>(
           transcriptWindowQueryKey(sessionId, activeThreadId),
-          { pages: [window], pageParams: [{ position: "latest" }] },
+          latestData,
         );
         setNewerThreadMessagePages([]);
         settleScrollToBottom();
@@ -2554,7 +2597,7 @@ function ChatPanel({
       persistScrollPosition(el.scrollTop);
     }
     setShowJumpToLatest(false);
-  }, [activeThreadId, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, persistScrollPosition, queryClient, settleScrollToBottom, sessionId]);
+  }, [activeThreadId, activeThreadTranscriptQueryKey, cancelPendingInitialAnchorRestore, hasNewerThreadMessages, persistScrollPosition, queryClient, settleScrollToBottom, sessionId]);
 
   const focusTranscript = useCallback(() => {
     scrollRef.current?.focus({ preventScroll: true });
@@ -2630,6 +2673,7 @@ function ChatPanel({
     (_entry: TimelineEntry, index: number) =>
       ({
         "data-session-entry-index": index,
+        ...(_entry.transcriptEntryId ? { "data-session-entry-id": _entry.transcriptEntryId } : {}),
         ...(_entry.kind === "message" ? { "data-session-message-id": _entry.data.id } : {}),
       }) as React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>,
     [],
@@ -2864,6 +2908,8 @@ function ChatPanel({
   useEffect(() => {
     initialAnchorAppliedRef.current = false;
     initialAnchorCancelledRef.current = false;
+    defaultEntryAnchorFetchRef.current = null;
+    defaultEntryAnchorAppliedRef.current = false;
   }, [activeThreadId, sessionId]);
 
   useEffect(() => {
@@ -2877,6 +2923,31 @@ function ChatPanel({
       }
     };
   }, [persistScrollPosition]);
+
+  useLayoutEffect(() => {
+    if (
+      defaultEntryAnchorAppliedRef.current ||
+      !activeThreadId ||
+      initialThreadAnchorPosition ||
+      isRunning
+    ) {
+      return;
+    }
+
+    const latestAssistantEntryID = threadTranscriptQuery.data?.pages[0]?.meta.latest_assistant_entry_id;
+    if (!latestAssistantEntryID) return;
+
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const target = el.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
+    if (!target) return;
+
+    el.scrollTop = target.offsetTop;
+    syncScrollState(el);
+    initialAnchorAppliedRef.current = true;
+    defaultEntryAnchorAppliedRef.current = true;
+  }, [activeThreadId, initialThreadAnchorPosition, isRunning, syncScrollState, threadTranscriptQuery.data?.pages, timelineEntries]);
 
   useEffect(() => {
     if (
@@ -2895,11 +2966,67 @@ function ChatPanel({
       initialThreadAnchorPosition &&
       firstThreadWindow?.meta.anchor_found
     ) {
-      const target = el.querySelector<HTMLElement>(`[data-session-message-id="${initialThreadAnchorPosition.anchor.id}"]`);
+      const targetSelector = initialThreadAnchorPosition.anchor.kind === "entry"
+        ? transcriptEntryIDSelector(initialThreadAnchorPosition.anchor.id)
+        : `[data-session-message-id="${initialThreadAnchorPosition.anchor.id}"]`;
+      const target = el.querySelector<HTMLElement>(targetSelector);
       if (target) {
         el.scrollTop = target.offsetTop + initialThreadAnchorPosition.offsetPx;
         syncScrollState(el);
         initialAnchorAppliedRef.current = true;
+        return;
+      }
+    }
+
+    if (
+      activeThreadId &&
+      !initialThreadAnchorPosition &&
+      !isRunning &&
+      firstThreadWindow?.meta.latest_assistant_entry_id
+    ) {
+      const latestAssistantEntryID = firstThreadWindow.meta.latest_assistant_entry_id;
+      const target = el.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
+      if (target) {
+        el.scrollTop = target.offsetTop;
+        syncScrollState(el);
+        initialAnchorAppliedRef.current = true;
+        return;
+      }
+
+      if (timelineEntries.some((entry) => entry.transcriptEntryId === latestAssistantEntryID)) {
+        requestAnimationFrame(() => {
+          if (initialAnchorAppliedRef.current || initialAnchorCancelledRef.current) return;
+          const currentEl = scrollRef.current;
+          if (!currentEl) return;
+          const delayedTarget = currentEl.querySelector<HTMLElement>(transcriptEntryIDSelector(latestAssistantEntryID));
+          if (!delayedTarget) return;
+          currentEl.scrollTop = delayedTarget.offsetTop;
+          syncScrollState(currentEl);
+          initialAnchorAppliedRef.current = true;
+          defaultEntryAnchorAppliedRef.current = true;
+        });
+        return;
+      }
+
+      const fetchKey = `${activeThreadId}:${latestAssistantEntryID}`;
+      if (
+        activeThreadTranscriptQueryKey &&
+        defaultEntryAnchorFetchRef.current !== fetchKey
+      ) {
+        defaultEntryAnchorFetchRef.current = fetchKey;
+        void api.sessions.getThreadTranscriptWindow(sessionId, activeThreadId, {
+          position: "around",
+          anchorEntryId: latestAssistantEntryID,
+        }).then((window) => {
+          queryClient.setQueryData<TranscriptWindowInfiniteData>(
+            activeThreadTranscriptQueryKey,
+            { pages: [window], pageParams: [{ position: "around", anchorEntryId: latestAssistantEntryID }] },
+          );
+        }).catch((error) => {
+          toast.error(error instanceof ApiError ? error.message : "Failed to load latest assistant message");
+          scrollToLiveEdgePosition();
+          initialAnchorAppliedRef.current = true;
+        });
         return;
       }
     }
@@ -2947,7 +3074,7 @@ function ChatPanel({
 
     scrollToLiveEdgePosition();
     initialAnchorAppliedRef.current = true;
-  }, [activeThreadId, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, viewerScope]);
+  }, [activeThreadId, activeThreadTranscriptQueryKey, hasLoadedTimelineInputs, initialThreadAnchorPosition, isRunning, queryClient, scrollToLiveEdgePosition, sessionId, syncScrollState, threadTranscriptQuery, timelineEntries, viewerScope]);
 
   // Only auto-scroll to bottom when new entries arrive if the user is already near the bottom.
   useEffect(() => {
@@ -3490,16 +3617,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     // ChatPanel's transcript infinite query shares this exact key, so React
     // Query dedupes against the in-flight prefetch.
     void queryClient.prefetchInfiniteQuery({
-      queryKey: transcriptWindowQueryKey(id, storedThreadId),
+      queryKey: transcriptWindowQueryKey(id, storedThreadId, transcriptAnchorKey(anchor)),
       queryFn: () =>
         api.sessions.getThreadTranscriptWindow(
           id,
           storedThreadId,
-          anchor
-            ? { position: "around", anchorMessageId: anchor.anchor.id }
-            : { position: "latest" },
+          transcriptInitialPageParam(anchor),
         ),
-      initialPageParam: transcriptInitialPageParam(anchor?.anchor.id ?? null),
+      initialPageParam: transcriptInitialPageParam(anchor),
     });
   }, [id, queryClient, user]);
 
@@ -4751,8 +4876,8 @@ export function SessionDetailContent({ id }: { id: string }) {
         // Inject the confirmed message into the newest transcript page so the
         // optimistic copy can be dropped without a gap; the next /transcript
         // refetch (triggered by SSE/invalidations) supersedes this patch.
-        queryClient.setQueryData<TranscriptWindowInfiniteData>(
-          transcriptWindowQueryKey(id, vars.activeThreadId),
+        queryClient.setQueriesData<TranscriptWindowInfiniteData>(
+          { queryKey: queryKeys.sessions.threadTranscript(id, vars.activeThreadId) },
           (previous) => appendMessageToTranscriptCache(previous, response.data, activeThread?.status ?? "idle"),
         );
       } else {

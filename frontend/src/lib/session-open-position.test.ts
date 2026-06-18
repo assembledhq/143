@@ -121,23 +121,57 @@ describe("session-open-position", () => {
     const storage = new Map<string, string>();
 
     writeStoredSessionAnchorPosition(storage, "sess-123", viewerScope, {
-      anchor: { kind: "message", id: 456 },
+      anchor: { kind: "entry", id: "msg_456" },
       offsetPx: 12.4,
       scrollTopFallback: 980.7,
     }, "thread-a");
 
     expect(storage.get("session-scroll-position:org-1:user-1:sess-123:thread-a")).toBe(JSON.stringify({
-      version: 2,
-      anchor: { kind: "message", id: 456 },
+      version: 3,
+      anchor_entry_id: "msg_456",
       offset_px: 12,
       scroll_top_fallback: 981,
     }));
+    expect(readStoredSessionAnchorPosition(storage, "sess-123", viewerScope, "thread-a")).toEqual({
+      anchor: { kind: "entry", id: "msg_456" },
+      offsetPx: 12,
+      scrollTopFallback: 981,
+    });
+    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-a")).toBe(981);
+  });
+
+  it("reads legacy message anchors for backward-compatible restores", () => {
+    const storage = new Map<string, string>([[
+      "session-scroll-position:org-1:user-1:sess-123:thread-a",
+      JSON.stringify({
+        version: 2,
+        anchor: { kind: "message", id: 456 },
+        offset_px: 12,
+        scroll_top_fallback: 981,
+      }),
+    ]]);
+
     expect(readStoredSessionAnchorPosition(storage, "sess-123", viewerScope, "thread-a")).toEqual({
       anchor: { kind: "message", id: 456 },
       offsetPx: 12,
       scrollTopFallback: 981,
     });
-    expect(readStoredSessionScrollPosition(storage, "sess-123", viewerScope, "thread-a")).toBe(981);
+  });
+
+  it("reads and writes non-message transcript entry anchors", () => {
+    const storage = new Map<string, string>();
+
+    writeStoredSessionAnchorPosition(storage, "sess-123", viewerScope, {
+      anchor: { kind: "entry", id: "tres_991" },
+      offsetPx: 4,
+      scrollTopFallback: 1200,
+    }, "thread-a");
+
+    expect(readStoredSessionAnchorPosition(storage, "sess-123", viewerScope, "thread-a")).toEqual({
+      anchor: { kind: "entry", id: "tres_991" },
+      offsetPx: 4,
+      scrollTopFallback: 1200,
+    });
   });
 
   it("ignores invalid structured anchor positions", () => {
