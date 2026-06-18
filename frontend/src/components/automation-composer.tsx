@@ -42,10 +42,13 @@ export function AutomationComposer({
   const goalLength = automationGoalLengthState(goal);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+    <div
+      data-testid="automation-composer"
+      className="overflow-hidden rounded-xl border border-border bg-card shadow-sm"
+    >
       <div
         data-testid="automation-identity-row"
-        className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-center gap-3 border-b border-border px-4 py-3 sm:px-5"
+        className="flex items-start gap-3 px-4 pb-2 pt-5 sm:px-6"
       >
         <AutomationEmojiPicker
           value={iconValue}
@@ -57,15 +60,29 @@ export function AutomationComposer({
           aria-label="Name"
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
-          placeholder="Name this automation"
-          className="border-0 bg-transparent px-0 text-base font-medium shadow-none focus-visible:ring-0 sm:text-base"
+          placeholder="Untitled automation"
+          className="h-auto min-h-10 rounded-none border-0 bg-transparent px-0 py-0 text-2xl font-semibold shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-0 sm:text-2xl"
         />
       </div>
 
-      <div ref={goalEditorContainerRef} className="space-y-2 px-4 py-4 sm:px-5">
-        <div className="flex items-center justify-between gap-3">
-          <Label htmlFor="goal" className="sr-only">Goal</Label>
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Goal</span>
+      <div ref={goalEditorContainerRef} className="space-y-2 px-4 pb-4 pt-1 sm:px-6">
+        <Label htmlFor="goal" className="sr-only">Goal</Label>
+        <AutomationGoalEditor
+          id="goal"
+          value={goal}
+          onChange={onGoalChange}
+          repositoryId={repositoryId}
+          branch={branch}
+          agentType={agentType}
+          placeholder="Describe the recurring work this automation should handle..."
+          rows={11}
+          ariaInvalid={goalLength.isTooLong}
+          className="min-h-[260px] resize-y border-0 bg-transparent px-0 py-1 text-sm shadow-none focus-visible:ring-0"
+        />
+        <div className="flex min-h-5 items-center justify-between gap-3">
+          <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
+            {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
+          </p>
           <span
             className={cn(
               "text-xs tabular-nums",
@@ -75,24 +92,9 @@ export function AutomationComposer({
             {goalLength.countText}
           </span>
         </div>
-        <AutomationGoalEditor
-          id="goal"
-          value={goal}
-          onChange={onGoalChange}
-          repositoryId={repositoryId}
-          branch={branch}
-          agentType={agentType}
-          placeholder="Describe what this automation should do every run..."
-          rows={11}
-          ariaInvalid={goalLength.isTooLong}
-          className="min-h-[280px] resize-y border-0 bg-transparent px-0 text-base shadow-none focus-visible:ring-0 sm:text-sm"
-        />
-        <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
-          {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
-        </p>
       </div>
 
-      <div className="flex flex-col gap-3 border-t border-border bg-muted/15 px-4 py-3 sm:px-5">
+      <div className="flex flex-col gap-3 border-t border-border px-4 py-3 sm:px-6">
         <div className="flex flex-wrap items-center gap-2">
           {footerControls}
         </div>

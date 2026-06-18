@@ -630,7 +630,6 @@ describe("PreviewPanel component", () => {
     const openedWindow = {
       addEventListener: vi.fn(),
       close: vi.fn(),
-      addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       closed: false,
       document: {
@@ -641,7 +640,6 @@ describe("PreviewPanel component", () => {
         href: "about:blank",
       },
       opener: null,
-      removeEventListener: vi.fn(),
     } as unknown as Window;
     const openSpy = vi.spyOn(window, "open").mockReturnValue(openedWindow);
 

@@ -214,9 +214,10 @@ describe("NewAutomationPage", () => {
     renderWithProviders(<NewAutomationPage />);
 
     expect(await screen.findByText("Triggers")).toBeInTheDocument();
-    expect(
-      screen.getByRole("group", { name: "Automation triggers" }),
-    ).toBeInTheDocument();
+    const triggerGroup = screen.getByRole("group", { name: "Automation triggers" });
+    expect(triggerGroup).toBeInTheDocument();
+    expect(triggerGroup).toHaveClass("rounded-lg", "bg-muted/25");
+    expect(triggerGroup).not.toHaveClass("border-border", "bg-background");
     expect(screen.getByText("Pull request events")).toBeInTheDocument();
     expect(screen.getByLabelText("On a schedule")).toBeChecked();
     expect(screen.getByLabelText("When a PR is opened")).not.toBeChecked();
@@ -350,7 +351,7 @@ describe("NewAutomationPage", () => {
     ).toContain("Review the repository for concrete, actionable security risk");
   });
 
-  it("keeps the emoji selector small on the same row as the name field", async () => {
+  it("renders the composer as a lightweight document-style form", async () => {
     server.use(
       http.get("/api/v1/repositories", () =>
         HttpResponse.json({
@@ -380,11 +381,18 @@ describe("NewAutomationPage", () => {
 
     await screen.findByDisplayValue("Security sweep");
 
+    const composer = screen.getByTestId("automation-composer");
     const identityRow = screen.getByTestId("automation-identity-row");
-    expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
-    expect(
-      screen.getByRole("button", { name: "Automation emoji" }),
-    ).toHaveClass("w-16");
+    const emojiTrigger = screen.getByRole("button", { name: "Automation emoji" });
+    const nameInput = screen.getByLabelText("Name");
+
+    expect(composer).toHaveClass("rounded-xl", "bg-card");
+    expect(identityRow).toHaveClass("flex", "items-start");
+    expect(identityRow).not.toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]", "border-b");
+    expect(emojiTrigger).toHaveClass("size-10", "border-transparent", "bg-transparent", "shadow-none");
+    expect(emojiTrigger.querySelector("svg")).toBeNull();
+    expect(nameInput).toHaveClass("text-2xl", "font-semibold");
+    expect(screen.getByPlaceholderText("Untitled automation")).toBe(nameInput);
     expect(screen.getByLabelText("Name")).toBeInTheDocument();
   });
 

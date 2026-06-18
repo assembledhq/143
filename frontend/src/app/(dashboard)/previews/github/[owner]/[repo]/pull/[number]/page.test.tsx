@@ -221,7 +221,6 @@ describe("PullRequestPreviewPage", () => {
     const openedWindow = {
       addEventListener: vi.fn(),
       close: vi.fn(),
-      addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       closed: false,
       document: {
@@ -232,7 +231,6 @@ describe("PullRequestPreviewPage", () => {
         href: "about:blank",
       },
       opener: null,
-      removeEventListener: vi.fn(),
     } as unknown as Window;
     const openSpy = vi.spyOn(window, "open").mockReturnValue(openedWindow);
 
