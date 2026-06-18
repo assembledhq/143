@@ -3,7 +3,7 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 
-import { renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, waitFor } from "@/test/test-utils";
 import { OpenPreviewButton } from "./open-preview-button";
 
 vi.mock("sonner", () => ({
@@ -18,15 +18,17 @@ afterEach(() => {
 });
 
 describe("OpenPreviewButton", () => {
-  it("closes the placeholder popup when bootstrap does not respond quickly", async () => {
-    const user = userEvent.setup();
+  it("keeps the placeholder popup open with timeout details when bootstrap does not respond", async () => {
+    vi.useFakeTimers();
     const close = vi.fn();
+    const documentOpen = vi.fn();
     const documentWrite = vi.fn();
     const documentClose = vi.fn();
     const popup = {
       opener: window,
       close,
       document: {
+        open: documentOpen,
         write: documentWrite,
         close: documentClose,
       },
@@ -43,21 +45,29 @@ describe("OpenPreviewButton", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Open preview" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open preview" }));
 
     expect(documentWrite).toHaveBeenCalledTimes(1);
     const writtenDoc = documentWrite.mock.calls[0][0] as string;
     expect(writtenDoc).toContain("Opening preview");
     expect(writtenDoc).toContain("class=\"spinner\"");
 
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 5_100));
+    act(() => {
+      vi.advanceTimersByTime(5_100);
     });
 
-    expect(close).toHaveBeenCalled();
-    expect(toast.error).toHaveBeenCalledWith("Preview bootstrap timed out. Try opening it again.");
+    expect(close).not.toHaveBeenCalled();
+    expect(documentOpen).toHaveBeenCalled();
+    const timeoutDoc = documentWrite.mock.calls.at(-1)?.[0] as string;
+    expect(timeoutDoc).toContain("Preview connection timed out");
+    expect(timeoutDoc).toContain("The preview gateway did not answer");
+    expect(timeoutDoc).toContain("prev-1");
+    expect(timeoutDoc).toContain("https://prev-1.preview.143.dev");
+    expect(toast.error).toHaveBeenCalledWith(
+      "Preview connection timed out. The preview gateway did not answer in time.",
+    );
     expect(screen.getByRole("button", { name: "Open preview" })).toBeEnabled();
-  }, 10_000);
+  });
 
   it("keeps the button in its opening state until the popup preview load completes", async () => {
     const user = userEvent.setup();
