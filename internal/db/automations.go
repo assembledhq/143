@@ -683,6 +683,9 @@ const createAutomationRunSQL = `
 // index only fires when scheduled_time IS NOT NULL (i.e. scheduler-triggered
 // runs), so manual runs always insert successfully.
 func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (bool, error) {
+	if r.CapabilitySnapshot == nil {
+		r.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
+	}
 	configJSON, err := json.Marshal(r.ConfigSnapshot)
 	if err != nil {
 		return false, fmt.Errorf("marshal config snapshot: %w", err)

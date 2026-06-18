@@ -654,6 +654,9 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.LinearPrepareState == "" {
 		run.LinearPrepareState = models.LinearPrepareStateNone
 	}
+	if run.CapabilitySnapshot == nil {
+		run.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
+	}
 	query := `
 		INSERT INTO sessions (
 			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
