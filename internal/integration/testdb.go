@@ -135,6 +135,8 @@ var truncatedTables = []string{
 	"session_issue_links",
 	"session_turn_issue_snapshots",
 	"sessions",
+	"agent_capability_policy_grants",
+	"agent_capability_policies",
 	"issues",
 	"repositories",
 	"integrations",

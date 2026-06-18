@@ -289,6 +289,9 @@ function metadataItems(run: AutomationRun, kind: FullCardKind): string[] {
   const items: string[] = [];
   items.push(automationRunTriggerLabel(run.triggered_by));
   if (run.session?.id) items.push("Linked session");
+  if (run.capability_snapshot?.length) {
+    items.push(`${run.capability_snapshot.length} capabilities`);
+  }
   if (run.session?.pr) items.push(`PR #${run.session.pr.number}`);
 
   const filesChanged = run.session?.diff_stats?.files_changed;
