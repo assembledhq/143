@@ -262,12 +262,12 @@ describe("AuthenticatedLayout", () => {
     await user.click(screen.getByRole("button", { name: /Settings/ }));
 
     expect(screen.getByRole("link", { name: "Account" })).toHaveAttribute("href", "/settings/account");
-    expect(screen.getByRole("link", { name: "General" })).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "Organization" })).toHaveAttribute("href", "/settings");
     expect(screen.getByRole("link", { name: "Integrations" })).toHaveAttribute("href", "/settings/integrations");
     expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
-    expect(screen.getByRole("link", { name: "LLM" })).toHaveAttribute("href", "/settings/llm");
+    expect(screen.getByRole("link", { name: "App LLM" })).toHaveAttribute("href", "/settings/llm");
     expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/settings/autopilot")).toBeDefined();
-    expect(screen.getByRole("link", { name: "Runtime" })).toHaveAttribute("href", "/settings/runtime");
+    expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");

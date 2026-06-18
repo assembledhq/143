@@ -137,7 +137,7 @@ export default function SettingsPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="General settings"
+          title="Organization"
           description="Manage your organization."
         />
 
