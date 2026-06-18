@@ -98,7 +98,16 @@ func runMCPServe(stderr io.Writer) int {
 // and per-user audit happens.
 func selectToolSource(ctx context.Context, overrides globalOverrides) (mcp.ToolSource, error) {
 	envRegistry := mcp.BuildRegistryFromEnv(os.Stderr)
-	direct := mcp.NewToolRegistry(envRegistry)
+	var direct mcp.ToolSource = mcp.NewToolRegistry(envRegistry)
+	if token, apiURL := os.Getenv("INTERNAL_API_TOKEN"), os.Getenv("INTERNAL_API_URL"); token != "" && apiURL != "" {
+		direct = mcp.NewInternalMetaToolSource(direct, token, apiURL)
+		snapshot, err := mcp.FetchCapabilitySnapshot(ctx, token, apiURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "143-tools: capability snapshot unavailable, running without filter: %v\n", err)
+		} else if len(snapshot) > 0 {
+			direct = mcp.NewCapabilityFilteredToolSource(direct, mcp.ToolCapabilityPolicy{Capabilities: snapshot})
+		}
+	}
 	if InSandbox() || len(direct.ListTools()) > 0 {
 		return direct, nil
 	}

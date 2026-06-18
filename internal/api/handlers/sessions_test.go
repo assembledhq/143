@@ -173,7 +173,7 @@ var sessionColumns = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 var reviewLoopColumns = []string{
@@ -279,7 +279,7 @@ const (
 	// right pad helper, then sessionTestRow pads the four trailing linear
 	// columns and the two trailing identity nils at the end.
 	preLinearSessionColumnsLen                  = 76
-	sessionColumnsWithLegacyResultConfidenceLen = 92
+	sessionColumnsWithLegacyResultConfidenceLen = 93
 )
 
 // TestPreLinearSessionColumnsLenStaysInSync trips when a future migration
@@ -291,14 +291,15 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const pendingSnapshotFieldsAdded = 2
 	const unpushedChangesFieldAdded = 1
 	const linearFieldsAdded = 4
+	const capabilitySnapshotFieldsAdded = 1
 	const identityFieldsAdded = 2
 	const prPushFieldsAdded = 2
 	const branchCreationFieldsAdded = 3
 	const workspaceGenerationFieldAdded = 1
 	const workspaceRevisionFieldsAdded = 2
-	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+workspaceRevisionFieldsAdded+linearFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
+	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+workspaceRevisionFieldsAdded+linearFieldsAdded+capabilitySnapshotFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
-			"unpushedChangesFieldAdded, workspaceRevisionFieldsAdded, linearFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
+			"unpushedChangesFieldAdded, workspaceRevisionFieldsAdded, linearFieldsAdded, capabilitySnapshotFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
 	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded, "legacy confidence columns should stay isolated to test fixtures")
 }
 
@@ -652,9 +653,9 @@ func addSessionRow(rows *pgxmock.Rows, values ...interface{}) *pgxmock.Rows {
 // sessionTestRow dispatch with nil values for columns added after the
 // fixture conventions were settled: the pending-snapshot pair
 // (pending_snapshot_key + pending_snapshot_set_at, between snapshot_key and
-// runtime_soft_deadline_at) and the trailing git_identity_source /
-// git_identity_user_id pair (immediately before created_at). Callers don't
-// have to update their fixtures one-by-one.
+// runtime_soft_deadline_at), capability_snapshot after deleted_at, and the
+// trailing git_identity_source / git_identity_user_id pair (immediately before
+// created_at). Callers don't have to update their fixtures one-by-one.
 func padSessionIdentityColumns(row []interface{}) []interface{} {
 	if len(row) == len(sessionColumns) {
 		return row
@@ -670,7 +671,7 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 		padded = append(padded, row[branchCreationStateIndex:]...)
 		return padded
 	}
-	if len(row) != sessionColumnsWithLegacyResultConfidenceLen-9 {
+	if len(row) != sessionColumnsWithLegacyResultConfidenceLen-10 {
 		// Some other length we don't recognize — let the row through
 		// unchanged so the AddRow call surfaces the real mismatch.
 		return row
@@ -702,7 +703,7 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 
 	padded := make([]interface{}, 0, len(sessionColumns))
 	padded = append(padded, withBranch[:len(withBranch)-1]...)
-	padded = append(padded, nil, nil)
+	padded = append(padded, nil, nil, nil)
 	padded = append(padded, withBranch[len(withBranch)-1])
 	return padded
 }
@@ -853,7 +854,7 @@ func retrySessionRow(sessionID, orgID uuid.UUID, status models.SessionStatus, sn
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(28)...).
+		WithArgs(sessionAnyArgs(29)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(sessionAnyArgs(6)...).
@@ -864,7 +865,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(28)...).
+		WithArgs(sessionAnyArgs(29)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(sessionAnyArgs(6)...).
@@ -1986,7 +1987,7 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 							1, 0, "medium", nil, "fp-1",
 							now, now, nil,
 						),
-				)
+					)
 			},
 			expectedCode: http.StatusBadRequest,
 			expectedBody: "MESSAGE_TOO_LONG",
@@ -2012,7 +2013,7 @@ func TestSessionHandler_TriggerFix(t *testing.T) {
 							1, 0, "medium", nil, "fp-1",
 							now, now, nil,
 						),
-				)
+					)
 			},
 			expectedCode: http.StatusForbidden,
 			expectedBody: "FORBIDDEN",

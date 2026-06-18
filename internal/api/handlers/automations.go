@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -45,6 +46,8 @@ type AutomationHandler struct {
 	orgStore              automationOrgLookup
 	codingCredentialStore automationCodingCredentialLookup
 	jobStore              *db.JobStore
+	capabilityStore       *db.AgentCapabilityPolicyStore
+	capabilityService     *agentcapabilities.Service
 	audit                 *db.AuditEmitter
 	pool                  db.TxStarter // needed for transactional RunNow
 	logger                zerolog.Logger
@@ -74,6 +77,11 @@ func NewAutomationHandler(automationStore *db.AutomationStore, automationRunStor
 
 func (h *AutomationHandler) SetJobStore(jobStore *db.JobStore) {
 	h.jobStore = jobStore
+}
+
+func (h *AutomationHandler) SetCapabilityDependencies(store *db.AgentCapabilityPolicyStore, svc *agentcapabilities.Service) {
+	h.capabilityStore = store
+	h.capabilityService = svc
 }
 
 func (h *AutomationHandler) SetAuditEmitter(audit *db.AuditEmitter) {
@@ -106,6 +114,31 @@ func (h *AutomationHandler) SetPool(pool db.TxStarter) {
 // recomputed).
 func (h *AutomationHandler) SetLogger(logger zerolog.Logger) {
 	h.logger = logger
+}
+
+func userIDPtr(user *models.User) *uuid.UUID {
+	if user == nil {
+		return nil
+	}
+	return &user.ID
+}
+
+func (h *AutomationHandler) replaceAutomationCapabilities(r *http.Request, orgID, automationID uuid.UUID, userID *uuid.UUID, grants []models.AgentCapabilityPolicyGrantInput) error {
+	if h.capabilityStore == nil || h.capabilityService == nil {
+		return errors.New("automation capabilities are not configured")
+	}
+	seen := make(map[models.AgentCapabilityID]bool, len(grants))
+	for _, grant := range grants {
+		if seen[grant.CapabilityID] {
+			return fmt.Errorf("%w: duplicate capability grant", agentcapabilities.ErrInvalidGrant)
+		}
+		seen[grant.CapabilityID] = true
+		if err := h.capabilityService.ValidateGrant(grant); err != nil {
+			return err
+		}
+	}
+	_, err := h.capabilityStore.ReplaceAutomationPolicy(r.Context(), orgID, automationID, userID, grants)
+	return err
 }
 
 func (h *AutomationHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -177,31 +210,32 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 
 	var req struct {
-		Name                string                            `json:"name"`
-		Goal                string                            `json:"goal"`
-		IconType            models.AutomationIconType         `json:"icon_type"`
-		IconValue           string                            `json:"icon_value"`
-		RepositoryID        string                            `json:"repository_id"`
-		Scope               *string                           `json:"scope"`
-		AgentType           *models.AgentType                 `json:"agent_type"`
-		Model               *string                           `json:"model"`
-		ReasoningEffort     models.ReasoningEffort            `json:"reasoning_effort"`
-		ExecutionMode       *models.ProjectExecMode           `json:"execution_mode"`
-		MaxConcurrent       *int                              `json:"max_concurrent"`
-		BaseBranch          *string                           `json:"base_branch"`
-		IdentityScope       *models.AutomationIdentityScope   `json:"identity_scope"`
-		ScheduleType        *models.AutomationScheduleType    `json:"schedule_type"`
-		IntervalValue       *int                              `json:"interval_value"`
-		IntervalUnit        *models.ScheduleUnit              `json:"interval_unit"`
-		IntervalRunAt       *string                           `json:"interval_run_at"`
-		CronExpression      *string                           `json:"cron_expression"`
-		Timezone            *string                           `json:"timezone"`
-		ProductTriggers     []models.AutomationProductTrigger `json:"triggers"`
-		GitHubEventTriggers []models.AutomationGitHubEvent    `json:"github_event_triggers"`
-		GitHubEventFilters  json.RawMessage                   `json:"github_event_filters"`
-		Metadata            json.RawMessage                   `json:"metadata"`
-		Priority            *int                              `json:"priority"`
-		PrePRReviewLoops    *int                              `json:"pre_pr_review_loops"`
+		Name                string                                    `json:"name"`
+		Goal                string                                    `json:"goal"`
+		IconType            models.AutomationIconType                 `json:"icon_type"`
+		IconValue           string                                    `json:"icon_value"`
+		RepositoryID        string                                    `json:"repository_id"`
+		Scope               *string                                   `json:"scope"`
+		AgentType           *models.AgentType                         `json:"agent_type"`
+		Model               *string                                   `json:"model"`
+		ReasoningEffort     models.ReasoningEffort                    `json:"reasoning_effort"`
+		ExecutionMode       *models.ProjectExecMode                   `json:"execution_mode"`
+		MaxConcurrent       *int                                      `json:"max_concurrent"`
+		BaseBranch          *string                                   `json:"base_branch"`
+		IdentityScope       *models.AutomationIdentityScope           `json:"identity_scope"`
+		ScheduleType        *models.AutomationScheduleType            `json:"schedule_type"`
+		IntervalValue       *int                                      `json:"interval_value"`
+		IntervalUnit        *models.ScheduleUnit                      `json:"interval_unit"`
+		IntervalRunAt       *string                                   `json:"interval_run_at"`
+		CronExpression      *string                                   `json:"cron_expression"`
+		Timezone            *string                                   `json:"timezone"`
+		ProductTriggers     []models.AutomationProductTrigger         `json:"triggers"`
+		GitHubEventTriggers []models.AutomationGitHubEvent            `json:"github_event_triggers"`
+		GitHubEventFilters  json.RawMessage                           `json:"github_event_filters"`
+		Metadata            json.RawMessage                           `json:"metadata"`
+		Priority            *int                                      `json:"priority"`
+		PrePRReviewLoops    *int                                      `json:"pre_pr_review_loops"`
+		Capabilities        *[]models.AgentCapabilityPolicyGrantInput `json:"capabilities"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -474,6 +508,23 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create automation", err)
 		return
 	}
+	if req.Capabilities != nil {
+		if err := h.replaceAutomationCapabilities(r, orgID, automation.ID, userIDPtr(user), *req.Capabilities); err != nil {
+			// Automation was committed before capability write; attempt cleanup so
+			// the caller doesn't end up with an orphaned automation.
+			if delErr := h.automationStore.SoftDelete(r.Context(), orgID, automation.ID); delErr != nil {
+				h.logger.Error().Err(delErr).Str("automation_id", automation.ID.String()).Msg("failed to soft-delete automation after capability write failure")
+			}
+			if errors.Is(err, agentcapabilities.ErrInvalidGrant) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CAPABILITY", err.Error(), err)
+			} else if errors.Is(err, db.ErrAutomationNotFound) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found", err)
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "UPDATE_CAPABILITIES_FAILED", "failed to update automation capabilities", err)
+			}
+			return
+		}
+	}
 
 	idStr := automation.ID.String()
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationCreated, models.AuditResourceAutomation, &idStr, nil, nil,
@@ -520,8 +571,9 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 		Identity struct {
 			Scope *models.AutomationIdentityScope `json:"scope"`
 		} `json:"identity"`
-		Enabled  *bool           `json:"enabled"`
-		Metadata json.RawMessage `json:"metadata"`
+		Enabled      *bool                                     `json:"enabled"`
+		Metadata     json.RawMessage                           `json:"metadata"`
+		Capabilities *[]models.AgentCapabilityPolicyGrantInput `json:"capabilities"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
@@ -556,6 +608,7 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 		"timezone":              req.Schedule.Timezone,
 		"metadata":              req.Metadata,
 		"github_event_triggers": req.Triggers,
+		"capabilities":          req.Capabilities,
 	}
 	if scheduleType == models.AutomationScheduleCron {
 		flat["cron_expression"] = req.Schedule.Cron
@@ -696,30 +749,31 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 	before := automation
 
 	var req struct {
-		Name                *string                            `json:"name"`
-		Goal                *string                            `json:"goal"`
-		IconType            *models.AutomationIconType         `json:"icon_type"`
-		IconValue           *string                            `json:"icon_value"`
-		Scope               *string                            `json:"scope"`
-		RepositoryID        *string                            `json:"repository_id"`
-		AgentType           *models.AgentType                  `json:"agent_type"`
-		Model               *string                            `json:"model"`
-		ReasoningEffort     *models.ReasoningEffort            `json:"reasoning_effort"`
-		ExecutionMode       *models.ProjectExecMode            `json:"execution_mode"`
-		MaxConcurrent       *int                               `json:"max_concurrent"`
-		BaseBranch          *string                            `json:"base_branch"`
-		IdentityScope       *models.AutomationIdentityScope    `json:"identity_scope"`
-		ScheduleType        *models.AutomationScheduleType     `json:"schedule_type"`
-		IntervalValue       *int                               `json:"interval_value"`
-		IntervalUnit        *models.ScheduleUnit               `json:"interval_unit"`
-		IntervalRunAt       *string                            `json:"interval_run_at"`
-		CronExpression      *string                            `json:"cron_expression"`
-		Timezone            *string                            `json:"timezone"`
-		ProductTriggers     *[]models.AutomationProductTrigger `json:"triggers"`
-		GitHubEventTriggers *[]models.AutomationGitHubEvent    `json:"github_event_triggers"`
-		GitHubEventFilters  *json.RawMessage                   `json:"github_event_filters"`
-		Priority            *int                               `json:"priority"`
-		PrePRReviewLoops    *int                               `json:"pre_pr_review_loops"`
+		Name                *string                                   `json:"name"`
+		Goal                *string                                   `json:"goal"`
+		IconType            *models.AutomationIconType                `json:"icon_type"`
+		IconValue           *string                                   `json:"icon_value"`
+		Scope               *string                                   `json:"scope"`
+		RepositoryID        *string                                   `json:"repository_id"`
+		AgentType           *models.AgentType                         `json:"agent_type"`
+		Model               *string                                   `json:"model"`
+		ReasoningEffort     *models.ReasoningEffort                   `json:"reasoning_effort"`
+		ExecutionMode       *models.ProjectExecMode                   `json:"execution_mode"`
+		MaxConcurrent       *int                                      `json:"max_concurrent"`
+		BaseBranch          *string                                   `json:"base_branch"`
+		IdentityScope       *models.AutomationIdentityScope           `json:"identity_scope"`
+		ScheduleType        *models.AutomationScheduleType            `json:"schedule_type"`
+		IntervalValue       *int                                      `json:"interval_value"`
+		IntervalUnit        *models.ScheduleUnit                      `json:"interval_unit"`
+		IntervalRunAt       *string                                   `json:"interval_run_at"`
+		CronExpression      *string                                   `json:"cron_expression"`
+		Timezone            *string                                   `json:"timezone"`
+		ProductTriggers     *[]models.AutomationProductTrigger        `json:"triggers"`
+		GitHubEventTriggers *[]models.AutomationGitHubEvent           `json:"github_event_triggers"`
+		GitHubEventFilters  *json.RawMessage                          `json:"github_event_filters"`
+		Priority            *int                                      `json:"priority"`
+		PrePRReviewLoops    *int                                      `json:"pre_pr_review_loops"`
+		Capabilities        *[]models.AgentCapabilityPolicyGrantInput `json:"capabilities"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1067,6 +1121,18 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update automation", err)
 		return
 	}
+	if req.Capabilities != nil {
+		if err := h.replaceAutomationCapabilities(r, orgID, automation.ID, userIDPtr(middleware.UserFromContext(r.Context())), *req.Capabilities); err != nil {
+			if errors.Is(err, agentcapabilities.ErrInvalidGrant) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CAPABILITY", err.Error(), err)
+			} else if errors.Is(err, db.ErrAutomationNotFound) {
+				writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found", err)
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "UPDATE_CAPABILITIES_FAILED", "failed to update automation capabilities", err)
+			}
+			return
+		}
+	}
 
 	// Skip audit emit when no user-editable field actually changed — otherwise
 	// a no-op PATCH (e.g. a client re-sending the current values) would pollute
@@ -1270,6 +1336,19 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	if user != nil {
 		run.TriggeredByUserID = &user.ID
+	}
+	if h.capabilityService != nil {
+		snapshot, err := h.capabilityService.ResolveForSession(r.Context(), agentcapabilities.ResolveInput{
+			OrgID:         orgID,
+			RepositoryID:  automation.RepositoryID,
+			SessionOrigin: models.SessionOriginAutomation,
+			AutomationID:  &automation.ID,
+		})
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CAPABILITY_RESOLUTION_FAILED", "failed to resolve automation capabilities", err)
+			return
+		}
+		run.CapabilitySnapshot = snapshot
 	}
 
 	created, err := h.automationRunStore.CreateRunInTx(r.Context(), tx, &run)

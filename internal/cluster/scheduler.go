@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 )
 
 type schedulerJobStore interface {
@@ -48,6 +49,10 @@ type schedulerAutomationRunStore interface {
 	CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error)
 	ListOrgsWithStuckRuns(ctx context.Context, threshold time.Duration) ([]uuid.UUID, error)
 	ReapStuckRuns(ctx context.Context, orgID uuid.UUID, threshold time.Duration) (int64, error)
+}
+
+type schedulerCapabilityResolver interface {
+	ResolveForSession(ctx context.Context, in agentcapabilities.ResolveInput) ([]models.AgentCapabilitySnapshotItem, error)
 }
 
 // schedulerSessionStore is the narrow surface the scheduler needs for the
@@ -104,6 +109,7 @@ type Scheduler struct {
 	pmDocs         schedulerPMDocStore         // nil-safe: context refresh scheduling disabled if nil
 	automations    schedulerAutomationStore    // nil-safe: automation scheduling disabled if nil
 	automationRuns schedulerAutomationRunStore // nil-safe: automation scheduling disabled if nil
+	capabilities   schedulerCapabilityResolver // nil-safe: scheduled automation runs use empty snapshots if nil
 	sessions       schedulerSessionStore       // nil-safe: stranded-pending reaper disabled if nil
 	pool           schedulerTxBeginner         // needed for automation scheduling transactions
 	logger         zerolog.Logger
@@ -181,6 +187,10 @@ func (s *Scheduler) SetAutomationStores(automations schedulerAutomationStore, ru
 	s.automations = automations
 	s.automationRuns = runs
 	s.pool = pool
+}
+
+func (s *Scheduler) SetCapabilityResolver(resolver schedulerCapabilityResolver) {
+	s.capabilities = resolver
 }
 
 // SetSessionStore injects the session store used by the stranded-pending
@@ -761,6 +771,21 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 			GoalSnapshot:   a.Goal,
 			ConfigSnapshot: configSnapshot,
 			Status:         models.AutomationRunStatusPending,
+		}
+		if s.capabilities != nil {
+			snapshot, err := s.capabilities.ResolveForSession(ctx, agentcapabilities.ResolveInput{
+				OrgID:         a.OrgID,
+				RepositoryID:  a.RepositoryID,
+				SessionOrigin: models.SessionOriginAutomation,
+				AutomationID:  &a.ID,
+			})
+			if err != nil {
+				s.logger.Error().Err(err).
+					Str("automation_id", a.ID.String()).
+					Msg("failed to resolve automation capabilities; skipping automation")
+				continue
+			}
+			run.CapabilitySnapshot = snapshot
 		}
 
 		created, err := s.automationRuns.CreateRunInTx(ctx, tx, &run)
