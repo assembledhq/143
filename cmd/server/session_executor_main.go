@@ -290,6 +290,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		Repositories:        repoStore,
 		SessionMessages:     sessionMessageStore,
 		SessionThreads:      sessionThreadStore,
+		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
 		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 		Automations:         db.NewAutomationStore(pool),
 		AutomationRuns:      automationRunStore,
@@ -297,8 +298,15 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        pullRequestStore,
+		SlackInstallations:  db.NewSlackInstallationStore(pool),
+		SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
+		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
+		SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+		SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+		SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+		SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+		SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
 	}
-	wireSessionExecutorSlackStores(stores, pool)
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
 	}
@@ -321,19 +329,4 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		HeartbeatInterval: 10 * time.Second,
 		RenewInterval:     20 * time.Second,
 	}, shutdown, nil
-}
-
-func wireSessionExecutorSlackStores(stores *worker.Stores, database db.DBTX) {
-	if stores == nil || database == nil {
-		return
-	}
-	stores.SlackInstallations = db.NewSlackInstallationStore(database)
-	stores.SlackOrgSelections = db.NewSlackOrgSelectionStore(database)
-	stores.SlackBotSettings = db.NewSlackBotSettingsStore(database)
-	stores.SlackUserLinks = db.NewSlackUserLinkStore(database)
-	stores.SlackChannels = db.NewSlackChannelSettingsStore(database)
-	stores.SlackSessionLinks = db.NewSlackSessionLinkStore(database)
-	stores.SlackInboundEvents = db.NewSlackInboundEventStore(database)
-	stores.SlackOutbound = db.NewSlackOutboundMessageStore(database)
-	stores.HumanInputRequests = db.NewSessionHumanInputRequestStore(database)
 }
