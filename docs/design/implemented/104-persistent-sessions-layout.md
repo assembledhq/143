@@ -1,7 +1,7 @@
 # Design: Persistent Sessions Layout
 
 > **Status:** Implemented
-> **Last reviewed:** 2026-06-17
+> **Last reviewed:** 2026-06-18
 
 The sessions surface uses a persistent `/sessions` shell that owns the list, selection, and detail pane. The selected session id is derived from the route, not from locally duplicated selection state. Navigating between sessions updates the address and selected id while preserving the mounted shell, sidebar filters, search state, optimistic rows, list pagination, and detail-pane frame.
 
@@ -26,7 +26,7 @@ Before this refactor, the sessions route tree had the right product instincts bu
 - `/sessions` rendered the manual-session composer, while `/sessions/new` also existed as the explicit create route.
 - The sidebar already derived `selectedId` from the selected route segment, but the detail pane itself was still mounted by the `[id]` child route.
 
-This means route navigation does more work than the product model needs. Moving from one session to another should feel like selecting a row in a persistent workspace, not like leaving one page and entering another page. The current shape also makes `/sessions` carry two meanings: the sessions workspace and the new-session composer.
+That shape made route navigation do more work than the product model needed. Moving from one session to another should feel like selecting a row in a persistent workspace, not like leaving one page and entering another page. The old shape also made `/sessions` carry two meanings: the sessions workspace and the new-session composer.
 
 ## Product Principle
 
@@ -213,7 +213,7 @@ Mitigation:
 
 `SessionDetailContent` has many queries, mutations, effects, local states, scroll states, keyboard handlers, and refs keyed directly or indirectly by `id`. If the component instance persists while only `id` changes, stale state can leak between sessions.
 
-The implementation should specifically audit these state groups before removing the `[id]` page as the detail owner:
+The implementation audited these state groups before removing the `[id]` page as the detail owner:
 
 - **Transcript window and scroll restoration:** `activeThreadId`, initial-anchor refs, saved scroll timers, loaded newer-message pages, live-log reconnect timers, `chatPanelScrollToLiveEdgeRef`, and `chatPanelKeyboardControls` are session/thread-specific. These should reset or rehydrate from session-scoped storage when `id` changes.
 - **Thread selection and viewed-thread state:** `pendingThreadPreview`, `hasResolvedInitialThreadSelection`, `viewedThreadIds`, `viewedThreadIdsLoadedForSessionId`, and prefetch refs already partially key themselves by session id. Confirm they never carry the previous session's active thread or viewed markers into the next detail.
@@ -226,14 +226,14 @@ The implementation should specifically audit these state groups before removing 
 
 Mitigation:
 
-- Add tests for switching from one selected session to another while asserting the transcript, active thread, composer draft, PR action state, diff file index, and accumulated file events do not leak.
-- Prefer a keyed boundary around the detail pane for the first implementation:
+- Keep tests for switching from one selected session to another and asserting detail-local state does not leak.
+- Keep the keyed boundary around the detail pane:
 
 ```tsx
 <SessionDetailContent key={selectedSessionId} id={selectedSessionId} />
 ```
 
-This still preserves the shell/sidebar while allowing detail-local state to reset safely. After the persistent shell is stable, individual state groups can be made more granular if preserving per-session drafts or review position becomes valuable.
+This preserves the shell/sidebar while allowing detail-local state to reset safely. Future work can make individual state groups more granular if preserving per-session drafts or review position becomes valuable.
 
 ### 3. Mobile Pane Logic Can Regress
 
