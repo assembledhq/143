@@ -985,7 +985,7 @@ describe("AutomationDetailPage", () => {
     expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
     expect(
       screen.getByRole("button", { name: "Automation emoji" }),
-    ).toHaveClass("h-9", "w-16");
+    ).toHaveClass("size-10", "w-16", "border-transparent", "bg-transparent", "shadow-none");
     expect(screen.getByLabelText("Name")).toHaveValue("Weekly audit");
   });
 
