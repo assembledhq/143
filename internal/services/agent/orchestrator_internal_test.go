@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
@@ -109,6 +111,56 @@ func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
 		return
 	}
 	close(release)
+}
+
+func TestPrepareSandboxRepositoryRunsBootstrapCommandsFromWorkDir(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/home/sandbox/backend"
+	provider := &testInternalSandboxProvider{
+		readFiles: map[string][]byte{
+			path.Join(workDir, repoconfig.ConfigPath): []byte(`{
+				"bootstrap": {
+					"commands": ["npm install", "npm run lint:js -w assets"]
+				}
+			}`),
+		},
+	}
+	o := &Orchestrator{provider: provider}
+	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
+
+	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+
+	require.NoError(t, err, "prepareSandboxRepository should run configured bootstrap commands successfully")
+	require.Equal(t, []string{
+		"cd '/home/sandbox/backend' && npm install",
+		"cd '/home/sandbox/backend' && npm run lint:js -w assets",
+	}, provider.execCalls, "bootstrap commands should run in order from the repository workdir")
+}
+
+func TestPrepareSandboxRepositoryReturnsBootstrapCommandFailure(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/home/sandbox/backend"
+	provider := &testInternalSandboxProvider{
+		execExit:   127,
+		execStderr: "sh: eslint: not found",
+		readFiles: map[string][]byte{
+			path.Join(workDir, repoconfig.ConfigPath): []byte(`{
+				"bootstrap": {
+					"commands": ["npm run lint:js -w assets"]
+				}
+			}`),
+		},
+	}
+	o := &Orchestrator{provider: provider}
+	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
+
+	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+
+	require.Error(t, err, "prepareSandboxRepository should fail when a configured bootstrap command exits non-zero")
+	require.Contains(t, err.Error(), "npm run lint:js -w assets", "bootstrap setup error should identify the command that failed")
+	require.Contains(t, err.Error(), "sh: eslint: not found", "bootstrap setup error should include stderr so missing tool failures are actionable")
 }
 
 type blockingMentionIndexFileReader struct {

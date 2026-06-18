@@ -1,6 +1,6 @@
 # Design: Agent Orchestrator
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Implemented | **Last reviewed:** 2026-06-18
 
 This document describes how 143.dev launches, manages, and monitors coding agent runs inside isolated sandboxes.
 
@@ -10,10 +10,11 @@ When an issue is selected for an agent run (either manually or auto-triggered), 
 
 1. Prepares the execution context (issue details, codebase, instructions)
 2. Launches a sandboxed container
-3. Runs the coding agent inside the container
-4. Streams logs back to the UI in real time
-5. Collects the result (code diff) when the agent completes
-6. Hands off to the validation pipeline
+3. Clones the repository, wires sandbox GitHub auth, installs supported repo-declared tools, and runs `.143/config.json` bootstrap commands
+4. Runs the coding agent inside the container
+5. Streams logs back to the UI in real time
+6. Collects the result (code diff) when the agent completes
+7. Hands off to the validation pipeline
 
 ## Agent Adapter Interface
 
@@ -328,13 +329,19 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.AgentRun) error
     // 7. Clone repo
     o.provider.CloneRepo(ctx, sandbox, run.RepoURL, run.RepoBranch, token)
 
-    // 8. Execute agent with log streaming
+    // 8. Prepare repo-specific sandbox setup
+    o.runSandboxGitBootstrap(ctx, sandbox, sandbox.WorkDir, log)
+    if err := o.prepareSandboxRepository(ctx, sandbox, sandbox.WorkDir, log); err != nil {
+        return err
+    }
+
+    // 9. Execute agent with log streaming
     logCh := make(chan LogEntry, 100)
     go o.streamLogs(ctx, run.ID, logCh)
 
     result, err := adapter.Execute(ctx, sandbox, prompt, logCh)
 
-    // 9. Store result
+    // 10. Store result
     if err != nil {
         o.db.UpdateAgentRun(ctx, run.ID, "failed", err.Error(), nil)
         // Enqueue failure analysis job — see 18-fix-quality-feedback.md
