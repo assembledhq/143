@@ -112,7 +112,7 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
   }
 }
 
-function AuthResolutionNotice() {
+function AuthResolutionNotice({ isAdmin }: { isAdmin: boolean }) {
   return (
     <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/30 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="space-y-1">
@@ -127,9 +127,11 @@ function AuthResolutionNotice() {
         <Button asChild variant="outline" size="sm">
           <Link href="/settings/account">Personal auths</Link>
         </Button>
-        <Button asChild variant="outline" size="sm">
-          <Link href="/settings/runtime">Sandboxes</Link>
-        </Button>
+        {isAdmin && (
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings/runtime">Sandboxes</Link>
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -313,7 +315,7 @@ export default function AgentPage() {
             <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
-          <AuthResolutionNotice />
+          <AuthResolutionNotice isAdmin={isAdmin} />
 
           <section className="space-y-3">
             <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
@@ -375,7 +377,7 @@ export default function AgentPage() {
             </Button>
           )}
         />
-        <AuthResolutionNotice />
+        <AuthResolutionNotice isAdmin={isAdmin} />
 
         <section className="space-y-4">
           <div className="space-y-1.5">

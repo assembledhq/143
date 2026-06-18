@@ -88,7 +88,7 @@ describe("Agent settings page", () => {
     expect(await screen.findByText("Read-only view. Only admins can add, edit, or reorder coding auths.")).toBeInTheDocument();
     expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
-    expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
+    expect(screen.queryByRole("link", { name: "Sandboxes" })).not.toBeInTheDocument();
   });
 
   it("keeps the details sheet closed after dismissing it", async () => {
