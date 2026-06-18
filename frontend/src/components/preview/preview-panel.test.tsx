@@ -628,6 +628,7 @@ describe("PreviewPanel component", () => {
   it("bootstraps preview access before opening from the ready state", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
     const openedWindow = {
+      addEventListener: vi.fn(),
       close: vi.fn(),
       document: {
         close: vi.fn(),
@@ -637,6 +638,7 @@ describe("PreviewPanel component", () => {
         href: "about:blank",
       },
       opener: null,
+      removeEventListener: vi.fn(),
     } as unknown as Window;
     const openSpy = vi.spyOn(window, "open").mockReturnValue(openedWindow);
 

@@ -103,8 +103,10 @@ describe('TeamSettingsPage', () => {
     removeMemberMock.mockClear();
     createInvitationMock.mockClear();
     revokeInvitationMock.mockClear();
-    githubInviteStatusMock.mockClear();
-    searchGitHubUsersMock.mockClear();
+    githubInviteStatusMock.mockReset();
+    githubInviteStatusMock.mockResolvedValue({ data: { connected: false } });
+    searchGitHubUsersMock.mockReset();
+    searchGitHubUsersMock.mockResolvedValue({ data: [], meta: {} });
     auditLogsListMock.mockReset();
     auditLogsListMock.mockResolvedValue({ data: [], meta: {} });
     currentUserMock.id = 'user-1';
