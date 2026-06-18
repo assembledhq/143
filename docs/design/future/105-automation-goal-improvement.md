@@ -83,7 +83,7 @@ Deep improve is intended for cases where prompt quality depends on codebase fact
 
 Deep improve should be available on saved automations. It can also be available during creation once a repository is selected, but draft deep improvement should be treated as an ephemeral proposal tied to the draft inputs, not to an automation row that does not exist yet.
 
-The deep agent should not apply the goal itself. It writes only a proposal result back to 143 through a restricted internal result path. The proposal stores the session ID so the UI can keep the improvement result and the underlying agent run connected.
+The deep agent should not apply the goal itself. It writes only a proposal result back to 143 through a restricted `143-tools` CLI command injected into the analysis session. The proposal stores the session ID so the UI can keep the improvement result and the underlying agent run connected.
 
 ## Interaction Details
 
@@ -296,7 +296,9 @@ The deep session should be analysis-only:
 - deny publishing and external comment capabilities,
 - avoid PR creation paths,
 - discard any filesystem diff,
-- write the proposal through a restricted internal result endpoint or structured final-message parser.
+- write the proposal through a restricted `143-tools automation-goal-improvement complete ...` command rather than a structured final-message parser.
+
+The `143-tools` command should be the only supported write-back path from the deep agent. It should use the session-scoped internal token already injected into the sandbox, validate that the session matches `automation_goal_improvements.analysis_session_id`, and accept structured JSON containing the proposed goal, rationale, change list, evidence summary, risks, confidence, and warnings. This keeps the write-back path consistent with the rest of the platform's sandbox-agent tooling and avoids scraping agent prose from the transcript.
 
 Recommended capability snapshot:
 
@@ -426,3 +428,45 @@ Verification follows normal repo requirements:
 - Should proposal history be retained indefinitely, or expire draft-only proposals after a short retention window?
 - Should the deep agent use the automation's configured model or the org default coding-agent model?
 - Should repeated failures surface a passive `Improve goal` recommendation on the automation detail page?
+
+## Engineering Implementation Spec
+
+This should be implemented in small vertical phases. Each phase should keep generated text as a proposal until an explicit apply action updates `automations.goal`.
+
+### Phase 1: Fast Improve Backend
+
+- Add `automation_goal_improvements` migration, models, and a store under `internal/db/` with `orgID` on every exported method.
+- Add prompt templates and render functions for fast improvement and proposal judging.
+- Add a small service that builds draft/saved improvement inputs, calls the configured LLM client, validates JSON output, runs the judge when enabled, and stores a completed proposal.
+- Add handlers for draft create, saved create, proposal get, and proposal apply. Saved apply must check `base_goal_hash` against the current automation goal before patching.
+- Add audit details for proposal creation/completion/apply, while preserving the existing automation goal diff.
+
+### Phase 2: Fast Improve UI
+
+- Add a reusable split-button control to `AutomationComposer` with default `Fast improve` and dropdown `Deep improve with agent`.
+- Add a proposal review sheet/dialog that shows diff, rationale, change list, warnings, confidence, and `Apply` / `Discard`.
+- Wire creation flow so apply only updates local draft state.
+- Wire saved automation flow so apply calls the proposal apply endpoint and refreshes automation detail.
+- Handle stale-goal apply errors with a clear regenerate action.
+
+### Phase 3: Deep Improve For Saved Automations
+
+- Add a deep-improvement job path that creates a visible `sessions` row linked through `automation_goal_improvements.analysis_session_id`, then dispatches a normal `run_agent` job.
+- Add a session origin such as `automation_goal_improvement` if needed, and label the session in the UI as automation-goal analysis.
+- Inject an analysis-only capability snapshot: read repo/session/PR/CI/review context, no publishing, no external comments, no write/publish capabilities.
+- Add a restricted `143-tools automation-goal-improvement complete ...` command. This is the only deep-agent write-back path; it must validate org, session, and proposal linkage before storing structured proposal JSON.
+- Run the proposal judge before marking the deep proposal completed. If rejected, mark failed with a user-visible reason.
+
+### Phase 4: Creation-Time Deep Improve
+
+- Allow deep improve from `/automations/new` only after a repository is selected.
+- Create a draft proposal with `automation_id = NULL`, link it to the visible analysis session, and expire old draft proposals.
+- Applying a draft deep proposal should update only the local goal textarea. The eventual automation create request remains the source of truth.
+
+### Phase 5: Polish And Follow-Ups
+
+- Add rate limits: fast improve per user/org, deep improve per automation, and one running deep proposal per automation.
+- Add passive recommendations after repeated failed or no-op runs, but keep apply user-approved.
+- Add proposal history to the saved automation detail page only if users need rollback or comparison beyond audit logs.
+
+Implementation should update or add tests in the same phase as each behavior: Go tests for stores/services/handlers/prompts/jobs/`143-tools`, and React tests for split button, proposal review, draft apply, saved apply, deep polling, and stale-goal handling.
