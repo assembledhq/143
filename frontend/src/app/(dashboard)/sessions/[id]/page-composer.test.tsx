@@ -4,7 +4,7 @@ import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } fr
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, SessionMessage, SessionThread, User, SingleResponse, ListResponse } from '@/lib/types';
+import type { Session, SessionMessage, SessionReviewComment, SessionThread, User, SingleResponse, ListResponse } from '@/lib/types';
 import { installSessionDetailPageTestHooks, setMobileViewport, changeFieldValue } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
@@ -165,6 +165,53 @@ describe('SessionDetailPage composer and session metadata', () => {
     await waitFor(() => {
       expect(textarea).toHaveAttribute('data-mobile-composer-state', 'collapsed');
     });
+  });
+
+  it('constrains attached review comment chips inside the mobile composer', async () => {
+    const idleSession: Session = {
+      ...mockSessions[0],
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+    };
+    const comment: SessionReviewComment = {
+      id: 'comment-long-file',
+      session_id: idleSession.id,
+      org_id: 'org-1',
+      user_id: mockMembers[0].id,
+      file_path: 'docs/design/implemented/107-pagerduty-integration-with-a-very-long-file-name-that-used-to-overflow.md',
+      line_number: 776,
+      diff_side: 'new',
+      body: 'Let\'s make an oauth integration with enough text to require truncation in the attached comment chip.',
+      resolved: false,
+      pass_number: 1,
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:00Z',
+    };
+
+    setMobileViewport(true);
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: idleSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-comments', () => {
+        return HttpResponse.json({ data: [comment], meta: {} } satisfies ListResponse<SessionReviewComment>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-mobile-attached-comment-chip" />);
+
+    const filename = await screen.findByText('107-pagerduty-integration-with-a-very-long-file-name-that-used-to-overflow.md:776');
+    const chip = filename.closest('div');
+    expect(chip).not.toBeNull();
+    const commentPreview = within(chip as HTMLElement).getByText((content) => (
+      content.startsWith('Let\'s make an oauth integration') && content.endsWith('...')
+    ));
+
+    expect(chip).toHaveClass('max-w-full', 'min-w-0');
+    expect(filename).toHaveClass('min-w-0', 'truncate');
+    expect(commentPreview).toHaveClass('min-w-0', 'truncate');
   });
 
   it('autofocuses the follow-up textarea on desktop session detail pages', async () => {

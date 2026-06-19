@@ -1555,20 +1555,20 @@ function SessionComposer({
           )}
         >
           {openComments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
+            <div className="flex min-w-0 flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
               {openComments.map((c) => {
                 const fileName = c.file_path.split("/").pop() ?? c.file_path;
                 return (
                   <div
                     key={c.id}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    className="inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
                   >
                     <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
-                    <span className="font-mono text-muted-foreground">
+                    <span className="min-w-0 truncate font-mono text-muted-foreground">
                       {fileName}:{c.line_number}
                     </span>
                     <span className="text-muted-foreground/40">-</span>
-                    <span className="truncate max-w-[200px]">
+                    <span className="min-w-0 max-w-[200px] truncate">
                       {c.body.length > 60 ? `${c.body.slice(0, 60)}...` : c.body}
                     </span>
                   </div>
