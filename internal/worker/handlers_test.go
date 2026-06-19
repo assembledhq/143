@@ -57,6 +57,20 @@ func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context,
 	return models.Integration{}, pgx.ErrNoRows
 }
 
+type fakeSlackRoutingLLM struct {
+	response string
+	err      error
+	calls    int
+}
+
+func (l *fakeSlackRoutingLLM) Complete(_ context.Context, _, _ string) (string, error) {
+	l.calls++
+	if l.err != nil {
+		return "", l.err
+	}
+	return l.response, nil
+}
+
 type fakeGitHubOrgRosterService struct {
 	members []ghservice.OrgMember
 	err     error
@@ -637,6 +651,7 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 			},
 		},
 		slackbotsvc.SlackRoutingModeAnswerOnly,
+		true,
 	)
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should let users correct channel repository defaults")
@@ -644,6 +659,35 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_preview_target"), "ack should offer a preview target selector when preview context is missing")
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_pull_request"), "ack should offer a PR selector when PR context is missing")
 	require.Contains(t, slackBlocksActionValue(blocks, "slack_start_work"), orgID.String(), "start-work action should carry org scope")
+}
+
+func TestSlackSessionAckBlocksHideStartWorkWhenWorkAlreadyQueued(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	session := &models.Session{ID: uuid.New(), OrgID: orgID}
+
+	blocks := slackSessionAckBlocks(
+		context.Background(),
+		nil,
+		&Services{FrontendURL: "https://143.test"},
+		zerolog.Nop(),
+		orgID,
+		uuid.New(),
+		"T123",
+		"C123",
+		session,
+		"Starting a 143 session",
+		slackbotsvc.SlackSessionContextSummary{
+			RepositoryName: "acme/api",
+			Branch:         "main",
+		},
+		slackbotsvc.SlackRoutingModeStartWork,
+		false,
+	)
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should still let users correct channel repository defaults")
+	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "ack should hide start-work action once work is already queued")
 }
 
 func TestSlackMissingContextHelpers(t *testing.T) {
@@ -675,17 +719,94 @@ func TestShouldEnqueueSlackStartedRunRequiresRepository(t *testing.T) {
 	t.Parallel()
 
 	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
-	resolved := slackbotsvc.SlackContextResolveResult{}
+	resolved := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeStartWork}
 
 	require.False(t, shouldEnqueueSlackStartedRun(session, resolved), "Slack-started durable work should not enqueue without a repository")
+
+	require.True(t, shouldEnqueueSlackStartedRun(session, slackbotsvc.SlackContextResolveResult{
+		RoutingMode: slackbotsvc.SlackRoutingModeAnswerOnly,
+	}), "Slack-started answer-only sessions should enqueue without a repository so Slack receives an answer")
 
 	repoID := uuid.New()
 	session.RepositoryID = &repoID
 
 	require.True(t, shouldEnqueueSlackStartedRun(session, resolved), "Slack-started durable work should enqueue once repository context exists and no blocking context is missing")
 	require.False(t, shouldEnqueueSlackStartedRun(session, slackbotsvc.SlackContextResolveResult{
-		Missing: []slackbotsvc.MissingSlackContext{{Kind: "pull_request"}},
+		RoutingMode: slackbotsvc.SlackRoutingModeStartWork,
+		Missing:     []slackbotsvc.MissingSlackContext{{Kind: "pull_request"}},
 	}), "Slack-started durable work should remain blocked when other required context is missing")
+}
+
+func TestResolveSlackAutoRoutingWithClassifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		text             string
+		llmResponse      string
+		expectedRouting  slackbotsvc.SlackRoutingMode
+		expectedLLMCalls int
+	}{
+		{
+			name:             "question classifies as answer only",
+			text:             "<@U143> does our slack bot post notifications when a job finishes?",
+			llmResponse:      `{"routing_mode":"answer_only","confidence":0.93,"reason":"question asking for information"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeAnswerOnly,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "implementation request classifies as start work",
+			text:             "<@U143> fix the Slack final response notification",
+			llmResponse:      `{"routing_mode":"start_work","confidence":0.91,"reason":"request to modify behavior"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "invalid classifier response falls back conservatively",
+			text:             "<@U143> does our slack bot post notifications when a job finishes?",
+			llmResponse:      `not json`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeAnswerOnly,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "invalid classifier response keeps question with work verb answer only",
+			text:             "<@U143> does this update the Slack thread when the job finishes?",
+			llmResponse:      `not json`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeAnswerOnly,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "explicit start override skips classifier",
+			text:             "<@U143> start fix the Slack final response notification",
+			llmResponse:      `{"routing_mode":"answer_only","confidence":0.99,"reason":"should not be used"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
+			expectedLLMCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			classifier := &fakeSlackRoutingLLM{response: tt.llmResponse}
+			resolved := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
+			actual := resolveSlackAutoRouting(context.Background(), classifier, zerolog.Nop(), tt.text, resolved)
+
+			require.Equal(t, tt.expectedRouting, actual.RoutingMode, "Slack auto routing should resolve to expected mode")
+			require.Equal(t, tt.expectedLLMCalls, classifier.calls, "classifier should only be called for auto routing without explicit override")
+		})
+	}
+}
+
+func TestSlackRoutingManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	inputManifest := slackRoutingInputManifest(nil, slackbotsvc.SlackRoutingModeAnswerOnly, "question asking for information")
+	mode, ok := slackRoutingModeFromInputManifest(inputManifest)
+
+	require.True(t, ok, "input manifest should expose persisted Slack routing mode")
+	require.Equal(t, slackbotsvc.SlackRoutingModeAnswerOnly, mode, "input manifest should preserve answer-only routing")
+	require.JSONEq(t, `{"slack":{"routing_mode":"answer_only","routing_reason":"question asking for information"}}`, string(inputManifest), "input manifest should store Slack routing metadata under the Slack namespace")
 }
 
 func TestPostSlackMessageWithFallback_InvalidBlocksRetriesPlainTextAndRecordsFallback(t *testing.T) {
