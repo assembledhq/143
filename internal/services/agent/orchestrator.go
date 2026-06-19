@@ -538,6 +538,10 @@ type AutomationRunUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
+type AutomationGoalImprovementUpdater interface {
+	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
+}
+
 type EvalBootstrapLookup interface {
 	GetBySessionThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.EvalBootstrapRun, error)
 }
@@ -545,51 +549,52 @@ type EvalBootstrapLookup interface {
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
-	provider            SandboxProvider
-	adapters            map[models.AgentType]AgentAdapter
-	sessions            SessionStore
-	agentRunLogs        SessionLogStore
-	agentRunQuestions   SessionQuestionStore
-	humanInputRequests  SessionHumanInputRequestStore
-	sessionMessages     SessionMessageStore
-	sessionThreads      SessionThreadStore
-	sessionIssueLinks   SessionIssueLinkStore
-	issueSnapshots      SessionIssueSnapshotStore
-	decisionLog         DecisionLogStore
-	projectTasks        ProjectTaskUpdater   // can be nil
-	automationRuns      AutomationRunUpdater // can be nil
-	issues              IssueStore
-	repositories        RepositoryStore
-	orgs                OrgStore
-	jobs                JobStore
-	github              GitHubTokenProvider
-	claudeCodeAuth      ClaudeCodeAuthProvider // can be nil
-	credentials         CredentialProvider     // can be nil — disables integration-skills doc generation
-	memory              MemoryService          // can be nil
-	snapshots           storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	uploads             storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
-	fileReader          sandbox.FileReader     // can be nil — disables proactive mention-index warmup
-	mentionIndexes      *workspace.MentionIndexCache
-	usageTracker        UsageRecorder        // can be nil — billing tracking disabled if nil
-	sandboxCapacity     *SandboxCapacityGate // can be nil — live local sandbox admission disabled
-	staticEgress        StaticEgressRuntimeConfig
-	threadRuntimes      ThreadRuntimeStore // can be nil — disables live thread-runtime routing
-	threadInbox         ThreadInboxStore   // can be nil — disables live inbox delivery
-	sandboxHolders      SessionSandboxHolderStore
-	threadDeliveryLocks sync.Map
-	env                 *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver    *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth         SandboxAuthServer  // can be nil — paired with identityResolver
-	users               UserLookup         // can be nil — needed for App-token Co-authored-by trailer
-	evalBootstraps      EvalBootstrapLookup
-	internalAPIURL      string
-	internalAPISecret   string
-	logger              zerolog.Logger
-	maxConcurrent       int
-	cancels             *CancelRegistry
-	threadCancels       *ThreadCancelRegistry // optional — enables per-tab SIGINT
-	nodeID              string
-	isDraining          func() bool
+	provider                   SandboxProvider
+	adapters                   map[models.AgentType]AgentAdapter
+	sessions                   SessionStore
+	agentRunLogs               SessionLogStore
+	agentRunQuestions          SessionQuestionStore
+	humanInputRequests         SessionHumanInputRequestStore
+	sessionMessages            SessionMessageStore
+	sessionThreads             SessionThreadStore
+	sessionIssueLinks          SessionIssueLinkStore
+	issueSnapshots             SessionIssueSnapshotStore
+	decisionLog                DecisionLogStore
+	projectTasks               ProjectTaskUpdater               // can be nil
+	automationRuns             AutomationRunUpdater             // can be nil
+	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
+	issues                     IssueStore
+	repositories               RepositoryStore
+	orgs                       OrgStore
+	jobs                       JobStore
+	github                     GitHubTokenProvider
+	claudeCodeAuth             ClaudeCodeAuthProvider // can be nil
+	credentials                CredentialProvider     // can be nil — disables integration-skills doc generation
+	memory                     MemoryService          // can be nil
+	snapshots                  storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	uploads                    storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
+	fileReader                 sandbox.FileReader     // can be nil — disables proactive mention-index warmup
+	mentionIndexes             *workspace.MentionIndexCache
+	usageTracker               UsageRecorder        // can be nil — billing tracking disabled if nil
+	sandboxCapacity            *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	staticEgress               StaticEgressRuntimeConfig
+	threadRuntimes             ThreadRuntimeStore // can be nil — disables live thread-runtime routing
+	threadInbox                ThreadInboxStore   // can be nil — disables live inbox delivery
+	sandboxHolders             SessionSandboxHolderStore
+	threadDeliveryLocks        sync.Map
+	env                        *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver           *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth                SandboxAuthServer  // can be nil — paired with identityResolver
+	users                      UserLookup         // can be nil — needed for App-token Co-authored-by trailer
+	evalBootstraps             EvalBootstrapLookup
+	internalAPIURL             string
+	internalAPISecret          string
+	logger                     zerolog.Logger
+	maxConcurrent              int
+	cancels                    *CancelRegistry
+	threadCancels              *ThreadCancelRegistry // optional — enables per-tab SIGINT
+	nodeID                     string
+	isDraining                 func() bool
 }
 
 // CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
@@ -786,42 +791,43 @@ type PRRepairContinueOptions struct {
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
-	Provider           SandboxProvider
-	Adapters           map[models.AgentType]AgentAdapter
-	Sessions           SessionStore
-	SessionLogs        SessionLogStore
-	SessionQuestions   SessionQuestionStore
-	HumanInputRequests SessionHumanInputRequestStore
-	SessionMessages    SessionMessageStore
-	SessionThreads     SessionThreadStore
-	SessionIssueLinks  SessionIssueLinkStore
-	IssueSnapshots     SessionIssueSnapshotStore
-	DecisionLog        DecisionLogStore
-	ProjectTasks       ProjectTaskUpdater   // optional — updates project tasks on run completion
-	AutomationRuns     AutomationRunUpdater // optional — updates automation_runs on session completion
-	Issues             IssueStore
-	Repositories       RepositoryStore
-	Orgs               OrgStore
-	Jobs               JobStore
-	GitHub             GitHubTokenProvider
-	CodexAuth          CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
-	ClaudeCodeAuth     ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
-	Credentials        CredentialProvider
-	Memory             MemoryService            // optional — injects learned memories into agent prompts
-	CodingCredentials  CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
-	Snapshots          storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
-	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
-	FileReader         sandbox.FileReader       // optional — enables proactive mention-index warmup
-	MentionIndexes     *workspace.MentionIndexCache
-	UsageTracker       UsageRecorder        // optional — enables billing observability
-	SandboxCapacity    *SandboxCapacityGate // optional — gates new local sandbox creation
-	StaticEgress       StaticEgressRuntimeConfig
-	ThreadRuntimes     ThreadRuntimeStore // optional — records per-thread live runtime ownership
-	ThreadInbox        ThreadInboxStore   // optional — durable per-thread input delivery log
-	SandboxHolders     SessionSandboxHolderStore
-	Cancels            *CancelRegistry       // optional — enables session cancellation from API
-	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
-	OrgSettingsCache   *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
+	Provider                   SandboxProvider
+	Adapters                   map[models.AgentType]AgentAdapter
+	Sessions                   SessionStore
+	SessionLogs                SessionLogStore
+	SessionQuestions           SessionQuestionStore
+	HumanInputRequests         SessionHumanInputRequestStore
+	SessionMessages            SessionMessageStore
+	SessionThreads             SessionThreadStore
+	SessionIssueLinks          SessionIssueLinkStore
+	IssueSnapshots             SessionIssueSnapshotStore
+	DecisionLog                DecisionLogStore
+	ProjectTasks               ProjectTaskUpdater               // optional — updates project tasks on run completion
+	AutomationRuns             AutomationRunUpdater             // optional — updates automation_runs on session completion
+	AutomationGoalImprovements AutomationGoalImprovementUpdater // optional — updates goal-improvement proposals on analysis session completion
+	Issues                     IssueStore
+	Repositories               RepositoryStore
+	Orgs                       OrgStore
+	Jobs                       JobStore
+	GitHub                     GitHubTokenProvider
+	CodexAuth                  CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
+	ClaudeCodeAuth             ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
+	Credentials                CredentialProvider
+	Memory                     MemoryService            // optional — injects learned memories into agent prompts
+	CodingCredentials          CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
+	Snapshots                  storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	Uploads                    storage.UploadStore      // optional — resolves session uploads into sandbox files
+	FileReader                 sandbox.FileReader       // optional — enables proactive mention-index warmup
+	MentionIndexes             *workspace.MentionIndexCache
+	UsageTracker               UsageRecorder        // optional — enables billing observability
+	SandboxCapacity            *SandboxCapacityGate // optional — gates new local sandbox creation
+	StaticEgress               StaticEgressRuntimeConfig
+	ThreadRuntimes             ThreadRuntimeStore // optional — records per-thread live runtime ownership
+	ThreadInbox                ThreadInboxStore   // optional — durable per-thread input delivery log
+	SandboxHolders             SessionSandboxHolderStore
+	Cancels                    *CancelRegistry       // optional — enables session cancellation from API
+	ThreadCancels              *ThreadCancelRegistry // optional — enables per-tab cancellation from API
+	OrgSettingsCache           *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -879,50 +885,51 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	}
 
 	return &Orchestrator{
-		provider:           cfg.Provider,
-		adapters:           cfg.Adapters,
-		sessions:           cfg.Sessions,
-		agentRunLogs:       cfg.SessionLogs,
-		agentRunQuestions:  cfg.SessionQuestions,
-		humanInputRequests: cfg.HumanInputRequests,
-		sessionMessages:    cfg.SessionMessages,
-		sessionThreads:     cfg.SessionThreads,
-		sessionIssueLinks:  cfg.SessionIssueLinks,
-		issueSnapshots:     cfg.IssueSnapshots,
-		decisionLog:        cfg.DecisionLog,
-		projectTasks:       cfg.ProjectTasks,
-		automationRuns:     cfg.AutomationRuns,
-		issues:             cfg.Issues,
-		repositories:       cfg.Repositories,
-		orgs:               cfg.Orgs,
-		jobs:               cfg.Jobs,
-		github:             cfg.GitHub,
-		claudeCodeAuth:     cfg.ClaudeCodeAuth,
-		credentials:        cfg.Credentials,
-		memory:             cfg.Memory,
-		snapshots:          cfg.Snapshots,
-		uploads:            cfg.Uploads,
-		fileReader:         cfg.FileReader,
-		mentionIndexes:     cfg.MentionIndexes,
-		usageTracker:       cfg.UsageTracker,
-		sandboxCapacity:    cfg.SandboxCapacity,
-		staticEgress:       cfg.StaticEgress,
-		threadRuntimes:     cfg.ThreadRuntimes,
-		threadInbox:        cfg.ThreadInbox,
-		sandboxHolders:     cfg.SandboxHolders,
-		env:                env,
-		identityResolver:   cfg.IdentityResolver,
-		sandboxAuth:        cfg.SandboxAuth,
-		users:              cfg.Users,
-		evalBootstraps:     cfg.EvalBootstraps,
-		internalAPIURL:     cfg.InternalAPIURL,
-		internalAPISecret:  cfg.InternalAPISecret,
-		cancels:            cfg.Cancels,
-		threadCancels:      cfg.ThreadCancels,
-		logger:             cfg.Logger,
-		maxConcurrent:      maxConcurrent,
-		nodeID:             cfg.NodeID,
-		isDraining:         cfg.IsDraining,
+		provider:                   cfg.Provider,
+		adapters:                   cfg.Adapters,
+		sessions:                   cfg.Sessions,
+		agentRunLogs:               cfg.SessionLogs,
+		agentRunQuestions:          cfg.SessionQuestions,
+		humanInputRequests:         cfg.HumanInputRequests,
+		sessionMessages:            cfg.SessionMessages,
+		sessionThreads:             cfg.SessionThreads,
+		sessionIssueLinks:          cfg.SessionIssueLinks,
+		issueSnapshots:             cfg.IssueSnapshots,
+		decisionLog:                cfg.DecisionLog,
+		projectTasks:               cfg.ProjectTasks,
+		automationRuns:             cfg.AutomationRuns,
+		automationGoalImprovements: cfg.AutomationGoalImprovements,
+		issues:                     cfg.Issues,
+		repositories:               cfg.Repositories,
+		orgs:                       cfg.Orgs,
+		jobs:                       cfg.Jobs,
+		github:                     cfg.GitHub,
+		claudeCodeAuth:             cfg.ClaudeCodeAuth,
+		credentials:                cfg.Credentials,
+		memory:                     cfg.Memory,
+		snapshots:                  cfg.Snapshots,
+		uploads:                    cfg.Uploads,
+		fileReader:                 cfg.FileReader,
+		mentionIndexes:             cfg.MentionIndexes,
+		usageTracker:               cfg.UsageTracker,
+		sandboxCapacity:            cfg.SandboxCapacity,
+		staticEgress:               cfg.StaticEgress,
+		threadRuntimes:             cfg.ThreadRuntimes,
+		threadInbox:                cfg.ThreadInbox,
+		sandboxHolders:             cfg.SandboxHolders,
+		env:                        env,
+		identityResolver:           cfg.IdentityResolver,
+		sandboxAuth:                cfg.SandboxAuth,
+		users:                      cfg.Users,
+		evalBootstraps:             cfg.EvalBootstraps,
+		internalAPIURL:             cfg.InternalAPIURL,
+		internalAPISecret:          cfg.InternalAPISecret,
+		cancels:                    cfg.Cancels,
+		threadCancels:              cfg.ThreadCancels,
+		logger:                     cfg.Logger,
+		maxConcurrent:              maxConcurrent,
+		nodeID:                     cfg.NodeID,
+		isDraining:                 cfg.IsDraining,
 	}
 }
 
@@ -1148,6 +1155,9 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 			}
 		}
 	}
+	if session.Origin == models.SessionOriginAutomationGoalImprovement {
+		scopes = []string{"automation-goal-improvement:complete"}
+	}
 	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
@@ -1159,6 +1169,9 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
 		sandboxCfg.Env["EVAL_BOOTSTRAP_RUN_ID"] = evalBootstrapRunID.String()
+	}
+	if session.Origin == models.SessionOriginAutomationGoalImprovement {
+		sandboxCfg.Env["AUTOMATION_GOAL_IMPROVEMENT_TOOLS_ENABLED"] = "true"
 	}
 }
 
@@ -2932,14 +2945,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Str("status", string(status))
 	})
 
-	payload := map[string]interface{}{
-		"session_id": run.ID.String(),
-		"org_id":     run.OrgID.String(),
+	if run.Origin != models.SessionOriginAutomationGoalImprovement {
+		payload := map[string]interface{}{
+			"session_id": run.ID.String(),
+			"org_id":     run.OrgID.String(),
+		}
+		if issueSnapshot != nil {
+			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
+		}
+		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 	}
-	if issueSnapshot != nil {
-		payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-	}
-	o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
@@ -2965,6 +2980,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if run.AutomationRunID != nil && o.automationRuns != nil {
 		if err := o.automationRuns.OnSessionComplete(ctx, run, status); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session completion")
+		}
+	}
+	if o.automationGoalImprovements != nil {
+		if err := o.automationGoalImprovements.OnSessionComplete(ctx, run, status); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation goal improvement on session completion")
 		}
 	}
 
@@ -5308,6 +5328,11 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	if run.AutomationRunID != nil && o.automationRuns != nil {
 		if err := o.automationRuns.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
+		}
+	}
+	if o.automationGoalImprovements != nil {
+		if err := o.automationGoalImprovements.OnSessionComplete(ctx, run, models.SessionStatusFailed); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation goal improvement on session failure")
 		}
 	}
 	o.enqueueLinearMilestone(ctx, run, "failed")

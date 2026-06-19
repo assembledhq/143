@@ -144,6 +144,21 @@ func (m *mockSessionTabManager) ListTabMessages(_ context.Context, _ integration
 	return json.RawMessage(`{"data":[{"id":1,"role":"assistant","content":"done"}],"meta":{"next_cursor":"0"}}`), nil
 }
 
+type mockAutomationGoalImprovementCompleter struct {
+	name string
+}
+
+func (m *mockAutomationGoalImprovementCompleter) Name() string {
+	return m.name
+}
+
+func (m *mockAutomationGoalImprovementCompleter) CompleteGoalImprovement(_ context.Context, params integration.CompleteAutomationGoalImprovementParams) (*integration.CompleteAutomationGoalImprovementResult, error) {
+	return &integration.CompleteAutomationGoalImprovementResult{
+		ImprovementID: params.ImprovementID,
+		Status:        "completed",
+	}, nil
+}
+
 // --------------------------------------------------------------------------
 // Mock: CITestInsights
 // --------------------------------------------------------------------------
@@ -201,6 +216,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterPullRequestCreator(&mockPullRequestCreator{name: "session"})
 	reg.RegisterSessionTabManager(&mockSessionTabManager{name: "session_tabs"})
 	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
+	reg.RegisterAutomationGoalImprovementCompleter(&mockAutomationGoalImprovementCompleter{name: "automation_goal_improvement"})
 	reg.RegisterCITestInsights(&mockCITestInsights{name: "circleci"})
 	return reg
 }
@@ -570,33 +586,34 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 5 session tab tools + 1 project proposer + 3 ci test insights = 26
-	if len(tools) != 26 {
+	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 27
+	if len(tools) != 27 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 26 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 27 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
-		"github_list_recent_prs":            false,
-		"github_get_pr_reviews":             false,
-		"notion_search_documents":           false,
-		"notion_get_document":               false,
-		"slack_search_messages":             false,
-		"slack_get_thread":                  false,
-		"issue_create":                      false,
-		"create_pr":                         false,
-		"session_tabs_list":                 false,
-		"session_tabs_get":                  false,
-		"session_tabs_create":               false,
-		"session_tabs_send":                 false,
-		"session_tabs_messages":             false,
-		"project_propose":                   false,
-		"circleci_list_flaky_tests":         false,
-		"circleci_get_job_test_results":     false,
-		"circleci_get_recent_test_failures": false,
+		"github_list_recent_prs":               false,
+		"github_get_pr_reviews":                false,
+		"notion_search_documents":              false,
+		"notion_get_document":                  false,
+		"slack_search_messages":                false,
+		"slack_get_thread":                     false,
+		"issue_create":                         false,
+		"create_pr":                            false,
+		"session_tabs_list":                    false,
+		"session_tabs_get":                     false,
+		"session_tabs_create":                  false,
+		"session_tabs_send":                    false,
+		"session_tabs_messages":                false,
+		"automation_goal_improvement_complete": false,
+		"project_propose":                      false,
+		"circleci_list_flaky_tests":            false,
+		"circleci_get_job_test_results":        false,
+		"circleci_get_recent_test_failures":    false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; ok {

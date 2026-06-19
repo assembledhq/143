@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
+	automationservice "github.com/assembledhq/143/internal/services/automations"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -48,6 +49,8 @@ type AutomationHandler struct {
 	jobStore              *db.JobStore
 	capabilityStore       *db.AgentCapabilityPolicyStore
 	capabilityService     *agentcapabilities.Service
+	goalImprovement       *automationservice.GoalImprovementService
+	canceller             SessionCanceller
 	audit                 *db.AuditEmitter
 	pool                  db.TxStarter // needed for transactional RunNow
 	logger                zerolog.Logger
@@ -82,6 +85,14 @@ func (h *AutomationHandler) SetJobStore(jobStore *db.JobStore) {
 func (h *AutomationHandler) SetCapabilityDependencies(store *db.AgentCapabilityPolicyStore, svc *agentcapabilities.Service) {
 	h.capabilityStore = store
 	h.capabilityService = svc
+}
+
+func (h *AutomationHandler) SetGoalImprovementService(service *automationservice.GoalImprovementService) {
+	h.goalImprovement = service
+}
+
+func (h *AutomationHandler) SetCanceller(canceller SessionCanceller) {
+	h.canceller = canceller
 }
 
 func (h *AutomationHandler) SetAuditEmitter(audit *db.AuditEmitter) {

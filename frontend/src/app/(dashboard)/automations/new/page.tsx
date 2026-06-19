@@ -55,6 +55,7 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationComposer } from "@/components/automation-composer";
+import { AutomationGoalImprovementControl } from "@/components/automation-goal-improvement";
 import {
   AutomationCapabilitiesEditor,
   capabilitySummary,
@@ -82,11 +83,7 @@ import type {
   AutomationGitHubEventFilters,
   ListResponse,
 } from "@/lib/types";
-import {
-  browserTimezone,
-  hourOptions,
-  minuteOptions,
-} from "../schedule-time";
+import { browserTimezone, hourOptions, minuteOptions } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
 
 export default function NewAutomationPage() {
@@ -140,7 +137,9 @@ export default function NewAutomationPage() {
   const [reasoningEffort, setReasoningEffort] =
     useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
-  const [capabilityOverride, setCapabilityOverride] = useState<AgentCapabilityGrant[] | null>(null);
+  const [capabilityOverride, setCapabilityOverride] = useState<
+    AgentCapabilityGrant[] | null
+  >(null);
   const [redirecting, setRedirecting] = useState(false);
 
   const { data: settingsResponse } = useQuery({
@@ -157,13 +156,19 @@ export default function NewAutomationPage() {
   });
   const repos = reposData?.data ?? [];
 
-  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+  const { data: capabilityCatalogResponse } = useQuery<
+    ListResponse<AgentCapabilityDefinition>
+  >({
     queryKey: ["agent-capabilities"],
     queryFn: () => api.settings.getAgentCapabilities(),
   });
-  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+  const capabilityCatalog = useMemo(
+    () => capabilityCatalogResponse?.data ?? [],
+    [capabilityCatalogResponse?.data],
+  );
   const capabilityGrants = useMemo(
-    () => capabilityOverride ?? normalizeCapabilityGrants(capabilityCatalog, []),
+    () =>
+      capabilityOverride ?? normalizeCapabilityGrants(capabilityCatalog, []),
     [capabilityCatalog, capabilityOverride],
   );
 
@@ -318,6 +323,29 @@ export default function NewAutomationPage() {
             }
             agentType={effectiveAgentType}
             goalEditorContainerRef={goalEditorRef}
+            goalImprovementControls={
+              <AutomationGoalImprovementControl
+                name={name}
+                goal={goal}
+                repositoryId={repoId || undefined}
+                scope={scope.trim() || undefined}
+                config={{
+                  schedule_type: scheduleEnabled ? "interval" : "none",
+                  triggers: productTriggers,
+                  github_event_filters: githubEventFilters,
+                  base_branch: selectedBaseBranch.trim() || undefined,
+                  agent_type: effectiveAgentType,
+                  model,
+                  reasoning_effort:
+                    showReasoningSelector && reasoningEffort
+                      ? reasoningEffort
+                      : undefined,
+                  pre_pr_review_loops: effectivePrePRReviewLoops,
+                }}
+                disabled={createMutation.isPending || redirecting}
+                onDraftApply={setGoal}
+              />
+            }
             footerControls={
               <>
                 <Select value={repoId} onValueChange={setSelectedRepoId}>
@@ -622,7 +650,12 @@ export default function NewAutomationPage() {
                         <div className="flex items-center justify-between gap-3">
                           <Label>Capabilities</Label>
                           <span className="truncate text-xs text-muted-foreground">
-                            {capabilityOverride ? capabilitySummary(capabilityCatalog, capabilityOverride) : "Org defaults"}
+                            {capabilityOverride
+                              ? capabilitySummary(
+                                  capabilityCatalog,
+                                  capabilityOverride,
+                                )
+                              : "Org defaults"}
                           </span>
                         </div>
                         <AutomationCapabilitiesEditor

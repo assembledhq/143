@@ -50,6 +50,9 @@ func (s *capabilityFilteredToolSource) toolAllowed(name string) bool {
 	if namespace == NamespaceCapability {
 		return true
 	}
+	if namespace == NamespaceAutomationGoalImprovement && action == ActionComplete {
+		return true
+	}
 	return s.allowed[string(namespace)+" "+string(action)]
 }
 

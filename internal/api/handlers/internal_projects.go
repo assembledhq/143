@@ -120,6 +120,10 @@ func (h *InternalProjectHandler) Propose(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token", err)
 		return
 	}
+	if claims.SessionOrigin == string(models.SessionOriginAutomationGoalImprovement) {
+		writeError(w, r, http.StatusForbidden, "TOOL_NOT_AVAILABLE", "project proposals are not available to automation goal improvement sessions")
+		return
+	}
 
 	var req proposeProjectRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {

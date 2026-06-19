@@ -551,6 +551,31 @@ type AddEvalCandidateResult struct {
 }
 
 // --------------------------------------------------------------------------
+// AutomationGoalImprovementCompleter — deep automation goal proposals
+// --------------------------------------------------------------------------
+
+type AutomationGoalImprovementCompleter interface {
+	Name() string
+	CompleteGoalImprovement(ctx context.Context, params CompleteAutomationGoalImprovementParams) (*CompleteAutomationGoalImprovementResult, error)
+}
+
+type CompleteAutomationGoalImprovementParams struct {
+	ImprovementID string   `json:"improvement_id"`
+	ProposedGoal  string   `json:"proposed_goal"`
+	Rationale     string   `json:"rationale"`
+	Changes       []string `json:"changes,omitempty"`
+	Evidence      []string `json:"evidence,omitempty"`
+	Risks         []string `json:"risks,omitempty"`
+	Confidence    string   `json:"confidence"`
+	Warnings      []string `json:"warnings,omitempty"`
+}
+
+type CompleteAutomationGoalImprovementResult struct {
+	ImprovementID string `json:"improvement_id"`
+	Status        string `json:"status"`
+}
+
+// --------------------------------------------------------------------------
 // ProjectProposer — internal 143 project proposal creation
 // --------------------------------------------------------------------------
 

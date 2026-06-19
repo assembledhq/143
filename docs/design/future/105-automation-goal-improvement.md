@@ -1,6 +1,6 @@
 # Design: Automation Goal Improvement
 
-> **Status:** Future | **Last reviewed:** 2026-06-18
+> **Status:** Implemented | **Last reviewed:** 2026-06-19
 
 ## Problem
 
@@ -371,6 +371,7 @@ Audit events should capture:
 
 - improvement requested,
 - improvement completed or failed,
+- improvement canceled,
 - improvement applied.
 
 The existing automation update audit diff should still record the actual `goal` before and after. Include `automation_goal_improvement_id`, `mode`, and `base_goal_hash` in audit details.
@@ -397,6 +398,13 @@ The existing automation update audit diff should still record the actual `goal` 
 5. Add creation-time deep improve for selected repositories.
 6. Later: suggest running goal improvement after repeated failures or repeated no-op runs, but still require user approval before applying.
 
+### Implementation Progress
+
+- **Implemented:** durable `automation_goal_improvements` proposals, fast-improve prompt templates, draft/saved fast-improve API routes, proposal get/list/apply/cancel routes, stale-goal apply protection, saved-run evidence snapshots with PR/CI summary metadata, stale draft proposal expiry, and audit events for requested/completed/failed/canceled/applied proposals.
+- **Implemented:** automation creation and saved-edit UI split button, proposal review dialog with a compact diff, draft-local apply, saved apply, stale-goal regenerate, session link, cancellation, and recent proposal history for saved automations.
+- **Implemented:** saved and creation-time deep improvement sessions with `automation_goal_improvement` session origin, proposal-linked `run_agent` dispatch, read-only capability snapshot, scoped sandbox completion token, restricted `143-tools automation-goal-improvement complete` write-back, internal completion authorization, direct internal API blocking for PR/issue/project side effects, judge-before-complete validation, failed/canceled proposal recording, linked-session cancel requests, one-running-deep-proposal enforcement for saved automations, dedicated route rate limits, client-side debounce, and UI polling for running/completed/failed/canceled deep proposals.
+- **Deferred:** passive repeated-failure/no-op recommendations. The rollout plan already treats this as a later suggestion mechanism that must still require human approval.
+
 ## Tests And Verification
 
 Backend:
@@ -421,13 +429,13 @@ Verification follows normal repo requirements:
 - Go changes: `go vet ./...`, `go build ./...`, `go test ./...`.
 - Frontend changes: from `frontend/`, `npm run typecheck`, `npm run lint`, `npm run build`.
 
-## Open Questions
+## Decisions
 
-- Should creation-time deep improve ship in the first pass, or should deep require saving the automation first?
-- Should users choose which evidence classes are included in deep improve, or should the system infer them from capabilities and trigger type?
-- Should proposal history be retained indefinitely, or expire draft-only proposals after a short retention window?
-- Should the deep agent use the automation's configured model or the org default coding-agent model?
-- Should repeated failures surface a passive `Improve goal` recommendation on the automation detail page?
+- Creation-time deep improve ships for drafts with a selected repository. Draft proposals use `automation_id = NULL` and apply only to local draft goal state.
+- Evidence classes are inferred from the workflow. Saved fast improve stores bounded run/session evidence plus PR/CI summary metadata when present; deep improve receives a read-only capability snapshot for repository, session history, PR history, CI history, and review feedback.
+- Saved proposal history is retained as durable audit-supporting product history. Draft-only active proposals expire after a short TTL so abandoned creation flows do not leave indefinitely running proposal state.
+- Saved deep improve uses the automation's configured agent/model settings when present. Draft deep improve uses the default Codex agent path because no saved automation policy exists yet.
+- Passive recommendations after repeated failures or repeated no-op runs remain a later follow-up; they must still create user-reviewed proposals and must not auto-apply goals.
 
 ## Engineering Implementation Spec
 
@@ -439,7 +447,7 @@ This should be implemented in small vertical phases. Each phase should keep gene
 - Add prompt templates and render functions for fast improvement and proposal judging.
 - Add a small service that builds draft/saved improvement inputs, calls the configured LLM client, validates JSON output, runs the judge when enabled, and stores a completed proposal.
 - Add handlers for draft create, saved create, proposal get, and proposal apply. Saved apply must check `base_goal_hash` against the current automation goal before patching.
-- Add audit details for proposal creation/completion/apply, while preserving the existing automation goal diff.
+- Add audit details for proposal creation/completion/failure/cancellation/apply, while preserving the existing automation goal diff.
 
 ### Phase 2: Fast Improve UI
 
