@@ -3833,6 +3833,7 @@ type stubPRService struct {
 	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
+	syncPRPreviewSurfacesFn        func(context.Context, ghservice.SyncPRPreviewSurfacesPayload) error
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -3894,6 +3895,13 @@ func (s *stubPRService) QueueMergeWhenReady(ctx context.Context, orgID, pullRequ
 func (s *stubPRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
 	if s.processMergeWhenReadyFn != nil {
 		return s.processMergeWhenReadyFn(ctx, orgID, pullRequestID)
+	}
+	return nil
+}
+
+func (s *stubPRService) SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error {
+	if s.syncPRPreviewSurfacesFn != nil {
+		return s.syncPRPreviewSurfacesFn(ctx, payload)
 	}
 	return nil
 }
@@ -4342,6 +4350,21 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			},
 			expectErr: "unmarshal merge_pull_request_when_ready payload",
 		},
+		{
+			name:    "sync pr preview surfaces passes decoded payload",
+			payload: json.RawMessage(`{"org_id":"` + orgID.String() + `","repository_id":"` + prID.String() + `","owner":"acme","repo":"web","pr_number":42,"head_sha":"abc123","fork":true,"draft":true}`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newSyncPRPreviewSurfacesHandler(services, logger)
+			},
+		},
+		{
+			name:    "sync pr preview surfaces rejects invalid payload",
+			payload: json.RawMessage(`oops`),
+			handler: func(services *Services, logger zerolog.Logger) JobHandler {
+				return newSyncPRPreviewSurfacesHandler(services, logger)
+			},
+			expectErr: "unmarshal sync_pr_preview_surfaces payload",
+		},
 	}
 
 	for _, tt := range tests {
@@ -4377,6 +4400,11 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.prID = gotPRID
 						return nil
 					},
+					syncPRPreviewSurfacesFn: func(_ context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error {
+						called.surfaceCalls++
+						called.surfacePayload = payload
+						return nil
+					},
 				},
 			}
 
@@ -4406,6 +4434,16 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 				require.Equal(t, 1, called.mergeWhenReadyCalls, "merge-when-ready handler should invoke the PR service once")
 				require.Equal(t, orgID, called.orgID, "merge-when-ready handler should parse and pass the org ID")
 				require.Equal(t, prID, called.prID, "merge-when-ready handler should parse and pass the pull request ID")
+			case "sync pr preview surfaces passes decoded payload":
+				require.Equal(t, 1, called.surfaceCalls, "surface sync handler should invoke the PR service once")
+				require.Equal(t, orgID, called.surfacePayload.OrgID, "surface sync handler should pass org ID")
+				require.Equal(t, prID, called.surfacePayload.RepositoryID, "surface sync handler should pass repository ID")
+				require.Equal(t, "acme", called.surfacePayload.Owner, "surface sync handler should pass owner")
+				require.Equal(t, "web", called.surfacePayload.Repo, "surface sync handler should pass repo")
+				require.Equal(t, 42, called.surfacePayload.PRNumber, "surface sync handler should pass PR number")
+				require.Equal(t, "abc123", called.surfacePayload.HeadSHA, "surface sync handler should pass head SHA")
+				require.True(t, called.surfacePayload.Fork, "surface sync handler should preserve fork flag")
+				require.True(t, called.surfacePayload.Draft, "surface sync handler should preserve draft flag")
 			}
 		})
 	}
@@ -4439,10 +4477,12 @@ type prHandlerCalls struct {
 	reconcileCalls      int
 	enrichCalls         int
 	mergeWhenReadyCalls int
+	surfaceCalls        int
 	orgID               uuid.UUID
 	prID                uuid.UUID
 	limit               int
 	version             int64
+	surfacePayload      ghservice.SyncPRPreviewSurfacesPayload
 }
 
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
@@ -5356,10 +5396,13 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
 			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":2}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, true, true, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -5448,10 +5491,13 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
 			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":1}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, true, true, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
@@ -5494,10 +5540,13 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
 			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":2}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, true, true, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -5695,7 +5744,7 @@ func workerOrganizationColumns() []string {
 }
 
 func workerRepositoryPreviewPolicyColumns() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func workerRepositoryColumns() []string {

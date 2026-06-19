@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -36,6 +37,10 @@ type branchPreviewGitHub interface {
 	CommitExists(ctx context.Context, token, owner, repo, sha string) error
 	GetPullRequestHead(ctx context.Context, token, owner, repo string, number int) (ghservice.PullRequestHead, error)
 	GetFileContent(ctx context.Context, token, owner, repo, ref, path string) (string, error)
+}
+
+type branchPreviewGitHubInstallationDetails interface {
+	GetInstallationDetails(ctx context.Context, installationID int64) (ghservice.InstallationDetails, error)
 }
 
 type BranchPreviewHandler struct {
@@ -274,8 +279,15 @@ type restartBranchPreviewRequest struct {
 }
 
 type updatePreviewPolicyRequest struct {
-	AutoMode           *models.PreviewAutoMode           `json:"auto_mode"`
-	SessionPrewarmMode *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
+	AutoMode                  *models.PreviewAutoMode           `json:"auto_mode"`
+	SessionPrewarmMode        *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
+	PRPreviewSurfacesEnabled  *bool                             `json:"pr_preview_surfaces_enabled"`
+	GitHubPRCommentEnabled    *bool                             `json:"github_pr_comment_enabled"`
+	GitHubCommitStatusEnabled *bool                             `json:"github_commit_status_enabled"`
+}
+
+type testPreviewPolicyRequest struct {
+	PreviewConfigName *string `json:"preview_config_name"`
 }
 
 func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -2087,7 +2099,112 @@ func (h *BranchPreviewHandler) ListPolicies(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICIES_LIST_FAILED", "failed to list preview policies", err)
 		return
 	}
+	if h.repos != nil {
+		h.enrichPreviewPolicyPermissions(r.Context(), orgID, policies)
+	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.RepositoryPreviewPolicySummary]{Data: policies})
+}
+
+func (h *BranchPreviewHandler) enrichPreviewPolicyPermissions(ctx context.Context, orgID uuid.UUID, policies []models.RepositoryPreviewPolicySummary) {
+	detailsGetter, hasDetails := h.github.(branchPreviewGitHubInstallationDetails)
+	detailsByInstallation := make(map[int64]ghservice.InstallationDetails)
+	for i := range policies {
+		repo, err := h.repos.GetByID(ctx, orgID, policies[i].RepositoryID)
+		if err != nil {
+			policies[i].GitHubPRCommentPermissionOK = false
+			policies[i].GitHubCommitStatusPermissionOK = false
+			continue
+		}
+		h.enrichPreviewPolicyConfigReadiness(ctx, repo, &policies[i])
+		if !hasDetails {
+			continue
+		}
+		details, ok := detailsByInstallation[repo.InstallationID]
+		if !ok {
+			details, err = detailsGetter.GetInstallationDetails(ctx, repo.InstallationID)
+			if err != nil {
+				policies[i].GitHubPRCommentPermissionOK = false
+				policies[i].GitHubCommitStatusPermissionOK = false
+				continue
+			}
+			detailsByInstallation[repo.InstallationID] = details
+		}
+		policies[i].GitHubPRCommentPermissionOK = githubPRCommentPermissionOK(details.Permissions)
+		policies[i].GitHubCommitStatusPermissionOK = githubCommitStatusPermissionOK(details.Permissions)
+	}
+}
+
+func (h *BranchPreviewHandler) enrichPreviewPolicyConfigReadiness(ctx context.Context, repo models.Repository, policy *models.RepositoryPreviewPolicySummary) {
+	if h.github == nil || policy == nil {
+		return
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" || strings.TrimSpace(repo.DefaultBranch) == "" {
+		return
+	}
+	token, err := h.github.GetInstallationToken(ctx, repo.InstallationID)
+	if err != nil {
+		// Transient GitHub error — preserve DB-computed readiness so the
+		// settings page does not flash "not ready" during outages.
+		return
+	}
+	content, err := h.github.GetFileContent(ctx, token, owner, repoName, repo.DefaultBranch, ".143/config.json")
+	if err != nil {
+		var apiErr *ghservice.GitHubAPIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			// Definitive signal: the config file is absent from the default branch.
+			policy.PreviewConfigured = false
+			policy.PreviewReady = false
+			policy.PreviewReadinessMissingReason = "Add .143/config.json first"
+		}
+		// Any other error (rate-limit, outage, etc.) is transient — preserve
+		// DB-computed readiness rather than demoting a working repository.
+		return
+	}
+	options, err := preview.InspectConfigOptions([]byte(content), "")
+	if err != nil {
+		policy.PreviewConfigured = false
+		policy.PreviewReady = false
+		policy.PreviewReadinessMissingReason = "Fix .143/config.json first"
+		return
+	}
+	policy.PreviewConfigured = true
+	policy.PreviewConfigNames = options.Names
+	policy.PreviewConfigDefaultName = options.DefaultName
+	policy.PreviewConfigRequiresSelection = options.RequiresSelection
+	if options.RequiresSelection {
+		policy.PreviewReady = false
+		policy.PreviewReadinessMissingReason = "Select a preview config and run a successful test preview before enabling GitHub PR links"
+		return
+	}
+	cfg, err := preview.ParseNamedConfig([]byte(content), options.SelectedName)
+	if err != nil {
+		policy.PreviewReady = false
+		policy.PreviewReadinessMissingReason = "Fix .143/config.json first"
+		return
+	}
+	detection := preview.DetectReadiness(cfg)
+	if detection.Readiness != models.PreviewReadinessReady {
+		policy.PreviewReady = false
+		policy.PreviewReadinessMissingReason = "Fix .143/config.json first"
+		return
+	}
+	if !policy.PreviewSuccessRecorded {
+		policy.PreviewReady = false
+		policy.PreviewReadinessMissingReason = "Run a successful test preview before enabling GitHub PR links"
+	}
+}
+
+func githubPermissionWrites(value string) bool {
+	return value == "write" || value == "admin"
+}
+
+func githubPRCommentPermissionOK(perms ghservice.InstallationPermissions) bool {
+	return githubPermissionWrites(perms.Issues) || githubPermissionWrites(perms.PullRequests)
+}
+
+func githubCommitStatusPermissionOK(perms ghservice.InstallationPermissions) bool {
+	return githubPermissionWrites(perms.Statuses)
 }
 
 func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
@@ -2107,7 +2224,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
-	if req.AutoMode == nil && req.SessionPrewarmMode == nil {
+	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.PRPreviewSurfacesEnabled == nil && req.GitHubPRCommentEnabled == nil && req.GitHubCommitStatusEnabled == nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_POLICY", "at least one preview policy field is required")
 		return
 	}
@@ -2123,8 +2240,11 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
+	var repo models.Repository
+	repoLoaded := false
 	if h.repos != nil {
-		if _, err := h.repos.GetByID(r.Context(), orgID, repoID); err != nil {
+		loaded, err := h.repos.GetByID(r.Context(), orgID, repoID)
+		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
 				return
@@ -2132,18 +2252,69 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to load repository", err)
 			return
 		}
+		repo = loaded
+		repoLoaded = true
+		if !repo.IsActive() {
+			writeError(w, r, http.StatusConflict, "REPOSITORY_DISCONNECTED", "repository is disconnected")
+			return
+		}
 	}
 	beforeMode := models.PreviewAutoModeOff
 	beforeSessionPrewarmMode := models.PreviewSessionPrewarmModeOff
+	beforeSurfaces := false
+	beforeComment := true
+	beforeStatus := true
 	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
 		beforeMode = existing.AutoMode
 		beforeSessionPrewarmMode = existing.SessionPrewarmMode
+		beforeSurfaces = existing.PRPreviewSurfacesEnabled
+		beforeComment = existing.GitHubPRCommentEnabled
+		beforeStatus = existing.GitHubCommitStatusEnabled
 	} else if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_LOOKUP_FAILED", "failed to load preview policy", existingErr)
 		return
 	}
-	policy, err := h.previews.UpdateRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, req.AutoMode, req.SessionPrewarmMode)
+	nextSurfaces := beforeSurfaces
+	if req.PRPreviewSurfacesEnabled != nil {
+		nextSurfaces = *req.PRPreviewSurfacesEnabled
+	}
+	nextComment := beforeComment
+	if req.GitHubPRCommentEnabled != nil {
+		nextComment = *req.GitHubPRCommentEnabled
+	}
+	nextStatus := beforeStatus
+	if req.GitHubCommitStatusEnabled != nil {
+		nextStatus = *req.GitHubCommitStatusEnabled
+	}
+	if nextSurfaces && repoLoaded {
+		if detailsGetter, ok := h.github.(branchPreviewGitHubInstallationDetails); ok {
+			details, detailsErr := detailsGetter.GetInstallationDetails(r.Context(), repo.InstallationID)
+			if detailsErr != nil {
+				writeError(w, r, http.StatusBadGateway, "GITHUB_PERMISSION_CHECK_FAILED", "failed to check GitHub App permissions", detailsErr)
+				return
+			}
+			if nextComment && !githubPRCommentPermissionOK(details.Permissions) {
+				writeError(w, r, http.StatusBadRequest, "GITHUB_PERMISSION_MISSING", "GitHub App needs Issues write or Pull requests write permission to publish PR preview comments")
+				return
+			}
+			if nextStatus && !githubCommitStatusPermissionOK(details.Permissions) {
+				writeError(w, r, http.StatusBadRequest, "GITHUB_PERMISSION_MISSING", "GitHub App needs Commit statuses write permission to publish PR preview statuses")
+				return
+			}
+		}
+	}
+	policy, err := h.previews.UpsertRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, db.RepositoryPreviewPolicyPatch{
+		AutoMode:                  req.AutoMode,
+		SessionPrewarmMode:        req.SessionPrewarmMode,
+		PRPreviewSurfacesEnabled:  req.PRPreviewSurfacesEnabled,
+		GitHubPRCommentEnabled:    req.GitHubPRCommentEnabled,
+		GitHubCommitStatusEnabled: req.GitHubCommitStatusEnabled,
+	})
 	if err != nil {
+		if errors.Is(err, db.ErrPreviewNotReady) {
+			writeError(w, r, http.StatusBadRequest, "PREVIEW_NOT_READY", "run a successful test preview before enabling GitHub PR links", err)
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_UPDATE_FAILED", "failed to update preview policy", err)
 		return
 	}
@@ -2155,6 +2326,15 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		if req.SessionPrewarmMode != nil {
 			changes["session_prewarm_mode"] = map[string]any{"before": beforeSessionPrewarmMode, "after": policy.SessionPrewarmMode}
 		}
+		if req.PRPreviewSurfacesEnabled != nil {
+			changes["pr_preview_surfaces_enabled"] = map[string]any{"before": beforeSurfaces, "after": policy.PRPreviewSurfacesEnabled}
+		}
+		if req.GitHubPRCommentEnabled != nil {
+			changes["github_pr_comment_enabled"] = map[string]any{"before": beforeComment, "after": policy.GitHubPRCommentEnabled}
+		}
+		if req.GitHubCommitStatusEnabled != nil {
+			changes["github_commit_status_enabled"] = map[string]any{"before": beforeStatus, "after": policy.GitHubCommitStatusEnabled}
+		}
 		details, marshalErr := json.Marshal(map[string]any{
 			"repository_id": repoID.String(),
 			"changes":       changes,
@@ -2165,6 +2345,111 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.RepositoryPreviewPolicy]{Data: policy})
+}
+
+func (h *BranchPreviewHandler) TestPolicyPreview(w http.ResponseWriter, r *http.Request) {
+	if h.previews == nil || h.repos == nil || h.github == nil {
+		writeError(w, r, http.StatusInternalServerError, "PREVIEW_UNAVAILABLE", "preview service is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	userID, ok := previewRequestUserID(r.Context(), user)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	repoID, err := uuid.Parse(chi.URLParam(r, "repository_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "invalid repository_id")
+		return
+	}
+	var req testPreviewPolicyRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+			return
+		}
+	}
+	repo, err := h.repos.GetByID(r.Context(), orgID, repoID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOOKUP_FAILED", "failed to load repository", err)
+		return
+	}
+	if !repo.IsActive() {
+		writeError(w, r, http.StatusConflict, "REPOSITORY_DISCONNECTED", "repository is disconnected")
+		return
+	}
+	owner, name, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || name == "" {
+		writeError(w, r, http.StatusInternalServerError, "INVALID_REPOSITORY_NAME", "repository full name is invalid")
+		return
+	}
+	branch := strings.TrimSpace(repo.DefaultBranch)
+	if branch == "" {
+		writeError(w, r, http.StatusBadRequest, "DEFAULT_BRANCH_MISSING", "repository default branch is missing")
+		return
+	}
+	token, tokenErr := h.github.GetInstallationToken(r.Context(), repo.InstallationID)
+	if tokenErr != nil {
+		writeError(w, r, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "failed to get GitHub token", tokenErr)
+		return
+	}
+	head, headErr := h.github.ResolveBranchHead(r.Context(), token, owner, name, branch)
+	if headErr != nil {
+		writeError(w, r, http.StatusBadGateway, "BRANCH_HEAD_RESOLVE_FAILED", "failed to resolve branch head from GitHub", headErr)
+		return
+	}
+	configContent, contentErr := h.github.GetFileContent(r.Context(), token, owner, name, head, ".143/config.json")
+	if contentErr != nil {
+		writeError(w, r, http.StatusBadGateway, "PREVIEW_CONFIG_LOOKUP_FAILED", "failed to read .143/config.json", contentErr)
+		return
+	}
+	requestedConfigName := ""
+	if req.PreviewConfigName != nil {
+		requestedConfigName = strings.TrimSpace(*req.PreviewConfigName)
+	}
+	configName, parsedConfig, configErr := validatePreviewConfigContent([]byte(configContent), requestedConfigName)
+	if configErr != nil {
+		writeError(w, r, configErr.status, configErr.code, configErr.message, configErr.err)
+		return
+	}
+	sourceID := fmt.Sprintf("preview-policy-test:%s:%s:%s:%s", repo.ID, branch, head, configName)
+	target, targetErr := h.previews.GetPreviewTargetBySource(r.Context(), orgID, models.PreviewSourceTypeManual, sourceID)
+	if targetErr != nil {
+		if !errors.Is(targetErr, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load preview target", targetErr)
+			return
+		}
+		target = &models.PreviewTarget{
+			OrgID:             orgID,
+			RepositoryID:      repo.ID,
+			Branch:            branch,
+			CommitSHA:         head,
+			PreviewConfigName: configName,
+			SourceType:        models.PreviewSourceTypeManual,
+			SourceID:          sourceID,
+			SourceURL:         fmt.Sprintf("https://github.com/%s/%s/tree/%s", owner, name, branch),
+			CreatedByUserID:   userID,
+			RequestID:         nilIfEmpty(chiMiddleware.GetReqID(r.Context())),
+		}
+		if err := h.previews.CreatePreviewTarget(r.Context(), target); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_CREATE_FAILED", "failed to create preview target", err)
+			return
+		}
+	}
+	resp, startErr := h.startTargetRuntimeWithOptions(r.Context(), orgID, userID, repo, target, nil, false, parsedConfig, branchPreviewStartOptions{
+		Initiator: "settings_test_preview",
+	})
+	if startErr != nil {
+		writePreviewHTTPError(w, r, startErr)
+		return
+	}
+	writeJSON(w, http.StatusCreated, models.SingleResponse[branchPreviewResponse]{Data: resp})
 }
 
 func (h *BranchPreviewHandler) CreateAPIToken(w http.ResponseWriter, r *http.Request) {

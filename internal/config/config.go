@@ -290,6 +290,7 @@ type Config struct {
 	PreviewCachePrewarmTimeout              time.Duration `env:"PREVIEW_CACHE_PREWARM_TIMEOUT" envDefault:"15m"`
 	PreviewCachePrewarmPriority             int           `env:"PREVIEW_CACHE_PREWARM_PRIORITY" envDefault:"-50"`
 	PreviewIdleTimeout                      time.Duration `env:"PREVIEW_IDLE_TIMEOUT" envDefault:"30m"`
+	PRPreviewSurfacesEnabled                bool          `env:"PR_PREVIEW_SURFACES_ENABLED" envDefault:"true"`
 
 	// Concurrency caps for the preview subsystem. Each StartPreview checks
 	// these before hydrating a sandbox, so an overloaded worker returns a

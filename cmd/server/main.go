@@ -536,6 +536,11 @@ func main() {
 						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+					if keyringErr != nil {
+						logger.Warn().Err(keyringErr).Msg("failed to initialize preview RPC keyring for Slack preview control; worker RPC auth disabled")
+						previewRPCKeyring = auth.PreviewTokenKeyring{}
+					}
 					var slackBranchPreviewHandler *handlers.BranchPreviewHandler
 					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
 						autoPreviewNodeStore := db.NewNodeStore(pool)
@@ -543,6 +548,9 @@ func main() {
 							MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 							PreferredRegion:      cfg.NodeRegion,
 						})
+						previewStopper := preview.NewWorkerStopper(previewStore, autoPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID, previewManager)
+						prSvc.SetPreviewTeardown(previewStore, previewStopper)
+						prSvc.SetPreviewOriginTemplate(cfg.PreviewOriginTemplate)
 						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
 						services.AutoPreviewStarter = branchPreviewHandler
@@ -553,11 +561,6 @@ func main() {
 						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 						PreferredRegion:      cfg.NodeRegion,
 					})
-					previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
-					if keyringErr != nil {
-						logger.Warn().Err(keyringErr).Msg("failed to initialize preview RPC keyring for Slack preview control; worker RPC auth disabled")
-						previewRPCKeyring = auth.PreviewTokenKeyring{}
-					}
 					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
 					slackPreviewHandler.SetJobStore(jobStore)
 					slackPreviewHandler.SetWorkerRuntime(slackPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID)
@@ -1496,6 +1499,7 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, repoStore, jobStore, logger,
 	)
+	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
 		sandboxProvider,

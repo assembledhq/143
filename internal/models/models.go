@@ -981,6 +981,7 @@ const (
 	JobTypeSessionPreviewPrewarmClassify = "session_preview_prewarm_classify"
 	JobTypeSessionPreviewWarmBuild       = "session_preview_warm_build"
 	JobTypeBackfillPreviewGroups         = "backfill_preview_groups"
+	JobTypeSyncPRPreviewSurfaces         = "sync_pr_preview_surfaces"
 )
 
 // Job represents an async work queue item.
