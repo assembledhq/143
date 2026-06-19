@@ -508,7 +508,7 @@ fi
 # Sync compose file so the remote always runs the latest version. Worker
 # compose can include support-service changes, so stage it until the routine
 # worker fingerprint gate allows promotion.
-if [ "$ROLE" = "worker" ]; then
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new
 else
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
@@ -860,7 +860,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # Clean up staged Caddy inputs on any exit path.
   # stage_caddy_*_if_changed normally consumes them (mv or rm), but this
   # guards against a failure between the scp and that call leaving it on disk.
-  trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new' EXIT
+  trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new' EXIT
 
   # recreate_other_services SKIP_SVCS — force-recreate every compose service
   # except the space-separated list in SKIP_SVCS. Used to update out-of-band
@@ -921,6 +921,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
     rm -f "$new_file"
     return 1
+  }
+
+  promote_staged_app_compose() {
+    local new_file="/opt/143/$COMPOSE_FILE.new"
+    local cur_file="/opt/143/$COMPOSE_FILE"
+    [ -f "$new_file" ] || return 0
+    mv "$new_file" "$cur_file"
   }
 
   caddy_env_from_env_file() {
@@ -991,6 +998,40 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
   }
 
+  caddy_service_config_fingerprint() {
+    compose_service_fingerprint /opt/143/docker-compose.app.yml caddy
+  }
+
+  caddy_active_service_config_fingerprint() {
+    compose_service_active_fingerprint /opt/143/docker-compose.app.yml caddy
+  }
+
+  caddy_service_config_changed() {
+    local fp_file="/opt/143/.caddy-service.fingerprint"
+    local next current
+    next="$(caddy_service_config_fingerprint)"
+
+    if [ ! -f "$fp_file" ]; then
+      printf '%s\n' "$next" > "$fp_file.new"
+      return 0
+    fi
+    current="$(cat "$fp_file")"
+
+    if [ "$current" != "$next" ]; then
+      printf '%s\n' "$next" > "$fp_file.new"
+      return 0
+    fi
+    rm -f "$fp_file.new"
+    return 1
+  }
+
+  commit_caddy_service_config_fingerprint() {
+    local fp_file="/opt/143/.caddy-service.fingerprint"
+    if [ -f "$fp_file.new" ]; then
+      mv "$fp_file.new" "$fp_file"
+    fi
+  }
+
   # reconcile_caddy_service — applies app-edge Caddy changes with the least
   # disruptive path available:
   #   1. Leave Caddy untouched for routine code-only deploys.
@@ -1004,14 +1045,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       caddy_config_changed=1
     fi
 
-    local old_caddy_id new_caddy_id caddy_env_changed=0 caddy_dockerfile_changed="${CADDY_DOCKERFILE_CHANGED:-0}"
+    local old_caddy_id new_caddy_id caddy_env_changed=0 caddy_dockerfile_changed="${CADDY_DOCKERFILE_CHANGED:-0}" caddy_service_config_changed="${CADDY_SERVICE_CONFIG_CHANGED:-0}"
     old_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
 
     if caddy_env_fingerprint_changed "$old_caddy_id"; then
       caddy_env_changed=1
     fi
 
-    if [ -z "$old_caddy_id" ] || [ "$caddy_dockerfile_changed" -eq 1 ] || [ "$caddy_env_changed" -eq 1 ]; then
+    if [ -z "$old_caddy_id" ] || [ "$caddy_dockerfile_changed" -eq 1 ] || [ "$caddy_env_changed" -eq 1 ] || [ "$caddy_service_config_changed" -eq 1 ]; then
       echo "Reconciling Caddy service..."
       docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
 
@@ -1022,6 +1063,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       fi
 
       commit_caddy_env_fingerprint
+      commit_caddy_service_config_fingerprint
 
       if [ -z "$old_caddy_id" ]; then
         echo "Caddy started successfully."
@@ -1512,6 +1554,33 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   compose_service_fingerprint() {
+    local compose_file="$1"
+    shift
+    local read_file="$compose_file"
+    if [ -e "${compose_file}.new" ]; then
+      read_file="${compose_file}.new"
+    fi
+    if [ ! -e "$read_file" ]; then
+      printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
+      return 0
+    fi
+    {
+      local svc
+      for svc in "$@"; do
+        printf -- '--- %s:%s ---\n' "$compose_file" "$svc"
+        awk -v svc="$svc" '
+          /^  [A-Za-z0-9_.-]+:/ {
+            current=$1
+            sub(/:$/, "", current)
+            in_service=(current == svc)
+          }
+          in_service { print }
+        ' "$read_file"
+      done
+    } | sha256sum | awk '{print $1}'
+  }
+
+  compose_service_active_fingerprint() {
     local compose_file="$1"
     shift
     if [ ! -e "$compose_file" ]; then
@@ -2040,6 +2109,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # --ignore-buildable: skip services whose image is built locally (sandbox-dns
   # has both build: and image: 143-sandbox-dns:local in docker-compose.worker.yml,
   # which pull would otherwise treat as a registry reference and fail on).
+  if [ "$ROLE" = "app" ]; then
+    CADDY_SERVICE_CONFIG_CHANGED=0
+    if caddy_service_config_changed; then
+      CADDY_SERVICE_CONFIG_CHANGED=1
+    fi
+    promote_staged_app_compose
+  fi
+
   docker compose -f "$COMPOSE_FILE" pull --ignore-buildable
 
   # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose
