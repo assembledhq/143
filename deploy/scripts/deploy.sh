@@ -1421,7 +1421,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     query="WITH endpoint_blockers AS (
   SELECT 1 FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now()
   UNION ALL
-  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining') AND last_heartbeat_at >= now() - interval '2 minutes'
+  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining')
 )
 SELECT COUNT(*) FROM endpoint_blockers;"
     if ! count="$(printf '%s\n' "$query" | docker run -i --rm --network host -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \

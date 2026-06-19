@@ -520,8 +520,8 @@ func TestWorkerDeployPreflightTargetValidatesBlueGreenReadiness(t *testing.T) {
 	require.Contains(t, preflightText, "NODE_ID WORKER_PRIVATE_IP DB_HOST DB_PASSWORD", "preflight should validate required worker env values")
 	require.Contains(t, preflightText, "WORKER_BLUE_GREEN_PORT_START and WORKER_BLUE_GREEN_PORT_END must be numeric", "preflight should validate numeric blue/green port range")
 	require.Contains(t, preflightText, "FROM preview_runtimes WHERE endpoint_url", "preflight should validate preview runtime endpoint ownership queries")
-	require.Contains(t, preflightText, "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "preflight should treat fresh node registry ownership as an endpoint blocker")
-	require.Contains(t, preflightText, "last_heartbeat_at >= now() - interval '2 minutes'", "preflight should block recently-heartbeating nodes before reusing their preview endpoint")
+	require.Contains(t, preflightText, "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "preflight should treat node registry ownership as an endpoint blocker")
+	require.NotContains(t, preflightText, "last_heartbeat_at >= now() - interval '2 minutes'", "preflight should wait for node rows to be marked dead before reusing their preview endpoint")
 	require.Contains(t, preflightText, "No safe worker blue/green port found", "preflight should give an actionable message when routine deploy cannot find a safe endpoint")
 	require.Contains(t, preflightText, "Use DEPLOY_MODE=maintenance only for disruptive host/runtime/support-service changes", "preflight should preserve the routine-vs-maintenance operator contract")
 }
@@ -685,8 +685,8 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "load_worker_endpoint_check_env", "synchronous worker deploy should load DB endpoint-check credentials before selecting a routine port")
 	require.Contains(t, deploy, "FROM preview_runtimes WHERE endpoint_url", "worker deploy should query active preview runtime endpoints before selecting a generation port")
 	require.Contains(t, deploy, "status IN ('starting', 'ready', 'draining')", "worker deploy should treat starting, ready, and draining preview runtimes as endpoint owners")
-	require.Contains(t, deploy, "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "worker deploy should query fresh node registry endpoint ownership before selecting a generation port")
-	require.Contains(t, deploy, "last_heartbeat_at >= now() - interval '2 minutes'", "worker deploy should avoid reusing endpoints still advertised by recently-heartbeating nodes")
+	require.Contains(t, deploy, "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "worker deploy should query node registry endpoint ownership before selecting a generation port")
+	require.NotContains(t, deploy, "last_heartbeat_at >= now() - interval '2 minutes'", "worker deploy should wait for node rows to be marked dead before reusing advertised endpoints")
 	require.Contains(t, deploy, `find_free_worker_port "$worker_private_ip"`, "worker deploy should pass the worker private IP into port selection so endpoint URLs match runtime routing")
 	require.Contains(t, deploy, "refusing to reuse it", "worker deploy should fail closed when runtime endpoint ownership cannot be verified")
 	require.NotContains(t, deploy, "falling back to blocking worker drain", "routine worker deploy should not interrupt old workers when no extra blue/green port is configured")
@@ -1147,7 +1147,7 @@ esac
 	require.Contains(t, string(stdin), "FROM preview_runtimes WHERE endpoint_url", "worker endpoint ownership query should include preview runtime ownership")
 	require.Contains(t, string(stdin), "endpoint_url = :'endpoint'", "worker endpoint ownership query should use psql SQL-quoted variable interpolation")
 	require.Contains(t, string(stdin), "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "worker endpoint ownership query should include node registry ownership")
-	require.Contains(t, string(stdin), "last_heartbeat_at >= now() - interval '2 minutes'", "worker endpoint ownership query should block fresh stale rows before endpoint reuse")
+	require.NotContains(t, string(stdin), "last_heartbeat_at >= now() - interval '2 minutes'", "worker endpoint ownership query should block active/draining node rows until recovery marks them dead")
 }
 
 func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {

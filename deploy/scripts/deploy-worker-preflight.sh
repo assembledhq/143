@@ -80,7 +80,7 @@ worker_runtime_endpoint_in_use() {
   query="WITH endpoint_blockers AS (
   SELECT 1 FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now()
   UNION ALL
-  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining') AND last_heartbeat_at >= now() - interval '2 minutes'
+  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining')
 )
 SELECT COUNT(*) FROM endpoint_blockers;"
 
@@ -104,7 +104,7 @@ for port in $(seq "$start" "$end"); do
     continue
   fi
   if worker_runtime_endpoint_in_use "$port"; then
-    echo "port $port: active preview_runtimes or fresh node registry rows still own http://${WORKER_PRIVATE_IP}:${port}"
+    echo "port $port: active preview_runtimes or active/draining node registry rows still own http://${WORKER_PRIVATE_IP}:${port}"
     continue
   fi
   echo "worker deploy preflight ok: safe worker blue/green port $port is available"
