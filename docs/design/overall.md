@@ -114,6 +114,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - **Agent tools must use platform paths.** Sandbox agents, automations, and external clients should call `143-tools` or `/api/v1`, so auth, audit, templates, Linear links, PR state, dedupe, and policy checks stay consistent.
 - **Untrusted app previews stay isolated.** Previewed apps run on preview origins, not the main app origin, and preview secrets are delivered through preview-specific backend controls.
 - **Credentials are visible, scoped, and revocable.** Coding-agent credentials, API tokens, GitHub tokens, preview secrets, and CLI tokens each have explicit ownership, scope, runtime state, and audit surfaces.
+- **CLI join links are bearer membership grants.** They grant org membership only after GitHub sign-in, are revocable and optionally bounded by expiry/use count, validate through non-reversible hashes, and expose recoverable install commands only to admins through explicit actions.
 
 ## Known Broad Gaps
 

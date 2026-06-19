@@ -1821,6 +1821,7 @@ export interface InvitationResponse {
 export interface JoinToken {
   id: string;
   token_prefix: string;
+  can_reveal: boolean;
   name: string;
   role: string;
   max_uses?: number | null;
@@ -1831,7 +1832,7 @@ export interface JoinToken {
 }
 
 // CreatedJoinToken is the create response: the plaintext token and the
-// ready-to-paste install command, shown exactly once.
+// ready-to-paste install command.
 export interface CreatedJoinToken {
   id: string;
   token: string;
@@ -1840,6 +1841,12 @@ export interface CreatedJoinToken {
   name: string;
   expires_at?: string | null;
   max_uses?: number | null;
+  install_command: string;
+}
+
+export interface JoinTokenLink {
+  id: string;
+  token_prefix: string;
   install_command: string;
 }
 

@@ -968,6 +968,8 @@ export const api = {
       get<import('./types').ListResponse<import('./types').JoinToken>>('/api/v1/org/join-tokens'),
     createJoinToken: (body: { name?: string; role?: string; max_uses?: number; expires_in_days?: number }) =>
       post<import('./types').SingleResponse<import('./types').CreatedJoinToken>>('/api/v1/org/join-tokens', body),
+    getJoinTokenLink: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').JoinTokenLink>>(`/api/v1/org/join-tokens/${id}/link`),
     revokeJoinToken: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
     // The caller's own CLI device tokens (any authenticated user).
     listCliTokens: () =>

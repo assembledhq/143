@@ -1,6 +1,6 @@
 # Design: 143-tools Local Install & Team Auth
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-09
+> **Status:** Implemented | **Last reviewed:** 2026-06-19
 
 ## Implementation notes (2026-06-09)
 
@@ -23,6 +23,14 @@ All four phases shipped. Deltas from the text below:
 - **Secret scanning**: the repo runs no secret scanner today; the `143u_`/
   `143j_` patterns are documented in `docs/guides/cli-install.md` for teams
   that do, and the sandbox log-redaction layer strips both shapes.
+- **Recoverable join links**: as of migration `000209`, newly created
+  `org_join_tokens` rows keep `token_hash` as the validation key and also store
+  `raw_token_encrypted` with the same AES-GCM application encryption used for
+  credentials. Admins can fetch the install command again for active,
+  unexpired, unexhausted links through a separate endpoint. Successful reveals
+  emit `org.join_token_revealed` without the raw token in audit details. Rows
+  created before `000209` remain unrecoverable because only the hash and
+  display prefix were retained.
 - **Key files**: distribution `internal/api/handlers/cli_distribution.go`
   (+ `assets/install.sh.tmpl`); login flow `internal/api/handlers/auth_cli.go`;
   gateway `internal/api/handlers/cli_tools.go` +
@@ -221,6 +229,7 @@ CREATE TABLE org_join_tokens (
     org_id             UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     token_hash         TEXT NOT NULL,            -- same scheme as api_tokens
     token_prefix       TEXT NOT NULL,            -- "143j_" + first 8 chars, for UI display
+    raw_token_encrypted BYTEA,                   -- encrypted plaintext for admin re-copy
     role               TEXT NOT NULL DEFAULT 'member',  -- role granted on join
     name               TEXT NOT NULL DEFAULT '', -- e.g. "Eng team link, June 2026"
     created_by_user_id UUID NOT NULL REFERENCES users(id),
@@ -366,14 +375,15 @@ revocation — not expiry — is the real control here.
 
 | Route | Method | Auth | Description |
 |---|---|---|---|
-| `/api/v1/org/join-tokens` | POST | session, admin | Body: `{"name", "role", "max_uses?", "expires_in_days?"}`. Returns plaintext token once: `{"data": {"id", "token": "143j_...", "install_command": "curl -fsSL .../install/143j_... \| sh"}}`. |
-| `/api/v1/org/join-tokens` | GET | session, admin | List (prefix, name, role, use_count, status). |
+| `/api/v1/org/join-tokens` | POST | session, admin | Body: `{"name", "role", "max_uses?", "expires_in_days?"}`. Returns the plaintext token and ready install command on creation: `{"data": {"id", "token": "143j_...", "install_command": "curl -fsSL .../install/143j_... \| sh"}}`; new rows also store an encrypted raw token for later admin re-copy. |
+| `/api/v1/org/join-tokens` | GET | session, admin | List (prefix, name, role, use_count, status, `can_reveal`). Does not include plaintext links. |
+| `/api/v1/org/join-tokens/{id}/link` | GET | session, admin | Returns `{"data": {"id", "token_prefix", "install_command"}}` for active recoverable links. Returns `409 JOIN_TOKEN_NOT_RECOVERABLE` for pre-`000209` legacy rows. |
 | `/api/v1/org/join-tokens/{id}` | DELETE | session, admin | Revoke. |
 | `/api/v1/auth/cli-tokens` | GET | any auth | List the caller's own CLI tokens (device, prefix, last_used). |
 | `/api/v1/auth/cli-tokens/{id}` | DELETE | any auth | Revoke own token. `logout` calls this. |
 
 Frontend: a "CLI" card on the Members settings page (create/copy join link, list
-active links) and a "CLI sessions" list on the user's own settings page. Removing a
+active links, re-copy active recoverable links on demand) and a "CLI sessions" list on the user's own settings page. Removing a
 member from the org must also revoke their CLI tokens' access — this falls out
 naturally because bearer auth resolves org access through memberships, but the
 member-removal handler should additionally revoke `user_cli_tokens` rows for users
@@ -447,6 +457,12 @@ config file, so the same binary works in both worlds.
   for this privilege level, and one-click revoke is the mitigation; still, the
   server's request logger must redact the path segment (log as `/install/:token`), and
   the route must be HTTPS-only. Rate-limit join attempts per token.
+- **Join link recovery**: recovering an existing link does not grant a new
+  capability to admins who can already create equivalent links, but it does
+  turn the raw join token into retrievable secret material at rest. Keep
+  validation on `token_hash`, encrypt `raw_token_encrypted` with
+  `ENCRYPTION_MASTER_KEY` when configured, omit plaintext from list responses,
+  and only reveal active links through an explicit audited admin action.
 - **One-time code**: 60-second TTL, single use, stored hashed, bound to the CLI's
   verifier (challenge = SHA-256). The browser/history only ever sees the code, never
   a credential.

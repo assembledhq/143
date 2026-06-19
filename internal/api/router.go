@@ -200,7 +200,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
 	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
 	userCLITokenStore := db.NewUserCLITokenStore(pool)
-	orgJoinTokenStore := db.NewOrgJoinTokenStore(pool)
+	orgJoinTokenStore := db.NewOrgJoinTokenStore(pool, cryptoSvc)
 	authHandler.SetCLIAuthStores(cliAuthCodeStore, userCLITokenStore, orgJoinTokenStore, orgStore)
 	joinTokenHandler := handlers.NewJoinTokenHandler(orgJoinTokenStore, cfg.BaseURL)
 	// Local agent gateway: executes integration tools server-side for
@@ -1478,6 +1478,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// hands out org membership.
 				r.Post("/api/v1/org/join-tokens", joinTokenHandler.Create)
 				r.Get("/api/v1/org/join-tokens", joinTokenHandler.List)
+				r.Get("/api/v1/org/join-tokens/{id}/link", joinTokenHandler.GetLink)
 				r.Delete("/api/v1/org/join-tokens/{id}", joinTokenHandler.Revoke)
 				r.Get("/api/v1/team/invitations", teamHandler.ListInvitations)
 				r.Post("/api/v1/team/invitations", teamHandler.CreateInvitation)
