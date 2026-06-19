@@ -50,26 +50,37 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 	if token := os.Getenv("INTERNAL_API_TOKEN"); token != "" {
 		apiURL := os.Getenv("INTERNAL_API_URL")
 		if apiURL != "" {
-			creator := integration.NewInternalIssueCreator(token, apiURL)
-			reg.RegisterIssueCreator(creator)
-			fmt.Fprintln(logger, "143-tools: registered issue creator")
+			goalImprovementToolsOnly := os.Getenv("AUTOMATION_GOAL_IMPROVEMENT_TOOLS_ENABLED") == "true"
+			if !goalImprovementToolsOnly {
+				creator := integration.NewInternalIssueCreator(token, apiURL)
+				reg.RegisterIssueCreator(creator)
+				fmt.Fprintln(logger, "143-tools: registered issue creator")
 
-			prCreator := integration.NewInternalPullRequestCreator(token, apiURL)
-			reg.RegisterPullRequestCreator(prCreator)
-			fmt.Fprintln(logger, "143-tools: registered PR creator")
+				prCreator := integration.NewInternalPullRequestCreator(token, apiURL)
+				reg.RegisterPullRequestCreator(prCreator)
+				fmt.Fprintln(logger, "143-tools: registered PR creator")
+			}
 
 			tabManager := integration.NewInternalSessionTabManager(token, apiURL)
 			reg.RegisterSessionTabManager(tabManager)
 			fmt.Fprintln(logger, "143-tools: registered session tab manager")
 
-			proposer := integration.NewInternalProjectProposer(token, apiURL)
-			reg.RegisterProjectProposer(proposer)
-			fmt.Fprintln(logger, "143-tools: registered project proposer")
+			if !goalImprovementToolsOnly {
+				proposer := integration.NewInternalProjectProposer(token, apiURL)
+				reg.RegisterProjectProposer(proposer)
+				fmt.Fprintln(logger, "143-tools: registered project proposer")
+			}
 
 			if os.Getenv("EVAL_BOOTSTRAP_TOOLS_ENABLED") == "true" {
 				reporter := integration.NewInternalEvalCandidateReporter(token, apiURL, os.Getenv("EVAL_BOOTSTRAP_RUN_ID"))
 				reg.RegisterEvalCandidateReporter(reporter)
 				fmt.Fprintln(logger, "143-tools: registered eval candidate reporter")
+			}
+
+			if goalImprovementToolsOnly {
+				completer := integration.NewInternalAutomationGoalImprovementCompleter(token, apiURL)
+				reg.RegisterAutomationGoalImprovementCompleter(completer)
+				fmt.Fprintln(logger, "143-tools: registered automation goal improvement completer")
 			}
 		}
 	}

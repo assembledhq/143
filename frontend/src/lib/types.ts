@@ -2772,6 +2772,44 @@ export interface Automation {
   updated_at: string;
 }
 
+export type AutomationGoalImprovementMode = "fast" | "deep";
+export type AutomationGoalImprovementStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export interface AutomationGoalImprovementProposal {
+  rationale?: string;
+  changes?: string[];
+  evidence?: string[];
+  risks?: string[];
+}
+
+export interface AutomationGoalImprovement {
+  id: string;
+  org_id: string;
+  automation_id?: string;
+  repository_id?: string;
+  mode: AutomationGoalImprovementMode;
+  status: AutomationGoalImprovementStatus;
+  input_name?: string;
+  input_goal: string;
+  input_config?: Record<string, unknown>;
+  base_goal_hash: string;
+  evidence_snapshot?: Record<string, unknown>;
+  proposed_goal?: string;
+  proposal?: AutomationGoalImprovementProposal;
+  confidence?: string;
+  warnings?: string[];
+  error_message?: string;
+  analysis_session_id?: string;
+  applied_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AutomationRun {
   id: string;
   automation_id: string;

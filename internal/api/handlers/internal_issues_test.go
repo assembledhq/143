@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
 )
@@ -60,6 +61,38 @@ func TestInternalIssueHandler_InvalidToken(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.Create(rec, req)
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestInternalIssueHandler_AutomationGoalImprovementTokenRejected(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	defer mock.Close()
+
+	handler := newInternalIssueHandler(t, mock)
+	token, err := auth.GenerateSessionThreadTokenWithClaims(
+		handler.signingSecret,
+		uuid.New(),
+		uuid.New(),
+		uuid.New(),
+		nil,
+		[]string{"automation-goal-improvement:complete"},
+		string(models.SessionOriginAutomationGoalImprovement),
+		nil,
+		5*time.Minute,
+	)
+	require.NoError(t, err, "automation goal improvement token should be generated")
+
+	body := `{"title":"test","description":"desc"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/issues", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.Create(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code, "goal improvement sessions should not be allowed to create issues")
+	require.Contains(t, rec.Body.String(), "TOOL_NOT_AVAILABLE", "response should explain the tool is unavailable")
+	require.NoError(t, mock.ExpectationsWereMet(), "no database calls should be made")
 }
 
 func TestInternalIssueHandler_MissingTitle(t *testing.T) {

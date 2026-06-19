@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient, type QueryKey } from "@tanstack/
 import { notify as toast } from "@/lib/notify";
 import { Archive, ArchiveRestore, Plus, Search } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter, useSelectedLayoutSegment } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEventHandler, type KeyboardEvent as ReactKeyboardEvent, type MouseEventHandler, type ReactNode } from "react";
 import { useQueryState, parseAsString } from "nuqs";
 import { PeopleFilter } from "@/components/people-filter";
@@ -34,6 +34,7 @@ import {
   filterToStatusParam,
 } from "@/lib/session-status-groups";
 import { getCountForTab, renderCount } from "@/lib/session-counts";
+import { useSessionsRouteState } from "./sessions-route-state";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -339,8 +340,7 @@ type SidebarSessionRow =
 
 export function SessionSidebar() {
   const router = useRouter();
-  const pathname = usePathname();
-  const selectedSegment = useSelectedLayoutSegment();
+  const routeState = useSessionsRouteState();
   const queryClient = useQueryClient();
   const {
     mode,
@@ -352,13 +352,13 @@ export function SessionSidebar() {
     setPeopleFilter,
   } = usePeopleFilter();
   const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
-  const selectedId = selectedSegment && selectedSegment !== "new" ? selectedSegment : undefined;
+  const selectedId = routeState.selectedSessionId ?? undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const optionRefs = useRef(new Map<string, HTMLDivElement>());
-  const [activeSessionFocus, setActiveSessionFocus] = useState<{ id: string; pathname: string } | null>(null);
+  const [activeSessionFocus, setActiveSessionFocus] = useState<{ id: string; routeKey: string } | null>(null);
   const searchRef = useRef(search);
   const skipNextSearchParamWriteRef = useRef(false);
   // Debounce the search query so rapid typing doesn't fire a request per
@@ -641,7 +641,7 @@ export function SessionSidebar() {
     return merged.filter((s) => sessionTitle(s).toLowerCase().includes(q));
   }, [firstPage, extraPages, search]);
 
-  const isNewSession = pathname === "/sessions/new";
+  const isNewSession = routeState.isCreatingSession;
   const selectedSessionIsDisplayed = !!selectedId && displayedSessions.some((session) => session.id === selectedId);
   const shouldShowCurrentSessionContextRow = !!selectedId && !isNewSession && !selectedSessionIsDisplayed;
   const { data: currentSessionData } = useQuery({
@@ -652,7 +652,7 @@ export function SessionSidebar() {
   });
   const currentSessionContext = shouldShowCurrentSessionContextRow ? currentSessionData?.data : undefined;
   const activeSessionId = activeSessionFocus?.id ?? null;
-  const hasNavigatedFromNewSessionDraft = isNewSession && activeSessionFocus?.pathname === pathname;
+  const hasNavigatedFromNewSessionDraft = isNewSession && activeSessionFocus?.routeKey === routeState.routeKey;
 
   const currentActiveSessionId = useMemo(() => {
     if (displayedSessions.length === 0) {
@@ -742,12 +742,12 @@ export function SessionSidebar() {
     const boundedIndex = Math.min(Math.max(index, 0), displayedSessions.length - 1);
     const next = displayedSessions[boundedIndex];
     if (!next) return;
-    setActiveSessionFocus({ id: next.id, pathname });
+    setActiveSessionFocus({ id: next.id, routeKey: routeState.routeKey });
     focusList();
     requestAnimationFrame(() => {
       optionRefs.current.get(next.id)?.scrollIntoView({ block: "nearest" });
     });
-  }, [displayedSessions, focusList, pathname]);
+  }, [displayedSessions, focusList, routeState.routeKey]);
 
   const moveActiveSession = useCallback((delta: number) => {
     if (displayedSessions.length === 0) return;

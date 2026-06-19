@@ -45,3 +45,18 @@ func TestCapabilityFilteredToolSourceBlocksDirectCall(t *testing.T) {
 	require.True(t, result.IsError, "blocked tool calls should return an error result")
 	require.Contains(t, result.Content[0].Text, "CAPABILITY_DENIED", "blocked tool call should explain capability denial")
 }
+
+func TestCapabilityFilteredToolSourceAllowsAutomationGoalImprovementComplete(t *testing.T) {
+	t.Parallel()
+
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "automation_goal_improvement_complete"},
+		{Name: "pr_create"},
+	}}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityRepoContext, AccessLevel: models.AgentCapabilityAccessRead},
+	}})
+
+	require.Equal(t, []Tool{{Name: "automation_goal_improvement_complete"}}, source.ListTools(), "goal improvement sessions should keep their scoped completion tool visible")
+	result := source.CallTool(context.Background(), "automation_goal_improvement_complete", json.RawMessage(`{}`))
+	require.False(t, result.IsError, "goal improvement completion should remain callable after capability filtering")
+}
