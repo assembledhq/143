@@ -47,6 +47,7 @@ type createJoinTokenRequest struct {
 type joinTokenView struct {
 	ID          uuid.UUID              `json:"id"`
 	TokenPrefix string                 `json:"token_prefix"`
+	CanReveal   bool                   `json:"can_reveal"`
 	Name        string                 `json:"name"`
 	Role        models.Role            `json:"role"`
 	MaxUses     *int                   `json:"max_uses,omitempty"`
@@ -60,6 +61,7 @@ func joinTokenViewOf(t models.OrgJoinToken, now time.Time) joinTokenView {
 	return joinTokenView{
 		ID:          t.ID,
 		TokenPrefix: t.TokenPrefix,
+		CanReveal:   len(t.RawTokenEncrypted) > 0,
 		Name:        t.Name,
 		Role:        t.Role,
 		MaxUses:     t.MaxUses,
@@ -70,8 +72,9 @@ func joinTokenViewOf(t models.OrgJoinToken, now time.Time) joinTokenView {
 	}
 }
 
-// Create mints a join token and returns the plaintext exactly once, along
-// with the ready-to-paste install one-liner.
+// Create mints a join token and returns the plaintext with the
+// ready-to-paste install one-liner. The raw token is also stored encrypted
+// for later admin re-copy; validation still uses only token_hash.
 func (h *JoinTokenHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	orgID := middleware.OrgIDFromContext(r.Context())
@@ -121,7 +124,7 @@ func (h *JoinTokenHandler) Create(w http.ResponseWriter, r *http.Request) {
 		expiresAt := time.Now().AddDate(0, 0, *body.ExpiresInDays)
 		token.ExpiresAt = &expiresAt
 	}
-	if err := h.store.Create(r.Context(), token); err != nil {
+	if err := h.store.Create(r.Context(), token, rawToken); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "JOIN_TOKEN_CREATE_FAILED", "failed to create join token", err)
 		return
 	}
@@ -160,6 +163,43 @@ func (h *JoinTokenHandler) List(w http.ResponseWriter, r *http.Request) {
 		views = append(views, joinTokenViewOf(t, now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": views})
+}
+
+// GetLink returns the ready-to-paste install command for a recoverable
+// active join token. It is deliberately separate from List so loading the
+// settings page doesn't expose every bearer join URL to browser state.
+func (h *JoinTokenHandler) GetLink(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if user == nil || orgID == uuid.Nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(chi.URLParam(r, "id")))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_TOKEN_ID", "token id must be a UUID")
+		return
+	}
+	token, rawToken, err := h.store.GetActiveRecoverableToken(r.Context(), orgID, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "JOIN_TOKEN_NOT_FOUND", "active join token not found")
+		case errors.Is(err, db.ErrOrgJoinTokenNotRecoverable):
+			writeError(w, r, http.StatusConflict, "JOIN_TOKEN_NOT_RECOVERABLE", "join token was created before link recovery was available")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "JOIN_TOKEN_LINK_FAILED", "failed to recover join token", err)
+		}
+		return
+	}
+	h.emitJoinTokenEvent(r, user.ID, &token, models.AuditActionOrgJoinTokenRevealed)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": map[string]any{
+			"id":              token.ID,
+			"token_prefix":    token.TokenPrefix,
+			"install_command": fmt.Sprintf("curl -fsSL %s/install/%s | sh", h.baseURL, rawToken),
+		},
+	})
 }
 
 // Revoke kills a join link. One click here is the mitigation for the
