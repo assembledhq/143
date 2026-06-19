@@ -362,8 +362,9 @@ func (h *SessionReviewCommentHandler) SendToAgent(w http.ResponseWriter, r *http
 	sb.WriteString("Please address the following code review comments:\n\n")
 	for i, c := range open {
 		sb.WriteString(fmt.Sprintf("%d. **%s:%d** (%s side)\n", i+1, c.FilePath, c.LineNumber, c.DiffSide))
+		sb.WriteString(fmt.Sprintf("   Target line: `%s:%d` (%s side)\n", c.FilePath, c.LineNumber, c.DiffSide))
 		indented := strings.ReplaceAll(c.Body, "\n", "\n   ")
-		sb.WriteString(fmt.Sprintf("   Comment: \"%s\"\n\n", indented))
+		sb.WriteString(fmt.Sprintf("   Requested change: \"%s\"\n\n", indented))
 	}
 	message := strings.TrimSpace(sb.String())
 

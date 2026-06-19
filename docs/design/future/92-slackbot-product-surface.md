@@ -68,7 +68,10 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Channel settings persist default repository, default branch, response visibility, allowed actions, and notification subscription JSON.
 - Authenticated Slack settings APIs expose bot install metadata, bot reinstall, bot-visible channels with connected settings, channel setting updates, user-link listing, self-link, and self-unlink.
 - Slack thread context, detected references, and file metadata are bounded and included in the initial session prompt.
+- Slack-started durable work resolves repository context from explicit Slack references, channel defaults, install defaults, the shared org default work repository, then a single active repository fallback. The resolver records a stable source label for operational debugging.
+- Slack creates the canonical session even when a repository is missing, but it does not enqueue `run_agent` for durable work until a repository is selected. The acknowledgement offers repository selection instead of starting an empty workspace run.
 - Slack acks and final replies are posted back to Slack, and final replies truncate long assistant responses with a session link fallback.
+- Slack delivery tries Block Kit first and falls back to plain-text `chat.postMessage` when Slack returns `invalid_blocks`; failed and fallback outbound attempts are recorded in `slack_outbound_messages`.
 - Final Slack replies append concrete user-facing outcome context when available: branch URL, PR URL/status/CI state, preview URL/status, and compact diff stats.
 - Final Slack replies include Block Kit next-action buttons for opening the session, opening an existing preview, creating a preview when no preview exists, and opening the PR when one exists.
 - Mention/DM context detection classifies common references into typed prompt context for GitHub PR/repository URLs, Linear-style issues, Sentry URLs, preview URLs, branches, and file paths.
@@ -99,7 +102,7 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Multi-org Slack workspaces still need a full retargeting model before App Home org selection can make Slack actions target alternate orgs.
 - App Home account linking is not Slack-native end-to-end. The current flow points users to the web integrations surface.
 - App Home Slack connection health does not yet show detailed install health, scopes, or remediation state.
-- Repository selection is offered for some missing-repository starts, but there are no full missing-context flows for preview target, PR, branch, issue, Sentry, or session resolution.
+- Repository selection is offered for missing-repository starts, but there are no full missing-context flows for preview target, PR, branch, issue, Sentry, or session resolution.
 - Mention/DM context detection still enters references as typed prompt context rather than first-class structured session attachments.
 - Slack progress rendering is still coarse. Runtime/tool/test/command/preview milestones are not normalized into sparse Slack updates.
 - Slack progress updates are not debounced by a per-thread timing policy.
@@ -116,7 +119,7 @@ The current implementation provides the first usable Slackbot backend surface, b
 - Slack-started sessions can be initiated by App Home, slash command, mention, and DM, but not generally by a "start work" button from arbitrary notifications/session updates.
 - If a linked Slack thread starts a fresh session after a non-resumable terminal session, the link is repointed to the new session; there is still no separate historical new-thread-message pointer model.
 - Team sessions are surfaced in Slack acknowledgement/final messages as "started from Slack without a mapped 143 user," but 143 web surfaces still need clearer labeling.
-- Slack session creation uses DB stores directly rather than the same higher-level creation service as `/sessions/new`.
+- Slack and Linear share run enqueue primitives, but Slack session creation still uses DB stores directly rather than the same higher-level creation service as `/sessions/new`.
 - Direct preview creation for PR, branch, commit, or repository is not implemented.
 - Slack preview creation for a session is currently an agent continuation prompt, not a direct durable preview-control-plane create call.
 - `Open preview` links to the 143 preview page, not necessarily a short-lived isolated preview-origin URL.
@@ -171,9 +174,9 @@ Mention handling should resolve enough context to start the session:
 - Slack channel, thread root, replies, permalink, and attached files/links.
 - Mentioning Slack user and best-effort mapped 143 user, if available.
 - Repository, PR, issue, Sentry URL, preview URL, branch, or file paths when detectable.
-- Org/channel defaults such as repository or preferred agent.
+- Org/channel defaults such as repository or preferred agent. Repository resolution order is explicit Slack references, Slack channel default, Slack install default, shared org default, then single active repository fallback.
 
-If required context is missing, the bot should still create the session and ask the clarifying question in the Slack thread. When a repository or preview target cannot be resolved, the Slack reply should offer concise buttons or select menus rather than forcing the user into a separate setup flow:
+If required context is missing, the bot should still create the session and ask the clarifying question in the Slack thread. When a repository or preview target cannot be resolved, the Slack reply should offer concise buttons or select menus rather than forcing the user into a separate setup flow. Durable coding work must not enqueue until a repository is resolved:
 
 ```text
 I can help, but I need a repository first.

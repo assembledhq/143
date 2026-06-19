@@ -140,9 +140,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	scopedCredentialStore := db.NewScopedCredentialStore(codingCredentialStore)
 	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
@@ -224,6 +222,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	projectCycleStore := db.NewProjectCycleStore(pool)
 	pmDocumentStore := db.NewPMDocumentStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
+	evalBootstrapStore := db.NewEvalBootstrapStore(pool)
 	orgSettingsCache := agent.NewOrgSettingsCache(agent.DefaultOrgSettingsCacheTTL)
 
 	services := buildServices(
@@ -253,6 +252,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		integrationStore,
 		sessionMessageStore,
 		automationRunStore,
+		evalBootstrapStore,
 		snapshotStore,
 		billingMetrics,
 		agent.NewCancelRegistry(logger),
@@ -280,14 +280,17 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		Credentials:         credentialStore,
 		AuditLogs:           db.NewAuditLogStore(pool),
 		Organizations:       orgStore,
+		Users:               db.NewUserStore(pool),
 		SessionLogs:         sessionLogStore,
 		EvalTasks:           db.NewEvalTaskStore(pool),
 		EvalRuns:            db.NewEvalRunStore(pool),
 		EvalBatches:         db.NewEvalBatchStore(pool),
-		EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+		EvalBootstraps:      evalBootstrapStore,
+		EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 		Repositories:        repoStore,
 		SessionMessages:     sessionMessageStore,
 		SessionThreads:      sessionThreadStore,
+		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
 		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
 		Automations:         db.NewAutomationStore(pool),
 		AutomationRuns:      automationRunStore,
@@ -295,6 +298,14 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        pullRequestStore,
+		SlackInstallations:  db.NewSlackInstallationStore(pool),
+		SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
+		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
+		SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+		SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+		SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+		SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+		SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
 	}
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores

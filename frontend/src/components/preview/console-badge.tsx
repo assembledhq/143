@@ -25,12 +25,12 @@ const LEVEL_CONFIG: Record<
   },
   warning: {
     icon: AlertCircle,
-    color: "text-amber-600 dark:text-amber-400",
+    color: "text-warning",
     label: "Warning",
   },
   info: {
     icon: Info,
-    color: "text-blue-600 dark:text-blue-400",
+    color: "text-info",
     label: "Info",
   },
   log: {
@@ -57,8 +57,10 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
 
   const { data: rawMessages } = useQuery({
     queryKey: ["preview-console", sessionId],
-    queryFn: () => api.sessions.preview.console(sessionId),
+    queryFn: ({ signal }) =>
+      api.sessions.preview.console(sessionId, { signal, timeoutMs: 5000 }),
     refetchInterval: 10000,
+    retry: false,
   });
   const messages = useMemo(
     () => (Array.isArray(rawMessages) ? rawMessages : []),
@@ -93,7 +95,7 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
         ) : warnCount > 0 ? (
           <Badge
             variant="secondary"
-            className="text-xs gap-1 bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
+            className="text-xs gap-1 bg-warning/15 text-warning border-warning/20"
           >
             <AlertCircle className="size-3" />
             {warnCount} warning{warnCount !== 1 ? "s" : ""}

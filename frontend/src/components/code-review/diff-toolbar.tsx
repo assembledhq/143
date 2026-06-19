@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, FolderSearch, Rows3, Search, X, Files, MessageSquare } from "lucide-react";
+import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, FolderSearch, Maximize2, Minimize2, Rows3, Search, X, Files, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -24,6 +24,8 @@ interface DiffToolbarProps {
   canGoNext?: boolean;
   mobileChromeCollapsed?: boolean;
   onOpenComposer?: () => void;
+  isFullScreen?: boolean;
+  onToggleFullScreen?: () => void;
 }
 
 export function DiffToolbar({
@@ -43,6 +45,8 @@ export function DiffToolbar({
   canGoNext = false,
   mobileChromeCollapsed = false,
   onOpenComposer,
+  isFullScreen = false,
+  onToggleFullScreen,
 }: DiffToolbarProps) {
   const [showSearch, setShowSearch] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -226,10 +230,13 @@ export function DiffToolbar({
           )}
           {/* View mode toggle */}
           <div className="flex items-center rounded-md border border-border bg-muted/30">
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => onViewModeChange("unified")}
               className={cn(
-                "flex items-center gap-1 px-2 py-1 text-xs rounded-l-md transition-colors",
+                "h-auto rounded-l-md rounded-r-none px-2 py-1 text-xs",
                 viewMode === "unified"
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
@@ -237,11 +244,14 @@ export function DiffToolbar({
             >
               <Rows3 className="h-3 w-3" />
               Unified
-            </button>
-            <button
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => onViewModeChange("split")}
               className={cn(
-                "flex items-center gap-1 px-2 py-1 text-xs rounded-r-md transition-colors",
+                "h-auto rounded-l-none rounded-r-md px-2 py-1 text-xs",
                 viewMode === "split"
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
@@ -249,8 +259,21 @@ export function DiffToolbar({
             >
               <Columns2 className="h-3 w-3" />
               Split
-            </button>
+            </Button>
           </div>
+
+          {onToggleFullScreen && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn("h-7 w-7 p-0", isFullScreen && "text-primary")}
+              onClick={onToggleFullScreen}
+              title={isFullScreen ? "Exit full screen (Esc)" : "Full screen"}
+              aria-label={isFullScreen ? "Exit full screen" : "Enter full screen"}
+            >
+              {isFullScreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            </Button>
+          )}
 
           {onBrowseRepo && (
             <Button
@@ -285,12 +308,16 @@ export function DiffToolbar({
             className="h-8 flex-1 border-border/60 bg-background text-xs placeholder:text-muted-foreground/60"
           />
           {searchQuery && (
-            <button
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
               onClick={() => onSearchChange("")}
-              className="text-muted-foreground hover:text-foreground"
+              className="h-8 w-8 px-0 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
             >
               <X className="h-3 w-3" />
-            </button>
+            </Button>
           )}
         </div>
       )}

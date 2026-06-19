@@ -24,24 +24,40 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// sandboxBusyAcquireRetries and sandboxBusyAcquireRetryDelay bound the
+// in-process retry loop when a preview start loses the sandbox attach race.
+// The winner needs a moment to finish wiring its container (network attach,
+// auth socket) before the reuse path's liveness check accepts it; three
+// 2-second retries cover that window without stretching the HTTP request
+// noticeably against the launch that follows.
+const (
+	sandboxBusyAcquireRetries    = 3
+	sandboxBusyAcquireRetryDelay = 2 * time.Second
+)
+
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
-	manager         *preview.Manager
-	store           *db.PreviewStore
-	jobStore        *db.JobStore
-	sessionStore    *db.SessionStore
-	orgStore        agent.OrgSettingsReader
-	repoStore       *db.RepositoryStore
-	fileReader      sandbox.FileReader
-	sandboxProvider agent.SandboxProvider
-	sandboxCapacity *agent.SandboxCapacityGate
-	staticEgress    agent.StaticEgressRuntimeConfig
-	snapshots       storage.SnapshotStore
-	workerSelector  *preview.WorkerSelector
-	workerClient    *preview.WorkerPreviewClient
-	localNodeID     string
-	logger          zerolog.Logger
-	audit           *db.AuditEmitter
+	manager           *preview.Manager
+	store             *db.PreviewStore
+	jobStore          *db.JobStore
+	sessionStore      *db.SessionStore
+	orgStore          agent.OrgSettingsReader
+	repoStore         *db.RepositoryStore
+	fileReader        sandbox.FileReader
+	sandboxProvider   agent.SandboxProvider
+	sandboxCapacity   *agent.SandboxCapacityGate
+	staticEgress      agent.StaticEgressRuntimeConfig
+	snapshots         storage.SnapshotStore
+	workerSelector    *preview.WorkerSelector
+	workerClient      *preview.WorkerPreviewClient
+	localNodeID       string
+	restartClassifier preview.PreviewRestartClassifier
+	logger            zerolog.Logger
+	audit             *db.AuditEmitter
+
+	// sandboxBusyRetryDelay overrides sandboxBusyAcquireRetryDelay in tests;
+	// zero means the production default.
+	sandboxBusyRetryDelay time.Duration
 }
 
 // SetStaticEgressRuntime injects the worker-local static egress runtime for
@@ -66,15 +82,16 @@ func (h *PreviewHandler) SetStaticEgressRuntime(orgs agent.OrgSettingsReader, ru
 // "NO_SANDBOX"/"SNAPSHOT_EXPIRED" errors in that case.
 func NewPreviewHandler(manager *preview.Manager, store *db.PreviewStore, sessionStore *db.SessionStore, repoStore *db.RepositoryStore, fileReader sandbox.FileReader, sandboxProvider agent.SandboxProvider, snapshots storage.SnapshotStore, logger zerolog.Logger) *PreviewHandler {
 	return &PreviewHandler{
-		manager:         manager,
-		store:           store,
-		jobStore:        nil,
-		sessionStore:    sessionStore,
-		repoStore:       repoStore,
-		fileReader:      fileReader,
-		sandboxProvider: sandboxProvider,
-		snapshots:       snapshots,
-		logger:          logger,
+		manager:           manager,
+		store:             store,
+		jobStore:          nil,
+		sessionStore:      sessionStore,
+		repoStore:         repoStore,
+		fileReader:        fileReader,
+		sandboxProvider:   sandboxProvider,
+		snapshots:         snapshots,
+		restartClassifier: preview.DefaultPreviewRestartClassifier{},
+		logger:            logger,
 	}
 }
 
@@ -155,11 +172,14 @@ func (h *PreviewHandler) isLocalWorker(worker preview.WorkerNode) bool {
 }
 
 func (h *PreviewHandler) writeWorkerClientError(w http.ResponseWriter, r *http.Request, err error) {
+	writePreviewHTTPError(w, r, workerClientHTTPError(err))
+}
+
+func workerClientHTTPError(err error) *previewHTTPError {
 	if reqErr, ok := preview.AsWorkerRequestError(err); ok {
-		writeError(w, r, reqErr.StatusCode, reqErr.Code, reqErr.Message)
-		return
+		return newPreviewHTTPError(reqErr.StatusCode, reqErr.Code, reqErr.Message, nil)
 	}
-	writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
+	return newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_REQUEST_FAILED", "preview worker request failed", err)
 }
 
 // =============================================================================
@@ -325,7 +345,7 @@ func (h *PreviewHandler) resolveSandboxWorkDir(ctx context.Context, session *mod
 //     new container, restore the snapshot, and publish the new container_id.
 //   - Expired/Unavailable: no container and no usable snapshot; caller should
 //     return 410 only when the reaper explicitly expired the snapshot.
-func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, cfg *models.PreviewConfig) acquireSandboxResult {
+func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, session *models.Session, reservation *models.PreviewInstance) acquireSandboxResult {
 	workDir := h.resolveSandboxWorkDir(ctx, session)
 	expectedNetwork, expectedErr := agent.ExpectedSandboxNetwork(ctx, h.orgStore, orgID, h.staticEgress)
 	if expectedErr != nil {
@@ -338,10 +358,15 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	// fall through to hydrate/expired instead of attaching to a dead ID.
 	if session.ContainerID != nil && *session.ContainerID != "" &&
 		session.SandboxState == models.SandboxStateRunning {
+		// HomeDir matches the orchestrator/hydrate path so the home-rooted
+		// package-manager cache (npm's ~/.npm, etc.) can restore. Without it,
+		// reused session sandboxes fail package-manager cache restore with
+		// "sandbox home dir is required" and re-download deps every launch.
 		candidate := &agent.Sandbox{
 			ID:        *session.ContainerID,
 			Provider:  "docker",
 			WorkDir:   workDir,
+			HomeDir:   agent.DefaultSandboxConfig().HomeDir,
 			SessionID: session.ID.String(),
 			OrgID:     session.OrgID.String(),
 			Purpose:   "preview",
@@ -412,7 +437,7 @@ func (h *PreviewHandler) acquireSandbox(ctx context.Context, orgID uuid.UUID, se
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "preview_hydrate"
-	preview.ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
+	preview.ApplyPreviewInstanceResourceLimitsToSandboxConfig(&sandboxCfg, reservation)
 	if err := agent.ApplyOrgSandboxNetworkSettings(ctx, h.orgStore, orgID, h.staticEgress, &sandboxCfg); err != nil {
 		return acquireSandboxResult{
 			ErrCode: "STATIC_EGRESS_UNAVAILABLE",
@@ -753,7 +778,33 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	//   3. SnapshotExpired / SnapshotUnavailable — neither a container nor a
 	//      usable snapshot exists.
 	hydrateStarted := time.Now()
-	acq := h.acquireSandbox(ctx, orgID, &session, input.Config)
+	acq := h.acquireSandbox(ctx, orgID, &session, reservation)
+	// Losing the attach race means a competing holder (typically a
+	// continue_session turn) just published a live container — exactly what
+	// the reuse path attaches to. Retrying the acquire after a short delay
+	// converts the most common preview start failure ("another process
+	// attached first") into a successful attach instead of aborting the
+	// reservation and making the user click again.
+	retryDelay := h.sandboxBusyRetryDelay
+	if retryDelay <= 0 {
+		retryDelay = sandboxBusyAcquireRetryDelay
+	}
+	for attempt := 1; acq.ErrCode == "SANDBOX_BUSY" && attempt <= sandboxBusyAcquireRetries && ctx.Err() == nil; attempt++ {
+		h.logger.Info().
+			Str("session_id", sessionID.String()).
+			Int("attempt", attempt).
+			Msg("preview start: sandbox busy; retrying acquire against the winning container")
+		select {
+		case <-ctx.Done():
+		case <-time.After(retryDelay):
+		}
+		// Re-read the session row: the winner published a container_id that
+		// the reuse path needs to see.
+		if fresh, freshErr := h.sessionStore.GetByID(ctx, orgID, sessionID); freshErr == nil {
+			session = fresh
+		}
+		acq = h.acquireSandbox(ctx, orgID, &session, reservation)
+	}
 	metrics.RecordSessionPreviewPhaseDuration(ctx, orgID.String(), "hydrate", time.Since(hydrateStarted))
 	if acq.Err != nil {
 		h.logger.Warn().Err(acq.Err).
@@ -852,38 +903,63 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 	if session.RepositoryID != nil {
 		repoID = *session.RepositoryID
 	}
-	placementKey := ""
+	var cachePlacements []preview.WorkerCachePlacement
 	if repoID != uuid.Nil {
 		if body.Config != nil {
-			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled {
-				configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
-				if digestErr != nil {
-					h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
-				}
+			configDigest, digestErr := preview.ComputePreviewConfigDigest(body.Config)
+			if digestErr != nil {
+				h.logger.Warn().Err(digestErr).Str("session_id", sessionID.String()).Msg("failed to compute preview config digest for dependency cache placement")
+			}
+			if paths, enabled := preview.ResolvePreviewInstallCachePaths(body.Config.Install); enabled && len(paths) > 0 {
 				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
 				if placementErr != nil {
 					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 				} else {
-					placementKey = computedPlacementKey
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey})
+				}
+			}
+			if paths, _, enabled := preview.ResolvePreviewInstallPackageManagerCachePaths(body.Config.Install); enabled && len(paths) > 0 {
+				computedPlacementKey, placementErr := preview.ComputePreviewDependencyCachePlacementKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
+				if placementErr != nil {
+					h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview package-manager cache placement key")
+				} else {
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindPackageManager, PlacementKey: computedPlacementKey})
+				}
+			}
+			if paths, enabled := preview.ResolvePreviewBuildCachePaths(body.Config.Install); enabled && len(paths) > 0 {
+				buildCacheKey, keyErr := preview.ComputePreviewBuildCacheKey(orgID, repoID, body.Config.Name, configDigest, body.Config.Install, paths)
+				if keyErr != nil {
+					h.logger.Warn().Err(keyErr).Str("session_id", sessionID.String()).Msg("failed to compute preview build cache placement key")
+				} else {
+					cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindBuildArtifact, PlacementKey: buildCacheKey})
 				}
 			}
 		}
-		if placementKey == "" {
+		if len(cachePlacements) == 0 {
 			computedPlacementKey, placementErr := preview.ComputePreviewDependencyCacheRepoPlacementKey(orgID, repoID)
 			if placementErr != nil {
 				h.logger.Warn().Err(placementErr).Str("session_id", sessionID.String()).Msg("failed to compute preview dependency cache placement key")
 			} else {
-				placementKey = computedPlacementKey
+				cachePlacements = append(cachePlacements, preview.WorkerCachePlacement{Kind: models.PreviewCacheKindInstallArtifact, PlacementKey: computedPlacementKey, Approximate: true})
 			}
 		}
 	}
-	worker, err := h.workerSelector.SelectStartNodeWithPlacementAndRequirements(ctx, orgID, &session, repoID, placementKey, reqs)
+	worker, err := h.workerSelector.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, &session, repoID, cachePlacements, reqs)
+	var deadOwnerErr *preview.LiveSessionWorkerOwnerNotRoutableError
+	if errors.As(err, &deadOwnerErr) {
+		refreshed, recoveryErr := h.clearDeadLiveSessionPreviewOwner(ctx, orgID, session, deadOwnerErr)
+		if recoveryErr != nil {
+			return nil, 0, recoveryErr
+		}
+		session = refreshed
+		worker, err = h.workerSelector.SelectStartNodeWithCachePlacementsAndRequirements(ctx, orgID, &session, repoID, cachePlacements, reqs)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, preview.ErrLegacySessionWorkerOwnership):
 			return nil, 0, newPreviewHTTPError(http.StatusConflict, "PREVIEW_WORKER_OWNERSHIP_REQUIRED", "live sandbox is missing worker ownership metadata; send a new message to rebuild it", nil)
 		case errors.Is(err, preview.ErrNoPreviewWorkers):
-			return nil, 0, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_NO_WORKERS", "no preview-capable workers are available", nil)
+			return nil, 0, newPreviewHTTPError(http.StatusServiceUnavailable, "PREVIEW_NO_WORKERS", previewNoWorkersMessage(reqs), nil)
 		default:
 			return nil, 0, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WORKER_SELECTION_FAILED", "failed to select preview worker", err)
 		}
@@ -893,6 +969,70 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 		return nil, 0, asyncErr
 	}
 	return instance, http.StatusAccepted, nil
+}
+
+func (h *PreviewHandler) clearDeadLiveSessionPreviewOwner(ctx context.Context, orgID uuid.UUID, session models.Session, ownerErr *preview.LiveSessionWorkerOwnerNotRoutableError) (models.Session, *previewHTTPError) {
+	containerID := ""
+	workerNodeID := ""
+	if ownerErr != nil {
+		containerID = ownerErr.ContainerID
+		workerNodeID = ownerErr.WorkerNodeID
+	}
+	if containerID == "" && session.ContainerID != nil {
+		containerID = *session.ContainerID
+	}
+	if workerNodeID == "" && session.WorkerNodeID != nil {
+		workerNodeID = *session.WorkerNodeID
+	}
+	if containerID == "" {
+		return session, newPreviewHTTPError(
+			http.StatusInternalServerError,
+			"PREVIEW_STALE_SANDBOX_CLEAR_FAILED",
+			"failed to clear stale preview sandbox ownership",
+			fmt.Errorf("stale live session owner is missing container id"),
+		)
+	}
+
+	cleared, err := h.sessionStore.ClearContainerID(ctx, orgID, session.ID, containerID)
+	if err != nil {
+		return session, newPreviewHTTPError(
+			http.StatusInternalServerError,
+			"PREVIEW_STALE_SANDBOX_CLEAR_FAILED",
+			"failed to clear stale preview sandbox ownership",
+			err,
+		)
+	}
+	log := h.logger.With().
+		Str("session_id", session.ID.String()).
+		Str("container_id", containerID).
+		Str("worker_node_id", workerNodeID).
+		Logger()
+	if cleared {
+		log.Warn().Msg("cleared stale preview live-session worker ownership before worker selection retry")
+	} else {
+		log.Info().Msg("stale preview live-session worker ownership clear lost CAS; refetching before worker selection retry")
+	}
+
+	refreshed, err := h.sessionStore.GetByID(ctx, orgID, session.ID)
+	if err != nil {
+		return session, newPreviewHTTPError(
+			http.StatusInternalServerError,
+			"PREVIEW_STALE_SANDBOX_REFRESH_FAILED",
+			"failed to refresh session after clearing stale preview sandbox ownership",
+			err,
+		)
+	}
+	return refreshed, nil
+}
+
+func previewNoWorkersMessage(reqs preview.WorkerSelectionRequirements) string {
+	if !reqs.StaticEgressRequired {
+		return "no preview-capable workers are available"
+	}
+	if reqs.StaticEgressPublicIP == "" {
+		return "Static egress is enabled, but no public IP is configured. Disable static egress or configure STATIC_EGRESS_PUBLIC_IP."
+	}
+	return fmt.Sprintf("Static egress is enabled, but no preview workers are verified for %s. Disable static egress or provision workers.", reqs.StaticEgressPublicIP)
 }
 
 func (h *PreviewHandler) StartPreview(w http.ResponseWriter, r *http.Request) {
@@ -1020,10 +1160,32 @@ func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID 
 			Reason:                            "preview_revision_missing",
 		}
 	}
-	return computePreviewFreshness(&session, instance)
+	restartReasons := h.previewRestartReasons(ctx, orgID, &session, instance)
+	return computePreviewFreshness(&session, instance, restartReasons)
 }
 
-func computePreviewFreshness(session *models.Session, instance *models.PreviewInstance) *models.PreviewFreshness {
+func (h *PreviewHandler) previewRestartReasons(ctx context.Context, orgID uuid.UUID, session *models.Session, instance *models.PreviewInstance) []models.PreviewRestartReason {
+	if h.restartClassifier == nil || h.sessionStore == nil || session == nil || instance == nil {
+		return nil
+	}
+	if session.LatestDiffSnapshotID == nil || !previewStatusCanRefreshForFreshness(instance.Status) {
+		return nil
+	}
+	if instance.SourceWorkspaceRevision == nil || *instance.SourceWorkspaceRevision >= session.WorkspaceRevision {
+		return nil
+	}
+	snapshot, err := h.sessionStore.GetLatestDiffSnapshot(ctx, orgID, session.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("preview freshness: failed to load latest diff snapshot for restart classification")
+		}
+		return nil
+	}
+	paths := preview.ChangedPathsFromUnifiedDiff(snapshot.Diff)
+	return h.restartClassifier.Classify(paths)
+}
+
+func computePreviewFreshness(session *models.Session, instance *models.PreviewInstance, restartReasons []models.PreviewRestartReason) *models.PreviewFreshness {
 	if session == nil || instance == nil {
 		return nil
 	}
@@ -1033,13 +1195,37 @@ func computePreviewFreshness(session *models.Session, instance *models.PreviewIn
 		CurrentWorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
 		PreviewWorkspaceRevision:          instance.SourceWorkspaceRevision,
 		PreviewWorkspaceRevisionUpdatedAt: instance.SourceWorkspaceRevisionUpdatedAt,
+		RuntimeWorkspaceRevision:          instance.RuntimeWorkspaceRevision,
+		RuntimeWorkspaceRevisionUpdatedAt: instance.RuntimeWorkspaceRevisionUpdatedAt,
+		RuntimeWorkspaceRevisionSource:    instance.RuntimeWorkspaceRevisionSource,
 	}
 	if instance.SourceWorkspaceRevision == nil {
 		freshness.State = models.PreviewFreshnessUnknown
 		freshness.Reason = "preview_revision_missing"
 		return freshness
 	}
-	if *instance.SourceWorkspaceRevision < session.WorkspaceRevision {
+	if instance.Status == models.PreviewStatusStarting && *instance.SourceWorkspaceRevision == session.WorkspaceRevision {
+		freshness.State = models.PreviewFreshnessUpdating
+		freshness.Reason = "preview_starting"
+		return freshness
+	}
+	if *instance.SourceWorkspaceRevision < session.WorkspaceRevision && len(restartReasons) > 0 {
+		if !previewStatusCanRefreshForFreshness(instance.Status) {
+			freshness.State = models.PreviewFreshnessUnknown
+			freshness.Reason = "preview_not_refreshable"
+			return freshness
+		}
+		freshness.State = models.PreviewFreshnessRestartRequired
+		freshness.RestartRequired = true
+		freshness.RestartReasons = restartReasons
+		freshness.Reason = "restart_required"
+		return freshness
+	}
+	latestKnownRevision := instance.SourceWorkspaceRevision
+	if instance.RuntimeWorkspaceRevision != nil && *instance.RuntimeWorkspaceRevision > *latestKnownRevision {
+		latestKnownRevision = instance.RuntimeWorkspaceRevision
+	}
+	if *latestKnownRevision < session.WorkspaceRevision {
 		if !previewStatusCanRefreshForFreshness(instance.Status) {
 			freshness.State = models.PreviewFreshnessUnknown
 			freshness.Reason = "preview_not_refreshable"
@@ -1049,9 +1235,12 @@ func computePreviewFreshness(session *models.Session, instance *models.PreviewIn
 		freshness.Reason = "session_changed_after_preview_start"
 		return freshness
 	}
-	if instance.Status == models.PreviewStatusStarting && *instance.SourceWorkspaceRevision == session.WorkspaceRevision {
-		freshness.State = models.PreviewFreshnessUpdating
-		freshness.Reason = "preview_starting"
+	if instance.RuntimeWorkspaceRevision != nil &&
+		*instance.RuntimeWorkspaceRevision >= session.WorkspaceRevision &&
+		instance.RuntimeWorkspaceRevisionSource == models.PreviewRuntimeRevisionSourceHMR &&
+		*instance.SourceWorkspaceRevision < session.WorkspaceRevision {
+		freshness.State = models.PreviewFreshnessLiveUpdated
+		freshness.Reason = "preview_live_updated"
 		return freshness
 	}
 	return freshness
@@ -1278,55 +1467,84 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 		writePreviewHTTPError(w, r, reqErr)
 		return
 	}
-	instance, activeErr := h.lookupActivePreviewForRequest(r.Context(), orgID, sessionID)
-	if activeErr != nil {
-		writePreviewHTTPError(w, r, activeErr)
+	userID, ok := previewRequestUserID(r.Context(), middleware.UserFromContext(r.Context()))
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
+	}
+	instance, action, restartErr := h.RestartSessionPreview(r.Context(), orgID, userID, sessionID, body)
+	if restartErr != nil {
+		writePreviewHTTPError(w, r, restartErr)
+		return
+	}
+	switch action {
+	case sessionPreviewRestartStarted, sessionPreviewRestartAlreadyStarting:
+		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
+			Data: ensurePreviewResponse{Action: action, Instance: instance},
+		})
+	default:
+		writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
+	}
+}
+
+// Actions returned by RestartSessionPreview.
+const (
+	sessionPreviewRestartStarted         = "started"
+	sessionPreviewRestartAlreadyStarting = "already_starting"
+	sessionPreviewRestartRestarting      = "restarting"
+)
+
+// RestartSessionPreview restarts the preview for a session regardless of its
+// current state: with no active instance (stopped, failed, expired, or never
+// started) a fresh preview is started — re-hydrating the sandbox if needed —
+// while an active instance is recycled in place. It returns the resulting
+// instance and the action taken. Used by the session-scoped restart endpoint
+// and by the generic preview restart endpoint for previews without a branch
+// target.
+func (h *PreviewHandler) RestartSessionPreview(ctx context.Context, orgID, userID, sessionID uuid.UUID, body startPreviewRequest) (*models.PreviewInstance, string, *previewHTTPError) {
+	if h.manager == nil {
+		return nil, "", newPreviewHTTPError(http.StatusNotImplemented, "PREVIEW_NOT_AVAILABLE", "preview manager is not configured on this worker", nil)
+	}
+	instance, activeErr := h.lookupActivePreviewForRequest(ctx, orgID, sessionID)
+	if activeErr != nil {
+		return nil, "", activeErr
 	}
 	if instance == nil {
-		user := middleware.UserFromContext(r.Context())
-		started, _, startErr := h.startPreviewFromRequest(r.Context(), orgID, user.ID, sessionID, body)
+		started, _, startErr := h.startPreviewFromRequest(ctx, orgID, userID, sessionID, body)
 		if startErr != nil {
-			writePreviewHTTPError(w, r, startErr)
-			return
+			return nil, "", startErr
 		}
-		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: "started", Instance: started},
-		})
-		return
+		return started, sessionPreviewRestartStarted, nil
 	}
 	if instance.Status == models.PreviewStatusStarting {
-		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: "already_starting", Instance: instance},
-		})
-		return
+		return instance, sessionPreviewRestartAlreadyStarting, nil
 	}
 
 	if h.workerRoutingEnabled() {
-		worker, err := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
 		if err != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
-			return
+			return nil, "", newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
 		}
 		if h.isLocalWorker(worker) {
-			if recycleErr := h.recyclePreviewInstance(r.Context(), orgID, instance, body); recycleErr != nil {
-				writePreviewHTTPError(w, r, recycleErr)
-				return
+			if recycleErr := h.recyclePreviewInstance(ctx, orgID, instance, body); recycleErr != nil {
+				return nil, "", recycleErr
 			}
 		} else {
-			if err := h.workerClient.RecyclePreview(r.Context(), worker, orgID, instance.ID, body.Config); err != nil {
-				h.writeWorkerClientError(w, r, err)
-				return
+			if err := h.workerClient.RecyclePreview(ctx, worker, orgID, instance.ID, body.Config); err != nil {
+				return nil, "", workerClientHTTPError(err)
 			}
 		}
 	} else {
-		if recycleErr := h.recyclePreviewInstance(r.Context(), orgID, instance, body); recycleErr != nil {
-			writePreviewHTTPError(w, r, recycleErr)
-			return
+		if recycleErr := h.recyclePreviewInstance(ctx, orgID, instance, body); recycleErr != nil {
+			return nil, "", recycleErr
 		}
 	}
 
-	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
+	// Re-read so callers that render the instance see the post-recycle state.
+	if refreshed, err := h.store.GetPreviewInstance(ctx, orgID, instance.ID); err == nil {
+		instance = refreshed
+	}
+	return instance, sessionPreviewRestartRestarting, nil
 }
 
 // =============================================================================

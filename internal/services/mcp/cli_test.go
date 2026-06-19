@@ -63,6 +63,12 @@ func TestRunCLI_NamespaceHelp(t *testing.T) {
 			contains:  []string{"143-tools session-tabs <action>", "list", "send", "messages"},
 			notString: "session_tabs_",
 		},
+		{
+			name:      "automation goal improvement namespace",
+			args:      []string{"automation-goal-improvement", "--help"},
+			contains:  []string{"143-tools automation-goal-improvement <action>", "complete"},
+			notString: "automation_goal_improvement_complete",
+		},
 	}
 
 	for _, tt := range tests {
@@ -133,6 +139,19 @@ func TestRunCLI_DispatchesHierarchicalCommands(t *testing.T) {
 			name:     "issue creator",
 			args:     []string{"issue", "create", "--title", "Follow-up", "--description", "Investigate more"},
 			expected: "Follow-up",
+		},
+		{
+			name: "automation goal improvement completer",
+			args: []string{
+				"automation-goal-improvement", "complete",
+				"--improvement-id", "00000000-0000-0000-0000-000000000001",
+				"--proposed-goal", "Run a tighter automated check",
+				"--rationale", "clearer operating instructions",
+				"--changes", "clarified cadence",
+				"--evidence", "read workflow files",
+				"--confidence", "medium",
+			},
+			expected: "completed",
 		},
 	}
 

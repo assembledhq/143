@@ -59,7 +59,7 @@ func RequireAPIScope(scope string) func(http.Handler) http.Handler {
 				return
 			}
 			for _, tokenScope := range token.Scopes {
-				if tokenScope == scope {
+				if apiScopeAllows(tokenScope, scope) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -69,4 +69,41 @@ func RequireAPIScope(scope string) func(http.Handler) http.Handler {
 			})
 		})
 	}
+}
+
+func apiScopeAllows(tokenScope, requiredScope string) bool {
+	if tokenScope == requiredScope {
+		return true
+	}
+	allowedRequiredScopes, ok := apiFamilyScopeMap[tokenScope]
+	if !ok {
+		return false
+	}
+	for _, allowed := range allowedRequiredScopes {
+		if allowed == requiredScope {
+			return true
+		}
+	}
+	return false
+}
+
+var apiFamilyScopeMap = map[string][]string{
+	string(models.APITokenScopeSessionsAll): {
+		string(models.APITokenScopeSessionsRead),
+		string(models.APITokenScopeSessionsCreate),
+		string(models.APITokenScopeSessionsWrite),
+		string(models.APITokenScopeSessionsCancel),
+		string(models.APITokenScopeSessionsPublish),
+	},
+	string(models.APITokenScopeAutomationsAll): {
+		string(models.APITokenScopeAutomationsRead),
+		string(models.APITokenScopeAutomationsCreate),
+		string(models.APITokenScopeAutomationsWrite),
+		string(models.APITokenScopeAutomationsRun),
+	},
+	string(models.APITokenScopePreviewsAll): {
+		string(models.APITokenScopePreviewsRead),
+		string(models.APITokenScopePreviewsCreate),
+		string(models.APITokenScopePreviewsStop),
+	},
 }

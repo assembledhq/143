@@ -16,6 +16,7 @@ export const queryKeys = {
     detail: (id: string) => ["session", id] as const,
     diff: (id: string, revision?: string | null) => ["session", id, "diff", revision ?? null] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
+    logDetail: (sessionId: string, logId: number) => ["session", sessionId, "logs", logId, "detail"] as const,
     pr: (id: string) => ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
     humanInputRequests: (id: string, status?: string | null, threadId?: string | null) =>
@@ -25,6 +26,10 @@ export const queryKeys = {
     threadDetail: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId] as const,
     threadMessages: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "messages"] as const,
     threadLogs: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "logs"] as const,
+    threadTranscript: (sessionId: string, threadId: string, anchorKey?: string | null) =>
+      anchorKey
+        ? ["session", sessionId, "thread", threadId, "transcript", anchorKey] as const
+        : ["session", sessionId, "thread", threadId, "transcript"] as const,
     threadRecoverableInbox: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "recoverable-inbox"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
     reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
@@ -46,12 +51,17 @@ export const queryKeys = {
   },
   settings: {
     all: ["settings"] as const,
+    agentCapabilities: ["settings", "agent", "capabilities"] as const,
+    agentCapabilityCatalog: ["agent-capabilities"] as const,
     network: ["settings", "network"] as const,
+    runtimeStatus: ["settings", "runtime", "status"] as const,
   },
-  credentials: {
-    all: ["credentials"] as const,
-    resolved: ["credentials", "resolved"] as const,
-    teamDefaults: ["credentials", "team-defaults"] as const,
+  // Unified coding-credentials caches. The scope segment matches the API's
+  // scope param ("org" | "personal" | "resolved"); invalidating
+  // codingCredentials.all sweeps every scope at once.
+  codingCredentials: {
+    all: ["coding-credentials"] as const,
+    list: (scope: "org" | "personal" | "resolved") => ["coding-credentials", scope] as const,
   },
   codexAuth: {
     status: ["codex-auth-status"] as const,
@@ -61,6 +71,9 @@ export const queryKeys = {
     githubRepositories: (installationId?: number | null) => ["integrations", "github", "repositories", installationId ?? null] as const,
     linearAgentStatus: ["integrations", "linear", "agent"] as const,
     linearAgentMappings: ["integrations", "linear", "agent", "mappings"] as const,
+    slackHealth: ["integrations", "slack", "health"] as const,
+    slackSettings: ["integrations", "slack", "settings"] as const,
+    slackUserLinks: ["integrations", "slack", "user-links"] as const,
     slackChannels: ["slack-channels"] as const,
   },
   autopilot: {
@@ -73,6 +86,11 @@ export const queryKeys = {
   },
   team: {
     members: ["team", "members"] as const,
+    domains: ["team", "domains"] as const,
+    githubOrgs: ["team", "github-orgs"] as const,
+  },
+  organizations: {
+    joinable: ["organizations", "joinable"] as const,
   },
   auth: {
     memberships: ["auth", "memberships"] as const,
@@ -98,7 +116,8 @@ export const queryKeys = {
     bootstrapCandidates: ["evals", "bootstrap", "candidates"] as const,
     bootstrapRun: (id: string) => ["evals", "bootstrap", "run", id] as const,
   },
-  previews: {
-    apiTokens: ["preview-api-tokens"] as const,
+  apiKeys: {
+    clients: ["api-keys", "clients"] as const,
+    tokens: (clientId: string) => ["api-keys", "clients", clientId, "tokens"] as const,
   },
 } as const;

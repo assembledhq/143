@@ -64,6 +64,46 @@ func (s HumanInputRequestStatus) Validate() error {
 	}
 }
 
+type HumanInputSensitivity string
+
+const (
+	HumanInputSensitivityTeam      HumanInputSensitivity = "team"
+	HumanInputSensitivityPersonal  HumanInputSensitivity = "personal"
+	HumanInputSensitivitySensitive HumanInputSensitivity = "sensitive"
+)
+
+func (s HumanInputSensitivity) Validate() error {
+	switch s {
+	case HumanInputSensitivityTeam, HumanInputSensitivityPersonal, HumanInputSensitivitySensitive:
+		return nil
+	default:
+		return fmt.Errorf("invalid HumanInputSensitivity: %q", s)
+	}
+}
+
+type HumanInputPreferredChannel string
+
+const (
+	HumanInputPreferredChannelSlackThread HumanInputPreferredChannel = "slack_thread"
+	HumanInputPreferredChannelSlackDM     HumanInputPreferredChannel = "slack_dm"
+	HumanInputPreferredChannelWeb         HumanInputPreferredChannel = "web"
+)
+
+func (c HumanInputPreferredChannel) Validate() error {
+	switch c {
+	case HumanInputPreferredChannelSlackThread, HumanInputPreferredChannelSlackDM, HumanInputPreferredChannelWeb:
+		return nil
+	default:
+		return fmt.Errorf("invalid HumanInputPreferredChannel: %q", c)
+	}
+}
+
+type HumanInputDeliveryTarget struct {
+	AssignedUserID   *uuid.UUID                 `json:"assigned_user_id,omitempty"`
+	Sensitivity      HumanInputSensitivity      `json:"sensitivity"`
+	PreferredChannel HumanInputPreferredChannel `json:"preferred_channel"`
+}
+
 type HumanInputChoice struct {
 	ID          string `json:"id"`
 	Label       string `json:"label"`
@@ -74,28 +114,31 @@ type HumanInputChoice struct {
 }
 
 type HumanInputRequest struct {
-	ID                uuid.UUID               `db:"id" json:"id"`
-	OrgID             uuid.UUID               `db:"org_id" json:"org_id"`
-	SessionID         uuid.UUID               `db:"session_id" json:"session_id"`
-	ThreadID          *uuid.UUID              `db:"thread_id" json:"thread_id,omitempty"`
-	TurnNumber        int                     `db:"turn_number" json:"turn_number"`
-	AgentType         AgentType               `db:"agent_type" json:"agent_type"`
-	ProviderRequestID *string                 `db:"provider_request_id" json:"provider_request_id,omitempty"`
-	Kind              HumanInputRequestKind   `db:"request_kind" json:"request_kind"`
-	Status            HumanInputRequestStatus `db:"status" json:"status"`
-	Title             string                  `db:"title" json:"title"`
-	Body              string                  `db:"body" json:"body"`
-	Context           *string                 `db:"context" json:"context,omitempty"`
-	BlocksPhase       *string                 `db:"blocks_phase" json:"blocks_phase,omitempty"`
-	Choices           []HumanInputChoice      `db:"choices" json:"choices"`
-	ResponseSchema    json.RawMessage         `db:"response_schema" json:"response_schema,omitempty"`
-	ProviderPayload   json.RawMessage         `db:"provider_payload" json:"provider_payload,omitempty"`
-	AnswerText        *string                 `db:"answer_text" json:"answer_text,omitempty"`
-	AnswerPayload     json.RawMessage         `db:"answer_payload" json:"answer_payload,omitempty"`
-	AnsweredBy        *uuid.UUID              `db:"answered_by" json:"answered_by,omitempty"`
-	AnsweredAt        *time.Time              `db:"answered_at" json:"answered_at,omitempty"`
-	ExpiresAt         *time.Time              `db:"expires_at" json:"expires_at,omitempty"`
-	CreatedAt         time.Time               `db:"created_at" json:"created_at"`
+	ID                uuid.UUID                  `db:"id" json:"id"`
+	OrgID             uuid.UUID                  `db:"org_id" json:"org_id"`
+	SessionID         uuid.UUID                  `db:"session_id" json:"session_id"`
+	ThreadID          *uuid.UUID                 `db:"thread_id" json:"thread_id,omitempty"`
+	TurnNumber        int                        `db:"turn_number" json:"turn_number"`
+	AgentType         AgentType                  `db:"agent_type" json:"agent_type"`
+	ProviderRequestID *string                    `db:"provider_request_id" json:"provider_request_id,omitempty"`
+	Kind              HumanInputRequestKind      `db:"request_kind" json:"request_kind"`
+	Status            HumanInputRequestStatus    `db:"status" json:"status"`
+	Title             string                     `db:"title" json:"title"`
+	Body              string                     `db:"body" json:"body"`
+	Context           *string                    `db:"context" json:"context,omitempty"`
+	BlocksPhase       *string                    `db:"blocks_phase" json:"blocks_phase,omitempty"`
+	AssignedUserID    *uuid.UUID                 `db:"assigned_user_id" json:"assigned_user_id,omitempty"`
+	Sensitivity       HumanInputSensitivity      `db:"sensitivity" json:"sensitivity"`
+	PreferredChannel  HumanInputPreferredChannel `db:"preferred_channel" json:"preferred_channel"`
+	Choices           []HumanInputChoice         `db:"choices" json:"choices"`
+	ResponseSchema    json.RawMessage            `db:"response_schema" json:"response_schema,omitempty"`
+	ProviderPayload   json.RawMessage            `db:"provider_payload" json:"provider_payload,omitempty"`
+	AnswerText        *string                    `db:"answer_text" json:"answer_text,omitempty"`
+	AnswerPayload     json.RawMessage            `db:"answer_payload" json:"answer_payload,omitempty"`
+	AnsweredBy        *uuid.UUID                 `db:"answered_by" json:"answered_by,omitempty"`
+	AnsweredAt        *time.Time                 `db:"answered_at" json:"answered_at,omitempty"`
+	ExpiresAt         *time.Time                 `db:"expires_at" json:"expires_at,omitempty"`
+	CreatedAt         time.Time                  `db:"created_at" json:"created_at"`
 }
 
 type HumanInputAnswerInput struct {

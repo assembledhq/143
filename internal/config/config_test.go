@@ -26,6 +26,12 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("CORS_ALLOWED_ORIGINS", "")
 	t.Setenv("MODE", "")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "")
+	t.Setenv("PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR", "")
+	t.Setenv("PREVIEW_PACKAGE_MANAGER_CACHE_ENABLED", "")
+	t.Setenv("PREVIEW_CACHE_PREWARM_ENABLED", "")
+	t.Setenv("PREVIEW_CACHE_PREWARM_TIMEOUT", "")
+	t.Setenv("PREVIEW_CACHE_PREWARM_PRIORITY", "")
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "")
 	// Prevent .env files from interfering with defaults
 	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
@@ -51,6 +57,63 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, "chat", cfg.OpenAIAPIType, "Load should default OpenAI API type to chat")
 	require.Equal(t, "143", cfg.OpenRouterAppName, "Load should default OpenRouter app name to 143")
 	require.Equal(t, "busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should default the sandbox health-check image to a pinned busybox tag")
+	require.Equal(t, "/var/cache/143/preview-dependency-cache", cfg.PreviewDependencyCacheLocalDir, "Load should default dependency cache local L1 storage to the production worker host cache path")
+	require.True(t, cfg.PreviewPackageManagerCacheEnabled, "Load should enable package-manager caches by default")
+	require.False(t, cfg.PreviewCachePrewarmEnabled, "Load should disable preview cache prewarming by default")
+	require.Equal(t, 15*time.Minute, cfg.PreviewCachePrewarmTimeout, "Load should default preview cache prewarm timeout")
+	require.Equal(t, -50, cfg.PreviewCachePrewarmPriority, "Load should default preview cache prewarm to low priority")
+	require.Equal(t, 30*time.Minute, cfg.PreviewIdleTimeout, "Load should default preview idle retention to thirty minutes")
+}
+
+func TestResolvePreviewDependencyCacheLocalDir(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{
+			name:  "keeps configured path",
+			value: "/mnt/fast-cache/preview-dependency-cache",
+			want:  "/mnt/fast-cache/preview-dependency-cache",
+		},
+		{
+			name:  "trims configured path",
+			value: "  /mnt/fast-cache/preview-dependency-cache  ",
+			want:  "/mnt/fast-cache/preview-dependency-cache",
+		},
+		{
+			name:  "off disables local cache",
+			value: "off",
+			want:  "",
+		},
+		{
+			name:  "disabled disables local cache",
+			value: "DISABLED",
+			want:  "",
+		},
+		{
+			name:  "none disables local cache",
+			value: " none ",
+			want:  "",
+		},
+		{
+			name:  "blank disables local cache after explicit normalization",
+			value: "   ",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ResolvePreviewDependencyCacheLocalDir(tt.value)
+
+			require.Equal(t, tt.want, got, "local dependency cache path should normalize opt-out sentinels and configured paths")
+		})
+	}
 }
 
 //nolint:paralleltest // uses t.Setenv
@@ -67,6 +130,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("WORKER_PROCESS_COUNT", "4")
 	t.Setenv("WORKER_MAX_ACTIVE_SANDBOXES", "7")
 	t.Setenv("WORKER_PREVIEW_DRAIN_TIMEOUT", "90m")
+	t.Setenv("PREVIEW_IDLE_TIMEOUT", "45m")
 	t.Setenv("GITHUB_APP_ID", "12345")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "registry.example.com/health/busybox:1.36.1")
 
@@ -85,6 +149,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 4, cfg.WorkerProcessCount, "Load should parse WORKER_PROCESS_COUNT from the environment")
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
 	require.Equal(t, 90*time.Minute, cfg.WorkerPreviewDrainTimeout, "Load should parse WORKER_PREVIEW_DRAIN_TIMEOUT from the environment")
+	require.Equal(t, 45*time.Minute, cfg.PreviewIdleTimeout, "Load should read PREVIEW_IDLE_TIMEOUT from the environment")
 	require.Equal(t, "registry.example.com/health/busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should read SANDBOX_HEALTH_CHECK_IMAGE from the environment")
 }
 
@@ -95,6 +160,26 @@ func TestLoad_PreviewSecretBundleKEKVersion(t *testing.T) {
 	cfg := Load()
 
 	require.Equal(t, "preview-secrets-2026-05", cfg.PreviewSecretBundleKEKVersion, "Load should read PREVIEW_SECRET_BUNDLE_KEK_VERSION from the environment")
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestLoad_PreviewRPCSecrets(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "session-secret")
+	t.Setenv("PREVIEW_RPC_SECRETS", " new-secret , old-secret ,, ")
+
+	cfg := Load()
+
+	require.Equal(t, []string{"new-secret", "old-secret"}, cfg.PreviewRPCSecrets, "Load should parse PREVIEW_RPC_SECRETS in signing order and drop empty entries")
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestLoad_PreviewRPCSecretsFallbackToSessionSecret(t *testing.T) {
+	t.Setenv("SESSION_SECRET", "session-secret")
+	t.Setenv("PREVIEW_RPC_SECRETS", "")
+
+	cfg := Load()
+
+	require.Equal(t, []string{"session-secret"}, cfg.PreviewRPCSecrets, "Load should fall back to SESSION_SECRET for preview RPC compatibility when PREVIEW_RPC_SECRETS is unset")
 }
 
 //nolint:paralleltest // uses t.Setenv

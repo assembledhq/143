@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/models"
@@ -27,6 +29,11 @@ func NewWebhookDeliveryStore(db DBTX) *WebhookDeliveryStore {
 }
 
 func (s *WebhookDeliveryStore) Create(ctx context.Context, d *models.WebhookDelivery) error {
+	_, err := s.CreateOrGet(ctx, d)
+	return err
+}
+
+func (s *WebhookDeliveryStore) CreateOrGet(ctx context.Context, d *models.WebhookDelivery) (bool, error) {
 	query := `
 		INSERT INTO webhook_deliveries (org_id, integration_id, provider, delivery_id, event_type, signature_valid, payload, headers, status)
 		VALUES (@org_id, @integration_id, @provider, @delivery_id, @event_type, @signature_valid, @payload, @headers, @status)
@@ -47,11 +54,14 @@ func (s *WebhookDeliveryStore) Create(ctx context.Context, d *models.WebhookDeli
 	row := s.db.QueryRow(ctx, query, args)
 	if err := row.Scan(&d.ID, &d.ReceivedAt, &d.CreatedAt); err != nil {
 		if isUniqueViolation(err) {
-			return s.handleDuplicateDelivery(ctx, d)
+			if err := s.handleDuplicateDelivery(ctx, d); err != nil {
+				return false, err
+			}
+			return false, nil
 		}
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 func (s *WebhookDeliveryStore) handleDuplicateDelivery(ctx context.Context, d *models.WebhookDelivery) error {
@@ -130,6 +140,46 @@ func (s *WebhookDeliveryStore) MarkProcessed(ctx context.Context, d *models.Webh
 		"error":  errMsg,
 	})
 	return err
+}
+
+func (s *WebhookDeliveryStore) MarkIgnored(ctx context.Context, d *models.WebhookDelivery) error {
+	query := `
+		UPDATE webhook_deliveries
+		SET status = 'ignored', processed_at = now(), attempts = attempts + 1, error = NULL
+		WHERE id = @id AND org_id = @org_id`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     d.ID,
+		"org_id": d.OrgID,
+	})
+	return err
+}
+
+func (s *WebhookDeliveryStore) ListRecentFailures(ctx context.Context, orgID uuid.UUID, provider string, since time.Time, limit int) ([]models.WebhookDelivery, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, integration_id, provider, delivery_id, event_type,
+		       signature_valid, received_at, processed_at, status, attempts,
+		       error, payload, headers, created_at
+		FROM webhook_deliveries
+		WHERE org_id = @org_id
+		  AND provider = @provider
+		  AND status = 'failed'
+		  AND received_at >= @since
+		ORDER BY received_at DESC
+		LIMIT @limit`,
+		pgx.NamedArgs{
+			"org_id":   orgID,
+			"provider": provider,
+			"since":    since,
+			"limit":    limit,
+		})
+	if err != nil {
+		return nil, fmt.Errorf("query recent webhook failures: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.WebhookDelivery])
 }
 
 // DeleteExpired removes webhook deliveries older than the given number of days.

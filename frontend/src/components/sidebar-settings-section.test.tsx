@@ -26,26 +26,53 @@ describe("SidebarSettingsSection", () => {
     expect(screen.getByRole("button", { name: /Settings/ })).toHaveClass("px-2.5", "py-3", "text-sm");
   });
 
-  it("shows admin-only entries when role is admin", () => {
+  it("uses mobile-sized text for nested settings links in the mobile nav drawer", () => {
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/settings" userRole="admin" variant="mobile" />,
+    );
+
+    expect(screen.getByRole("link", { name: "Account" })).toHaveClass("py-2.5", "text-sm");
+    expect(screen.getByRole("link", { name: "Organization" })).toHaveClass("py-2.5", "text-sm");
+  });
+
+  it("groups admin settings by user intent", () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings" userRole="admin" />,
     );
+
+    for (const group of [
+      "PERSONAL",
+      "CONNECTIONS",
+      "AGENTS",
+      "RUNTIME",
+      "SECURITY & ADMIN",
+      "OPERATIONS",
+    ]) {
+      expect(screen.getByText(group)).toBeInTheDocument();
+    }
 
     for (const label of [
       "Account",
       "Integrations",
       "Coding agents",
-      "LLM",
+      "App LLM",
       "Autopilot",
-      "Preview",
-      "Evals",
-      "General",
+      "Sandboxes",
+      "Previews",
+      "Organization",
       "Team",
+      "API keys",
       "Usage",
       "Audit log",
+      "Evals",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
+
+    expect(screen.queryByText("PLATFORM")).not.toBeInTheDocument();
+    expect(screen.queryByText("LLM")).not.toBeInTheDocument();
+    expect(screen.queryByText("Runtime")).not.toBeInTheDocument();
+    expect(screen.queryByText("General")).not.toBeInTheDocument();
   });
 
   it("shows view-only pages for members and hides admin-only pages", () => {
@@ -64,10 +91,12 @@ describe("SidebarSettingsSection", () => {
     }
 
     for (const hidden of [
-      "LLM",
+      "App LLM",
       "Autopilot",
-      "Preview",
-      "General",
+      "Sandboxes",
+      "Previews",
+      "Organization",
+      "API keys",
       "Usage",
       "Audit log",
     ]) {
@@ -85,12 +114,14 @@ describe("SidebarSettingsSection", () => {
     for (const hidden of [
       "Integrations",
       "Coding agents",
-      "LLM",
+      "App LLM",
       "Autopilot",
-      "Preview",
+      "Sandboxes",
+      "Previews",
       "Evals",
-      "General",
+      "Organization",
       "Team",
+      "API keys",
       "Usage",
       "Audit log",
     ]) {
@@ -112,12 +143,14 @@ describe("SidebarSettingsSection", () => {
 
     for (const hidden of [
       "Integrations",
-      "Preview",
+      "Previews",
+      "Sandboxes",
       "Evals",
       "Team",
-      "LLM",
+      "App LLM",
       "Autopilot",
-      "General",
+      "Organization",
+      "API keys",
       "Usage",
       "Audit log",
     ]) {
@@ -125,12 +158,12 @@ describe("SidebarSettingsSection", () => {
     }
   });
 
-  it("labels the preview settings item as Preview", () => {
+  it("labels the preview settings item as Previews", () => {
     renderWithProviders(
       <SidebarSettingsSection pathname="/settings/previews" userRole="admin" />,
     );
 
-    expect(screen.getByRole("link", { name: /preview/i })).toHaveAttribute("href", "/settings/previews");
+    expect(screen.getByRole("link", { name: "Previews" })).toHaveAttribute("href", "/settings/previews");
     expect(screen.queryByText("Preview API")).not.toBeInTheDocument();
   });
 });

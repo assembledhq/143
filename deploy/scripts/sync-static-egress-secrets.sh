@@ -8,7 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$PROJECT_DIR/.env.production.enc}"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$SECRETS_DIR/.env.production.enc}"
 APPLY=0
 PROVISION_WORKER_HOST="${PROVISION_WORKER_HOST:-}"
 TUNNEL_PREFIX="${STATIC_EGRESS_TUNNEL_PREFIX:-10.143.0}"
@@ -43,28 +44,29 @@ dotenv_get() {
   grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 | cut -d= -f2- || true
 }
 
-dotenv_set() {
+# json_encode_string emits a JSON string literal for use as a `sops set` value.
+# WireGuard keys, IPs, and host strings never contain control characters, but we
+# still escape backslashes and double quotes so the value is always valid JSON.
+json_encode_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
+# sops_set edits a single dotenv key in place in the given file. In-place edits
+# preserve the SOPS data key, so only the touched value changes in the
+# ciphertext and unrelated secrets stay byte-identical (a reviewable diff). A
+# full decrypt+re-encrypt, by contrast, mints a new data key and rewrites every
+# value. --idempotent skips keys whose value is unchanged so no-op re-runs
+# produce no diff, and --value-stdin keeps secrets out of the process listing.
+sops_set() {
   local key="$1"
   local value="$2"
   local file="$3"
-  local tmp
-
-  tmp="$(mktemp)"
-  awk -v key="$key" -v value="$value" '
-    BEGIN { replaced = 0 }
-    $0 ~ "^" key "=" {
-      print key "=" value
-      replaced = 1
-      next
-    }
-    { print }
-    END {
-      if (replaced == 0) {
-        print key "=" value
-      }
-    }
-  ' "$file" > "$tmp"
-  mv "$tmp" "$file"
+  json_encode_string "$value" | sops set \
+    --input-type dotenv --output-type dotenv --idempotent --value-stdin \
+    "$file" "[\"${key}\"]"
 }
 
 generate_private_key() {
@@ -141,7 +143,8 @@ if [ ! -f "$ENC_FILE" ]; then
 fi
 
 tmp_env="$(mktemp)"
-trap 'rm -f "$tmp_env" "$tmp_env.enc"' EXIT
+staged_enc=""
+trap 'rm -f "$tmp_env" "$staged_enc"' EXIT
 sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" > "$tmp_env"
 
 static_public_ip="$(dotenv_get STATIC_EGRESS_PUBLIC_IP "$tmp_env")"
@@ -278,13 +281,6 @@ for host in "${worker_hosts[@]}"; do
   worker_peers+="${public_key}@${address}"
 done
 
-dotenv_set STATIC_EGRESS_GATEWAY_PRIVATE_KEY "$gateway_private_key" "$tmp_env"
-dotenv_set STATIC_EGRESS_GATEWAY_PUBLIC_KEY "$gateway_public_key" "$tmp_env"
-dotenv_set STATIC_EGRESS_GATEWAY_PUBLIC_IP "$gateway_public_ip" "$tmp_env"
-dotenv_set STATIC_EGRESS_GATEWAY_WG_ADDRESS "$gateway_wg_address" "$tmp_env"
-dotenv_set STATIC_EGRESS_WORKER_HOSTS "$worker_map" "$tmp_env"
-dotenv_set STATIC_EGRESS_WORKER_PEERS "$worker_peers" "$tmp_env"
-
 echo "Static egress sync derived ${#worker_hosts[@]} worker peer(s) from FLEET_HOSTS; generated $generated_workers new worker key(s)."
 
 if [ "$APPLY" -ne 1 ]; then
@@ -292,7 +288,26 @@ if [ "$APPLY" -ne 1 ]; then
   exit 0
 fi
 
-sops --encrypt --filename-override "$ENC_FILE" --input-type dotenv --output-type dotenv "$tmp_env" > "$tmp_env.enc"
-mv "$tmp_env.enc" "$ENC_FILE"
-echo "Updated $ENC_FILE with generated static egress config."
+# Stage all edits on a copy and swap it in atomically. Editing a copy still
+# preserves the SOPS data key (it is in-place editing, not a re-encrypt), so
+# only the touched keys change in the ciphertext and unrelated secrets stay
+# byte-identical. The staged copy lives next to $ENC_FILE so the final mv is an
+# atomic rename on the same filesystem; if any sops_set fails, set -e aborts and
+# the live $ENC_FILE is left untouched.
+staged_enc="$(mktemp "${ENC_FILE}.XXXXXX")"
+cp "$ENC_FILE" "$staged_enc"
+sops_set STATIC_EGRESS_GATEWAY_PRIVATE_KEY "$gateway_private_key" "$staged_enc"
+sops_set STATIC_EGRESS_GATEWAY_PUBLIC_KEY "$gateway_public_key" "$staged_enc"
+sops_set STATIC_EGRESS_GATEWAY_PUBLIC_IP "$gateway_public_ip" "$staged_enc"
+sops_set STATIC_EGRESS_GATEWAY_WG_ADDRESS "$gateway_wg_address" "$staged_enc"
+sops_set STATIC_EGRESS_WORKER_HOSTS "$worker_map" "$staged_enc"
+sops_set STATIC_EGRESS_WORKER_PEERS "$worker_peers" "$staged_enc"
+
+if cmp -s "$staged_enc" "$ENC_FILE"; then
+  echo "Static egress config already up to date; $ENC_FILE unchanged."
+else
+  mv "$staged_enc" "$ENC_FILE"
+  staged_enc=""
+  echo "Updated $ENC_FILE with generated static egress config."
+fi
 echo "Commit $ENC_FILE after provisioning succeeds so generated gateway and worker keys are preserved."

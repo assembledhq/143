@@ -5,9 +5,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Github, Mail, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
+import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -38,6 +40,8 @@ import {
 } from "@/components/ui/command";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { VerifiedDomainsSection } from "@/components/settings/verified-domains-section";
+import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { roleLabel } from "@/lib/roles";
@@ -93,7 +97,7 @@ export default function TeamSettingsPage() {
   const githubConnected = ghStatusData?.data.connected ?? false;
 
   useEffect(() => {
-    const handle = setTimeout(() => setDebouncedGhQuery(ghSearchQuery.trim()), 200);
+    const handle = setTimeout(() => setDebouncedGhQuery(ghSearchQuery.trim()), pollMs(200));
     return () => clearTimeout(handle);
   }, [ghSearchQuery]);
 
@@ -291,15 +295,10 @@ export default function TeamSettingsPage() {
           title="Team"
           description="Manage your team members and roles."
         />
-        <AuditLogTrigger
-          filters={{ resource_type: "team_member" }}
-          members={members}
-          title="Team activity"
-        />
       {actionError && (
-        <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
           {actionError}
-        </div>
+        </ErrorText>
       )}
 
       {!canManageTeam && (
@@ -337,7 +336,7 @@ export default function TeamSettingsPage() {
               </div>
             ) : (
               <div className="divide-y divide-border/50">
-                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground/70 md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
                   <div>Name</div>
                   <div>Email</div>
                   <div>Role</div>
@@ -511,6 +510,19 @@ export default function TeamSettingsPage() {
           </Card>
         </section>
       )}
+
+      {/* Verified domains (domain capture / auto-join) */}
+      {canManageTeam && <VerifiedDomainsSection />}
+
+      {/* CLI install links (admin-only: creating one hands out membership) */}
+      {canManageTeam && <CLIJoinTokensCard />}
+
+      <AuditLogTrigger
+        filters={{ resource_type: "team_member" }}
+        members={members}
+        title="Team activity"
+        variant="footer"
+      />
 
       {/* Invite Member Dialog */}
       {canManageTeam && (
@@ -799,7 +811,7 @@ export default function TeamSettingsPage() {
                 </Select>
               </div>
               {inviteError && (
-                <p className="text-xs text-destructive">{inviteError}</p>
+                <ErrorText>{inviteError}</ErrorText>
               )}
               <AlertDialogFooter>
                 <AlertDialogCancel type="button">Cancel</AlertDialogCancel>
@@ -882,6 +894,11 @@ export default function TeamSettingsPage() {
             <AlertDialogTitle>Remove member</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to remove {removingMember?.name} ({removingMember?.email}) from the organization? This action cannot be undone.
+              {removingMember?.captured_github_org_login ? (
+                <span className="mt-2 block">
+                  They&apos;re a member of {removingMember.captured_github_org_login} on GitHub and will rejoin on their next sign-in. Remove them from the GitHub organization too, or turn off auto-join.
+                </span>
+              ) : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

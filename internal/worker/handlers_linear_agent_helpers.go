@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -97,6 +99,29 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 	}
 }
 
+func applyLinearCreatorAttribution(ctx context.Context, users *db.UserStore, session *models.Session, fetched *linear.FetchedIssue, logger zerolog.Logger) error {
+	if users == nil || session == nil || fetched == nil {
+		return nil
+	}
+	email := strings.TrimSpace(fetched.CreatorEmail)
+	if email == "" {
+		return nil
+	}
+	user, err := users.GetByOrgAndEmail(ctx, session.OrgID, email)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup linear creator user: %w", err)
+		}
+		logger.Debug().
+			Str("creator_email", email).
+			Str("org_id", session.OrgID.String()).
+			Msg("linear_agent_event: no 143 org user matched Linear creator email")
+		return nil
+	}
+	session.TriggeredByUserID = &user.ID
+	return nil
+}
+
 func resolveLinearAgentSessionAgentType(ctx context.Context, deps LinearAgentEventHandlerDeps, orgID uuid.UUID) (models.AgentType, error) {
 	if deps.OrgSettingsLoader == nil {
 		return models.DefaultDefaultAgentType, nil
@@ -174,12 +199,7 @@ func enqueueRunAgentForLinearAgent(ctx context.Context, stores *Stores, orgID, s
 		return nil
 	}
 
-	dedupe := db.RunAgentDedupeKey(sessionID)
-	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", map[string]any{
-		"org_id":     orgID.String(),
-		"session_id": sessionID.String(),
-	}, 5, &dedupe)
-	return err
+	return enqueueRunAgentForSession(ctx, stores, session)
 }
 
 func linearAgentCreatedShouldEnqueueRun(status models.SessionStatus) bool {

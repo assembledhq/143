@@ -66,8 +66,14 @@ Use `preview.default` to auto-select one config. If there are multiple configs a
 <ConfigField name="preview.install.clean_paths" type="string[]" description="Repo-relative paths or simple globs removed before reinstalling. 143 deletes only declared paths." />
 <ConfigField name="preview.install.verify_paths" type="string[]" description="Repo-relative paths that must exist before a cached install can be reused." />
 <ConfigField name="preview.install.cache.enabled" type="boolean" defaultValue="true" description="Set false to opt out of dependency artifact caching." />
-<ConfigField name="preview.install.cache.paths" type="string[]" description="Additive repo-relative dependency/build cache paths. Effective paths are clean_paths + cache.paths + inferred paths." />
+<ConfigField name="preview.install.cache.paths" type="string[]" description="Additive repo-relative dependency/build cache paths. Effective paths are clean_paths + cache.paths + inferred paths, excluding platform-owned install markers." />
+<ConfigField name="preview.install.cache.build.enabled" type="boolean" defaultValue="true" description="Set false to opt out of build-artifact caching (incremental build caches saved after services report ready)." />
+<ConfigField name="preview.install.cache.build.paths" type="string[]" description="Additive repo-relative build cache paths (globs allowed). Effective paths are build.paths + inferred Turborepo cache dirs next to each JS lockfile." />
 <ConfigField name="preview.install.timeout_seconds" type="integer" defaultValue="420" description="Maximum install duration. Max 1800." />
+
+Install caches are keyed from the install command, declared lockfiles, sandbox image, and effective cache paths. They speed up preview startup without replacing source files from the session workspace.
+
+Use `preview.install` for dependency installation only. Source-dependent builds belong in service commands, where they run against the current workspace on every start.
 
 Inferred dependency cache paths:
 
@@ -77,7 +83,15 @@ Inferred dependency cache paths:
 | `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `requirements.txt`, `requirements-dev.txt` | `.venv` |
 | `go.mod`, `go.sum` | `vendor` |
 
-Inference is relative to the dependency file directory. For example, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`. Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. For stale dependencies, change lockfiles, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
+Inference is relative to the dependency file directory. For example, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`.
+
+Do not cache source directories, secret files, `.git`, `.143/cache`, `.143/cache/preview-install`, or any parent/glob path that can include preview install markers. `requirements.txt` is safe only when dependencies are pinned. For stale dependencies, change lockfiles or temporarily set `cache.enabled: false`.
+
+### Build-artifact cache
+
+Build-artifact caches are separate from install artifacts. They are restored after install and saved asynchronously after services report ready. JS lockfiles infer Turborepo cache directories; add other content-addressed caches, such as `.next/cache`, with `preview.install.cache.build.paths`.
+
+Only cache build directories whose tool validates entries by content hash. A stale build cache should degrade to a partial miss, not serve wrong output.
 
 ## Service fields
 
@@ -164,9 +178,9 @@ Secret values do not belong in `.143/config.json`. Put public, non-secret values
 <ConfigField name="preview.resources.requests.cpu" type="string" description='CPU request, such as "500m" or "1".' />
 <ConfigField name="preview.resources.requests.memory" type="string" description='Memory request, such as "512Mi" or "1Gi".' />
 <ConfigField name="preview.resources.requests.ephemeral-storage" type="string" description='Ephemeral storage request, such as "5Gi".' />
-<ConfigField name="preview.resources.limits.cpu" type="string" description="CPU limit. Hard cap is 2 cores." />
-<ConfigField name="preview.resources.limits.memory" type="string" description="Memory limit. Hard cap is 1Gi." />
-<ConfigField name="preview.resources.limits.ephemeral-storage" type="string" description="Ephemeral storage limit. Hard cap is 10Gi." />
+<ConfigField name="preview.resources.limits.cpu" type="string" description="CPU limit. Platform hard cap is 2 cores; org admins can configure a lower max." />
+<ConfigField name="preview.resources.limits.memory" type="string" description="Memory limit. Platform hard cap is 8Gi; org admins can configure a lower max." />
+<ConfigField name="preview.resources.limits.ephemeral-storage" type="string" description="Ephemeral storage limit. Platform hard cap is 10Gi; org admins can configure a lower max." />
 
 ## Platform-injected environment
 
@@ -183,4 +197,8 @@ Preview config is repository content. For fields that can expose secrets or netw
 
 For non-connected previews, service runtime fields can come from the session diff. For connected previews, launch behavior is pinned to the base branch. A preview is connected when `preview.secrets` is present, `preview.credentials.mode` is not `none`, or `preview.network.destinations` is non-empty.
 
-For task-based examples, see [Preview environments](/docs/guides/previews). For repo-wide setup, see [Repo config](/docs/guides/repo-config).
+## Runtime freshness
+
+143 can live-update ordinary source changes through the preview's dev server. Dependency, preview config, build config, environment config, and schema changes require a preview refresh. Refreshes reuse install, package-manager, and build caches when their keys still match.
+
+For task-based examples and behavior details, see [Preview environments](/docs/guides/previews). For repo-wide setup, see [Repo config](/docs/guides/repo-config).

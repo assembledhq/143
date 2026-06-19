@@ -34,7 +34,7 @@ describe("coding-agent reasoning settings", () => {
       coding_agent_reasoning_defaults: {
         codex: "xhigh",
         claude_code: "max",
-        gemini_cli: "high",
+        opencode: "high",
       },
     } as unknown as Parameters<typeof getCodingAgentReasoningDefaultsFromSettings>[0];
 

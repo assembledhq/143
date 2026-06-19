@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1011,11 +1012,79 @@ func (d *DockerProvider) Exec(ctx context.Context, sb *agent.Sandbox, cmd string
 	return inspectResp.ExitCode, nil
 }
 
+// ExecWithStdin runs a command inside the sandbox while streaming stdin into
+// the exec session. It is used for large payloads where staging a sandbox temp
+// file would create avoidable disk pressure.
+func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, cmd string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	log := d.scopedLogger(sb)
+	log.Debug().Str("cmd", redactSandboxCommandForLog(cmd)).Msg("executing stdin command in sandbox")
+
+	execCfg := container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir:   sb.WorkDir,
+		Env:          envSliceFromMap(sb.Env),
+	}
+
+	execResp, err := d.client.ContainerExecCreate(ctx, sb.ID, execCfg)
+	if err != nil {
+		return -1, fmt.Errorf("create exec: %w", err)
+	}
+
+	attachResp, err := d.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, fmt.Errorf("attach exec: %w", err)
+	}
+	defer attachResp.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			attachResp.Close()
+		case <-done:
+		}
+	}()
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(attachResp.Conn, stdin)
+		closeErr := attachResp.CloseWrite()
+		writeErrCh <- errors.Join(copyErr, closeErr)
+	}()
+
+	if _, err := stdcopy.StdCopy(stdout, stderr, attachResp.Reader); err != nil {
+		attachResp.Close()
+		<-writeErrCh
+		return -1, fmt.Errorf("read exec output: %w", err)
+	}
+	if err := <-writeErrCh; err != nil {
+		return -1, fmt.Errorf("write exec stdin: %w", err)
+	}
+
+	inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return -1, fmt.Errorf("inspect exec: %w", err)
+	}
+
+	return inspectResp.ExitCode, nil
+}
+
+// cliTokenPattern matches the distinctive 143-credential prefixes (user CLI
+// tokens "143u_", org join tokens "143j_") wherever they appear in logged
+// command lines. The prefixes exist partly so leaked tokens are
+// machine-findable — the log layer must therefore strip them before
+// shipping.
+var cliTokenPattern = regexp.MustCompile(`143[uj]_[A-Za-z0-9_-]{8,}`)
+
 func redactSandboxCommandForLog(cmd string) string {
 	if strings.Contains(cmd, "__143_SECRET_FILE__") {
 		return "[redacted preview secret file write]"
 	}
-	return cmd
+	return cliTokenPattern.ReplaceAllString(cmd, "143?_***")
 }
 
 // ReadFile reads a file from the sandbox filesystem by exec-ing cat.
@@ -1593,10 +1662,11 @@ func shellEscape(s string) string {
 }
 
 // redactToken removes an auth token from a string so it is safe to surface in
-// error messages or logs.
+// error messages or logs. CLI/join-token shapes are stripped by pattern as
+// well, since those can appear without the caller knowing the exact value.
 func redactToken(s, token string) string {
 	if token != "" {
 		s = strings.ReplaceAll(s, token, "***")
 	}
-	return s
+	return cliTokenPattern.ReplaceAllString(s, "143?_***")
 }

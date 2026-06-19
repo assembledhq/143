@@ -73,20 +73,30 @@ const mocks = vi.hoisted(() => ({
     file_name: "uploaded-shot.png",
     content_type: "image/png",
   }),
-  resolvedCredsMock: vi.fn().mockResolvedValue({
-    data: [
-      { provider: "openai", source: "personal" },
-      { provider: "anthropic", source: "personal" },
-      { provider: "gemini", source: "personal" },
-      { provider: "amp", source: "personal" },
-      { provider: "pi", source: "personal" },
-    ],
-  }),
-  codingAuthsListMock: vi.fn().mockResolvedValue({
-    data: [],
-  }),
+  // Default resolved stack: a healthy personal credential for every agent so
+  // the model picker shows every group unless a test narrows it.
   codingCredentialsListMock: vi.fn().mockResolvedValue({
-    data: [],
+    data: [
+      { agent: "codex", provider: "openai" },
+      { agent: "claude_code", provider: "anthropic" },
+      { agent: "opencode", provider: "opencode" },
+      { agent: "amp", provider: "amp" },
+      { agent: "pi", provider: "pi" },
+    ].map((row, index) => ({
+      id: `cc-${row.agent}`,
+      org_id: "org-1",
+      user_id: "user-1",
+      scope: "personal",
+      priority: index + 1,
+      agent: row.agent,
+      auth_type: "api_key",
+      provider: row.provider,
+      label: `${row.agent} API key`,
+      status: "healthy",
+      is_default: index === 0,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    })),
   }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
@@ -128,12 +138,6 @@ vi.mock("@/lib/api", () => ({
     },
     uploads: {
       upload: mocks.uploadMock,
-    },
-    userCredentials: {
-      listResolved: mocks.resolvedCredsMock,
-    },
-    codingAuths: {
-      list: mocks.codingAuthsListMock,
     },
     codingCredentials: {
       list: mocks.codingCredentialsListMock,
@@ -277,17 +281,8 @@ describe("ManualSessionCreatePageContent", () => {
   it("does not show the agent configuration warning before setup queries resolve", async () => {
     const settings = deferred<Awaited<ReturnType<typeof mocks.settingsGetMock>>>();
     mocks.settingsGetMock.mockImplementationOnce(() => settings.promise);
-    mocks.resolvedCredsMock.mockResolvedValueOnce({
-      data: [
-        { provider: "openai", source: "none" },
-        { provider: "anthropic", source: "none" },
-        { provider: "gemini", source: "none" },
-        { provider: "amp", source: "none" },
-        { provider: "pi", source: "none" },
-      ],
-    });
+    mocks.codingCredentialsListMock.mockResolvedValueOnce({ data: [] });
     mocks.codexAuthStatusMock.mockResolvedValueOnce({ data: { status: "none" } });
-    mocks.codingAuthsListMock.mockResolvedValueOnce({ data: [] });
 
     renderWithProviders(<ManualSessionCreatePageContent />);
 
@@ -838,7 +833,7 @@ describe("ManualSessionCreatePageContent", () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(await screen.findByRole("combobox", { name: /Model/i }));
-    await user.click(screen.getByRole("option", { name: "gemini-2.5-pro" }));
+    await user.click(screen.getByRole("option", { name: "openai/gpt-5.4-mini" }));
 
     const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
     await user.type(textarea, "Fix the login bug");
@@ -851,8 +846,8 @@ describe("ManualSessionCreatePageContent", () => {
     const requestBody = mocks.createSessionMock.mock.calls.at(-1)?.[0];
     expect(requestBody).toMatchObject({
       message: "Fix the login bug",
-      model: "gemini-2.5-pro",
-      agent_type: "gemini_cli",
+      model: "openai/gpt-5.4-mini",
+      agent_type: "opencode",
     });
     expect(requestBody).not.toHaveProperty("reasoning_effort");
   });
@@ -905,17 +900,10 @@ describe("ManualSessionCreatePageContent", () => {
         },
       },
     });
-    mocks.resolvedCredsMock.mockResolvedValueOnce({
-      data: [
-        { provider: "openai", source: "none" },
-        { provider: "anthropic", source: "none" },
-        { provider: "gemini", source: "none" },
-        { provider: "amp", source: "none" },
-        { provider: "pi", source: "none" },
-      ],
-    });
     mocks.codexAuthStatusMock.mockResolvedValueOnce({ data: { status: "pending" } });
-    mocks.codingAuthsListMock.mockResolvedValueOnce({
+    // The resolved stack falls through to the org fallback when the user has
+    // no personal credentials.
+    mocks.codingCredentialsListMock.mockResolvedValueOnce({
       data: [
         {
           id: "auth-1",
@@ -924,7 +912,7 @@ describe("ManualSessionCreatePageContent", () => {
           agent: "codex",
           auth_type: "api_key",
           label: "Org Codex",
-          scope: "organization",
+          scope: "org",
           provider: "openai",
           status: "healthy",
           is_default: true,
@@ -1015,8 +1003,8 @@ describe("ManualSessionCreatePageContent", () => {
       });
     });
 
-    it("does not clear a restored model that is available only through org coding auths", async () => {
-      type CodingAuthListResponse = {
+    it("does not clear a restored model while the resolved credential stack is still loading", async () => {
+      type CodingCredentialListResponse = {
         data: Array<{
           id: string;
           org_id: string;
@@ -1032,21 +1020,12 @@ describe("ManualSessionCreatePageContent", () => {
           updated_at: string;
         }>;
       };
-      let resolveCodingAuths: ((value: CodingAuthListResponse) => void) | undefined;
-      mocks.resolvedCredsMock.mockResolvedValueOnce({
-        data: [
-          { provider: "openai", source: "none" },
-          { provider: "anthropic", source: "none" },
-          { provider: "gemini", source: "none" },
-          { provider: "amp", source: "none" },
-          { provider: "pi", source: "none" },
-        ],
-      });
+      let resolveCodingCredentials: ((value: CodingCredentialListResponse) => void) | undefined;
       mocks.codexAuthStatusMock.mockResolvedValueOnce({ data: { status: "pending" } });
-      mocks.codingAuthsListMock.mockImplementationOnce(
+      mocks.codingCredentialsListMock.mockImplementationOnce(
         () =>
           new Promise((resolve) => {
-            resolveCodingAuths = resolve;
+            resolveCodingCredentials = resolve;
           }),
       );
       window.sessionStorage.setItem(
@@ -1069,12 +1048,12 @@ describe("ManualSessionCreatePageContent", () => {
 
       const modelSelect = await screen.findByRole("combobox", { name: /Model/i });
       await waitFor(() => {
-        expect(mocks.resolvedCredsMock).toHaveBeenCalledTimes(1);
+        expect(mocks.codingCredentialsListMock).toHaveBeenCalledTimes(1);
         expect(mocks.codexAuthStatusMock).toHaveBeenCalledTimes(1);
       });
 
-      expect(resolveCodingAuths).toBeDefined();
-      resolveCodingAuths!({
+      expect(resolveCodingCredentials).toBeDefined();
+      resolveCodingCredentials!({
         data: [
           {
             id: "auth-1",
@@ -1083,7 +1062,7 @@ describe("ManualSessionCreatePageContent", () => {
             agent: "codex",
             auth_type: "api_key",
             label: "Org Codex",
-            scope: "organization",
+            scope: "org",
             provider: "openai",
             status: "healthy",
             is_default: true,
@@ -1162,7 +1141,7 @@ describe("ManualSessionCreatePageContent", () => {
       await waitFor(() => {
         expect(mocks.settingsGetMock).toHaveBeenCalledTimes(1);
         expect(mocks.repositoriesListMock).toHaveBeenCalledTimes(1);
-        expect(mocks.resolvedCredsMock).toHaveBeenCalledTimes(1);
+        expect(mocks.codingCredentialsListMock).toHaveBeenCalledTimes(1);
         expect(mocks.codexAuthStatusMock).toHaveBeenCalledTimes(1);
         expect(mocks.authMeMock).toHaveBeenCalledTimes(1);
         expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();

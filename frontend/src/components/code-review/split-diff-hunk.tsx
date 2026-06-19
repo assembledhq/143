@@ -131,7 +131,7 @@ const SplitLineCell = memo(function SplitLineCell({
   if (!line) {
     return (
       <div className={cn("flex text-xs font-mono leading-[20px] flex-1 min-w-0", bgStyles.empty)}>
-        <div className={cn("w-[50px] shrink-0 select-none", gutterBg.empty)} />
+        <div className={cn("w-[42px] shrink-0 select-none", gutterBg.empty)} />
         <div className="w-[16px] shrink-0" />
         <div className="flex-1 min-w-0">&nbsp;</div>
       </div>
@@ -191,7 +191,7 @@ const SplitLineCell = memo(function SplitLineCell({
       )}
       <div
         className={cn(
-          "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60",
+          "w-[42px] shrink-0 text-right pr-1 select-none text-xs text-muted-foreground/60",
           gutterBg[type]
         )}
       >

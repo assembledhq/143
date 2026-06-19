@@ -1,4 +1,4 @@
-export type IntegrationKey = "github" | "sentry" | "linear" | "slack" | "notion" | "circleci" | "victorialogs" | "mezmo";
+export type IntegrationKey = "github" | "sentry" | "linear" | "slack" | "notion" | "circleci" | "mezmo";
 
 export type IntegrationDefinition = {
   key: IntegrationKey;
@@ -43,12 +43,6 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     name: "CircleCI",
     description: "Surface flaky tests so agents can investigate and fix them.",
     logoSrc: "/integrations/circleci.svg",
-  },
-  {
-    key: "victorialogs",
-    name: "VictoriaLogs",
-    description: "Query and search log data from VictoriaLogs.",
-    logoSrc: "/integrations/victorialogs.svg",
   },
   {
     key: "mezmo",

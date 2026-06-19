@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -302,6 +303,8 @@ type MezmoProvider struct {
 	client *http.Client
 }
 
+const mezmoExportPath = "/v2/export"
+
 func NewMezmoProvider(cfg MezmoConfig) *MezmoProvider {
 	client := cfg.HTTPClient
 	if client == nil {
@@ -324,23 +327,17 @@ func (p *MezmoProvider) QueryLogs(ctx context.Context, req LogQueryRequest) (*Lo
 	if p.cfg.APIKey == "" {
 		return nil, ErrLogProviderUnconfigured
 	}
+	if strings.TrimSpace(p.cfg.Dataset) != "" {
+		return nil, fmt.Errorf("mezmo dataset scoping is not supported by /v2/export; reconnect Mezmo without a dataset")
+	}
 	limit := intValue(req.Limit, LogDefaultLimit)
-	body := map[string]any{
-		"query":      req.Query,
-		"start_time": start.Format(time.RFC3339Nano),
-		"end_time":   end.Format(time.RFC3339Nano),
-		"limit":      limit + 1,
-	}
-	if p.cfg.Dataset != "" {
-		body["dataset"] = p.cfg.Dataset
-	}
-	records, err := p.post(ctx, "/v1/logs/search", body)
-	if err != nil {
-		return nil, err
-	}
 	direction := LogDirectionDesc
 	if req.Direction != nil {
 		direction = *req.Direction
+	}
+	records, err := p.get(ctx, mezmoExportPath, mezmoExportValues(req.Query, start, end, limit+1, direction))
+	if err != nil {
+		return nil, err
 	}
 	entries := normalizeLogRecords(models.ProviderMezmo, records, req.Fields, req.IncludeRaw)
 	sortLogEntries(entries, direction)
@@ -380,18 +377,38 @@ func (p *MezmoProvider) QueryLogStats(context.Context, LogStatsRequest) (*LogSta
 	return nil, ErrLogStatsUnsupported
 }
 
-func (p *MezmoProvider) post(ctx context.Context, path string, body map[string]any) ([]map[string]any, error) {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
+func mezmoExportValues(query string, start, end time.Time, size int, direction LogDirection) url.Values {
+	values := url.Values{}
+	values.Set("from", strconv.FormatInt(start.Unix(), 10))
+	values.Set("to", strconv.FormatInt(end.Unix(), 10))
+	values.Set("size", strconv.Itoa(size))
+	values.Set("query", query)
+	if direction == LogDirectionAsc {
+		values.Set("prefer", "head")
+	} else {
+		values.Set("prefer", "tail")
 	}
+	return values
+}
+
+func (p *MezmoProvider) get(ctx context.Context, path string, values url.Values) ([]map[string]any, error) {
+	records, err := p.getWithAuth(ctx, path, values, "Authorization", "Token "+p.cfg.APIKey)
+	if errors.Is(err, ErrLogProviderUnauthorized) {
+		return p.getWithAuth(ctx, path, values, "servicekey", p.cfg.APIKey)
+	}
+	return records, err
+}
+
+func (p *MezmoProvider) getWithAuth(ctx context.Context, path string, values url.Values, authHeader, authValue string) ([]map[string]any, error) {
 	endpoint := strings.TrimRight(p.cfg.BaseURL, "/") + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if encoded := values.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("servicekey", p.cfg.APIKey)
+	req.Header.Set(authHeader, authValue)
 	return doLogHTTPRequest(p.client, req)
 }
 

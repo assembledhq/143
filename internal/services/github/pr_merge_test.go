@@ -376,7 +376,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 		}).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	prMock.ExpectExec("UPDATE pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "version": int64(1)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "version": int64(1), "head_sha": "head-merge"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	prMock.ExpectExec("INSERT INTO pull_request_health_current").
 		WithArgs(pgx.NamedArgs{
@@ -424,7 +424,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 			prID, orgID, int64(1), "head-merge", "base-merge", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, (*time.Time)(nil), now, now,
 		))
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "health_version": int64(1)}).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": "head-merge"}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunTestColumns))
 	repoMock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).

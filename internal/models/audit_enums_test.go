@@ -48,6 +48,11 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "session.branch_requested is valid", value: AuditActionSessionBranchRequested},
 		{name: "session.preview_lifetime_set is valid", value: AuditActionSessionPreviewLifetimeSet},
 		{name: "project.started is valid", value: AuditActionProjectStarted},
+		{name: "automation goal improvement requested is valid", value: AuditActionAutomationGoalImprovementRequested},
+		{name: "automation goal improvement completed is valid", value: AuditActionAutomationGoalImprovementCompleted},
+		{name: "automation goal improvement failed is valid", value: AuditActionAutomationGoalImprovementFailed},
+		{name: "automation goal improvement applied is valid", value: AuditActionAutomationGoalImprovementApplied},
+		{name: "automation goal improvement canceled is valid", value: AuditActionAutomationGoalImprovementCanceled},
 		{name: "auth.login is valid", value: AuditActionAuthLogin},
 		{name: "team.member_invited is valid", value: AuditActionTeamMemberInvited},
 		{name: "credential.updated is valid", value: AuditActionCredentialUpdated},
@@ -57,6 +62,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "preview_secret_bundle.updated is valid", value: AuditActionPreviewSecretBundleUpdated},
 		{name: "preview_secret_bundle.revealed is valid", value: AuditActionPreviewSecretBundleRevealed},
 		{name: "preview_secret_bundle.resolved is valid", value: AuditActionPreviewSecretBundleResolved},
+		{name: "preview_policy.updated is valid", value: AuditActionPreviewPolicyUpdated},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foo.bar", expectErr: true},
 	}
@@ -90,6 +96,7 @@ func TestAuditResourceType_Validate(t *testing.T) {
 		{name: "settings is valid", value: AuditResourceSettings},
 		{name: "credential is valid", value: AuditResourceCredential},
 		{name: "preview_secret_bundle is valid", value: AuditResourcePreviewSecretBundle},
+		{name: "preview_policy is valid", value: AuditResourcePreviewPolicy},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foobar", expectErr: true},
 	}

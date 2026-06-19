@@ -32,8 +32,8 @@ func TestGitHubInstallationStore_UpsertInstallation(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO github_installations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"account_id", "account_login", "account_type", "repository_selection", "status", "created_at", "updated_at",
-		}).AddRow(int64(99), "assembledhq", nil, nil, "active", now, now))
+			"account_id", "account_login", "account_type", "repository_selection", "status", "roster_synced_at", "created_at", "updated_at",
+		}).AddRow(int64(99), "assembledhq", nil, nil, "active", nil, now, now))
 
 	err = store.UpsertInstallation(context.Background(), installation)
 	require.NoError(t, err, "UpsertInstallation should persist installation metadata")
@@ -82,7 +82,7 @@ func TestGitHubInstallationStore_UpsertOrgLink(t *testing.T) {
 
 	mock.ExpectQuery("INSERT INTO github_installation_org_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "account_login", "created_at", "updated_at"}).AddRow(linkID, "assembledhq", now, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "account_login", "auto_join_enabled", "created_at", "updated_at"}).AddRow(linkID, "assembledhq", false, now, now))
 
 	err = store.UpsertOrgLink(context.Background(), link)
 	require.NoError(t, err, "UpsertOrgLink should persist the org-to-installation link")
@@ -110,14 +110,43 @@ func TestGitHubInstallationStore_GetOrgLinkRequiresActiveInstallation(t *testing
 	mock.ExpectQuery("JOIN github_installations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "created_at", "updated_at",
-		}).AddRow(linkID, orgID, &integrationID, int64(12345), "assembledhq", &userID, "active", now, now))
+			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+		}).AddRow(linkID, orgID, &integrationID, int64(12345), "assembledhq", &userID, "active", true, now, now))
 
 	link, err := store.GetOrgLink(context.Background(), orgID, 12345)
 
 	require.NoError(t, err, "GetOrgLink should return an active link for an active installation")
 	require.Equal(t, linkID, link.ID, "GetOrgLink should scan the link id")
 	require.Equal(t, orgID, link.OrgID, "GetOrgLink should scan the org id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGitHubInstallationStore_FindAutoJoinCandidatesByGitHubUserID(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	accountType := "Organization"
+	mock.ExpectQuery("FROM github_org_members").
+		WithArgs(int64(42)).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"org_id", "org_name", "installation_id", "account_login", "account_type", "enabled_at",
+		}).AddRow(orgID, "Assembled", int64(12345), "assembledhq", &accountType, now))
+
+	got, err := NewGitHubInstallationStore(mock).FindAutoJoinCandidatesByGitHubUserID(context.Background(), 42)
+	require.NoError(t, err, "FindAutoJoinCandidatesByGitHubUserID should query the roster")
+	require.Equal(t, []models.GitHubOrgAutoJoinCandidate{{
+		OrgID:          orgID,
+		OrgName:        "Assembled",
+		InstallationID: 12345,
+		AccountLogin:   "assembledhq",
+		AccountType:    &accountType,
+		EnabledAt:      now,
+	}}, got, "FindAutoJoinCandidatesByGitHubUserID should return enabled capture candidates")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

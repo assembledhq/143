@@ -1,12 +1,9 @@
 "use client";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clipboard } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/page-header";
@@ -15,72 +12,14 @@ import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
-import { useAutosave } from "@/hooks/useAutosave";
-import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import {
-  applyOrgSettingsPatch,
-  coalesceSettingsPatch,
-  type SettingsPatch,
-} from "@/lib/settings-autosave";
-import type { MembershipsResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import { useOrgSettingsAutosave } from "@/hooks/use-org-settings-autosave";
+import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
   { value: "app_only", label: "App only", description: "Always create PRs as the 143 GitHub App" },
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
-
-const DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER = 4;
-const MIN_PREVIEW_MAX_PREVIEWS_PER_USER = 1;
-const MAX_PREVIEW_MAX_PREVIEWS_PER_USER = 20;
-
-const settingsTimestampFormatter = new Intl.DateTimeFormat("en-US", {
-  dateStyle: "long",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
-
-function formatUpdatedAt(updatedAt: string | undefined): string | undefined {
-  if (!updatedAt) return undefined;
-  const date = new Date(updatedAt);
-  if (Number.isNaN(date.getTime())) return undefined;
-  return `${settingsTimestampFormatter.format(date)} UTC`;
-}
-
-function useOrgSettingsAutosave() {
-  const queryClient = useQueryClient();
-  return useAutosave<SettingsPatch>({
-    queryKey: queryKeys.settings.all,
-    mutationFn: async (payload) => {
-      const response = await api.settings.update(payload);
-      queryClient.setQueryData(queryKeys.settings.all, response);
-      if (payload.name !== undefined) {
-        queryClient.setQueryData<SingleResponse<MembershipsResponse> | undefined>(
-          queryKeys.auth.memberships,
-          (previous) => {
-            if (!previous?.data) return previous;
-            return {
-              ...previous,
-              data: {
-                ...previous.data,
-                memberships: previous.data.memberships.map((membership) =>
-                  membership.org_id === response.data.id
-                    ? { ...membership, org_name: response.data.name }
-                    : membership,
-                ),
-              },
-            };
-          },
-        );
-      }
-      void queryClient.invalidateQueries({ queryKey: ["audit-logs", "latest"] });
-      return response;
-    },
-    applyOptimistic: applyOrgSettingsPatch,
-    coalesce: coalesceSettingsPatch,
-    invalidateOnSettled: false,
-  });
-}
 
 function PRAuthorshipSettings() {
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -186,136 +125,6 @@ function PRAuthorshipSettings() {
   );
 }
 
-function NetworkAccessSettings() {
-  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: queryKeys.settings.all,
-    queryFn: () => api.settings.get(),
-  });
-  const { data: networkStatusResponse } = useQuery({
-    queryKey: queryKeys.settings.network,
-    queryFn: () => api.settings.getNetworkStatus(),
-  });
-  const { save, status } = useOrgSettingsAutosave();
-
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-  const sandboxNetwork = settings.sandbox_network ?? {};
-  const enabled = sandboxNetwork.static_egress_enabled ?? false;
-  const networkStatus = networkStatusResponse?.data;
-  const available = networkStatus?.static_egress_available ?? false;
-  const publicIP = networkStatus?.static_egress_public_ip;
-  const unavailableReason = networkStatus?.static_egress_unavailable_reason;
-
-  const saveStaticEgress = (checked: boolean) => {
-    save({
-      settings: {
-        sandbox_network: {
-          ...sandboxNetwork,
-          static_egress_enabled: checked,
-        },
-      },
-    });
-  };
-
-  return (
-    <section className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xs font-medium text-foreground">Network access</h2>
-        <AutosaveIndicator status={status} />
-      </div>
-      <Card>
-        <CardContent className="space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="space-y-1">
-              <Label htmlFor="static-egress-enabled">Use static egress IP for sessions and previews</Label>
-              <p className="text-xs text-muted-foreground">
-                New and hydrated sandboxes use the allowlistable public IP when enabled.
-              </p>
-              {!available && unavailableReason && (
-                <p className="text-xs text-muted-foreground">{unavailableReason}</p>
-              )}
-            </div>
-            <Switch
-              id="static-egress-enabled"
-              checked={enabled}
-              disabled={!available && !enabled}
-              onCheckedChange={saveStaticEgress}
-              aria-label="Use static egress IP for sessions and previews"
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
-            <span className="text-xs text-muted-foreground">Public IP</span>
-            <code className="font-mono text-sm text-foreground">{publicIP ?? "Not configured"}</code>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              disabled={!publicIP}
-              aria-label="Copy static egress public IP"
-              onClick={() => {
-                if (publicIP) void navigator.clipboard?.writeText(publicIP);
-              }}
-            >
-              <Clipboard className="h-4 w-4" />
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
-
-function PreviewCapacitySettings() {
-  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: queryKeys.settings.all,
-    queryFn: () => api.settings.get(),
-  });
-
-  const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-  const currentMaxPreviewsPerUser =
-    settings.preview_max_previews_per_user ?? DEFAULT_PREVIEW_MAX_PREVIEWS_PER_USER;
-  const autosave = useOrgSettingsAutosave();
-  const maxPreviewsPerUserField = useAutosaveNumericField({
-    serverValue: currentMaxPreviewsPerUser,
-    autosave,
-    toPatch: (value) => ({ settings: { preview_max_previews_per_user: value } }),
-    clamp: (value) =>
-      Math.min(
-        MAX_PREVIEW_MAX_PREVIEWS_PER_USER,
-        Math.max(MIN_PREVIEW_MAX_PREVIEWS_PER_USER, value),
-      ),
-  });
-
-  return (
-    <section className="space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xs font-medium text-foreground">Preview capacity</h2>
-        <AutosaveIndicator status={autosave.status} />
-      </div>
-      <Card>
-        <CardContent>
-          <div className="max-w-[560px] space-y-2">
-            <Label htmlFor="preview-max-previews-per-user">Active previews per user</Label>
-            <Input
-              id="preview-max-previews-per-user"
-              type="number"
-              inputMode="numeric"
-              min={MIN_PREVIEW_MAX_PREVIEWS_PER_USER}
-              max={MAX_PREVIEW_MAX_PREVIEWS_PER_USER}
-              value={maxPreviewsPerUserField.value}
-              onChange={maxPreviewsPerUserField.onChange}
-              onBlur={maxPreviewsPerUserField.onBlur}
-            />
-            <p className="text-xs text-muted-foreground">
-              Limits how many previews one user can keep running at once. Higher values consume more worker capacity.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-  );
-}
-
 export default function SettingsPage() {
   const { user } = useAuth();
   const { data: settings } = useQuery<SingleResponse<Organization>>({
@@ -328,16 +137,8 @@ export default function SettingsPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
-          title="General settings"
+          title="Organization"
           description="Manage your organization."
-          subtitle={(() => {
-            const formattedUpdatedAt = formatUpdatedAt(settings?.data?.updated_at);
-            return formattedUpdatedAt ? `Updated at ${formattedUpdatedAt}` : undefined;
-          })()}
-        />
-        <AuditLogTrigger
-          filters={{ resource_type: "settings" }}
-          title="Settings activity"
         />
 
         <section className="space-y-3">
@@ -361,9 +162,13 @@ export default function SettingsPage() {
           </Card>
         </section>
 
-        {user?.role === "admin" && <NetworkAccessSettings />}
-        {user?.role === "admin" && <PreviewCapacitySettings />}
         {user?.role === "admin" && <PRAuthorshipSettings />}
+
+        <AuditLogTrigger
+          filters={{ resource_type: "settings" }}
+          title="Settings activity"
+          variant="footer"
+        />
       </div>
     </PageContainer>
   );

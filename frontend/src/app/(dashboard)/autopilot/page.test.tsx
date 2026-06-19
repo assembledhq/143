@@ -497,4 +497,112 @@ describe("AutopilotPage", () => {
     expect(screen.queryByText(/737e9a4c/)).not.toBeInTheDocument();
     expect(screen.queryByText(/60685fba/)).not.toBeInTheDocument();
   });
+
+  it("links issue titles to external issue URLs when available", async () => {
+    mockSettings({
+      default_agent_type: "codex",
+      product_context: {
+        philosophy: "Ship reliability first.",
+        direction: "Payments hardening this quarter.",
+        focus_areas: ["auth"],
+        avoid_areas: [],
+      },
+    });
+    mockStatus({
+      is_running: false,
+      issues_reviewed: 0,
+      success_rate: 0,
+      success_count: 0,
+      total_delegated: 0,
+    });
+    mockLatestPlan(null);
+    mockDocuments([]);
+    mockIntegrations([
+      {
+        id: "github-1",
+        org_id: "org-1",
+        provider: "github",
+        status: "active",
+        created_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockRepositories([
+      {
+        id: "repo-1",
+        org_id: "org-1",
+        integration_id: "integration-1",
+        github_id: 1,
+        full_name: "acme/app",
+        default_branch: "main",
+        private: true,
+        clone_url: "https://github.com/acme/app.git",
+        installation_id: 1,
+        status: "active",
+        settings: {},
+        created_at: "2026-03-20T00:00:00Z",
+        updated_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+    mockAgentReadiness();
+    server.use(
+      http.get("/api/v1/autopilot/queue", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "issue-linked",
+              rank: 1,
+              source: { type: "linear", key: "VIR-321" },
+              title: "Open linked Linear issue",
+              issue_url: "https://linear.app/acme/issue/VIR-321/open-linked-linear-issue",
+              repo: { id: "repo-1", name: "acme/app" },
+              issue_status: "open",
+              customer_impact: { label: "Medium", count: 4 },
+              implementation_ease: "High",
+              low_hanging_fruit: {
+                label: "High",
+                reasons: ["eligible for automation"],
+                cluster_size: 1,
+              },
+              display_run_state: "not_started",
+              available_action: "start_run",
+            },
+            {
+              id: "issue-unlinked",
+              rank: 2,
+              source: { type: "sentry", key: "SENTRY-321" },
+              title: "Plain unlinked issue",
+              issue_url: "javascript:alert(1)",
+              repo: { id: "repo-1", name: "acme/app" },
+              issue_status: "open",
+              customer_impact: { label: "Low", count: 0 },
+              implementation_ease: "Medium",
+              low_hanging_fruit: {
+                label: "Low",
+                reasons: [],
+                cluster_size: 1,
+              },
+              display_run_state: "not_started",
+              available_action: "start_run",
+            },
+          ],
+          meta: {
+            summary: {
+              top_issue_id: "issue-linked",
+              autorunnable_count: 2,
+              needs_review_count: 0,
+              open_pr_count: 0,
+              active_run_count: 0,
+              ranked_issue_count: 2,
+            },
+          },
+        } satisfies AutopilotQueueResponse))
+    );
+
+    renderWithProviders(<AutopilotPage />);
+
+    const linkedTitle = await screen.findByRole("link", { name: "Open linked Linear issue" });
+    expect(linkedTitle).toHaveAttribute("href", "https://linear.app/acme/issue/VIR-321/open-linked-linear-issue");
+    expect(linkedTitle).toHaveAttribute("target", "_blank");
+    expect(screen.getByText("Plain unlinked issue").closest("a")).toBeNull();
+  });
 });

@@ -6,7 +6,8 @@ set -euo pipefail
 # packets sourced from STATIC_EGRESS_SUBNET; ordinary host and sandbox traffic
 # keeps the existing route.
 
-WG_INTERFACE="${STATIC_EGRESS_WG_INTERFACE:-wg-static-egress}"
+WG_INTERFACE="${STATIC_EGRESS_WG_INTERFACE:-wg-egress}"
+LEGACY_WG_INTERFACES="wg-static-egress wgstegress"
 WG_PRIVATE_KEY="${STATIC_EGRESS_WORKER_PRIVATE_KEY:?STATIC_EGRESS_WORKER_PRIVATE_KEY is required}"
 WG_ADDRESS="${STATIC_EGRESS_WORKER_WG_ADDRESS:?STATIC_EGRESS_WORKER_WG_ADDRESS is required, e.g. 10.143.0.2/32}"
 WG_PEER_PUBLIC_KEY="${STATIC_EGRESS_GATEWAY_PUBLIC_KEY:?STATIC_EGRESS_GATEWAY_PUBLIC_KEY is required}"
@@ -21,6 +22,17 @@ CAPABILITY_FILE="/etc/143/static-egress-capable"
 PROBE_URL="${STATIC_EGRESS_PROBE_URL:-https://api.ipify.org}"
 PROBE_IMAGE="${STATIC_EGRESS_PROBE_IMAGE:-ghcr.io/assembledhq/143-sandbox:latest}"
 PROBE_TIMEOUT="${STATIC_EGRESS_PROBE_TIMEOUT_SECONDS:-10}"
+
+if [ "${#WG_INTERFACE}" -gt 15 ]; then
+  echo "ERROR: STATIC_EGRESS_WG_INTERFACE '$WG_INTERFACE' is too long; Linux interface names must be 15 characters or fewer." >&2
+  exit 1
+fi
+case "$WG_INTERFACE" in
+  ""|.|..|*/*)
+    echo "ERROR: STATIC_EGRESS_WG_INTERFACE '$WG_INTERFACE' is not a valid WireGuard interface name." >&2
+    exit 1
+    ;;
+esac
 
 apt-get update >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireguard iproute2 iptables iptables-persistent >/dev/null
@@ -44,8 +56,21 @@ Endpoint = ${WG_ENDPOINT}
 PersistentKeepalive = 25
 WGCONF
 
+for legacy_interface in $LEGACY_WG_INTERFACES; do
+  if [ "$WG_INTERFACE" != "$legacy_interface" ]; then
+    systemctl disable --now "wg-quick@${legacy_interface}" >/dev/null 2>&1 || true
+    rm -f "/etc/wireguard/${legacy_interface}.conf"
+  fi
+done
+
+systemctl stop "wg-quick@${WG_INTERFACE}" >/dev/null 2>&1 || true
+ip rule del fwmark "$FWMARK" table "$TABLE_ID" 2>/dev/null || true
+ip route flush table "$TABLE_ID" 2>/dev/null || true
+if ip link show "$WG_INTERFACE" >/dev/null 2>&1; then
+  ip link delete dev "$WG_INTERFACE"
+fi
 systemctl enable "wg-quick@${WG_INTERFACE}" >/dev/null
-systemctl restart "wg-quick@${WG_INTERFACE}"
+systemctl start "wg-quick@${WG_INTERFACE}"
 
 iptables -t mangle -N STATIC_EGRESS_MARK 2>/dev/null || true
 iptables -t mangle -F STATIC_EGRESS_MARK
@@ -70,7 +95,18 @@ ip route show table "$TABLE_ID" | grep -F "dev $WG_INTERFACE" >/dev/null
 
 if [ "${STATIC_EGRESS_SKIP_PROBES:-false}" != "true" ]; then
   if ! docker image inspect "$PROBE_IMAGE" >/dev/null 2>&1; then
-    docker pull "$PROBE_IMAGE" >/dev/null
+    # This script runs as root, which has no ghcr.io registry credentials, so
+    # this pull only works for public images. Private probe images must be
+    # pre-pulled by deploy.sh as the deploy user.
+    if ! pull_output="$(docker pull "$PROBE_IMAGE" 2>&1)"; then
+      echo "ERROR: static egress probe image '$PROBE_IMAGE' is not present locally and the pull failed:" >&2
+      echo "       ${pull_output}" >&2
+      echo "       Pull it as the deploy user (which is logged in to ghcr.io) and re-run:" >&2
+      echo "         docker pull $PROBE_IMAGE" >&2
+      echo "       deploy.sh pre-pulls STATIC_EGRESS_PROBE_IMAGE before reconciliation; if this keeps" >&2
+      echo "       failing, check that /opt/143/.env pins the same tag the deploy pre-pulled." >&2
+      exit 1
+    fi
   fi
   if ! observed_ip="$(docker run --rm --network "$STATIC_EGRESS_NETWORK" \
     --name "143-static-egress-probe-$$" \

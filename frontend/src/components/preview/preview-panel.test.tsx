@@ -1,6 +1,8 @@
+import { act } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   buildPreviewIframeSrc,
+  PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
   PreviewPanel,
@@ -228,6 +230,65 @@ describe("PreviewPanel component", () => {
     expect(screen.queryByText("Stopped")).not.toBeInTheDocument();
     expect(screen.getByText(/Started 5m ago/)).toBeInTheDocument();
     expect(screen.getByText(/Stopped 1m ago/)).toHaveClass("rounded-full");
+  });
+
+  it("shows endpoint-unreachable recovery copy when the preview runtime connection was lost", async () => {
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const stoppedAt = new Date(Date.now() - 60_000).toISOString();
+    mockGet.mockResolvedValue(
+      makePreviewStatus({
+        status: "unavailable",
+        unavailable_reason: "endpoint_unreachable",
+        created_at: startedAt,
+        stopped_at: stoppedAt,
+      }),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Preview connection lost").length).toBeGreaterThan(0);
+    });
+    expect(
+      screen.getByText(
+        "The worker that was serving this preview stopped responding. Start the preview again to create a fresh runtime.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Unavailable 1m ago/)).toHaveClass("rounded-full");
+    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+  });
+
+  it("uses endpoint-unreachable copy in the startup checklist open-preview row", async () => {
+    mockGet.mockResolvedValue(
+      makePreviewStatus(
+        {
+          status: "unavailable",
+          unavailable_reason: "endpoint_unreachable",
+          stopped_at: new Date(Date.now() - 60_000).toISOString(),
+        },
+        [
+          {
+            id: "svc-1",
+            preview_instance_id: "prev-1",
+            service_name: "web",
+            role: "primary",
+            status: "ready",
+            command: ["npm", "start"],
+            cwd: ".",
+            port: 3000,
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      ),
+    );
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Preview connection lost").length).toBeGreaterThan(0);
+    });
+    expect(screen.getByText("Worker connection lost before the preview could be opened.")).toBeInTheDocument();
+    expect(screen.queryByText("The worker runtime that owned this preview is unavailable.")).not.toBeInTheDocument();
   });
 
   it("treats async start success as startup in progress and resumes polling", async () => {
@@ -564,20 +625,64 @@ describe("PreviewPanel component", () => {
     );
   });
 
-  it("renders a prominent preview link instead of viewport preset buttons in ready state", async () => {
+  it("bootstraps preview access before opening from the ready state", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready" }));
+    const popupDocument = {
+      close: vi.fn(),
+      write: vi.fn(),
+    } as unknown as Document;
+    const openedWindow = {
+      addEventListener: vi.fn(),
+      close: vi.fn(),
+      removeEventListener: vi.fn(),
+      closed: false,
+      document: popupDocument,
+      location: {
+        href: "about:blank",
+      },
+      opener: null,
+    } as unknown as Window;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(openedWindow);
 
     const { container } = renderWithProviders(
       <PreviewPanel {...DEFAULT_PROPS} />,
     );
 
-    await waitFor(() => {
-      expect(screen.getByRole("link", { name: /Open Preview/i })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Open Preview" }));
+
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(screen.getByTitle("Preview bootstrap")).toHaveAttribute(
+      "src",
+      "http://prev-1.preview.test/bootstrap",
+    );
+    expect(openedWindow.location.href).toBe("about:blank");
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: PREVIEW_BOOTSTRAP_READY_EVENT },
+          origin: "http://prev-1.preview.test",
+        }),
+      );
     });
 
-    const previewLink = screen.getByRole("link", { name: /Open Preview/i });
-    expect(previewLink).toHaveAttribute("href", "http://prev-1.preview.test");
-    expect(previewLink).toHaveAttribute("target", "_blank");
+    await waitFor(() => {
+      expect(mockBootstrap).toHaveBeenCalledWith("sess-1");
+    });
+    expect(openedWindow.location.href).toBe("about:blank");
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: PREVIEW_BOOTSTRAP_COMPLETE_EVENT },
+          origin: "http://prev-1.preview.test",
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(openedWindow.location.href).toBe("http://prev-1.preview.test");
+    });
     expect(screen.queryByRole("button", { name: /^Stop$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Restart$/ })).not.toBeInTheDocument();
 
@@ -586,6 +691,8 @@ describe("PreviewPanel component", () => {
       ".flex.items-center.gap-0\\.5.rounded-md.border",
     );
     expect(presetContainer).not.toBeInTheDocument();
+
+    openSpy.mockRestore();
   });
 
   it("renders ConsoleBadge in ready state", async () => {
@@ -1522,15 +1629,34 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
     });
 
-    // Click the dismiss button (X icon)
-    const dismissBtn = screen.getByText("Failed to start preview: connection refused")
-      .closest("div")!
-      .querySelector("button")!;
-    await user.click(dismissBtn);
+    await user.click(screen.getByRole("button", { name: "Dismiss error" }));
 
     await waitFor(() => {
       expect(screen.queryByText("Failed to start preview: connection refused")).not.toBeInTheDocument();
     });
+  });
+
+  it("wraps long mutation error messages inside the alert card", async () => {
+    const user = userEvent.setup();
+    const longPath =
+      "/home/sandbox/assembled/gocode/msgconsumer/msgconsumer/internal/super/long/generated/path/with/no/spaces/github.com/assembledhq/assembled/gocode/msgconsumer";
+    const backendMessage = `preview service did not pass its readiness probe. Details: provider start preview: ${longPath}`;
+    mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
+    const err = new Error(backendMessage);
+    (err as Error & { code?: string }).code =
+      PREVIEW_ERROR_CODES.SERVICE_NOT_READY;
+    mockEnsure.mockRejectedValueOnce(err);
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+
+    const message = await screen.findByText(backendMessage);
+    expect(message).toHaveClass("min-w-0", "break-words", "[overflow-wrap:anywhere]");
   });
 
   it("shows mutation error banner when stop fails", async () => {
@@ -1599,7 +1725,7 @@ describe("PreviewPanel component", () => {
     const freshnessCallout = screen.getByTestId("preview-freshness-callout");
     const refreshButton = screen.getByRole("button", { name: "Refresh preview" });
     expect(freshnessCallout).toContainElement(refreshButton);
-    expect(screen.getByRole("link", { name: "Open Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry preview" })).not.toBeInTheDocument();
 
     await user.click(refreshButton);
@@ -1656,6 +1782,90 @@ describe("PreviewPanel component", () => {
 
     expect(await screen.findByRole("button", { name: "Refresh preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows live updated freshness as quiet metadata without refresh action", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+        runtime_workspace_revision: 5,
+        runtime_workspace_revision_updated_at: "2026-05-28T16:18:30Z",
+        runtime_workspace_revision_source: "hmr",
+      }),
+      freshness: {
+        state: "live_updated",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        runtime_workspace_revision: 5,
+        runtime_workspace_revision_source: "hmr",
+        reason: "preview_live_updated",
+        restart_required: false,
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Updated live")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("preview-freshness-callout")).not.toBeInTheDocument();
+  });
+
+  it("promotes restart preview when restart is required", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({
+        status: "ready",
+        source_workspace_revision: 4,
+        source_workspace_revision_updated_at: "2026-05-28T16:11:00Z",
+      }),
+      freshness: {
+        state: "restart_required",
+        current_workspace_revision: 5,
+        current_workspace_revision_updated_at: "2026-05-28T16:18:00Z",
+        preview_workspace_revision: 4,
+        restart_required: true,
+        restart_reasons: [
+          {
+            kind: "dependency_changed",
+            path: "frontend/package.json",
+            detail: "Dependencies changed. Restart to install and apply them.",
+          },
+        ],
+        reason: "restart_required",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Restart required")).toBeInTheDocument();
+    expect(screen.getByText("Dependencies changed. Restart to install and apply them.")).toBeInTheDocument();
+    const restartButton = screen.getByRole("button", { name: "Restart preview" });
+    expect(screen.queryByRole("button", { name: "Refresh preview" })).not.toBeInTheDocument();
+
+    await user.click(restartButton);
+
+    await waitFor(() => {
+      expect(mockEnsure).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows startup estimate while preview is starting", async () => {
+    mockGet.mockResolvedValue({
+      ...makePreviewStatus({ status: "starting" }),
+      startup_estimate: {
+        label: "Usually ready in ~25s",
+        p50_seconds: 25,
+        sample_count: 8,
+        confidence: "medium",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    expect(await screen.findByText("Usually ready in ~25s")).toBeInTheDocument();
   });
 
   it("shows unknown freshness as quiet metadata instead of a callout", async () => {

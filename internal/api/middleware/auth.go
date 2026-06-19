@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -122,6 +123,7 @@ type AuthStores struct {
 	Memberships      *db.OrganizationMembershipStore
 	PreviewAPITokens *db.PreviewAPITokenStore
 	APITokens        *db.APITokenStore
+	UserCLITokens    *db.UserCLITokenStore
 	Audit            *db.AuditEmitter
 }
 
@@ -167,6 +169,11 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 		// terminal — logs the user out. Surface transient errors as 503 so
 		// the useAuth retry path handles them.
 		if errors.Is(err, pgx.ErrNoRows) {
+			if !cookieBased && stores.UserCLITokens != nil && strings.HasPrefix(token, db.UserCLITokenPrefix) {
+				if handleUserCLIToken(w, r, next, stores, logger, token) {
+					return
+				}
+			}
 			if !cookieBased && stores.APITokens != nil && strings.HasPrefix(token, "143_sk_") {
 				if handleGeneralAPIToken(w, r, next, stores, logger, token) {
 					return
@@ -271,8 +278,82 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// handleUserCLIToken authenticates a "143u_" bearer token from the 143-tools
+// CLI. CLI tokens are user-scoped session-equivalents: the request gets the
+// same user context a session cookie would, and active-org resolution runs
+// the identical header → last_org_id → oldest-membership chain. Returns true
+// when the request was handled (success or terminal error); false to let the
+// caller fall through to other token types.
+func handleUserCLIToken(w http.ResponseWriter, r *http.Request, next http.Handler, stores AuthStores, logger zerolog.Logger, rawToken string) bool {
+	cliToken, err := stores.UserCLITokens.GetActiveByToken(r.Context(), rawToken)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Msg("auth: cli token lookup failed")
+			writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "cli token lookup failed")
+			return true
+		}
+		return false
+	}
+
+	user, err := stores.Users.GetByIDGlobal(r.Context(), cliToken.UserID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "user not found")
+			return true
+		}
+		logger.Warn().Err(err).Msg("auth: cli token user lookup failed")
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "user lookup failed")
+		return true
+	}
+
+	// Reuse the session resolution chain by projecting the token's
+	// last_org_id hint into a synthetic session value. The semantics are
+	// deliberately identical — see UserCLIToken doc.
+	resolution, err := resolveActiveMembership(r, stores, user.ID, models.AuthSession{LastOrgID: cliToken.LastOrgID})
+	if err != nil {
+		logger.Warn().Err(err).Str("user_id", user.ID.String()).Msg("auth: cli token membership resolution failed")
+		writeError(w, http.StatusInternalServerError, "MEMBERSHIP_RESOLUTION_FAILED", "failed to resolve active membership")
+		return true
+	}
+	if resolution.membershipRevoked {
+		w.Header().Set(RevokedOrgHeader, RevokedOrgHeaderValue)
+	}
+
+	if !resolution.fromHeader && resolution.orgID != uuid.Nil &&
+		(cliToken.LastOrgID == nil || *cliToken.LastOrgID != resolution.orgID) {
+		if updateErr := stores.UserCLITokens.UpdateLastOrgID(r.Context(), cliToken.ID, &resolution.orgID); updateErr != nil {
+			logger.Warn().Err(updateErr).Msg("auth: failed to persist cli token last_org_id")
+		}
+	}
+
+	// Throttled usage stamp doubling as the sliding-expiry write: extend
+	// expires_at to now()+TTL at most once per minute so active devices
+	// never hit the 90-day wall while the hot path stays read-mostly.
+	if cliToken.LastUsedAt == nil || time.Since(*cliToken.LastUsedAt) > time.Minute {
+		if touchErr := stores.UserCLITokens.TouchUsage(r.Context(), cliToken.ID, remoteAddrIP(r), time.Now().Add(db.UserCLITokenTTL)); touchErr != nil {
+			logger.Warn().Err(touchErr).Msg("auth: cli token usage stamp failed")
+		}
+	}
+
+	// Legacy single-org compat sync, mirroring the session path.
+	if resolution.role != "" {
+		user.Role = models.Role(resolution.role)
+		user.OrgID = resolution.orgID
+	}
+
+	ctx := WithUser(r.Context(), &user)
+	ctx = WithOrgID(ctx, resolution.orgID)
+	ctx = WithActiveRole(ctx, resolution.role)
+	if recorder, ok := w.(resolvedIdentityRecorder); ok {
+		recorder.SetResolvedIdentity(resolution.orgID, user.ID)
+	}
+	next.ServeHTTP(w, r.WithContext(ctx))
+	return true
+}
+
 func handleGeneralAPIToken(w http.ResponseWriter, r *http.Request, next http.Handler, stores AuthStores, logger zerolog.Logger, rawToken string) bool {
-	resolved, err := stores.APITokens.GetByToken(r.Context(), rawToken, remoteAddrIP(r), r.UserAgent())
+	sourceIP := remoteAddrIP(r)
+	resolved, err := stores.APITokens.GetByToken(r.Context(), rawToken, sourceIP, r.UserAgent())
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			logger.Warn().Err(err).Msg("auth: api token lookup failed")
@@ -285,11 +366,38 @@ func handleGeneralAPIToken(w http.ResponseWriter, r *http.Request, next http.Han
 		writeError(w, http.StatusForbidden, "API_CLIENT_DISABLED", "API client is disabled")
 		return true
 	}
+	if !apiTokenAllowsSourceIP(resolved.Token, sourceIP) {
+		writeError(w, http.StatusForbidden, "IP_NOT_ALLOWED", "API token is not allowed from this source IP")
+		return true
+	}
 	ctx := WithAPIIdentity(r.Context(), &resolved.Client, &resolved.Token)
 	ctx = WithActiveRole(ctx, "api_token")
 	emitAPITokenUsed(r, stores.Audit, resolved)
 	next.ServeHTTP(w, r.WithContext(ctx))
 	return true
+}
+
+func apiTokenAllowsSourceIP(token models.APIToken, sourceIP string) bool {
+	if len(token.AllowedIPCidrs) == 0 {
+		return true
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(sourceIP))
+	if err != nil {
+		return false
+	}
+	for _, raw := range token.AllowedIPCidrs {
+		allowed := strings.TrimSpace(raw)
+		if allowed == "" {
+			continue
+		}
+		if allowedAddr, parseErr := netip.ParseAddr(allowed); parseErr == nil && allowedAddr == addr {
+			return true
+		}
+		if prefix, parseErr := netip.ParsePrefix(allowed); parseErr == nil && prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 func emitAPITokenUsed(r *http.Request, emitter *db.AuditEmitter, resolved models.AuthenticatedAPIToken) {

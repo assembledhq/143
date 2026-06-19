@@ -26,6 +26,7 @@ vi.mock("lucide-react", () => {
     XCircle: icon("XCircle"),
     Clock: icon("Clock"),
     Timer: icon("Timer"),
+    X: icon("X"),
   };
 });
 
@@ -206,7 +207,7 @@ describe("PMStatusBanner", () => {
     expect(screen.getByText("Failed to start analysis.")).toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.click(screen.getByText("dismiss"));
+    await user.click(screen.getByRole("button", { name: "Dismiss error" }));
     expect(dismissError).toHaveBeenCalled();
   });
 

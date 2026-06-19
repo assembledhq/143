@@ -84,9 +84,9 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			SandboxStateSnapshotted, SandboxStateDestroyed,
 		),
 		"sessions_agent_type": toStrings(
-			AgentTypeClaudeCode, AgentTypeGeminiCLI,
+			AgentTypeClaudeCode,
 			AgentTypeCodex, AgentTypeAmp, AgentTypePi,
-			AgentTypePMAgent,
+			AgentTypeOpenCode, AgentTypePMAgent,
 		),
 		"session_threads_status": toStrings(
 			ThreadStatusPending, ThreadStatusRunning, ThreadStatusIdle,
@@ -102,6 +102,12 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			HumanInputRequestStatusPending, HumanInputRequestStatusAnswered,
 			HumanInputRequestStatusCancelled, HumanInputRequestStatusExpired,
 			HumanInputRequestStatusSuperseded,
+		),
+		"session_human_input_requests_sensitivity": toStrings(
+			HumanInputSensitivityTeam, HumanInputSensitivityPersonal, HumanInputSensitivitySensitive,
+		),
+		"session_human_input_requests_preferred_channel": toStrings(
+			HumanInputPreferredChannelSlackThread, HumanInputPreferredChannelSlackDM, HumanInputPreferredChannelWeb,
 		),
 		"session_executors_status": toStrings(
 			SessionExecutorStatusStarting, SessionExecutorStatusRunning,
@@ -167,6 +173,7 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 			IntegrationProviderGitHub, IntegrationProviderSentry,
 			IntegrationProviderLinear, IntegrationProviderSlack,
 			IntegrationProviderNotion, IntegrationProviderCircleCI,
+			IntegrationProviderMezmo,
 		),
 		// issue_source.go
 		"issues_source": toStrings(
@@ -176,6 +183,10 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		// pm_enums.go
 		"pm_plans_status": toStrings(
 			PMPlanStatusExecuting, PMPlanStatusCompleted, PMPlanStatusFailed,
+		),
+		// organization_domain.go
+		"organization_domains_status": toStrings(
+			OrgDomainStatusPending, OrgDomainStatusVerified,
 		),
 	}
 

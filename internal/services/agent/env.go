@@ -87,7 +87,6 @@ func (e *AuthError) Error() string {
 // exactly one place — no more "PM works for Claude Code but breaks for Codex".
 type AgentEnv struct {
 	credentials       CredentialProvider
-	userCredentials   UserCredentialProvider
 	codingCredentials CodingCredentialProvider
 	orgs              OrgStore
 	orgSettingsCache  *OrgSettingsCache
@@ -127,7 +126,18 @@ type pickKey struct {
 type pickRecord struct {
 	credID     uuid.UUID
 	credential *models.DecryptedCodingCredential
+	binding    runtimeCredentialBinding
 	at         time.Time
+}
+
+type runtimeCredentialBinding struct {
+	CredentialID      uuid.UUID
+	AgentType         models.AgentType
+	Provider          models.ProviderName
+	BackingProvider   models.ProviderName
+	EffectiveModel    string
+	CredentialScope   models.CodingCredentialScope
+	CredentialOwnerID *uuid.UUID
 }
 
 type credentialBlock struct {
@@ -174,7 +184,6 @@ const codexSubscriptionRefreshWindow = 5 * time.Minute
 // helper.
 type AgentEnvDeps struct {
 	Credentials       CredentialProvider
-	UserCredentials   UserCredentialProvider   // optional — enables legacy personal/team fallback (used only if CodingCredentials is nil or returns nothing)
 	CodingCredentials CodingCredentialProvider // preferred — unified resolver. Reads `coding_credentials` and is the source of truth post-migration.
 	Orgs              OrgStore                 // optional — enables agent_config overrides
 	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
@@ -207,7 +216,6 @@ type LinearTokenResolver interface {
 func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 	return &AgentEnv{
 		credentials:       deps.Credentials,
-		userCredentials:   deps.UserCredentials,
 		codingCredentials: deps.CodingCredentials,
 		orgs:              deps.Orgs,
 		orgSettingsCache:  deps.OrgSettingsCache,
@@ -263,7 +271,7 @@ type CodingCredentialPersistentShedder interface {
 // dropping personal subscriptions back to the org fallback after their
 // first 8h of token life.
 type CodexAuthRefresher interface {
-	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error)
 }
 
 // CodingCredentialMultiPicker is implemented by the real unified store for
@@ -294,14 +302,6 @@ func (e *AgentEnv) codingShedder() CodingCredentialShedder {
 	return nil
 }
 
-// recordPick stores the credential id chosen by a pickFromCodingProvider walk.
-// Callers are expected to invoke this once per successful pick. The stored
-// record is consulted by ShedRateLimited / ShedAuthRejected when the runtime
-// reports an upstream failure for that (orgID, userID, provider) tuple.
-func (e *AgentEnv) recordPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, credID uuid.UUID) {
-	e.recordPickWithCredential(orgID, userID, provider, credID, nil)
-}
-
 func (e *AgentEnv) recordCredentialPick(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, cred models.DecryptedCodingCredential) {
 	copied := cred
 	e.recordPickWithCredential(orgID, userID, provider, cred.ID, &copied)
@@ -330,7 +330,66 @@ func (e *AgentEnv) recordPickWithCredential(orgID uuid.UUID, userID *uuid.UUID, 
 	if len(e.recentPicks) >= pickTrackerMax {
 		e.evictOldestPickLocked()
 	}
-	e.recentPicks[key] = pickRecord{credID: credID, credential: cred, at: now}
+	e.recentPicks[key] = pickRecord{
+		credID:     credID,
+		credential: cred,
+		binding:    runtimeCredentialBindingForPick(provider, credID, cred),
+		at:         now,
+	}
+}
+
+func runtimeCredentialBindingForPick(provider models.ProviderName, credID uuid.UUID, cred *models.DecryptedCodingCredential) runtimeCredentialBinding {
+	binding := runtimeCredentialBinding{
+		CredentialID:    credID,
+		AgentType:       agentTypeForRuntimeProvider(provider),
+		Provider:        provider,
+		BackingProvider: provider,
+	}
+	if cred == nil {
+		return binding
+	}
+	binding.CredentialScope = cred.Scope().Label()
+	binding.CredentialOwnerID = cred.UserID
+	binding.Provider = cred.Provider
+	binding.AgentType = agentTypeForRuntimeProvider(cred.Provider)
+	binding.BackingProvider = cred.Provider
+	switch cfg := cred.Config.(type) {
+	case models.OpenCodeConfig:
+		binding.AgentType = models.AgentTypeOpenCode
+		binding.BackingProvider = cfg.NormalizedBackingProvider()
+		binding.EffectiveModel = cfg.Model
+	case models.GeminiConfig:
+		binding.EffectiveModel = cfg.Model
+	}
+	if binding.AgentType == "" {
+		binding.AgentType = agentTypeForRuntimeProvider(provider)
+	}
+	return binding
+}
+
+func agentTypeForRuntimeProvider(provider models.ProviderName) models.AgentType {
+	switch provider {
+	case models.ProviderOpenAI, models.ProviderOpenAISubscription:
+		return models.AgentTypeCodex
+	case models.ProviderAnthropic, models.ProviderAnthropicSubscription:
+		return models.AgentTypeClaudeCode
+	case models.ProviderAmp:
+		return models.AgentTypeAmp
+	case models.ProviderPi:
+		return models.AgentTypePi
+	case models.ProviderOpenCode:
+		return models.AgentTypeOpenCode
+	default:
+		return ""
+	}
+}
+
+func (e *AgentEnv) lookupRuntimeCredentialBinding(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (runtimeCredentialBinding, bool) {
+	rec, ok := e.lookupRecentPickRecord(orgID, userID, provider)
+	if !ok || rec.binding.CredentialID == uuid.Nil {
+		return runtimeCredentialBinding{}, false
+	}
+	return rec.binding, true
 }
 
 func (e *AgentEnv) lookupRecentCredential(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.DecryptedCodingCredential, bool) {
@@ -459,12 +518,14 @@ func (e *AgentEnv) ShedAuthRejectedWithContext(ctx context.Context, orgID uuid.U
 	shedder.MarkAuthRejected(rec.credID)
 }
 
-// integrationCredentials holds the resolved Sentry, Linear, and Notion configs for an org.
+// integrationCredentials holds the resolved Sentry, Linear, Notion, CircleCI,
+// and Mezmo configs for an org.
 type integrationCredentials struct {
 	Sentry   *models.SentryConfig
 	Linear   *models.LinearConfig
 	Notion   *models.NotionConfig
 	CircleCI *models.CircleCIConfig
+	Mezmo    *models.MezmoConfig
 }
 
 type integrationCredentialProvider interface {
@@ -476,6 +537,7 @@ var integrationProviderNames = []models.ProviderName{
 	models.ProviderLinear,
 	models.ProviderNotion,
 	models.ProviderCircleCI,
+	models.ProviderMezmo,
 }
 
 // fetchIntegrationCredentials retrieves integration configs for an org from
@@ -533,6 +595,11 @@ func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.De
 			ic.CircleCI = &cfg
 		}
 	}
+	if cred := creds[models.ProviderMezmo]; cred != nil {
+		if cfg, ok := cred.Config.(models.MezmoConfig); ok {
+			ic.Mezmo = &cfg
+		}
+	}
 }
 
 // Resolve builds the sandbox env vars for the given agent type. It checks
@@ -546,6 +613,10 @@ func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.De
 // leak across orgs in a multi-tenant deployment. Server-level LLM keys are
 // reserved for 143's own internal LLM calls via Config.LLMConfig().
 func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID) map[string]string {
+	return e.ResolveForModel(ctx, orgID, agentType, userID, "")
+}
+
+func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID, modelOverride string) map[string]string {
 	merged := make(map[string]string)
 
 	switch agentType {
@@ -588,18 +659,6 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 		// redundant and fails because gVisor doesn't support the
 		// unprivileged user namespaces that bwrap requires.
 		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
-	case models.AgentTypeGeminiCLI:
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderGemini)
-		if gc, ok := cfg.(models.GeminiConfig); ok {
-			if gc.APIKey != "" {
-				merged["GEMINI_API_KEY"] = gc.APIKey
-			}
-			if gc.Model != "" {
-				merged["GEMINI_MODEL"] = gc.Model
-			}
-		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderGemini); ok {
-			setAuthBlockedEnv(merged, block)
-		}
 	case models.AgentTypeAmp:
 		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
@@ -612,6 +671,19 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
 			merged["PI_API_KEY"] = pi.APIKey
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderPi); ok {
+			setAuthBlockedEnv(merged, block)
+		}
+	case models.AgentTypeOpenCode:
+		cfg := e.resolveOpenCodeProviderConfig(ctx, orgID, userID, modelOverride)
+		if oc, ok := cfg.(models.OpenCodeConfig); ok && oc.APIKey != "" {
+			if modelOverride != "" {
+				oc.Model = strings.TrimSpace(modelOverride)
+			} else {
+				oc.Model = e.effectiveOpenCodeModel(ctx, orgID, oc.Model)
+			}
+			applyOpenCodeEnv(merged, oc)
+			e.updateRuntimeCredentialBindingModel(orgID, userID, models.ProviderOpenCode, oc.Model)
+		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderOpenCode); ok {
 			setAuthBlockedEnv(merged, block)
 		}
 	}
@@ -668,11 +740,22 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 			merged["CIRCLECI_PROJECT_SLUG"] = ic.CircleCI.ProjectSlug
 		}
 	}
+	if ic.Mezmo != nil {
+		if ic.Mezmo.APIKey != "" {
+			merged["MEZMO_API_KEY"] = ic.Mezmo.APIKey
+		}
+		if ic.Mezmo.BaseURL != "" {
+			merged["MEZMO_BASE_URL"] = ic.Mezmo.BaseURL
+		}
+		if ic.Mezmo.Dataset != "" {
+			merged["MEZMO_DATASET"] = ic.Mezmo.Dataset
+		}
+	}
 
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
 	// Scoped to Amp and Pi only — these are non-secret runtime defaults
 	// (AMP_MODE, PI_MODEL, PI_MODEL_CUSTOM), while auth itself comes from the
-	// credential stores. For claude_code/codex/gemini_cli we keep the legacy
+	// credential stores. For claude_code/codex we keep the legacy
 	// behavior: provider creds come exclusively from resolveProviderConfig,
 	// and agent_config is treated as model-default metadata (validated,
 	// stored, but not injected here) — changing that would silently flip
@@ -727,8 +810,248 @@ func (e *AgentEnv) CheckAuth(agentType models.AgentType, env map[string]string) 
 				Detail:    "missing PI_API_KEY: configure Pi under Settings → Default Agent or My settings before starting a session",
 			}
 		}
+	case models.AgentTypeOpenCode:
+		if !hasOpenCodeRuntimeKey(env) {
+			return &AuthError{
+				AgentType: agentType,
+				Detail:    "missing OpenCode credential: configure an explicit OpenCode API key under Settings → Default Agent or My settings before starting a session",
+			}
+		}
 	}
 	return nil
+}
+
+func applyOpenCodeEnv(env map[string]string, cfg models.OpenCodeConfig) {
+	backing := cfg.NormalizedBackingProvider()
+	env["OPENCODE_BACKING_PROVIDER"] = string(backing)
+	env["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
+	env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "true"
+	env["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
+	env["OPENCODE_PERMISSION"] = `{"permission":"allow"}`
+	if cfg.Model != "" {
+		env["OPENCODE_MODEL"] = cfg.Model
+	}
+	env["OPENCODE_CONFIG_CONTENT"] = openCodeRuntimeConfigContent(cfg)
+	switch backing {
+	case models.ProviderAnthropic:
+		env["ANTHROPIC_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["ANTHROPIC_BASE_URL"] = cfg.BaseURL
+		}
+	case models.ProviderOpenAI:
+		env["OPENAI_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["OPENAI_BASE_URL"] = cfg.BaseURL
+		}
+	case models.ProviderGemini:
+		env["GEMINI_API_KEY"] = cfg.APIKey
+	case models.ProviderOpenRouter:
+		env["OPENROUTER_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["OPENROUTER_BASE_URL"] = cfg.BaseURL
+		}
+	default:
+		env["OPENCODE_API_KEY"] = cfg.APIKey
+		if cfg.BaseURL != "" {
+			env["OPENCODE_BASE_URL"] = cfg.BaseURL
+		}
+	}
+}
+
+func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, credentialModel string) string {
+	if credentialModel != "" {
+		return credentialModel
+	}
+	return e.openCodeModelFromAgentConfig(ctx, orgID)
+}
+
+func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
+	selectionModel := strings.TrimSpace(modelOverride)
+	if selectionModel == "" {
+		selectionModel = e.openCodeModelFromAgentConfig(ctx, orgID)
+	}
+	targetBacking := openCodeBackingProviderForModel(selectionModel)
+	if targetBacking == "" {
+		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+	}
+	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, []models.ProviderName{models.ProviderOpenCode})
+	if !ok || !sawRows {
+		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+	}
+
+	rows := append([]models.DecryptedCodingCredential(nil), rowsByProvider[models.ProviderOpenCode]...)
+	sortCodingCredentialResolutionRows(rows)
+	sawMatchingRows := false
+	sawRateLimitedMatchingRows := false
+	for _, cred := range rows {
+		cfg, ok := cred.Config.(models.OpenCodeConfig)
+		if !ok || cfg.APIKey == "" {
+			continue
+		}
+		if cfg.NormalizedBackingProvider() != targetBacking {
+			continue
+		}
+		sawMatchingRows = true
+		if !credentialRunnableForModelAwarePick(cred) {
+			if cred.RateLimitedUntil != nil && cred.RateLimitedUntil.After(time.Now()) {
+				sawRateLimitedMatchingRows = true
+			}
+			continue
+		}
+		cfg.BackingProvider = cfg.NormalizedBackingProvider()
+		e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
+		return cfg
+	}
+
+	if sawRateLimitedMatchingRows {
+		e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(models.ProviderOpenCode, rowsByProvider, []models.ProviderName{models.ProviderOpenCode}))
+	} else if !sawMatchingRows {
+		e.recordCredentialBlock(orgID, userID, missingOpenCodeBackingBlock(targetBacking))
+	}
+	return nil
+}
+
+func (e *AgentEnv) openCodeModelFromAgentConfig(ctx context.Context, orgID uuid.UUID) string {
+	agentConfig, ok := e.loadAgentConfig(ctx, orgID, models.AgentTypeOpenCode)
+	if !ok {
+		return ""
+	}
+	envVars := agentConfig[string(models.AgentTypeOpenCode)]
+	if envVars == nil {
+		return ""
+	}
+	if custom := strings.TrimSpace(envVars["OPENCODE_MODEL_CUSTOM"]); custom != "" {
+		return custom
+	}
+	return strings.TrimSpace(envVars["OPENCODE_MODEL"])
+}
+
+func openCodeBackingProviderForModel(model string) models.ProviderName {
+	provider, _ := splitProviderModel(strings.TrimSpace(model))
+	switch provider {
+	case "anthropic":
+		return models.ProviderAnthropic
+	case "openai":
+		return models.ProviderOpenAI
+	case "google", "gemini":
+		return models.ProviderGemini
+	case "openrouter":
+		return models.ProviderOpenRouter
+	case "opencode":
+		return models.ProviderOpenCode
+	case "minimax", "moonshot", "qwen", "deepseek":
+		// These providers are not directly backed by a first-party API; they
+		// require an OpenRouter-backed OpenCode key to access.
+		return models.ProviderOpenRouter
+	default:
+		return ""
+	}
+}
+
+func credentialRunnableForModelAwarePick(cred models.DecryptedCodingCredential) bool {
+	if cred.Status != models.CodingCredentialStatusActive {
+		return false
+	}
+	return cred.RateLimitedUntil == nil || !cred.RateLimitedUntil.After(time.Now())
+}
+
+func missingOpenCodeBackingBlock(backing models.ProviderName) credentialBlock {
+	label := openCodeBackingProviderLabel(backing)
+	return credentialBlock{
+		provider: models.ProviderOpenCode,
+		detail:   fmt.Sprintf("missing OpenCode credential for %s. Add an OpenCode via %s auth or choose a model backed by an existing OpenCode key.", label, label),
+	}
+}
+
+func openCodeBackingProviderLabel(backing models.ProviderName) string {
+	switch backing {
+	case models.ProviderAnthropic:
+		return "Anthropic"
+	case models.ProviderOpenAI:
+		return "OpenAI"
+	case models.ProviderGemini:
+		return "Gemini"
+	case models.ProviderOpenRouter:
+		return "OpenRouter"
+	case models.ProviderOpenCode:
+		return "OpenCode native"
+	default:
+		return string(backing)
+	}
+}
+
+func (e *AgentEnv) updateRuntimeCredentialBindingModel(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, model string) {
+	if e == nil || model == "" {
+		return
+	}
+	key := pickKey{orgID: orgID, provider: provider}
+	if userID != nil {
+		key.userID = *userID
+	}
+	e.recentPicksMu.Lock()
+	defer e.recentPicksMu.Unlock()
+	rec, ok := e.recentPicks[key]
+	if !ok || time.Since(rec.at) > pickTrackerTTL {
+		if ok {
+			delete(e.recentPicks, key)
+		}
+		return
+	}
+	rec.binding.EffectiveModel = model
+	e.recentPicks[key] = rec
+}
+
+func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
+	type openCodeProviderConfig struct {
+		Options map[string]string `json:"options"`
+	}
+	type openCodeRuntimeConfig struct {
+		Schema     string                            `json:"$schema"`
+		Permission string                            `json:"permission"`
+		Model      string                            `json:"model,omitempty"`
+		Provider   map[string]openCodeProviderConfig `json:"provider,omitempty"`
+	}
+	providerID, apiKeyEnv := openCodeProviderConfigIDAndKey(cfg.NormalizedBackingProvider())
+	options := map[string]string{"apiKey": "{env:" + apiKeyEnv + "}"}
+	if cfg.BaseURL != "" {
+		options["baseURL"] = cfg.BaseURL
+	}
+	payload := openCodeRuntimeConfig{
+		Schema:     "https://opencode.ai/config.json",
+		Permission: "allow",
+		Model:      cfg.Model,
+		Provider: map[string]openCodeProviderConfig{
+			providerID: {Options: options},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return `{"permission":"allow"}`
+	}
+	return string(data)
+}
+
+func openCodeProviderConfigIDAndKey(provider models.ProviderName) (string, string) {
+	switch provider {
+	case models.ProviderAnthropic:
+		return "anthropic", "ANTHROPIC_API_KEY"
+	case models.ProviderOpenAI:
+		return "openai", "OPENAI_API_KEY"
+	case models.ProviderGemini:
+		return "google", "GEMINI_API_KEY"
+	case models.ProviderOpenRouter:
+		return "openrouter", "OPENROUTER_API_KEY"
+	default:
+		return "opencode", "OPENCODE_API_KEY"
+	}
+}
+
+func hasOpenCodeRuntimeKey(env map[string]string) bool {
+	return env["OPENCODE_API_KEY"] != "" ||
+		env["ANTHROPIC_API_KEY"] != "" ||
+		env["OPENAI_API_KEY"] != "" ||
+		env["GEMINI_API_KEY"] != "" ||
+		env["OPENROUTER_API_KEY"] != ""
 }
 
 func setAuthBlockedEnv(env map[string]string, block credentialBlock) {
@@ -816,30 +1139,23 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 
 // resolveProviderConfig returns the best ProviderConfig for a provider.
 //
-// Post-unification (see docs/design/future/65-unified-coding-credentials.md):
-// the unified `coding_credentials` table is the source of truth. We try
-// CodingCredentialProvider.ListResolvable first, which returns one ordered
-// list (personal-then-org, priority-within-scope) covering both API-key and
-// subscription rows. If that returns a runnable row, we use it.
-//
-// Fallback: if CodingCredentials is unwired (older test rigs), we fall
-// through to the legacy 3-step cascade. Once the unified store is wired it is
-// authoritative even when it returns no active rows; otherwise disabling the
-// last migrated row would silently revive the still-present legacy row.
+// The unified `coding_credentials` table is the only credential source (see
+// docs/design/future/65-unified-coding-credentials.md):
+// CodingCredentialProvider.ListResolvable returns one ordered list
+// (personal-then-org, priority-within-scope) covering both API-key and
+// subscription rows, and the first runnable row wins. With no unified store
+// wired (older test rigs) or no runnable rows, the resolver returns nil.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	if cfg, handled := e.resolveFromCodingCredentials(ctx, orgID, userID, provider); cfg != nil || handled {
-		return cfg
-	}
-	return e.resolveFromLegacy(ctx, orgID, userID, provider)
+	cfg, _ := e.resolveFromCodingCredentials(ctx, orgID, userID, provider)
+	return cfg
 }
 
 // resolveFromCodingCredentials walks the unified resolver result, plus its
 // subscription twin for providers that have one. The twin lookup is what
 // lets a Claude Code subscription row (provider=anthropic_subscription) be
-// found when a caller asks for a `claude_code` agent that today resolves to
-// ProviderAnthropic — the legacy code matched by ProviderAnthropic and
-// inferred subscription status from the embedded field; the unified shape
-// uses two distinct provider names.
+// found when a caller asks for a `claude_code` agent that resolves to
+// ProviderAnthropic — API keys and subscriptions are two distinct provider
+// partitions on the unified table.
 func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, bool) {
 	if e.codingCredentials == nil {
 		return nil, false
@@ -858,11 +1174,9 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool) {
 	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok {
-		// Lookup errored. Yield to the legacy fallback rather than
-		// short-circuiting as "unified authoritative with zero rows" — during
-		// the dual-write window the legacy stores still hold authoritative
-		// data, so a transient pgx error on the unified table must not bypass
-		// it.
+		// Lookup errored. Report "not handled" rather than "unified
+		// authoritative with zero rows" so callers can distinguish a
+		// transient pgx error from a genuinely empty credential stack.
 		return nil, nil, false
 	}
 	if !sawRows {
@@ -999,6 +1313,8 @@ func agentLabelForProvider(provider models.ProviderName) string {
 		return "Amp"
 	case models.ProviderPi:
 		return "Pi"
+	case models.ProviderOpenCode:
+		return "OpenCode"
 	default:
 		return string(provider)
 	}
@@ -1053,93 +1369,6 @@ func unifiedSubscriptionTwin(provider models.ProviderName) models.ProviderName {
 	}
 }
 
-// resolveFromLegacy is the pre-unification 3-step cascade kept as a safety
-// net during the migration window. It is consulted only when the unified
-// resolver returns nothing, so once `coding_credentials` is fully populated
-// this code path produces no work.
-//
-// Status filter: legacy stores' Get/ListByProvider methods do not all filter
-// to status='active' the same way the unified ListResolvable does. We re-
-// assert active-only here so a disabled or invalid legacy row that lingered
-// in the table during cleanup cannot suddenly become picked when unified
-// returns no rows.
-//
-// Shed integration: legacy-path picks call recordPick under the legacy id.
-// During the dual-write window the mirror reuses legacy ids as the unified
-// row's id for personal and direct-org rows, so a shed marker keyed by
-// legacy id correctly poisons the matching unified row's health-cache
-// entry. Team-default rows are an exception: migration 000111 mints a
-// fresh UUID for those (the legacy user_credentials.id could collide with
-// an org_credentials id), so a shed marker recorded under the legacy id
-// will NOT poison the unified row served by ListResolvable. Sustained
-// shedding still works because repeated legacy fallbacks share the legacy
-// id; the brief staleness window only opens when unified flips from
-// erroring back to healthy and starts returning the unified team-default
-// row again, at which point the next 429 will re-poison the correct id.
-func (e *AgentEnv) resolveFromLegacy(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	if userID != nil && e.userCredentials != nil {
-		if cred, err := e.userCredentials.GetForUser(ctx, orgID, *userID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
-			e.recordPick(orgID, userID, provider, cred.ID)
-			return cred.Config
-		}
-	}
-	if e.userCredentials != nil {
-		if cred, err := e.userCredentials.GetTeamDefault(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
-			e.recordPick(orgID, userID, provider, cred.ID)
-			return cred.Config
-		}
-	}
-	if cfg, id, ok := e.resolveOrgProviderConfig(ctx, orgID, provider); ok {
-		e.recordPick(orgID, userID, provider, id)
-		return cfg
-	}
-	return nil
-}
-
-// legacyStatusActive reports whether a legacy credential row should be picked
-// by the resolver. Mirrors the unified store's
-// `Status == CodingCredentialStatusActive` filter so the two paths agree
-// during the migration window.
-func legacyStatusActive(status models.CredentialStatus) bool {
-	return status == models.CredentialStatusActive
-}
-
-// resolveOrgProviderConfig returns (config, picked-id, found) for an org-
-// scoped legacy credential. The id is surfaced so the caller can record it
-// for ShedRateLimited / ShedAuthRejected — without that, legacy-path picks
-// would have no traceable id and the health cache would never learn of
-// upstream failures during the migration window.
-func (e *AgentEnv) resolveOrgProviderConfig(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (models.ProviderConfig, uuid.UUID, bool) {
-	if e.credentials == nil {
-		return nil, uuid.Nil, false
-	}
-
-	if provider.IsCodingAgentProvider() {
-		if creds, err := e.credentials.ListByProvider(ctx, orgID, provider); err == nil {
-			for _, cred := range creds {
-				if !legacyStatusActive(cred.Status) {
-					continue
-				}
-				if cfg, ok := compatibleCodingProviderConfig(provider, cred.Config); ok {
-					return cfg, cred.ID, true
-				}
-			}
-		}
-	}
-
-	if cred, err := e.credentials.Get(ctx, orgID, provider); err == nil && cred != nil && legacyStatusActive(cred.Status) {
-		if provider.IsCodingAgentProvider() {
-			if cfg, ok := compatibleCodingProviderConfig(provider, cred.Config); ok {
-				return cfg, cred.ID, true
-			}
-			return nil, uuid.Nil, false
-		}
-		return cred.Config, cred.ID, true
-	}
-
-	return nil, uuid.Nil, false
-}
-
 // compatibleCodingProviderConfig returns the runtime ProviderConfig that
 // matches the given (provider, stored config) pair, or (nil, false) when the
 // pair is not usable: the provider is unknown, the type assertion fails, the
@@ -1152,7 +1381,7 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 	switch provider {
 	case models.ProviderAnthropic:
 		anthropic, ok := cfg.(models.AnthropicConfig)
-		if !ok || anthropic.APIKey == "" || anthropic.Subscription != nil {
+		if !ok || anthropic.APIKey == "" {
 			return nil, false
 		}
 		return anthropic, true
@@ -1172,14 +1401,14 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 		// the Status='active' filter upstream already excludes pending rows,
 		// but re-asserting their absence here keeps the runtime config minimal
 		// in case that filter ever loosens.
-		return models.AnthropicConfig{Subscription: &models.AnthropicSubscription{
+		return models.AnthropicSubscriptionConfig{
 			AccessToken:   sub.AccessToken,
 			RefreshToken:  sub.RefreshToken,
 			ExpiresAt:     sub.ExpiresAt,
 			AccountType:   sub.AccountType,
 			RateLimitTier: sub.RateLimitTier,
 			Scopes:        sub.Scopes,
-		}}, true
+		}, true
 	case models.ProviderOpenAISubscription:
 		sub, ok := cfg.(models.OpenAISubscriptionConfig)
 		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
@@ -1187,11 +1416,10 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 		}
 		// Strip device-code pending fields (DeviceAuthID, UserCode,
 		// VerificationURI, PollInterval) when constructing the runtime
-		// config. AsOpenAIChatGPTConfig is a type conversion that would
-		// carry them through; the Status='active' filter upstream already
-		// excludes pending rows, but re-asserting their absence here keeps
-		// the runtime config minimal in case that filter ever loosens.
-		return models.OpenAIChatGPTConfig{
+		// config. The Status='active' filter upstream already excludes
+		// pending rows, but re-asserting their absence here keeps the
+		// runtime config minimal in case that filter ever loosens.
+		return models.OpenAISubscriptionConfig{
 			AccessToken:  sub.AccessToken,
 			RefreshToken: sub.RefreshToken,
 			IDToken:      sub.IDToken,
@@ -1222,6 +1450,13 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 			return nil, false
 		}
 		return pi, true
+	case models.ProviderOpenCode:
+		openCode, ok := cfg.(models.OpenCodeConfig)
+		if !ok || openCode.APIKey == "" {
+			return nil, false
+		}
+		openCode.BackingProvider = openCode.NormalizedBackingProvider()
+		return openCode, true
 	default:
 		return nil, false
 	}
@@ -1240,7 +1475,7 @@ func (e *AgentEnv) InjectCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox
 func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, error) {
 	if e.codingCredentials != nil {
 		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderOpenAI); ok {
-			if chatGPT, ok := codexChatGPTConfigFromPicked(picked); ok {
+			if chatGPT, ok := codexSubscriptionConfigFromPicked(picked); ok {
 				if picked.Provider == models.ProviderOpenAISubscription {
 					// Refresh against the picked row's actual scope —
 					// personal credentials carry UserID, org rows do not.
@@ -1259,7 +1494,7 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 			models.ProviderOpenAISubscription,
 		})
 		if handled {
-			if chatGPT, ok := cfg.(models.OpenAIChatGPTConfig); ok {
+			if chatGPT, ok := cfg.(models.OpenAISubscriptionConfig); ok {
 				if picked != nil && picked.Provider == models.ProviderOpenAISubscription {
 					refreshed, err := e.refreshCodexSubscriptionIfNeeded(ctx, models.Scope{OrgID: orgID, UserID: picked.UserID}, picked.ID, chatGPT)
 					if err != nil {
@@ -1293,16 +1528,16 @@ func (e *AgentEnv) InjectCodexAuthForUser(ctx context.Context, orgID uuid.UUID, 
 	return e.writeCodexAuth(ctx, orgID, sandbox, *cfg)
 }
 
-func codexChatGPTConfigFromPicked(picked models.DecryptedCodingCredential) (models.OpenAIChatGPTConfig, bool) {
+func codexSubscriptionConfigFromPicked(picked models.DecryptedCodingCredential) (models.OpenAISubscriptionConfig, bool) {
 	cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config)
 	if !ok {
-		return models.OpenAIChatGPTConfig{}, false
+		return models.OpenAISubscriptionConfig{}, false
 	}
-	chatGPT, ok := cfg.(models.OpenAIChatGPTConfig)
+	chatGPT, ok := cfg.(models.OpenAISubscriptionConfig)
 	return chatGPT, ok
 }
 
-func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope models.Scope, credID uuid.UUID, cfg models.OpenAIChatGPTConfig) (*models.OpenAIChatGPTConfig, error) {
+func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope models.Scope, credID uuid.UUID, cfg models.OpenAISubscriptionConfig) (*models.OpenAISubscriptionConfig, error) {
 	if !cfg.NeedsRefresh(codexSubscriptionRefreshWindow) {
 		return &cfg, nil
 	}
@@ -1341,7 +1576,7 @@ func (e *AgentEnv) refreshCodexSubscriptionIfNeeded(ctx context.Context, scope m
 	return refreshed, nil
 }
 
-func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, cfg models.OpenAIChatGPTConfig) (bool, error) {
+func (e *AgentEnv) writeCodexAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, cfg models.OpenAISubscriptionConfig) (bool, error) {
 	// Omit the refresh_token from auth.json so the Codex CLI never attempts
 	// to refresh the token itself. If the CLI refreshes the token inside the
 	// sandbox, it consumes the refresh_token on OpenAI's servers, but the
@@ -1614,7 +1849,7 @@ func codingProviderConfigIsAPIKey(cfg models.ProviderConfig) bool {
 	case models.OpenAIConfig:
 		return c.APIKey != ""
 	case models.AnthropicConfig:
-		return c.APIKey != "" && c.Subscription == nil
+		return c.APIKey != ""
 	default:
 		return false
 	}

@@ -1,27 +1,31 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, ORG_PROVIDER_OPTIONS } from "@/lib/coding-auth-metadata";
+import { apiKeyHelp, OPENCODE_BACKING_PROVIDER_OPTIONS, openCodeAgentDefaults, openCodeDefaultModelForBackingProvider, openCodeModelsForBackingProvider, ORG_PROVIDER_OPTIONS, type OpenCodeBackingProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
-import { AVAILABLE_AMP_MODES, AVAILABLE_PI_MODELS, PI_MODEL_CLAUDE_OPUS_48 } from "@/lib/model-constants";
+import {
+  AVAILABLE_AMP_MODES,
+  AVAILABLE_PI_MODELS,
+  PI_MODEL_CLAUDE_OPUS_48,
+} from "@/lib/model-constants";
 import { queryKeys } from "@/lib/query-keys";
-import type { CodingAuth, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { AgentCapabilityDefinition, AgentCapabilityGrant, CodingCredentialSummary, ListResponse, Organization, OrgSettings, SingleResponse } from "@/lib/types";
 import { CodingAuthStack } from "@/components/coding-auth-stack";
 import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
-import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -30,44 +34,30 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Switch } from "@/components/ui/switch";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
-import { useAutosave } from "@/hooks/useAutosave";
-import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { applyOrgSettingsPatch, coalesceSettingsPatch, type SettingsPatch } from "@/lib/settings-autosave";
+import { capabilityAccessFor, normalizeCapabilityGrants } from "@/components/automation-capabilities-editor";
 import { capitalizeWords } from "@/lib/utils";
-import {
-  MAX_CONCURRENT_RUNS,
-  MAX_SESSION_DURATION_MINUTES,
-  MIN_CONCURRENT_RUNS,
-  MIN_SESSION_DURATION_MINUTES,
-  clampNumber,
-} from "@/lib/settings-constants";
 
-type ModalProvider = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+type ModalProvider = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 type AddFlowAuthType = "subscription" | "api_key";
 type InsertionMode = "make_default" | "next_fallback";
 
-const DEFAULT_EXECUTION_SETTINGS = {
-  max_concurrent_runs: 5,
-  max_session_duration_seconds: 25 * 60,
-};
-
 const PROVIDER_OPTIONS = ORG_PROVIDER_OPTIONS;
 
-function authStatusTone(status: CodingAuth["status"]) {
+function authStatusTone(status: CodingCredentialSummary["status"]) {
   switch (status) {
     case "healthy":
-      return "text-emerald-700";
+      return "text-success";
     case "rate_limited":
-      return "text-amber-700";
+      return "text-warning";
     case "needs_reauth":
     case "invalid":
-      return "text-red-700";
+      return "text-destructive";
     default:
       return "text-slate-700";
   }
 }
 
-function moveRows(rows: CodingAuth[], id: string, direction: "up" | "down") {
+function moveRows(rows: CodingCredentialSummary[], id: string, direction: "up" | "down") {
   const index = rows.findIndex((row) => row.id === id);
   if (index === -1) return rows;
   const targetIndex = direction === "up" ? Math.max(0, index - 1) : Math.min(rows.length - 1, index + 1);
@@ -78,7 +68,7 @@ function moveRows(rows: CodingAuth[], id: string, direction: "up" | "down") {
   return next;
 }
 
-function moveRowToTop(rows: CodingAuth[], id: string) {
+function moveRowToTop(rows: CodingCredentialSummary[], id: string) {
   const index = rows.findIndex((row) => row.id === id);
   if (index <= 0) return rows;
   const next = [...rows];
@@ -88,7 +78,7 @@ function moveRowToTop(rows: CodingAuth[], id: string) {
 }
 
 export function reorderRows(
-  rows: CodingAuth[],
+  rows: CodingCredentialSummary[],
   sourceId: string,
   targetId: string,
   position: "before" | "after",
@@ -113,15 +103,40 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
       return authType === "subscription" ? "Codex subscription" : "Codex API key";
     case "claude_code":
       return authType === "subscription" ? "Claude Code subscription" : "Claude Code API key";
-    case "gemini_cli":
-      return "Gemini CLI API key";
     case "amp":
       return "Amp API key";
     case "pi":
       return "Pi API key";
+    case "opencode":
+      return "OpenCode API key";
     default:
       return "Coding auth";
   }
+}
+
+function AuthResolutionNotice({ isAdmin }: { isAdmin: boolean }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/30 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="space-y-1">
+        <p className="text-xs font-medium text-foreground">
+          Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Shared sandbox networking, lifecycle, and capacity controls live in Sandboxes.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button asChild variant="outline" size="sm">
+          <Link href="/settings/account">Personal auths</Link>
+        </Button>
+        {isAdmin && (
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings/runtime">Sandboxes</Link>
+          </Button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function AgentPage() {
@@ -141,12 +156,16 @@ export default function AgentPage() {
   const [renameValue, setRenameValue] = useState("");
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
   const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
+  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(openCodeBackingProvider), [openCodeBackingProvider]);
 
-  const { data: codingAuthsResponse } = useQuery<ListResponse<CodingAuth>>({
-    queryKey: ["coding-auths"],
-    queryFn: () => api.codingAuths.list(),
+  const { data: codingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("org"),
+    queryFn: () => api.codingCredentials.list("org"),
   });
-  const rows = useMemo(() => codingAuthsResponse?.data ?? [], [codingAuthsResponse?.data]);
+  const rows = useMemo(() => codingCredentialsResponse?.data ?? [], [codingCredentialsResponse?.data]);
   const selected = rows.find((row) => row.id === selectedId) ?? null;
 
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
@@ -155,41 +174,57 @@ export default function AgentPage() {
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
-  const maxConcurrentServer = settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
-  const sessionMinutesServer = Math.round((settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60);
-  const tabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
 
-  const autosave = useAutosave<SettingsPatch>({
-    queryKey: queryKeys.settings.all,
-    mutationFn: (payload) => api.settings.update(payload),
-    applyOptimistic: applyOrgSettingsPatch,
-    coalesce: coalesceSettingsPatch,
+  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+    queryKey: queryKeys.settings.agentCapabilityCatalog,
+    queryFn: () => api.settings.getAgentCapabilities(),
+  });
+  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+
+  const { data: capabilityPolicyResponse } = useQuery({
+    queryKey: queryKeys.settings.agentCapabilities,
+    queryFn: () => api.settings.getAgentCapabilityPolicy(),
+  });
+  const capabilityGrants = useMemo(
+    () => normalizeCapabilityGrants(capabilityCatalog, capabilityPolicyResponse?.data?.capabilities ?? []),
+    [capabilityCatalog, capabilityPolicyResponse?.data?.capabilities],
+  );
+
+  const capabilityMutation = useMutation({
+    mutationFn: (nextGrants: AgentCapabilityGrant[]) => api.settings.updateAgentCapabilityPolicy(nextGrants),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.settings.agentCapabilities });
+      toast.success("Default capabilities updated");
+    },
+    onError: (error) => {
+      captureError(error, { feature: "agent-capabilities-update" });
+      toast.error("Could not update default capabilities");
+    },
   });
 
-  const maxConcurrentField = useAutosaveNumericField({
-    serverValue: maxConcurrentServer,
-    autosave,
-    toPatch: (value) => ({ settings: { max_concurrent_runs: value } }),
-    clamp: (value) => clampNumber(value, MIN_CONCURRENT_RUNS, MAX_CONCURRENT_RUNS),
-  });
-
-  const maxSessionMinutesField = useAutosaveNumericField({
-    serverValue: sessionMinutesServer,
-    autosave,
-    toPatch: (minutes) => ({ settings: { max_session_duration_seconds: minutes * 60 } }),
-    clamp: (value) => clampNumber(value, MIN_SESSION_DURATION_MINUTES, MAX_SESSION_DURATION_MINUTES),
-  });
+  function setCapabilityEnabled(definition: AgentCapabilityDefinition, enabled: boolean) {
+    if (enabled && definition.risk === "high") {
+      const confirmed = window.confirm(`${definition.display_name} is high-risk. Changes apply to future runs only.`);
+      if (!confirmed) return;
+    }
+    const next = capabilityGrants.map((grant) => (
+      grant.capability_id === definition.id
+        ? { ...grant, enabled, access_level: capabilityAccessFor(definition) }
+        : grant
+    ));
+    capabilityMutation.mutate(next);
+  }
 
   const reorderMutation = useMutation({
-    mutationFn: async (nextRows: CodingAuth[]) => {
-      await api.codingAuths.reorder(nextRows.map((row) => row.id));
+    mutationFn: async (nextRows: CodingCredentialSummary[]) => {
+      await api.codingCredentials.reorder("org", nextRows.map((row) => row.id));
       const nextDefault = nextRows.find((row) => row.status === "healthy") ?? nextRows[0];
       if (nextDefault && settings.default_agent_type !== nextDefault.agent) {
         await api.settings.update({ settings: { default_agent_type: nextDefault.agent } });
       }
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
     },
     onError: (error) => {
@@ -201,23 +236,27 @@ export default function AgentPage() {
   const stackCreateMutation = useMutation({
     mutationFn: async () => {
       const nextLabel = label.trim() || defaultLabel(provider, authType);
-      const created = await api.codingAuths.create({
+      // The unified create endpoint returns the new row unwrapped (no
+      // SingleResponse envelope).
+      return api.codingCredentials.create({
+        scope: "org",
         agent: provider,
         auth_type: "api_key",
         label: nextLabel,
         api_key: apiKey,
+        ...(provider === "opencode" ? { api_type: openCodeBackingProvider } : {}),
         ...(provider === "amp"
           ? { agent_defaults: { AMP_MODE: ampMode } }
           : provider === "pi"
             ? { agent_defaults: { PI_MODEL: piModel } }
+            : provider === "opencode"
+              ? { agent_defaults: openCodeAgentDefaults(openCodeModel, openCodeCustomModel) }
             : {}),
       });
-      return created.data;
     },
     onSuccess: async (created) => {
-      await queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       await queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
       closeAddModal();
       if (insertionMode === "make_default") {
         const nextRows = moveRowToTop([created, ...rows], created.id);
@@ -232,9 +271,9 @@ export default function AgentPage() {
   });
 
   const renameMutation = useMutation({
-    mutationFn: (nextLabel: string) => api.codingAuths.update(selectedId ?? "", { label: nextLabel }),
+    mutationFn: (nextLabel: string) => api.codingCredentials.update(selectedId ?? "", { scope: "org", label: nextLabel }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       toast.success("Auth renamed");
     },
     onError: (error) => {
@@ -244,10 +283,9 @@ export default function AgentPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => api.codingAuths.delete(id),
+    mutationFn: (id: string) => api.codingCredentials.delete(id, "org"),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.credentials.resolved });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
       setSelectedId(null);
       setRenameValue("");
       toast.success("Auth removed");
@@ -274,6 +312,15 @@ export default function AgentPage() {
     setInsertionMode("next_fallback");
     setAmpMode(AVAILABLE_AMP_MODES[0] ?? "smart");
     setPiModel(PI_MODEL_CLAUDE_OPUS_48);
+    setOpenCodeBackingProvider("opencode");
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeCustomModel("");
+  }
+
+  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider) {
+    setOpenCodeBackingProvider(value);
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(value));
+    setOpenCodeCustomModel("");
   }
 
   function openAddModal(nextProvider: ModalProvider) {
@@ -299,26 +346,41 @@ export default function AgentPage() {
   }
 
   if (!isAdmin) {
-    const sessionMinutes = Math.round(
-      (settings.max_session_duration_seconds ?? DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
-    );
-    const maxConcurrent = settings.max_concurrent_runs ?? DEFAULT_EXECUTION_SETTINGS.max_concurrent_runs;
-    const readOnlyTabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
-    const defaultAgentLabel = settings.default_agent_type
-      ? (AGENTS_BY_KEY[settings.default_agent_type as keyof typeof AGENTS_BY_KEY]?.label ?? settings.default_agent_type)
-      : "Not set";
-
     return (
       <PageContainer>
         <div className="space-y-6 pt-2">
           <PageHeader
             title="Coding agents"
-            description="View the org's coding-agent stack and execution limits. Only admins can change these."
+            description="View the org's coding-agent auth stack. Only admins can change shared auths."
           />
           <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
             <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
+          <AuthResolutionNotice isAdmin={isAdmin} />
+
+          <section className="space-y-3">
+            <h2 className="text-xs font-medium text-foreground">Default capabilities</h2>
+            <Card>
+              <CardContent className="divide-y divide-border/50 p-0">
+                {capabilityCatalog.map((definition) => {
+                  const grant = capabilityGrants.find((item) => item.capability_id === definition.id);
+                  return (
+                    <div key={definition.id} className="flex items-center justify-between gap-4 px-4 py-3">
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-medium text-foreground">{definition.display_name}</p>
+                          <Badge variant="outline" className="text-xs capitalize">{definition.risk}</Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{definition.description}</p>
+                      </div>
+                      <Switch checked={Boolean(grant?.enabled)} disabled aria-label={`${definition.display_name} default capability`} />
+                    </div>
+                  );
+                })}
+              </CardContent>
+            </Card>
+          </section>
 
           <section className="space-y-3">
             <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
@@ -362,29 +424,6 @@ export default function AgentPage() {
             )}
           </section>
 
-          <section className="space-y-3">
-            <h2 className="text-xs font-medium text-foreground">Execution limits</h2>
-            <Card>
-              <CardContent className="space-y-3 py-4 text-xs">
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="text-muted-foreground">Default agent</span>
-                  <span className="font-medium">{defaultAgentLabel}</span>
-                </div>
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="text-muted-foreground">Max concurrent runs</span>
-                  <span className="font-medium">{maxConcurrent}</span>
-                </div>
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="text-muted-foreground">Max session duration</span>
-                  <span className="font-medium">{sessionMinutes} min</span>
-                </div>
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="text-muted-foreground">Agent tab tools</span>
-                  <span className="font-medium">{readOnlyTabToolsEnabled ? "On" : "Off"}</span>
-                </div>
-              </CardContent>
-            </Card>
-          </section>
         </div>
       </PageContainer>
     );
@@ -395,17 +434,52 @@ export default function AgentPage() {
       <div className="space-y-8 pt-2">
         <PageHeader
           title="Coding agents"
-          description="Control which auths the org can use, how fallback works, and the execution limits for coding sessions."
+          description="Control which auths the org can use and how fallback works."
           action={(
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <AutosaveIndicator status={autosave.status} />
-              <Button onClick={() => openAddModal("codex")}>
-                <Plus className="mr-2 h-4 w-4" />
-                Add auth
-              </Button>
-            </div>
+            <Button onClick={() => openAddModal("codex")}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add auth
+            </Button>
           )}
         />
+        <AuthResolutionNotice isAdmin={isAdmin} />
+
+        <section className="space-y-4">
+          <div className="space-y-1.5">
+            <h2 className="text-xs font-medium text-foreground">Default capabilities</h2>
+            <p className="text-xs text-muted-foreground">
+              Controls what future manual coding-agent sessions can inspect or do by default.
+            </p>
+          </div>
+          <Card>
+            <CardContent className="divide-y divide-border/50 p-0">
+              {capabilityCatalog.map((definition) => {
+                const grant = capabilityGrants.find((item) => item.capability_id === definition.id);
+                const unavailable = definition.availability && !definition.availability.available;
+                return (
+                  <div key={definition.id} className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium text-foreground">{definition.display_name}</p>
+                        <Badge variant={definition.risk === "high" ? "destructive" : "outline"} className="text-xs capitalize">
+                          {definition.risk}
+                        </Badge>
+                        <Badge variant="outline" className="text-xs">{definition.category}</Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{unavailable ? definition.availability?.reason : definition.description}</p>
+                    </div>
+                    <Switch
+                      checked={Boolean(grant?.enabled)}
+                      disabled={capabilityMutation.isPending || unavailable}
+                      onCheckedChange={(checked) => setCapabilityEnabled(definition, checked)}
+                      aria-label={`${definition.display_name} default capability`}
+                    />
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        </section>
 
         <section className="space-y-4">
           <div className="space-y-1.5">
@@ -433,59 +507,6 @@ export default function AgentPage() {
           />
         </section>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Execution limits</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="max-concurrent-runs">Max concurrent sessions</Label>
-              <Input
-                id="max-concurrent-runs"
-                type="number"
-                min={MIN_CONCURRENT_RUNS}
-                max={MAX_CONCURRENT_RUNS}
-                value={maxConcurrentField.value}
-                onChange={maxConcurrentField.onChange}
-                onBlur={maxConcurrentField.onBlur}
-              />
-              <p className="text-xs text-muted-foreground">
-                Cap how many coding sessions can run at the same time for this org.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="max-session-minutes">Session max time (minutes)</Label>
-              <Input
-                id="max-session-minutes"
-                type="number"
-                min={MIN_SESSION_DURATION_MINUTES}
-                max={MAX_SESSION_DURATION_MINUTES}
-                value={maxSessionMinutesField.value}
-                onChange={maxSessionMinutesField.onChange}
-                onBlur={maxSessionMinutesField.onBlur}
-              />
-              <p className="text-xs text-muted-foreground">
-                Stop runaway sessions automatically after the selected wall-clock limit.
-              </p>
-            </div>
-            <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3 md:col-span-2">
-              <div className="space-y-1">
-                <Label htmlFor="agent-tab-tools">Agent tab tools</Label>
-                <p className="text-xs text-muted-foreground">
-                  Allow coding agents to view, create, and message tabs in their current session.
-                </p>
-              </div>
-              <Switch
-                id="agent-tab-tools"
-                checked={tabToolsEnabled}
-                onCheckedChange={(checked) => {
-                  autosave.save({ settings: { coding_agent_tab_tools_enabled: checked } });
-                }}
-              />
-            </div>
-          </CardContent>
-        </Card>
-
         <Sheet open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelectedId(null); }}>
           <SheetContent className="w-full sm:max-w-lg">
             {selected ? (
@@ -500,10 +521,10 @@ export default function AgentPage() {
                       ? "Codex"
                       : selected.agent === "claude_code"
                         ? "Claude Code"
-                        : selected.agent === "gemini_cli"
-                          ? "Gemini CLI"
-                          : selected.agent === "amp"
-                            ? "Amp"
+                        : selected.agent === "amp"
+                          ? "Amp"
+                          : selected.agent === "opencode"
+                            ? "OpenCode"
                             : "Pi"} {selected.auth_type === "subscription" ? "subscription" : "API key"} auth
                   </SheetDescription>
                 </SheetHeader>
@@ -663,6 +684,45 @@ export default function AgentPage() {
                     </Select>
                   </div>
                 ) : null}
+                {provider === "opencode" ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="opencode-backing-provider">OpenCode provider</Label>
+                      <Select value={openCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
+                        <SelectTrigger id="opencode-backing-provider">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {OPENCODE_BACKING_PROVIDER_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="opencode-model">Default model</Label>
+                      <Select value={openCodeModel} onValueChange={setOpenCodeModel}>
+                        <SelectTrigger id="opencode-model">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {openCodeModelOptions.map((model) => (
+                            <SelectItem key={model} value={model}>{model}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="opencode-model-custom">Custom model override</Label>
+                      <Input
+                        id="opencode-model-custom"
+                        value={openCodeCustomModel}
+                        onChange={(event) => setOpenCodeCustomModel(event.target.value)}
+                        placeholder="provider/model (e.g. xai/grok-code-fast)"
+                      />
+                    </div>
+                  </>
+                ) : null}
                 <div className="space-y-2">
                   <Label htmlFor="auth-api-key-input" className="flex items-center gap-2">
                     API key
@@ -678,7 +738,7 @@ export default function AgentPage() {
                     type="password"
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "gemini_cli" ? "AIza..." : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
+                    placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "opencode" ? "OpenCode or provider key" : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
                   />
                 </div>
               </>
@@ -704,6 +764,7 @@ export default function AgentPage() {
         {showCodexModal ? (
           <CodexDeviceCodeModal
             label={generatedLabel}
+            scope="org"
             onClose={() => {
               setShowCodexModal(false);
               closeAddModal();
@@ -711,7 +772,7 @@ export default function AgentPage() {
             onConnected={() => {
               setShowCodexModal(false);
               closeAddModal();
-              void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+              void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
             }}
           />
         ) : null}
@@ -719,6 +780,7 @@ export default function AgentPage() {
         {showClaudeModal ? (
           <ClaudeCodeAuthModal
             label={generatedLabel}
+            scope="org"
             onClose={() => {
               setShowClaudeModal(false);
               closeAddModal();
@@ -726,7 +788,7 @@ export default function AgentPage() {
             onConnected={() => {
               setShowClaudeModal(false);
               closeAddModal();
-              void queryClient.invalidateQueries({ queryKey: ["coding-auths"] });
+              void queryClient.invalidateQueries({ queryKey: queryKeys.codingCredentials.all });
             }}
           />
         ) : null}

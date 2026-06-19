@@ -10,7 +10,6 @@ describe("INTEGRATIONS", () => {
     "slack",
     "notion",
     "circleci",
-    "victorialogs",
     "mezmo",
   ] as const satisfies readonly IntegrationKey[];
 
@@ -41,7 +40,6 @@ describe("getIntegrationByKey", () => {
     "slack",
     "notion",
     "circleci",
-    "victorialogs",
     "mezmo",
   ] as IntegrationKey[])(
     "returns the correct integration for %s",

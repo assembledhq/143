@@ -33,6 +33,9 @@ interface ContextExpanderProps {
   /** Currently visible range inside the hidden range. */
   visibleStart?: number;
   visibleEnd?: number;
+  /** Edge-specific visible boundaries for gaps revealed from both ends. */
+  aboveVisibleStart?: number;
+  belowVisibleEnd?: number;
   /** Callback when context lines are fetched */
   onExpand?: (direction: "above" | "below" | "all", lines: FileLine[], meta: ContextExpandResult) => void;
   /** When true, disables expansion controls and shows an explicit unavailable message. */
@@ -55,6 +58,8 @@ export function ContextExpander({
   hiddenEnd,
   visibleStart,
   visibleEnd,
+  aboveVisibleStart,
+  belowVisibleEnd,
   onExpand,
   contextUnavailable = false,
   onContextUnavailable,
@@ -66,8 +71,10 @@ export function ContextExpander({
   const loading = loadingDirection !== null;
   const canExpand = !contextUnavailable && sessionId && filePath && onExpand;
   const hasKnownHiddenEnd = hiddenEnd != null;
-  const canExpandAbove = canExpand && hasKnownHiddenEnd && (visibleStart == null || visibleStart > hiddenStart);
-  const canExpandBelow = canExpand && (!hasKnownHiddenEnd || visibleEnd == null || visibleEnd < hiddenEnd);
+  const aboveBoundaryStart = aboveVisibleStart ?? visibleStart;
+  const belowBoundaryEnd = belowVisibleEnd ?? visibleEnd;
+  const canExpandAbove = canExpand && hasKnownHiddenEnd && (aboveBoundaryStart == null || aboveBoundaryStart > hiddenStart);
+  const canExpandBelow = canExpand && (!hasKnownHiddenEnd || belowBoundaryEnd == null || belowBoundaryEnd < hiddenEnd);
   const controlDirections: Array<"above" | "below"> =
     kind === "top" ? ["above"] : kind === "bottom" ? ["below"] : ["above", "below"];
 
@@ -83,12 +90,12 @@ export function ContextExpander({
 
       if (direction === "above") {
         if (hiddenEnd == null) return;
-        const fetchEnd = visibleStart != null ? visibleStart - 1 : hiddenEnd;
+        const fetchEnd = aboveBoundaryStart != null ? aboveBoundaryStart - 1 : hiddenEnd;
         const fetchStart = Math.max(hiddenStart, fetchEnd - 19);
         line = fetchStart;
         below = fetchEnd - fetchStart;
       } else if (direction === "below") {
-        const fetchStart = visibleEnd != null ? visibleEnd + 1 : hiddenStart;
+        const fetchStart = belowBoundaryEnd != null ? belowBoundaryEnd + 1 : hiddenStart;
         const fetchEnd = hiddenEnd == null ? fetchStart + 19 : Math.min(hiddenEnd, fetchStart + 19);
         line = fetchStart;
         below = fetchEnd - fetchStart;
@@ -137,8 +144,8 @@ export function ContextExpander({
       ? `Reveal ${hiddenLineCount} hidden context lines`
       : "Reveal context below"
     : "Context expansion unavailable (sandbox not running)";
-  const gutterWidthClass = viewMode === "split" ? "w-[66px]" : "w-[100px]";
-  const prefixSpacerClass = viewMode === "split" ? "w-0" : "w-[20px]";
+  const gutterWidthClass = viewMode === "split" ? "w-[58px]" : "w-[84px]";
+  const prefixSpacerClass = viewMode === "split" ? "w-0" : "w-[16px]";
 
   function renderControl({
     direction,

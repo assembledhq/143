@@ -112,18 +112,6 @@ var CodexSlashCommands = []SlashCommand{
 	{Name: "compact", Description: "Compact the conversation"},
 }
 
-// GeminiCLISlashCommands is the curated catalog of well-known Gemini CLI
-// commands. Source: https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/commands.md
-var GeminiCLISlashCommands = []SlashCommand{
-	{Name: "help", Description: "List available commands"},
-	{Name: "clear", Description: "Clear conversation context"},
-	{Name: "compress", Description: "Compress conversation history"},
-	{Name: "tools", Description: "List or manage available tools"},
-	{Name: "memory", Description: "Manage Gemini memory entries", AcceptsArgs: true},
-	{Name: "chat", Description: "Manage saved chats", AcceptsArgs: true},
-	{Name: "quit", Description: "Quit the Gemini CLI session"},
-}
-
 // AmpSlashCommands is the curated catalog of well-known Amp commands.
 // Source: https://ampcode.com/manual
 var AmpSlashCommands = []SlashCommand{
@@ -138,6 +126,11 @@ var AmpSlashCommands = []SlashCommand{
 // stabilize. Source: https://www.npmjs.com/package/@mariozechner/pi-agent
 var PiSlashCommands = []SlashCommand{}
 
+// OpenCodeSlashCommands is intentionally empty in v1. 143 still passes through
+// user-entered slash tokens and discovers .opencode/commands/*.md project
+// commands, but built-ins should only be surfaced after probing exact names.
+var OpenCodeSlashCommands = []SlashCommand{}
+
 // agentSlashCommandCatalog binds an agent's built-in command list to the label
 // rendered above it in the picker. Keying both off the same map prevents the
 // label switch and the catalog switch from drifting (e.g. renaming an agent
@@ -150,9 +143,9 @@ type agentSlashCommandCatalog struct {
 var agentSlashCommandCatalogs = map[AgentType]agentSlashCommandCatalog{
 	AgentTypeClaudeCode: {Label: "Claude Code commands", Commands: ClaudeCodeSlashCommands},
 	AgentTypeCodex:      {Label: "Codex commands", Commands: CodexSlashCommands},
-	AgentTypeGeminiCLI:  {Label: "Gemini CLI commands", Commands: GeminiCLISlashCommands},
 	AgentTypeAmp:        {Label: "Amp commands", Commands: AmpSlashCommands},
 	AgentTypePi:         {Label: "Pi commands", Commands: PiSlashCommands},
+	AgentTypeOpenCode:   {Label: "OpenCode commands", Commands: OpenCodeSlashCommands},
 }
 
 // SlashCommandsForAgent returns the built-in command catalog for an agent. The
@@ -240,7 +233,7 @@ func (s ProjectCommandSpec) CommandNameFromPath(path string) string {
 var ProjectCommandPaths = map[AgentType]ProjectCommandSpec{
 	AgentTypeClaudeCode: {Dir: ".claude/commands", FileExtension: "md"},
 	AgentTypeCodex:      {Dir: ".codex/commands", FileExtension: "md"},
-	AgentTypeGeminiCLI:  {Dir: ".gemini/commands", FileExtension: "toml"},
+	AgentTypeOpenCode:   {Dir: ".opencode/commands", FileExtension: "md"},
 }
 
 // SupportsProjectCommands reports whether an agent type has a registered

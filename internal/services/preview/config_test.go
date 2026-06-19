@@ -785,6 +785,14 @@ func TestValidateConfig_PreviewInstall(t *testing.T) {
 			install:    &models.PreviewInstallConfig{Command: []string{"npm", "ci"}, TimeoutSeconds: MaxInstallTimeoutSeconds + 1},
 			wantErrSub: "preview.install.timeout_seconds",
 		},
+		{
+			name: "platform cache verify path",
+			install: &models.PreviewInstallConfig{
+				Command:     []string{"npm", "ci"},
+				Lockfiles:   []string{"package-lock.json"},
+				VerifyPaths: []string{".143/cache/bin/webserver"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -843,8 +851,8 @@ func TestValidateConfig_Resources(t *testing.T) {
 		},
 		{
 			name:       "memory exceeds cap",
-			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "2Gi"}},
-			wantErrSub: "at most 1Gi",
+			resources:  models.PreviewResourceRequirements{Limits: models.PreviewResourceList{Memory: "9Gi"}},
+			wantErrSub: "at most 8Gi",
 		},
 		{
 			name:       "storage exceeds cap",
@@ -921,6 +929,86 @@ func TestParseCPUQuantity(t *testing.T) {
 			require.NoError(t, err, "CPU quantity should parse")
 			require.True(t, ok, "CPU quantity should be treated as set")
 			require.Equal(t, tt.expected, actual, "CPU quantity should normalize to millicores")
+		})
+	}
+}
+
+func TestValidateConfigWithResourcePolicy_Resources(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Primary:        "app",
+		Services:       map[string]models.ServiceConfig{"app": {Command: []string{"npm", "run", "dev"}, Port: 3000, Ready: models.ReadinessProbe{HTTPPath: "/"}}},
+		Infrastructure: map[string]models.InfrastructureConfig{},
+		Credentials:    models.CredentialConfig{Mode: "none"},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "2", Memory: "8Gi", EphemeralStorage: "10Gi"},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		policy     ResourcePolicy
+		memory     string
+		wantErrSub string
+	}{
+		{
+			name: "platform maximum accepts full resource ceiling",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: true,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              MaxPreviewMemoryMiB,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+		},
+		{
+			name: "org maximum can be lower than platform ceiling",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: true,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              4096,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+			wantErrSub: "preview.resources.limits.memory must be at most 4Gi",
+		},
+		{
+			name: "org maximum cannot raise above platform ceiling",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: true,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              MaxPreviewMemoryMiB * 2,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+			memory:     "9Gi",
+			wantErrSub: "preview.resources.limits.memory must be at most 8Gi",
+		},
+		{
+			name: "repo resource requests can be disabled",
+			policy: ResourcePolicy{
+				AllowRepoResourceRequests: false,
+				MaxCPUMillis:              MaxPreviewCPUMillis,
+				MaxMemoryMiB:              MaxPreviewMemoryMiB,
+				MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+			},
+			wantErrSub: "preview.resources cannot be set when repo resource requests are disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			testCfg := *cfg
+			if tt.memory != "" {
+				testCfg.Resources.Limits.Memory = tt.memory
+			}
+			errs := ValidateConfigWithResourcePolicy(&testCfg, tt.policy)
+			if tt.wantErrSub == "" {
+				require.Empty(t, errs, "resource policy should accept the config")
+				return
+			}
+			require.NotEmpty(t, errs, "resource policy should reject the config")
+			require.Contains(t, strings.Join(errs, "; "), tt.wantErrSub, "resource policy error should explain the effective cap")
 		})
 	}
 }
@@ -1141,6 +1229,23 @@ func TestResolvePreviewInstallCachePaths(t *testing.T) {
 			enabled: true,
 		},
 		{
+			name: "excludes preview marker child clean path glob",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"Cargo.lock"},
+				CleanPaths: []string{".143/cache/preview-install*/*"},
+			},
+			enabled: false,
+		},
+		{
+			name: "excludes platform cache descendants while keeping dependencies",
+			install: &models.PreviewInstallConfig{
+				Lockfiles:  []string{"package-lock.json"},
+				CleanPaths: []string{".143/cache/turbo", "node_modules"},
+			},
+			want:    []string{"node_modules"},
+			enabled: true,
+		},
+		{
 			name: "explicit opt out disables paths",
 			install: &models.PreviewInstallConfig{
 				Lockfiles:  []string{"package-lock.json"},
@@ -1172,6 +1277,95 @@ func TestResolvePreviewInstallCachePaths(t *testing.T) {
 			got, enabled := ResolvePreviewInstallCachePaths(tt.install)
 			require.Equal(t, tt.enabled, enabled, "cache resolver should return expected enabled state")
 			require.Equal(t, tt.want, got, "cache resolver should return expected effective paths")
+		})
+	}
+}
+
+func TestResolvePreviewInstallPackageManagerCachePaths(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		wantPMs []string
+		want    []string
+		enabled bool
+	}{
+		{
+			name: "infers npm from lockfile",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+			},
+			wantPMs: []string{"npm"},
+			want:    []string{".npm"},
+			enabled: true,
+		},
+		{
+			name: "infers nested pnpm from lockfile and command",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"pnpm", "install", "--frozen-lockfile"},
+				Lockfiles: []string{"frontend/pnpm-lock.yaml"},
+			},
+			wantPMs: []string{"pnpm"},
+			want:    []string{".local/share/pnpm/store"},
+			enabled: true,
+		},
+		{
+			name: "infers go module and build caches",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"go", "mod", "download"},
+				Lockfiles: []string{"go.mod"},
+			},
+			wantPMs: []string{"go"},
+			want:    []string{".cache/go-build", "go/pkg/mod"},
+			enabled: true,
+		},
+		{
+			name: "explicit include and paths are additive",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"custompm", "install"},
+				Lockfiles: []string{"custom.lock"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{
+						Include: []string{"pip"},
+						Paths:   []string{".cache/custom-package-manager"},
+					},
+				},
+			},
+			wantPMs: []string{"pip"},
+			want:    []string{".cache/custom-package-manager", ".cache/pip"},
+			enabled: true,
+		},
+		{
+			name: "package manager opt out disables only home cache",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Enabled: &disabled},
+				},
+			},
+			enabled: false,
+		},
+		{
+			name: "global cache requires lockfiles",
+			install: &models.PreviewInstallConfig{
+				Command: []string{"npm", "ci"},
+			},
+			enabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			paths, managers, enabled := ResolvePreviewInstallPackageManagerCachePaths(tt.install)
+			require.Equal(t, tt.enabled, enabled, "package-manager cache resolver should return expected enabled state")
+			require.Equal(t, tt.wantPMs, managers, "package-manager cache resolver should return expected package managers")
+			require.Equal(t, tt.want, paths, "package-manager cache resolver should return expected home-relative paths")
 		})
 	}
 }
@@ -1237,6 +1431,24 @@ func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 			wantErr: "must not target preview install markers",
 		},
 		{
+			name: "rejects marker parent path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache"}},
+			},
+			wantErr: "must not target preview install markers",
+		},
+		{
+			name: "rejects platform cache descendant path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".143/cache/turbo"}},
+			},
+			wantErr: "must not target platform preview cache",
+		},
+		{
 			name: "rejects broad path",
 			install: &models.PreviewInstallConfig{
 				Command:   []string{"npm", "ci"},
@@ -1253,6 +1465,60 @@ func TestValidateConfig_PreviewInstallCache(t *testing.T) {
 				Cache:     &models.PreviewInstallCacheConfig{Paths: []string{".pnpm-store/*"}},
 			},
 			wantErr: "glob paths are not allowed",
+		},
+		{
+			name: "valid package manager override",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{".cache/custom-package-manager"}},
+				},
+			},
+		},
+		{
+			name: "rejects unknown package manager include",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Include: []string{"unknownpm"}},
+				},
+			},
+			wantErr: "preview.install.cache.package_manager.include[0]",
+		},
+		{
+			name: "rejects absolute package manager path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{"/home/sandbox/.npm"}},
+				},
+			},
+			wantErr: "must be a relative path",
+		},
+		{
+			name: "rejects package manager traversal",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{"../.npm"}},
+				},
+			},
+			wantErr: "escapes the sandbox home",
+		},
+		{
+			name: "rejects sensitive package manager path",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"npm", "ci"},
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					PackageManager: &models.PreviewPackageManagerCacheConfig{Paths: []string{".ssh"}},
+				},
+			},
+			wantErr: "must not target sensitive sandbox home state",
 		},
 	}
 
@@ -1504,14 +1770,14 @@ func TestResolveResourceLimits(t *testing.T) {
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"app": {}},
 			},
-			expected: models.ResourceLimits{MemoryMiB: 384, CPUMillis: 500, DiskMiB: 10 * 1024},
+			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 500, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service without managed infrastructure uses standard preview tier",
 			cfg: models.PreviewConfig{
 				Services: map[string]models.ServiceConfig{"a": {}, "b": {}},
 			},
-			expected: models.ResourceLimits{MemoryMiB: 768, CPUMillis: 1000, DiskMiB: 10 * 1024},
+			expected: models.ResourceLimits{MemoryMiB: 2048, CPUMillis: 1000, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "multi service with managed infrastructure uses heavy preview tier",
@@ -1521,7 +1787,7 @@ func TestResolveResourceLimits(t *testing.T) {
 					"db": {Template: "postgres-17"},
 				},
 			},
-			expected: models.ResourceLimits{MemoryMiB: 1024, CPUMillis: 2000, DiskMiB: 10 * 1024},
+			expected: models.ResourceLimits{MemoryMiB: 4096, CPUMillis: 2000, DiskMiB: 10 * 1024},
 		},
 		{
 			name: "requests override topology defaults when limits are omitted",
@@ -1554,6 +1820,21 @@ func TestResolveResourceLimits(t *testing.T) {
 	}
 }
 
+func TestResolveResourceLimitsWithPolicy_ClampsToOrgMaximum(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.PreviewConfig{
+		Services: map[string]models.ServiceConfig{"app": {}},
+		Resources: models.PreviewResourceRequirements{
+			Limits: models.PreviewResourceList{CPU: "2", Memory: "8Gi", EphemeralStorage: "10Gi"},
+		},
+	}
+	policy := ResourcePolicy{AllowRepoResourceRequests: true, MaxCPUMillis: 1500, MaxMemoryMiB: 4096, MaxDiskMiB: 6 * 1024}
+	expected := models.ResourceLimits{MemoryMiB: 4096, CPUMillis: 1500, DiskMiB: 6 * 1024}
+
+	require.Equal(t, expected, ResolveResourceLimitsWithPolicy(&cfg, policy), "resource tier should respect org maximums")
+}
+
 func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1570,7 +1851,7 @@ func TestApplyResourceLimitsToSandboxConfig(t *testing.T) {
 
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
-	require.Equal(t, 1024, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
+	require.Equal(t, 4096, sandboxCfg.MemoryLimitMB, "sandbox config should use the preview topology memory tier")
 	require.Equal(t, 2.0, sandboxCfg.CPULimit, "sandbox config should convert preview millicores into CPU cores")
 	require.Equal(t, 10, sandboxCfg.DiskLimitGB, "sandbox config should round preview disk MiB up to whole GiB")
 }
@@ -1589,6 +1870,23 @@ func TestApplyResourceLimitsToSandboxConfig_RoundsDiskUp(t *testing.T) {
 	ApplyResourceLimitsToSandboxConfig(&sandboxCfg, cfg)
 
 	require.Equal(t, 2, sandboxCfg.DiskLimitGB, "sandbox config should round non-whole GiB disk limits up for Docker quota support")
+}
+
+func TestApplyPreviewInstanceResourceLimitsToSandboxConfig(t *testing.T) {
+	t.Parallel()
+
+	sandboxCfg := agent.DefaultSandboxConfig()
+	instance := &models.PreviewInstance{
+		MemoryLimitMB:  4096,
+		CPULimitMillis: 1500,
+		DiskLimitMB:    1537,
+	}
+
+	ApplyPreviewInstanceResourceLimitsToSandboxConfig(&sandboxCfg, instance)
+
+	require.Equal(t, 4096, sandboxCfg.MemoryLimitMB, "sandbox memory should use persisted preview limit")
+	require.Equal(t, 1.5, sandboxCfg.CPULimit, "sandbox CPU should use persisted preview limit")
+	require.Equal(t, 2, sandboxCfg.DiskLimitGB, "sandbox disk should round persisted MiB limit up to GiB")
 }
 
 func TestLookupInfraTemplate(t *testing.T) {
@@ -1707,14 +2005,18 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
 			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
 			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
-			require.Contains(t, string(raw), "package-lock.json", "dogfood Next preview should key dependency install reuse to the lockfile")
-			require.Contains(t, string(raw), ".143-npm-ci-lock", "dogfood Next preview should only skip npm ci after a successful lockfile-matched install marker")
-			require.Contains(t, string(raw), "node_modules/.bin/next", "dogfood Next preview should verify the expected Next binary exists before reusing installed deps")
-			require.Contains(t, string(raw), "rm -rf node_modules", "dogfood Next preview should clean partial dependency installs before retrying npm ci")
+			require.Contains(t, string(raw), "sh .143/preview-install-frontend.sh", "dogfood Next preview should run the shared install script as a fallback when the platform install phase did not run")
 			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
 			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
+
+			installScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-install-frontend.sh"))
+			require.NoError(t, err, "test should read committed dogfood frontend install script")
+			require.Contains(t, string(installScript), "package-lock.json", "dogfood install script should key dependency install reuse to the lockfile")
+			require.Contains(t, string(installScript), ".143-npm-ci-lock", "dogfood install script should only skip npm ci after a successful lockfile-matched install marker")
+			require.Contains(t, string(installScript), "node_modules/.bin/next", "dogfood install script should verify the expected Next binary exists before reusing installed deps")
+			require.Contains(t, string(installScript), "rm -rf node_modules", "dogfood install script should clean partial dependency installs before retrying npm ci")
 			return
 		}
 		parent := filepath.Dir(dir)
@@ -1723,4 +2025,115 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 		}
 		dir = parent
 	}
+}
+
+func TestResolvePreviewBuildCachePaths(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		want    []string
+		enabled bool
+	}{
+		{
+			name:    "nil install disables build caching",
+			install: nil,
+			enabled: false,
+		},
+		{
+			name: "infers turbo cache dirs from root javascript lockfile",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+			},
+			want:    []string{".turbo/cache", "node_modules/.cache/turbo"},
+			enabled: true,
+		},
+		{
+			name: "infers turbo cache dirs next to nested lockfile",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"frontend/pnpm-lock.yaml"},
+			},
+			want:    []string{"frontend/.turbo/cache", "frontend/node_modules/.cache/turbo"},
+			enabled: true,
+		},
+		{
+			name: "non javascript lockfiles infer nothing",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod", "poetry.lock"},
+			},
+			enabled: false,
+		},
+		{
+			name: "explicit build paths are added and deduplicated",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{
+						Paths: []string{".next/cache", "node_modules/.cache/turbo"},
+					},
+				},
+			},
+			want:    []string{".next/cache", ".turbo/cache", "node_modules/.cache/turbo"},
+			enabled: true,
+		},
+		{
+			name: "cache disabled flag disables build caching",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache:     &models.PreviewInstallCacheConfig{Enabled: &disabled},
+			},
+			enabled: false,
+		},
+		{
+			name: "build disabled flag disables build caching",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{Enabled: &disabled},
+				},
+			},
+			enabled: false,
+		},
+		{
+			name: "platform cache paths are excluded",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{
+						Paths: []string{".143/cache/turbo", "target/debug/incremental"},
+					},
+				},
+			},
+			want:    []string{"target/debug/incremental"},
+			enabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, enabled := ResolvePreviewBuildCachePaths(tt.install)
+			require.Equal(t, tt.enabled, enabled, "enabled flag should match")
+			if tt.enabled {
+				require.Equal(t, tt.want, got, "effective build cache paths should match")
+			} else {
+				require.Empty(t, got, "disabled build caching should resolve no paths")
+			}
+		})
+	}
+}
+
+func TestCacheRestorablePreviewInstallVerifyPaths(t *testing.T) {
+	t.Parallel()
+
+	got := CacheRestorablePreviewInstallVerifyPaths([]string{
+		"node_modules/.bin/next",
+		".143/cache/bin/webserver",
+		"node_modules/.bin/next",
+		" .143/cache/preview-install/abc.done ",
+	})
+
+	require.Equal(t, []string{"node_modules/.bin/next"}, got, "cache-restorable verify paths should exclude platform cache paths and deduplicate workspace artifacts")
 }

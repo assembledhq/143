@@ -169,8 +169,9 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
-	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadFn            func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn       func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadLatestTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
@@ -183,6 +184,13 @@ func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UU
 func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
 	if m.listByThreadTurnsFn != nil {
 		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+	if m.listByThreadLatestTurnsFn != nil {
+		return m.listByThreadLatestTurnsFn(ctx, orgID, threadID, latestTurns)
 	}
 	return nil, nil
 }
@@ -1651,6 +1659,7 @@ func TestSessionThreadHandler_GetThreadMessagesWindow(t *testing.T) {
 			HasOlder:                 true,
 			LatestAssistantMessageID: 21,
 			LiveEdgeMessageID:        21,
+			Position:                 db.SessionMessageWindowPositionLatest,
 		}, nil
 	}
 
@@ -1670,10 +1679,211 @@ func TestSessionThreadHandler_GetThreadMessagesWindow(t *testing.T) {
 	require.Equal(t, models.ThreadMessageWindowMeta{
 		NextOlderCursor:          "21",
 		HasOlder:                 true,
+		HasNewer:                 false,
 		LatestAssistantMessageID: 21,
 		LiveEdgeMessageID:        21,
+		WindowPosition:           "latest",
 		ThreadStatus:             string(models.ThreadStatusIdle),
 	}, resp.Meta, "response should include cursor and anchor metadata")
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow_After(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should use the route thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+		require.Equal(t, orgID, gotOrgID, "message window should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "message window should use the route thread")
+		require.Equal(t, int64(30), opts.AfterID, "message window should pass the after cursor")
+		require.Equal(t, db.SessionMessageWindowPositionNewer, opts.Position, "message window should request a newer page")
+		require.Equal(t, 25, opts.Limit, "message window should pass the requested limit")
+		return db.SessionMessageWindow{
+			Messages: []models.SessionMessage{
+				{ID: 31, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleAssistant, Content: "newer", CreatedAt: now},
+			},
+			NextNewerCursor:          "31",
+			HasNewer:                 true,
+			LatestAssistantMessageID: 40,
+			LiveEdgeMessageID:        40,
+			Position:                 db.SessionMessageWindowPositionNewer,
+		}, nil
+	}
+
+	req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?after=30&limit=25", "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+	w := httptest.NewRecorder()
+
+	handler.GetThreadMessages(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "newer window request should return success")
+	var resp models.ThreadMessageWindowResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, int64(31), resp.Data[0].ID, "response should include the newer message")
+	require.Equal(t, models.ThreadMessageWindowMeta{
+		NextNewerCursor:          "31",
+		HasOlder:                 false,
+		HasNewer:                 true,
+		LatestAssistantMessageID: 40,
+		LiveEdgeMessageID:        40,
+		WindowPosition:           "newer",
+		ThreadStatus:             string(models.ThreadStatusIdle),
+	}, resp.Meta, "response should include newer cursor metadata")
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow_AroundAnchor(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should use the route thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	deps.messageStore.listWindowByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionMessageWindowOptions) (db.SessionMessageWindow, error) {
+		require.Equal(t, orgID, gotOrgID, "message window should be scoped to the request org")
+		require.Equal(t, threadID, gotThreadID, "message window should use the route thread")
+		require.Equal(t, db.SessionMessageWindowPositionAround, opts.Position, "message window should request an anchor-centered window")
+		require.Equal(t, int64(456), opts.AnchorMessageID, "message window should pass the anchor message id")
+		require.Equal(t, 25, opts.Limit, "message window should pass the requested limit")
+		return db.SessionMessageWindow{
+			Messages: []models.SessionMessage{
+				{ID: 455, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleUser, Content: "older", CreatedAt: now.Add(-time.Minute)},
+				{ID: 456, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleAssistant, Content: "anchor", CreatedAt: now},
+				{ID: 457, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleUser, Content: "newer", CreatedAt: now.Add(time.Minute)},
+			},
+			NextOlderCursor:          "455",
+			HasOlder:                 true,
+			NextNewerCursor:          "457",
+			HasNewer:                 true,
+			AnchorMessageID:          456,
+			AnchorFound:              true,
+			LatestAssistantMessageID: 456,
+			LiveEdgeMessageID:        500,
+			Position:                 db.SessionMessageWindowPositionAround,
+		}, nil
+	}
+
+	req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?position=around&anchor_message_id=456&limit=25", "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+	w := httptest.NewRecorder()
+
+	handler.GetThreadMessages(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "around window request should return success")
+	var resp models.ThreadMessageWindowResponse
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Equal(t, []int64{455, 456, 457}, []int64{resp.Data[0].ID, resp.Data[1].ID, resp.Data[2].ID}, "response should preserve chronological anchor window")
+	require.Equal(t, models.ThreadMessageWindowMeta{
+		NextOlderCursor:          "455",
+		HasOlder:                 true,
+		NextNewerCursor:          "457",
+		HasNewer:                 true,
+		LatestAssistantMessageID: 456,
+		LiveEdgeMessageID:        500,
+		AnchorMessageID:          456,
+		AnchorFound:              true,
+		WindowPosition:           "around",
+		ThreadStatus:             string(models.ThreadStatusIdle),
+	}, resp.Meta, "response should include anchor and bidirectional cursor metadata")
+}
+
+func TestSessionThreadHandler_GetThreadMessagesWindow_InvalidCursorCombinations(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+
+	cases := []struct {
+		name          string
+		query         string
+		expectedCode  int
+		expectedError string
+	}{
+		{
+			name:          "position=latest with before cursor",
+			query:         "position=latest&before=10",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "position=latest with after cursor",
+			query:         "position=latest&after=10",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "before and after combined",
+			query:         "before=5&after=10",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "around without anchor",
+			query:         "position=around",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+		{
+			name:          "around with before cursor",
+			query:         "position=around&anchor_message_id=5&before=3",
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_CURSOR",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := threadRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/messages?"+tc.query, "", orgID, map[string]string{"id": sessionID.String(), "tid": threadID.String()})
+			w := httptest.NewRecorder()
+			handler.GetThreadMessages(w, req)
+			require.Equal(t, tc.expectedCode, w.Code, "invalid cursor combination should return error")
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "error response should be valid JSON")
+			require.Equal(t, tc.expectedError, body.Error.Code, "error code should match")
+		})
+	}
 }
 
 func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
@@ -1747,6 +1957,42 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 			expectedLen:  1,
 		},
 		{
+			name:           "success with latest turns window",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "log lookup should be scoped to the request organization")
+					require.Equal(t, threadID, gotThreadID, "log lookup should target the requested thread")
+					require.Equal(t, 50, latestTurns, "log lookup should pass the requested latest-turns window")
+					return []models.SessionLog{
+						{ID: 3, SessionID: sessionID, ThreadID: &threadID, Level: "info", Message: "latest turn", TurnNumber: 12, Timestamp: now},
+					}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  1,
+		},
+		{
+			name:           "latest turns clamped to the server cap",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, _, _ uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, maxLatestTurns, latestTurns, "oversized latest_turns should be clamped, not honored")
+					return []models.SessionLog{}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+			expectedLen:  0,
+		},
+		{
 			name:           "invalid session ID",
 			sessionIDParam: "bad-id",
 			threadIDParam:  threadID.String(),
@@ -1787,6 +2033,12 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 			if tt.name == "success with turn filter" {
 				target += "?turn_numbers=7,6,7,5,bad"
 			}
+			if tt.name == "success with latest turns window" {
+				target += "?latest_turns=50"
+			}
+			if tt.name == "latest turns clamped to the server cap" {
+				target += "?latest_turns=99999"
+			}
 			req := threadRequest(http.MethodGet, target, "", orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
 			w := httptest.NewRecorder()
 
@@ -1799,13 +2051,62 @@ func TestSessionThreadHandler_GetThreadLogs(t *testing.T) {
 				require.NoError(t, err, "response body should be valid JSON")
 				require.Equal(t, tt.expectedError, errResp.Error.Code, "should return expected error code")
 			} else {
-				var resp models.ListResponse[models.SessionLog]
+				var resp models.ListResponse[models.SessionLogResponse]
 				err := json.Unmarshal(w.Body.Bytes(), &resp)
 				require.NoError(t, err, "response body should be valid JSON")
 				require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of logs")
+				if len(resp.Data) > 0 {
+					require.Equal(t, len([]byte(resp.Data[0].Message)), resp.Data[0].MessageBytes, "thread log response should include message byte length for short logs")
+					require.False(t, resp.Data[0].MessageTruncated, "short thread log should not be truncated")
+				}
 			}
 		})
 	}
+}
+
+func TestSessionThreadHandler_GetThreadLogs_TruncatesLongLog(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+	longOutput := strings.Repeat("o", models.SessionLogPreviewBytes+37)
+
+	handler, deps := newThreadHandler(t)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "thread lookup should be scoped to the request organization")
+		require.Equal(t, threadID, gotThreadID, "thread lookup should target the requested thread")
+		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+	}
+	deps.logStore.listByThreadFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) ([]models.SessionLog, error) {
+		require.Equal(t, orgID, gotOrgID, "log lookup should be scoped to the request organization")
+		require.Equal(t, threadID, gotThreadID, "log lookup should target the requested thread")
+		return []models.SessionLog{
+			{ID: 77, SessionID: sessionID, ThreadID: &threadID, Level: "output", Message: longOutput, Timestamp: now},
+		}, nil
+	}
+
+	req := threadRequest(
+		http.MethodGet,
+		"/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/logs",
+		"",
+		orgID,
+		map[string]string{"id": sessionID.String(), "tid": threadID.String()},
+	)
+	w := httptest.NewRecorder()
+
+	handler.GetThreadLogs(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "should return OK for thread logs")
+
+	var resp models.ListResponse[models.SessionLogResponse]
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err, "response body should be valid JSON")
+	require.Len(t, resp.Data, 1, "should return one log response")
+	require.Equal(t, models.SessionLogPreviewBytes, len(resp.Data[0].Message), "long log message should be previewed")
+	require.Equal(t, len([]byte(longOutput)), resp.Data[0].MessageBytes, "response should report original byte length")
+	require.Equal(t, len(longOutput), resp.Data[0].MessageChars, "response should report original character length")
+	require.True(t, resp.Data[0].MessageTruncated, "long log should be marked truncated")
 }
 
 func TestParseTurnNumbersRejectsOverflow(t *testing.T) {
@@ -1814,4 +2115,347 @@ func TestParseTurnNumbersRejectsOverflow(t *testing.T) {
 	turnNumbers := parseTurnNumbers("1,2147483647,2147483648,999999999999999999999999999999")
 
 	require.Equal(t, []int{1, 2147483647}, turnNumbers, "turn parsing should reject values that cannot fit in the database integer column")
+}
+
+func TestParseLatestTurns(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 0, parseLatestTurns(""), "empty input should disable the latest-turns window")
+	require.Equal(t, 0, parseLatestTurns("bad"), "non-numeric input should disable the latest-turns window")
+	require.Equal(t, 0, parseLatestTurns("-5"), "negative input should disable the latest-turns window")
+	require.Equal(t, 0, parseLatestTurns("0"), "zero should disable the latest-turns window")
+	require.Equal(t, 50, parseLatestTurns(" 50 "), "valid input should parse with surrounding whitespace")
+	require.Equal(t, maxLatestTurns, parseLatestTurns("99999"), "oversized input should clamp to the server cap")
+}
+
+// --- mockTranscriptStore ---
+
+type mockTranscriptStore struct {
+	listWindowFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
+}
+
+func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+	if m.listWindowFn != nil {
+		return m.listWindowFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionTranscriptWindow{}, nil
+}
+
+// newThreadHandlerWithTranscript creates a handler with the given transcript store wired in.
+func newThreadHandlerWithTranscript(t *testing.T, transcriptStore thread.TranscriptStore) (*SessionThreadHandler, *threadTestDeps) {
+	t.Helper()
+	deps := &threadTestDeps{
+		threadStore:  &mockThreadStore{},
+		sessionStore: &mockSessionStoreForThread{},
+		messageStore: &mockMessageStore{},
+		logStore:     &mockLogStore{},
+		jobStore:     &mockJobStore{},
+	}
+	svc := thread.NewService(
+		deps.threadStore,
+		deps.sessionStore,
+		deps.messageStore,
+		deps.logStore,
+		deps.jobStore,
+		zerolog.Nop(),
+	)
+	svc.SetTranscriptStore(transcriptStore)
+	return NewSessionThreadHandler(svc), deps
+}
+
+func TestSessionThreadHandler_GetThreadTranscript(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	tests := []struct {
+		name           string
+		sessionIDParam string
+		threadIDParam  string
+		query          string
+		setupDeps      func(deps *threadTestDeps, ts *mockTranscriptStore)
+		expectedCode   int
+		expectedError  string
+	}{
+		{
+			name:           "invalid session uuid",
+			sessionIDParam: "not-uuid",
+			threadIDParam:  threadID.String(),
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid thread uuid",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  "not-uuid",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ID",
+		},
+		{
+			name:           "invalid position",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			query:          "?position=sideways",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_POSITION",
+		},
+		{
+			name:           "invalid cursor",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			query:          "?before=!!!notbase64",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_CURSOR",
+		},
+		{
+			name:           "around without anchor",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			query:          "?position=around",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ANCHOR",
+		},
+		{
+			name:           "invalid anchor_message_id",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			query:          "?position=around&anchor_message_id=notanumber",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_ANCHOR",
+		},
+		{
+			name:           "invalid limit_turns",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			query:          "?limit_turns=notanumber",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_LIMIT",
+		},
+		{
+			name:           "invalid include",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			query:          "?include=messages,unknown",
+			setupDeps:      func(deps *threadTestDeps, ts *mockTranscriptStore) {},
+			expectedCode:   http.StatusBadRequest,
+			expectedError:  "INVALID_INCLUDE",
+		},
+		{
+			name:           "thread not found",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps, ts *mockTranscriptStore) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			expectedCode:  http.StatusNotFound,
+			expectedError: "NOT_FOUND",
+		},
+		{
+			name:           "success latest",
+			sessionIDParam: sessionID.String(),
+			threadIDParam:  threadID.String(),
+			setupDeps: func(deps *threadTestDeps, ts *mockTranscriptStore) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusIdle,
+					}, nil
+				}
+				ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, _ db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+					return db.SessionTranscriptWindow{}, nil
+				}
+			},
+			expectedCode: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := &mockTranscriptStore{}
+			handler, deps := newThreadHandlerWithTranscript(t, ts)
+			tt.setupDeps(deps, ts)
+
+			url := "/api/v1/sessions/" + tt.sessionIDParam + "/threads/" + tt.threadIDParam + "/transcript" + tt.query
+			req := threadRequest(http.MethodGet, url, "", orgID, map[string]string{
+				"id":  tt.sessionIDParam,
+				"tid": tt.threadIDParam,
+			})
+			w := httptest.NewRecorder()
+
+			handler.GetThreadTranscript(w, req)
+			require.Equal(t, tt.expectedCode, w.Code, "GetThreadTranscript should return the expected status code")
+
+			if tt.expectedError != "" {
+				var errResp models.ErrorResponse
+				err := json.Unmarshal(w.Body.Bytes(), &errResp)
+				require.NoError(t, err, "response body should be valid JSON")
+				require.Equal(t, tt.expectedError, errResp.Error.Code, "GetThreadTranscript should return the expected error code")
+			}
+		})
+	}
+}
+
+func TestSessionThreadHandler_GetThreadTranscript_ParsesInclude(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+
+	ts := &mockTranscriptStore{}
+	handler, deps := newThreadHandlerWithTranscript(t, ts)
+	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+		require.True(t, opts.Include.Messages, "include=messages should include messages")
+		require.True(t, opts.Include.Tools, "include=tools should include tool entries")
+		require.False(t, opts.Include.HumanInputs, "omitted human_inputs should be excluded")
+		require.False(t, opts.Include.System, "omitted system should be excluded")
+		return db.SessionTranscriptWindow{Position: models.TranscriptWindowPositionLatest}, nil
+	}
+
+	req := threadRequest(
+		http.MethodGet,
+		"/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/transcript?include=messages,tools",
+		"",
+		orgID,
+		map[string]string{"id": sessionID.String(), "tid": threadID.String()},
+	)
+	w := httptest.NewRecorder()
+
+	handler.GetThreadTranscript(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "GetThreadTranscript should accept valid include filters")
+}
+
+func TestSessionThreadHandler_GetThreadTranscript_ResponseContract(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	msgID := int64(41)
+	logID := int64(42)
+	olderCursor := "older-cursor"
+	newerCursor := "newer-cursor"
+
+	ts := &mockTranscriptStore{}
+	handler, deps := newThreadHandlerWithTranscript(t, ts)
+	deps.threadStore.getByIDFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID) (models.SessionThread, error) {
+		require.Equal(t, orgID, gotOrgID, "GetThreadTranscript should scope the thread lookup by org")
+		require.Equal(t, threadID, gotThreadID, "GetThreadTranscript should load the requested thread")
+		return models.SessionThread{
+			ID:        threadID,
+			SessionID: sessionID,
+			OrgID:     orgID,
+			Status:    models.ThreadStatusIdle,
+		}, nil
+	}
+	ts.listWindowFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+		require.Equal(t, orgID, gotOrgID, "transcript store should receive the request org")
+		require.Equal(t, threadID, gotThreadID, "transcript store should receive the request thread")
+		require.Equal(t, models.TranscriptWindowPositionAround, opts.Position, "transcript store should receive around position")
+		require.Equal(t, "msg_41", opts.AnchorEntryID, "transcript store should receive the anchor entry id")
+		return db.SessionTranscriptWindow{
+			Rows: []db.SessionTranscriptRawRow{
+				{
+					EntryKindHint: models.TranscriptEntryKindMessage,
+					TurnNumber:    7,
+					EntryTime:     now,
+					SourceRank:    1,
+					SourceID:      msgID,
+					Message: &models.SessionMessage{
+						ID:         msgID,
+						SessionID:  sessionID,
+						OrgID:      orgID,
+						ThreadID:   &threadID,
+						TurnNumber: 7,
+						Role:       models.MessageRoleAssistant,
+						Content:    "Finished the work.",
+						CreatedAt:  now,
+					},
+				},
+				{
+					EntryKindHint: models.TranscriptEntryKindToolResult,
+					TurnNumber:    7,
+					EntryTime:     now.Add(time.Second),
+					SourceRank:    2,
+					SourceID:      logID,
+					Log: &models.SessionLog{
+						ID:         logID,
+						SessionID:  sessionID,
+						OrgID:      orgID,
+						ThreadID:   &threadID,
+						TurnNumber: 7,
+						Level:      models.SessionLogLevelOutput,
+						Message:    "ok",
+						Metadata:   json.RawMessage(`{"type":"tool_result","tool_name":"exec_command"}`),
+						Timestamp:  now.Add(time.Second),
+					},
+				},
+			},
+			Position:                 models.TranscriptWindowPositionAround,
+			HasOlder:                 true,
+			HasNewer:                 true,
+			OlderCursor:              olderCursor,
+			NewerCursor:              newerCursor,
+			AnchorEntryID:            "msg_41",
+			AnchorFound:              true,
+			LatestAssistantEntryID:   "msg_41",
+			LatestAssistantMessageID: msgID,
+			LiveEdgeEntryID:          "tres_42",
+			LiveEdgeMessageID:        0,
+		}, nil
+	}
+
+	req := threadRequest(
+		http.MethodGet,
+		"/api/v1/sessions/"+sessionID.String()+"/threads/"+threadID.String()+"/transcript?position=around&anchor_entry_id=msg_41",
+		"",
+		orgID,
+		map[string]string{"id": sessionID.String(), "tid": threadID.String()},
+	)
+	w := httptest.NewRecorder()
+
+	handler.GetThreadTranscript(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "GetThreadTranscript should return a successful response")
+
+	var resp models.SessionTranscriptWindowResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "GetThreadTranscript response should be valid JSON")
+	require.Equal(t, models.TranscriptWindowPositionAround, resp.Meta.Position, "response should include the resolved window position")
+	require.True(t, resp.Meta.AnchorFound, "response should report that the requested anchor was found")
+	require.Equal(t, "msg_41", resp.Meta.AnchorEntryID, "response should echo the resolved anchor entry id")
+	require.Equal(t, "msg_41", resp.Meta.LatestAssistantEntryID, "response should include the latest assistant entry id")
+	require.Equal(t, msgID, resp.Meta.LatestAssistantMessageID, "response should include the latest assistant message id")
+	require.Equal(t, "tres_42", resp.Meta.LiveEdgeEntryID, "response should include the live edge entry id")
+	require.Equal(t, int64(0), resp.Meta.LiveEdgeMessageID, "non-message live edges should not report a message id")
+	require.Equal(t, olderCursor, resp.Meta.NextOlderCursor, "response should include the older cursor")
+	require.Equal(t, newerCursor, resp.Meta.NextNewerCursor, "response should include the newer cursor")
+	require.Equal(t, models.ThreadStatusIdle, resp.Meta.ThreadStatus, "response should include the thread status")
+	require.Len(t, resp.Data, 1, "response should group rows into one turn")
+	require.Len(t, resp.Data[0].Entries, 2, "response should include both transcript entries")
+	require.Equal(t, "msg_41", resp.Data[0].Entries[0].ID, "message entry should use the stable message entry id")
+	require.Equal(t, "tres_42", resp.Data[0].Entries[1].ID, "tool result entry should use the stable tool-result entry id")
+	require.Equal(t, models.TranscriptEntryKindToolResult, resp.Data[0].Entries[1].Kind, "tool result logs should render as tool_result entries")
 }

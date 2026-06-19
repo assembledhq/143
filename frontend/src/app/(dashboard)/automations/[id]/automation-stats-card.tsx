@@ -187,7 +187,7 @@ export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) 
           <div>
             <h3 className="text-sm font-medium">Runs · last {STATS_WINDOW_DAYS} days</h3>
             {stats && (
-              <p className="text-xs text-muted-foreground mt-0.5">
+              <p className="text-xs text-muted-foreground tabular-nums mt-0.5">
                 {stats.totals.total} total · {successPct}% success · avg {formatDuration(stats.totals.avg_duration_seconds)}
               </p>
             )}

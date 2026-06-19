@@ -38,31 +38,107 @@ export interface User {
   role: string;
   github_id?: number;
   github_login?: string;
+  captured_github_org_login?: string;
   avatar_url?: string;
   google_id?: string;
+  // Whether the account's current email is attested (OAuth provider claim,
+  // verification link, or emailed-invite claim). Gates the "verify your
+  // email" prompt and email-domain auto-join.
+  email_verified?: boolean;
   settings?: UserSettings;
   created_at: string;
 }
 
 export interface UserSettings {
   coding_agent_model_default?: string;
-  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
+  coding_agent_reasoning_defaults?: Partial<
+    Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">
+  >;
+  diff_viewer_full_screen?: boolean;
 }
 
-export interface ThreadMessageWindowMeta {
-  next_older_cursor?: string;
-  has_older: boolean;
-  latest_assistant_message_id?: number;
-  live_edge_message_id?: number;
-  thread_status: ThreadStatus;
+// PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
+// fields keep their stored value, null clears a field, and nested objects
+// merge per key. Send only the fields being changed — never a full settings
+// document rebuilt from the query cache, which would clobber concurrent
+// edits from other tabs.
+export interface UserSettingsUpdateRequest {
+  coding_agent_model_default?: string | null;
+  coding_agent_reasoning_defaults?: Partial<
+    Record<
+      "codex" | "claude_code",
+      "low" | "medium" | "high" | "xhigh" | "max" | null
+    >
+  > | null;
+  diff_viewer_full_screen?: boolean | null;
 }
 
-export interface ThreadMessageWindowResponse {
-  data: SessionMessage[];
-  meta: ThreadMessageWindowMeta;
+export type AgentCapabilityID =
+  | 'repo_context'
+  | 'pr_history'
+  | 'session_history'
+  | 'review_feedback'
+  | 'ci_history'
+  | 'issue_sources'
+  | 'team_docs'
+  | 'production_diagnostics'
+  | 'external_comments'
+  | 'project_proposals'
+  | 'eval_authoring'
+  | 'publishing';
+
+export type AgentCapabilityAccessLevel = 'read' | 'write' | 'publish';
+export type AgentCapabilityRisk = 'low' | 'medium' | 'high';
+export type AgentCapabilityScope = 'repository' | 'org' | 'integration';
+
+export interface AgentCapabilityAvailability {
+  available: boolean;
+  reason?: string;
 }
 
-export type UserSettingsUpdateRequest = UserSettings;
+export interface AgentCapabilityDefinition {
+  id: AgentCapabilityID;
+  display_name: string;
+  description: string;
+  category: string;
+  max_access_level: AgentCapabilityAccessLevel;
+  risk: AgentCapabilityRisk;
+  scope: AgentCapabilityScope;
+  requirements?: string[];
+  default_config?: Record<string, unknown>;
+  availability?: AgentCapabilityAvailability;
+}
+
+export interface AgentCapabilityGrant {
+  id?: string;
+  capability_id: AgentCapabilityID;
+  access_level: AgentCapabilityAccessLevel;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface AgentCapabilitySnapshotItem {
+  id: AgentCapabilityID;
+  display_name: string;
+  access_level: AgentCapabilityAccessLevel;
+  risk: AgentCapabilityRisk;
+  scope: AgentCapabilityScope;
+  config?: Record<string, unknown>;
+  source: 'session_default' | 'automation' | 'launch_default' | 'user_approved';
+  granted_at: string;
+  human_input_request_id?: string;
+}
+
+export interface AgentCapabilityPolicyResponse {
+  policy?: {
+    id: string;
+    org_id: string;
+    policy_type: 'session_default' | 'automation';
+    automation_id?: string;
+    created_at: string;
+  };
+  capabilities: AgentCapabilityGrant[];
+}
 
 export interface AuthProviders {
   github: boolean;
@@ -191,9 +267,133 @@ export interface BranchPreviewResponse {
   preview_url?: string;
   expires_at?: string;
   stopped_at?: string;
-  services?: import('./preview-types').PreviewService[];
-  infrastructure?: import('./preview-types').PreviewInfrastructure[];
-  logs?: import('./preview-types').PreviewLog[];
+  stopped_reason?:
+    | ""
+    | "user"
+    | "expired"
+    | "warm_policy"
+    | "pr_closed"
+    | "drain"
+    | "error";
+  unavailable_reason?:
+    | "owner_lost"
+    | "deploy_drain_timeout"
+    | "host_maintenance"
+    | "emergency_force"
+    | "lease_expired"
+    | "endpoint_unreachable";
+  resumable?: boolean;
+  resume_estimate_seconds?: number;
+  services?: import("./preview-types").PreviewService[];
+  infrastructure?: import("./preview-types").PreviewInfrastructure[];
+  logs?: import("./preview-types").PreviewLog[];
+  launch?: PreviewLaunchDecision;
+}
+
+export type PreviewLaunchAction =
+  | "open"
+  | "wait"
+  | "resume"
+  | "start"
+  | "start_latest"
+  | "restart"
+  | "retry"
+  | "cancel"
+  | "blocked"
+  | "closed"
+  | "none";
+
+export type PreviewLaunchReason =
+  | "ready"
+  | "starting"
+  | "resumable"
+  | "no_runtime"
+  | "stale"
+  | "failed"
+  | "role_forbidden"
+  | "token_forbidden"
+  | "capacity"
+  | "config_required"
+  | "config_invalid"
+  | "repository_missing"
+  | "github_unavailable"
+  | "pull_request_closed"
+  | "preview_unavailable";
+
+export interface PreviewLaunchDecision {
+  action: PreviewLaunchAction;
+  reason: PreviewLaunchReason;
+  auto_open: boolean;
+  represents_latest: boolean;
+  requires_user_gesture?: boolean;
+  message?: string;
+  primary_label?: string;
+  secondary_label?: string;
+  stale_preview_url?: string;
+}
+
+export interface PreviewListMeta {
+  next_cursor?: string;
+  counts?: { running: number; resumable: number; attention?: number; recent: number };
+  pool?: {
+    auto_active: number;
+    auto_max: number;
+    user_active: number;
+    user_max: number;
+  };
+}
+
+export type PreviewGroupKind = "pull_request" | "branch" | "source" | "session" | "pinned";
+export type PreviewCurrentFreshness = "current" | "outdated" | "unknown" | "pinned";
+
+export interface PreviewLaunchRecommendation {
+  action: PreviewLaunchAction;
+  primary_label: string;
+  secondary_label?: string;
+  message?: string;
+}
+
+export interface PreviewCurrentResponse {
+  preview_group_id: string;
+  id?: string;
+  repository_id: string;
+  repository_full_name?: string;
+  group_kind: PreviewGroupKind;
+  branch?: string;
+  pull_request_number?: number;
+  preview_config_name?: string;
+  source_type?: "api" | "manual" | "session" | "pull_request" | "automation";
+  source_id?: string;
+  source_url?: string;
+  status: string;
+  freshness: PreviewCurrentFreshness;
+  latest_commit_sha?: string;
+  running_commit_sha?: string;
+  current_target_id?: string;
+  current_preview_id?: string;
+  preview_url?: string;
+  stable_url: string;
+  pinned: boolean;
+  created_at: string;
+  last_activity_at: string;
+  expires_at?: string;
+  stopped_at?: string;
+  stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  error?: string;
+  current_phase?: string;
+  attempt_count: number;
+  target_count: number;
+  resumable: boolean;
+  resume_estimate_seconds?: number;
+  launch: PreviewLaunchRecommendation;
+}
+
+export interface PreviewPolicySummary {
+  repository_id: string;
+  repository_full_name: string;
+  auto_mode: "off" | "warm" | "on";
+  open_pr_count: number;
+  updated_at?: string;
 }
 
 export interface BranchPreviewConfigOptions {
@@ -209,18 +409,6 @@ export interface BranchPreviewConfigOptions {
   validation_errors?: string[];
 }
 
-export interface PreviewAPIToken {
-  id: string;
-  org_id: string;
-  name: string;
-  scopes: string[];
-  repository_ids: string[];
-  created_by_user_id: string;
-  last_used_at?: string;
-  revoked_at?: string;
-  created_at: string;
-}
-
 export interface Integration {
   id: string;
   org_id: string;
@@ -233,6 +421,8 @@ export interface Integration {
   notion_workspace_id?: string;
   notion_workspace_name?: string;
   circleci_project_slug?: string;
+  mezmo_dataset?: string;
+  mezmo_base_url?: string;
   /**
    * Surfaced by the backend when a provider rejects our access token (e.g.
    * Linear returns 401). Populated by deriveIntegrationStatus on the server
@@ -247,6 +437,127 @@ export interface Integration {
   status: string;
   last_synced_at?: string;
   created_at: string;
+}
+
+export type SlackRoutingMode = "auto" | "answer_only" | "start_work";
+export type SlackResponseVisibility = "thread" | "dm";
+export type SlackNotificationPreset =
+  | "quiet"
+  | "balanced"
+  | "verbose"
+  | "custom";
+export type SlackChannelAction =
+  | "session"
+  | "preview"
+  | "pr_request"
+  | "human_input";
+
+export interface SlackBotSettings {
+  id?: string;
+  org_id: string;
+  slack_installation_id: string;
+  default_repository_id?: string;
+  default_branch?: string;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  notification_subscriptions?: Record<string, unknown>;
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type SlackBotSettingsUpdate = Partial<{
+  default_repository_id: string | null;
+  default_branch: string | null;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  notification_subscriptions: Record<string, unknown>;
+}>;
+
+export interface SlackUserLink {
+  id: string;
+  org_id: string;
+  slack_installation_id: string;
+  slack_team_id: string;
+  slack_user_id: string;
+  slack_email?: string;
+  slack_display_name?: string;
+  user_id?: string;
+  source: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SlackUserLinkUpsert {
+  user_id: string;
+  slack_user_id: string;
+  slack_email?: string;
+  slack_display_name?: string;
+}
+
+export type SlackChannelSettingsUpdate = Partial<{
+  slack_channel_name: string;
+  channel_type: string;
+  default_repository_id: string | null;
+  default_branch: string | null;
+  routing_mode: SlackRoutingMode | "";
+  response_visibility: SlackResponseVisibility | "";
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset | "";
+  notification_subscriptions: Record<string, unknown>;
+}>;
+
+export interface EffectiveSlackChannelSettings {
+  slack_channel_id: string;
+  default_repository_id?: string;
+  default_branch?: string;
+  routing_mode: SlackRoutingMode;
+  response_visibility: SlackResponseVisibility;
+  allowed_actions: SlackChannelAction[];
+  notification_preset: SlackNotificationPreset;
+  has_channel_override: boolean;
+}
+
+export interface SlackChannel {
+  id: string;
+  name: string;
+  type?: string;
+  selected: boolean;
+  monitoring_enabled?: boolean;
+  bot_configured?: boolean;
+  settings?: Partial<EffectiveSlackChannelSettings>;
+  effective_settings?: EffectiveSlackChannelSettings;
+}
+
+export interface SlackInstallation {
+  id: string;
+  org_id: string;
+  team_id: string;
+  team_name: string;
+  bot_user_id: string;
+  scope: string[];
+  status: string;
+  last_event_at?: string;
+  updated_at: string;
+}
+
+export interface SlackInstallationHealth {
+  installation: SlackInstallation;
+  required_scopes: string[];
+  missing_scopes: string[];
+  last_event_at?: string;
+  last_auth_check_at?: string;
+  auth_ok: boolean;
+  auth_error?: {
+    reason: string;
+    at: string;
+  };
+  symptoms?: string[];
 }
 
 export type GitHubRepositoryClaimStatus =
@@ -326,33 +637,37 @@ export interface Issue {
 }
 
 export type AutopilotRunState =
-  | 'not_started'
-  | 'queued'
-  | 'running'
-  | 'awaiting_input'
-  | 'needs_review'
-  | 'pr_open'
-  | 'merged'
-  | 'failed'
-  | 'skipped';
+  | "not_started"
+  | "queued"
+  | "running"
+  | "awaiting_input"
+  | "needs_review"
+  | "pr_open"
+  | "merged"
+  | "failed"
+  | "skipped";
 
-export type PullRequestStatus = 'open' | 'closed' | 'merged';
-export type PullRequestReviewStatus = 'pending' | 'approved' | 'changes_requested';
-export type PullRequestCIStatus = '' | 'success' | 'failure' | 'pending';
+export type PullRequestStatus = "open" | "closed" | "merged";
+export type PullRequestReviewStatus =
+  | "pending"
+  | "approved"
+  | "changes_requested";
+export type PullRequestCIStatus = "" | "success" | "failure" | "pending";
 
 export type AutopilotQueueAction =
-  | 'start_run'
-  | 'view_run'
-  | 'review'
-  | 'open_pr'
-  | 'retry'
-  | 'blocked';
+  | "start_run"
+  | "view_run"
+  | "review"
+  | "open_pr"
+  | "retry"
+  | "blocked";
 
 export interface AutopilotQueueRow {
   id: string;
   rank: number;
   source: { type: string; key: string };
   title: string;
+  issue_url?: string;
   repo?: { id: string; name: string };
   issue_status: string;
   customer_impact: { label: string; count: number };
@@ -371,7 +686,7 @@ export interface AutopilotQueueRow {
   latest_agent_run?: {
     id: string;
     status: string;
-    trigger_mode: 'auto' | 'manual';
+    trigger_mode: "auto" | "manual";
     started_at?: string;
   };
   latest_pr?: {
@@ -380,6 +695,23 @@ export interface AutopilotQueueRow {
     url: string;
     status: PullRequestStatus;
     merged_at?: string;
+  };
+  latest_preview?: {
+    target_id: string;
+    preview_id?: string;
+    status:
+      | "target_created"
+      | "starting"
+      | "ready"
+      | "partially_ready"
+      | "unhealthy"
+      | "stopped"
+      | "failed"
+      | "expired"
+      | "unavailable";
+    commit_sha: string;
+    latest_commit_sha?: string;
+    new_commits_available: boolean;
   };
   available_action: AutopilotQueueAction;
   action_disabled_reason?: string | null;
@@ -428,28 +760,29 @@ export interface Session {
   pm_reasoning?: string;
   project_task_id?: string;
   model_override?: string;
-  reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   triggered_by_user_id?: string;
   agent_session_id?: string;
   current_turn: number;
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
-  recovery_state?: '' | 'queued' | 'recovering' | 'unavailable';
+  recovery_state?: "" | "queued" | "recovering" | "unavailable";
   recovery_queued_at?: string;
   recovery_started_at?: string;
   recovery_attempt_count?: number;
-  pr_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_creation_state?: PRCreationState;
   pr_creation_error?: string;
-  pr_push_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pr_push_state?: PRPushState;
   pr_push_error?: string;
-  branch_creation_state?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  branch_creation_state?: BranchCreationState;
   branch_creation_error?: string;
   branch_url?: string;
   has_unpushed_changes?: boolean;
   target_branch?: string;
   working_branch?: string;
   repository_id?: string;
+  repository_full_name?: string;
   linked_issues?: Array<{
     id: string;
     session_id: string;
@@ -478,14 +811,19 @@ export interface Session {
   // missing-context signal; 'pending'/'ready' are not yet rendered (the
   // "Preparing Linear context..." indicator is one diff away when we want
   // it).
-  linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
+  linear_prepare_state?: "none" | "pending" | "ready" | "failed";
   error?: string;
   result_summary?: string;
   runtime_stop_reason?: string;
   runtime_graceful_stop_at?: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
-  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_history?: Array<{
+    pass: number;
+    diff: string;
+    diff_stats: { added: number; removed: number; files_changed: number };
+    created_at: string;
+  }>;
   diff_collected_at?: string;
   latest_diff_snapshot_id?: string;
   workspace_revision?: number;
@@ -494,10 +832,11 @@ export interface Session {
   archived_at?: string;
   archived_by_user_id?: string;
   automation_run_id?: string;
+  capability_snapshot?: AgentCapabilitySnapshotItem[];
   created_at: string;
 }
 
-export type SessionRetryMode = 'checkpoint' | 'start_over';
+export type SessionRetryMode = "checkpoint" | "start_over";
 
 export interface RetrySessionRequest {
   mode?: SessionRetryMode;
@@ -515,9 +854,23 @@ export interface SessionListItem extends Session {
   pr_summary?: PRSummary;
 }
 
-export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
+export type ThreadStatus =
+  | "pending"
+  | "running"
+  | "idle"
+  | "awaiting_input"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
-export type ThreadInboxSummaryState = 'idle' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+export type ThreadInboxSummaryState =
+  | "idle"
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "unknown_delivery"
+  | "acked"
+  | "dead_letter";
 
 export interface ThreadInboxDeliverySummary {
   thread_id: string;
@@ -535,11 +888,21 @@ export interface ThreadInboxDeliverySummary {
   last_error?: string;
 }
 
-export type ThreadInboxEntryType = 'user_message' | 'human_input_answer' | 'control';
+export type ThreadInboxEntryType =
+  | "user_message"
+  | "human_input_answer"
+  | "control";
 // '' is emitted by the API when no inbox entry was created (deployment with the
 // inbox unwired), keeping the SendThreadMessageResponse delivery_state field
 // total without lying about confirmed delivery.
-export type ThreadInboxDeliveryState = '' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+export type ThreadInboxDeliveryState =
+  | ""
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "unknown_delivery"
+  | "acked"
+  | "dead_letter";
 
 export interface ThreadInboxEntry {
   id: string;
@@ -590,7 +953,7 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
-  created_by_source?: 'user' | 'agent_tool' | 'system';
+  created_by_source?: "user" | "agent_tool" | "system";
   created_by_thread_id?: string;
   archived_at?: string;
   base_snapshot_key?: string;
@@ -635,17 +998,28 @@ export interface SessionThreadFileEvent {
   thread_id?: string;
   turn: number;
   path: string;
-  event_type: 'created' | 'modified' | 'deleted';
+  event_type: "created" | "modified" | "deleted";
   before_hash?: string;
   after_hash?: string;
   observed_at: string;
 }
 
-export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
-export type ReviewLoopSource = 'manual' | 'automation';
-export type ReviewLoopFixMode = 'minimal' | 'exhaustive';
-export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
-export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
+export type ReviewLoopStatus =
+  | "running"
+  | "clean"
+  | "needs_human_decision"
+  | "failed"
+  | "cancelled";
+export type ReviewLoopSource = "manual" | "automation";
+export type ReviewLoopFixMode = "minimal" | "exhaustive";
+export type ReviewLoopPassStatus =
+  | "reviewing"
+  | "deciding"
+  | "fixing"
+  | "clean"
+  | "needs_fix"
+  | "failed";
+export type ReviewLoopDecision = "REVIEW_CLEAN" | "NEEDS_FIX_PASS";
 
 export interface SessionReviewLoop {
   id: string;
@@ -703,7 +1077,12 @@ export interface SessionDiff {
   session_id: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
-  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_history?: Array<{
+    pass: number;
+    diff: string;
+    diff_stats: { added: number; removed: number; files_changed: number };
+    created_at: string;
+  }>;
   diff_truncated: boolean;
   diff_history_truncated: boolean;
   diff_chars?: number;
@@ -721,10 +1100,30 @@ export interface SessionLog {
   metadata: Record<string, unknown> | null;
   turn_number: number;
   created_at: string;
+  message_bytes: number;
+  message_chars: number;
+  message_truncated: boolean;
+}
+
+export interface SessionLogDetail extends Omit<
+  SessionLog,
+  "message_truncated"
+> {
+  message: string;
+  message_bytes: number;
+  message_chars: number;
 }
 
 export interface SessionTimelineEntry {
-  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message' | 'human_input';
+  kind:
+    | "message"
+    | "assistant_output"
+    | "tool_group"
+    | "error"
+    | "log"
+    | "plan_output"
+    | "plan_message"
+    | "human_input";
   created_at: string;
   message?: SessionMessage;
   log?: SessionLog;
@@ -741,13 +1140,13 @@ export interface SessionMessage {
   thread_id?: string;
   user_id?: string;
   turn_number: number;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   attachments?: string[];
   references?: SessionInputReference[];
   commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
-  source?: 'agent_tool';
+  source?: "agent_tool";
   created_at: string;
 }
 
@@ -761,7 +1160,12 @@ export interface SessionInputReference {
   display: string;
 }
 
-export type SessionComposerAgentType = "claude_code" | "codex" | "gemini_cli" | "amp" | "pi";
+export type SessionComposerAgentType =
+  | "claude_code"
+  | "codex"
+  | "amp"
+  | "pi"
+  | "opencode";
 
 export type SessionInputCommandSource = "builtin" | "project";
 
@@ -805,8 +1209,18 @@ export interface SessionQuestion {
   created_at: string;
 }
 
-export type HumanInputRequestKind = "free_text" | "single_choice" | "multi_choice" | "tool_approval" | "action_choice";
-export type HumanInputRequestStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded";
+export type HumanInputRequestKind =
+  | "free_text"
+  | "single_choice"
+  | "multi_choice"
+  | "tool_approval"
+  | "action_choice";
+export type HumanInputRequestStatus =
+  | "pending"
+  | "answered"
+  | "cancelled"
+  | "expired"
+  | "superseded";
 
 export interface HumanInputChoice {
   id: string;
@@ -848,6 +1262,63 @@ export interface HumanInputAnswerBody {
   answer_payload?: unknown;
 }
 
+export type SessionTranscriptEntryKind =
+  | "message"
+  | "tool_use"
+  | "tool_result"
+  | "log"
+  | "human_input"
+  | "milestone"
+  | "checkpoint";
+
+export interface SessionTranscriptEntry {
+  id: string;
+  kind: SessionTranscriptEntryKind;
+  created_at: string;
+  message_id?: number;
+  log_id?: number;
+  request_id?: string;
+  role?: "user" | "assistant";
+  level?: string;
+  content?: string;
+  content_truncated?: boolean;
+  content_bytes?: number;
+  content_chars?: number;
+  summary?: string;
+  tool_name?: string;
+  collapsed?: boolean;
+  message?: SessionMessage;
+  log?: SessionLog;
+  human_input?: HumanInputRequest;
+}
+
+export interface SessionTranscriptTurn {
+  turn_number: number;
+  started_at: string;
+  ended_at?: string;
+  entries: SessionTranscriptEntry[];
+}
+
+export interface SessionTranscriptWindowMeta {
+  position: "latest" | "older" | "newer" | "around";
+  has_older: boolean;
+  next_older_cursor?: string;
+  has_newer: boolean;
+  next_newer_cursor?: string;
+  anchor_entry_id?: string;
+  anchor_found?: boolean;
+  latest_assistant_entry_id?: string;
+  latest_assistant_message_id?: number;
+  live_edge_entry_id?: string;
+  live_edge_message_id?: number;
+  thread_status: ThreadStatus;
+}
+
+export interface SessionTranscriptWindowResponse {
+  data: SessionTranscriptTurn[];
+  meta: SessionTranscriptWindowMeta;
+}
+
 export interface PullRequest {
   id: string;
   session_id: string;
@@ -879,8 +1350,14 @@ export interface PullRequestCheckSummary {
 export interface PullRequestActiveRepair {
   action_type: "fix_tests" | "resolve_conflicts";
   session_id: string;
+  thread_id?: string;
   session_status: SessionStatus;
   health_version: number;
+}
+
+export interface PullRequestRepairRequest {
+  thread_id?: string;
+  push_changes?: boolean;
 }
 
 export type PullRequestMergeWhenReadyState =
@@ -909,7 +1386,13 @@ export interface PullRequestHealthResponse {
   head_sha: string;
   base_sha: string;
   health_version: number;
-  merge_state: "unknown" | "mergeability_pending" | "clean" | "conflicted" | "behind" | "blocked";
+  merge_state:
+    | "unknown"
+    | "mergeability_pending"
+    | "clean"
+    | "conflicted"
+    | "behind"
+    | "blocked";
   has_conflicts: boolean;
   failing_test_count: number;
   needs_agent_action: boolean;
@@ -932,6 +1415,7 @@ export interface PullRequestHealthResponse {
 
 export interface PullRequestRepairResponse {
   session_id: string;
+  thread_id?: string;
   mode: "existing" | "resumed" | "reconstructed";
   reused_in_flight: boolean;
   head_sha: string;
@@ -962,7 +1446,7 @@ export interface SessionReviewComment {
   user_id: string;
   file_path: string;
   line_number: number;
-  diff_side: 'old' | 'new';
+  diff_side: "old" | "new";
   body: string;
   resolved: boolean;
   resolved_at?: string;
@@ -1011,11 +1495,12 @@ export interface Memory {
 }
 
 export interface OrgSettings {
-  autonomy_level?: 'manual' | 'auto_simple' | 'auto_all';
+  autonomy_level?: "manual" | "auto_simple" | "auto_all";
   execution_aggressiveness?: number;
   max_concurrent_runs?: number;
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
+  preview_auto_pool_max_active?: number;
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {
@@ -1028,10 +1513,10 @@ export interface OrgSettings {
   product_direction?: string;
   product_context?: ProductContext;
   llm_model?: string;
-  llm_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '';
+  llm_reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | "";
   agent_config?: Record<string, Record<string, string>>;
-  default_agent_type?: 'codex' | 'claude_code' | 'gemini_cli' | 'amp' | 'pi';
-  pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
+  default_agent_type?: "codex" | "claude_code" | "amp" | "pi" | "opencode";
+  pr_authorship?: "user_preferred" | "app_only" | "user_required";
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
   coding_agent_tab_tools_enabled?: boolean;
@@ -1041,13 +1526,44 @@ export interface OrgSettings {
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };
+  sandbox_lifecycle?: {
+    completed_session_retention_minutes?: number;
+    idle_preview_ttl_minutes?: number;
+    preview_holds_sandbox?: boolean;
+  };
+  sandbox_resources?: {
+    agent_default_tier?: SandboxResourceTier;
+    preview_default_tier?: SandboxResourceTier;
+    allow_repo_resource_requests?: boolean;
+    preview_max_tier?: SandboxResourceTier;
+    preview_max_cpu_millis?: number;
+    preview_max_memory_mib?: number;
+    preview_max_ephemeral_disk_mib?: number;
+  };
 }
+
+export type SandboxResourceTier = "small" | "standard" | "large";
 
 export interface NetworkSettingsStatus {
   static_egress_available: boolean;
   static_egress_enabled: boolean;
   static_egress_public_ip?: string;
   static_egress_unavailable_reason?: string;
+}
+
+export interface RuntimeSettingsStatus {
+  static_egress: {
+    available: boolean;
+    enabled: boolean;
+    public_ip?: string;
+  };
+  capacity: {
+    state: "normal" | "limited";
+    active_agent_runs: number;
+    max_concurrent_agent_runs: number;
+    active_previews: number;
+    max_previews_per_user: number;
+  };
 }
 
 export interface ProductContext {
@@ -1117,14 +1633,24 @@ export interface PMPlan {
   completed_at?: string;
 }
 
-export type SessionStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
-export type PMTaskComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
-export type PMTaskConfidence = 'high' | 'medium' | 'low';
-export type PMTaskStatus = 'pending' | 'delegated' | 'skipped_capacity';
+export type SessionStatus =
+  | "pending"
+  | "running"
+  | "idle"
+  | "awaiting_input"
+  | "needs_human_guidance"
+  | "completed"
+  | "pr_created"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+export type PMTaskComplexity = "trivial" | "simple" | "moderate" | "complex";
+export type PMTaskConfidence = "high" | "medium" | "low";
+export type PMTaskStatus = "pending" | "delegated" | "skipped_capacity";
 
 // PM Decision types for the decisions view
-export type PMDecisionType = 'delegate' | 'skip' | 'cluster';
-export type PMDecisionOutcome = 'succeeded' | 'failed' | 'still_open';
+export type PMDecisionType = "delegate" | "skip" | "cluster";
+export type PMDecisionOutcome = "succeeded" | "failed" | "still_open";
 
 export interface PMDecisionView {
   id: string;
@@ -1205,7 +1731,7 @@ export interface SessionCounts {
 }
 
 export interface CodexAuthStatus {
-  status: 'pending' | 'completed' | 'expired' | 'error' | 'none';
+  status: "pending" | "completed" | "expired" | "error" | "none";
   account_type?: string;
   message?: string;
 }
@@ -1216,7 +1742,11 @@ export interface CodexDeviceAuth {
   expires_in: number;
 }
 
-export type CodexSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
+export type CodexSubscriptionStatus =
+  | "active"
+  | "pending_auth"
+  | "invalid"
+  | "disabled";
 
 export interface CodexSubscription {
   id: string;
@@ -1237,7 +1767,11 @@ export interface ClaudeCodeCompleteResponse {
   account_type?: string;
 }
 
-export type ClaudeCodeSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
+export type ClaudeCodeSubscriptionStatus =
+  | "active"
+  | "pending_auth"
+  | "invalid"
+  | "disabled";
 
 export interface ClaudeCodeSubscription {
   id: string;
@@ -1253,7 +1787,7 @@ export interface InvitationResponse {
   id: string;
   email?: string | null;
   github_username?: string | null;
-  acceptance_method: 'email' | 'github' | 'either';
+  acceptance_method: "email" | "github" | "either";
   role: string;
   status: string;
   invited_by: {
@@ -1261,6 +1795,46 @@ export interface InvitationResponse {
     name: string;
   };
   expires_at: string;
+  created_at: string;
+}
+
+// JoinToken is a multi-use, revocable org join link backing the CLI install
+// one-liner (`curl .../install/<token> | sh`). Only the display prefix is
+// ever returned after creation.
+export interface JoinToken {
+  id: string;
+  token_prefix: string;
+  name: string;
+  role: string;
+  max_uses?: number | null;
+  use_count: number;
+  expires_at?: string | null;
+  status: "active" | "revoked" | "expired" | "exhausted";
+  created_at: string;
+}
+
+// CreatedJoinToken is the create response: the plaintext token and the
+// ready-to-paste install command, shown exactly once.
+export interface CreatedJoinToken {
+  id: string;
+  token: string;
+  token_prefix: string;
+  role: string;
+  name: string;
+  expires_at?: string | null;
+  max_uses?: number | null;
+  install_command: string;
+}
+
+// CliToken is one row in the user's own "CLI sessions" list — a per-device
+// credential minted by `143-tools login`.
+export interface CliToken {
+  id: string;
+  token_prefix: string;
+  device_name: string;
+  expires_at: string;
+  last_used_at?: string | null;
+  last_used_ip?: string | null;
   created_at: string;
 }
 
@@ -1279,6 +1853,67 @@ export interface PendingInvitationForUser {
   };
   expires_at: string;
   created_at: string;
+}
+
+export type OrgDomainStatus = "pending" | "verified";
+
+// OrganizationDomain is one verified-domain row from /api/v1/team/domains.
+// The server decorates the row with the exact DNS TXT record to publish
+// (dns_record_name / dns_record_value) so the UI never reconstructs the
+// format itself.
+export interface OrganizationDomain {
+  id: string;
+  org_id: string;
+  domain: string;
+  verification_token: string;
+  status: OrgDomainStatus;
+  auto_join_enabled: boolean;
+  created_at: string;
+  verified_at?: string | null;
+  last_checked_at?: string | null;
+  failed_checks: number;
+  dns_record_name: string;
+  dns_record_value: string;
+}
+
+export type GitHubOrgMembersPermission = "granted" | "missing";
+
+export interface GitHubOrgAutoJoin {
+  installation_id: number;
+  account_login: string;
+  account_type?: string;
+  auto_join_enabled: boolean;
+  members_permission: GitHubOrgMembersPermission;
+  roster_synced_at?: string;
+  captured_by_other_org: boolean;
+  settings_url?: string;
+}
+
+export interface GitHubOrgAutoJoinResponse {
+  github_orgs: GitHubOrgAutoJoin[];
+}
+
+// JoinableOrganization is a workspace the current user may join because
+// their provider-verified email domain matches the org's verified
+// auto-join domain.
+export interface JoinableOrganization {
+  org_id: string;
+  org_name: string;
+  domain: string;
+}
+
+// JoinableOrgsResponse wraps the joinable list with the hint that the
+// user's domain IS captured but their email isn't verified yet — the org
+// identity stays hidden until they prove the address.
+export interface JoinableOrgsResponse {
+  data: JoinableOrganization[];
+  email_verification_required: boolean;
+}
+
+// ConfirmEmailVerificationResponse is the verify-email confirm payload.
+export interface ConfirmEmailVerificationResponse {
+  verified: boolean;
+  joined_org?: JoinableOrganization | null;
 }
 
 export interface GitHubInviteStatus {
@@ -1302,47 +1937,29 @@ export interface CredentialSummary {
   account_type?: string;
 }
 
-export interface UserCredentialSummary {
-  provider: string;
-  configured: boolean;
-  is_team_default: boolean;
-  masked_key?: string;
-  set_by_user_id?: string;
-  set_by_user_name?: string;
-  status?: string;
-  last_verified_at?: string;
-}
-
+// ResolvedCredential is a provider-keyed view of the caller's effective
+// credentials, derived from the unified coding-credentials resolved stack.
+// "personal" rows belong to the requesting user, "org" rows are the shared
+// fallback; "none" marks a provider with no usable credential. The legacy
+// "team_default" source is gone — org-scoped credentials fill that role.
 export interface ResolvedCredential {
   provider: string;
-  source: string;
+  source: "personal" | "org" | "none";
   masked_key?: string;
 }
 
-export type CodingAuthAgent = "codex" | "claude_code" | "gemini_cli" | "amp" | "pi";
+export type CodingAuthAgent =
+  | "codex"
+  | "claude_code"
+  | "amp"
+  | "pi"
+  | "opencode";
 export type CodingAuthType = "subscription" | "api_key";
-export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
-
-export interface CodingAuth {
-  id: string;
-  org_id: string;
-  priority: number;
-  agent: CodingAuthAgent;
-  auth_type: CodingAuthType;
-  label: string;
-  scope: string;
-  provider: string;
-  status: CodingAuthStatus;
-  is_default: boolean;
-  last_verified_at?: string;
-  rate_limited_until?: string;
-  rate_limit_message?: string;
-  last_used_at?: string;
-  usage_note?: string;
-  created_by?: string;
-  created_at: string;
-  updated_at: string;
-}
+export type CodingAuthStatus =
+  | "healthy"
+  | "rate_limited"
+  | "needs_reauth"
+  | "invalid";
 
 // CodingCredentialScope is the scope dimension of the unified
 // coding-credentials API: "org" rows are visible to every member of the org as
@@ -1432,9 +2049,17 @@ export interface ComplexityEstimate {
 }
 
 // Project types
-export type ProjectStatus = 'draft' | 'active' | 'completed';
-export type ProjectExecMode = 'sequential' | 'parallel' | 'dependency_graph';
-export type ProjectTaskStatus = 'pending' | 'blocked' | 'delegated' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+export type ProjectStatus = "draft" | "active" | "completed";
+export type ProjectExecMode = "sequential" | "parallel" | "dependency_graph";
+export type ProjectTaskStatus =
+  | "pending"
+  | "blocked"
+  | "delegated"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "cancelled";
 
 export interface ApproachRecord {
   task_title: string;
@@ -1595,9 +2220,81 @@ export interface AIImprovementResponse {
   summary: string;
 }
 
+export type APIClientStatus = "enabled" | "disabled";
+
+export interface APIClient {
+  id: string;
+  org_id: string;
+  name: string;
+  description?: string;
+  status: APIClientStatus;
+  created_by_user_id?: string;
+  disabled_by_user_id?: string;
+  disabled_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface APIToken {
+  id: string;
+  org_id: string;
+  api_client_id: string;
+  name: string;
+  token_prefix: string;
+  scopes: string[];
+  repository_ids: string[];
+  allowed_ip_cidrs: string[];
+  expires_at?: string;
+  last_used_at?: string;
+  last_used_ip?: string;
+  last_used_user_agent?: string;
+  revoked_by_user_id?: string;
+  revoked_at?: string;
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CreateAPIKeyRequest {
+  integration_name: string;
+  description?: string;
+  token_name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPITokenRequest {
+  name: string;
+  scopes: string[];
+  repository_ids: string[];
+  expires_at?: string | null;
+  allowed_ip_cidrs: string[];
+}
+
+export interface CreateAPIKeyResponse {
+  client: APIClient;
+  token: APIToken & { token: string };
+}
+
 // Audit log types
-export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user';
+export type AuditActorType = "user" | "agent" | "system" | "webhook";
+export type AuditResourceType =
+  | "session"
+  | "project"
+  | "project_task"
+  | "automation"
+  | "issue"
+  | "pm_plan"
+  | "pm_decision"
+  | "settings"
+  | "team_member"
+  | "invitation"
+  | "integration"
+  | "credential"
+  | "user"
+  | "api_client"
+  | "api_token";
 
 export interface AuditLog {
   id: number;
@@ -1625,23 +2322,26 @@ export interface ProjectDetail {
   specs: ProjectSpec[];
 }
 
-export const projectStatusConfig: Record<string, { color: string; label: string }> = {
+export const projectStatusConfig: Record<
+  string,
+  { color: string; label: string }
+> = {
   draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
-  active: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Active" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Done" },
+  active: { color: "bg-info/10 text-info", label: "Active" },
+  completed: { color: "bg-success/10 text-success", label: "Done" },
 };
 
 export const projectStatusDotColor: Record<string, string> = {
   draft: "bg-muted-foreground/50",
-  active: "bg-blue-500",
-  completed: "bg-emerald-500",
+  active: "bg-info",
+  completed: "bg-success",
 };
 
 // --- Session file browsing types ---
 
 export interface FileEntry {
   path: string;
-  type: 'file' | 'dir';
+  type: "file" | "dir";
   size: number;
 }
 
@@ -1668,12 +2368,26 @@ export interface FileContextResponse {
 
 // --- Eval types ---
 
-export type EvalTaskSource = 'manual' | 'pr_bootstrap' | 'failure_derived';
-export type EvalComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
-export type GraderType = 'code_check' | 'llm_judge';
-export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'failed';
-export type EvalBatchStatus = 'pending' | 'running' | 'completed' | 'failed';
-export type EvalBootstrapStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type EvalTaskSource = "manual" | "pr_bootstrap" | "failure_derived";
+export type EvalComplexity = "trivial" | "simple" | "moderate" | "complex";
+export type GraderType = "code_check" | "llm_judge";
+export type EvalRunStatus =
+  | "pending"
+  | "running"
+  | "grading"
+  | "completed"
+  | "failed";
+export type EvalBatchStatus = "pending" | "running" | "completed" | "failed";
+export type EvalBootstrapStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed";
+export type EvalBootstrapCandidateStatus =
+  | "proposed"
+  | "accepted"
+  | "rejected"
+  | "needs_revision";
 
 export interface ScoringCriterion {
   name: string;
@@ -1686,6 +2400,7 @@ export interface ScoringCriterion {
 
 export interface CriterionResult {
   name: string;
+  grader_type?: GraderType;
   score: number;
   pass: boolean;
   details?: string;
@@ -1727,6 +2442,8 @@ export interface EvalRun {
   task_id: string;
   org_id: string;
   batch_id?: string;
+  session_id?: string;
+  thread_id?: string;
   input_manifest?: Record<string, unknown>;
   model: string;
   server_deploy_sha?: string;
@@ -1762,9 +2479,11 @@ export interface EvalBatch {
 
 export interface EvalBatchDetail extends EvalBatch {
   runs: EvalRun[];
+  gate_decisions?: EvalReleaseGateDecision[];
 }
 
 export interface EvalBootstrapCandidate {
+  id?: string;
   pr_number: number;
   pr_title: string;
   base_commit_sha: string;
@@ -1775,6 +2494,21 @@ export interface EvalBootstrapCandidate {
   complexity: EvalComplexity;
   fitness_score: number;
   fitness_reasoning: string;
+  status?: EvalBootstrapCandidateStatus;
+  rejection_reason?: string;
+  evidence?: Record<string, unknown>;
+  warnings?: string[];
+  validation_warnings?: EvalValidationWarning[];
+  accepted_task_id?: string;
+  created_task_id?: string;
+}
+
+export interface EvalValidationWarning {
+  code: string;
+  severity: "info" | "warning" | "error";
+  message: string;
+  suggestion?: string;
+  blocking: boolean;
 }
 
 export interface EvalBootstrapRun {
@@ -1784,10 +2518,66 @@ export interface EvalBootstrapRun {
   status: EvalBootstrapStatus;
   candidates?: EvalBootstrapCandidate[];
   session_id?: string;
+  thread_id?: string;
   created_by?: string;
   created_at: string;
   completed_at?: string;
   error_message?: string;
+}
+
+export type EvalDatasetType = "golden" | "shadow" | "adversarial";
+export type EvalDatasetStatus = "active" | "archived";
+
+export interface EvalDataset {
+  id: string;
+  org_id: string;
+  repository_id?: string;
+  name: string;
+  dataset_type: EvalDatasetType;
+  status: EvalDatasetStatus;
+  description: string;
+  source_summary: string;
+  created_by_user_id?: string;
+  created_at: string;
+  updated_at: string;
+  task_count: number;
+}
+
+export interface EvalDatasetTask {
+  id: string;
+  org_id: string;
+  dataset_id: string;
+  task_id: string;
+  slice_key: string;
+  created_at: string;
+}
+
+export interface EvalReleaseGate {
+  id: string;
+  org_id: string;
+  gate_name: string;
+  enabled: boolean;
+  dataset_id?: string;
+  min_pass_at_1: number;
+  min_pass_at_k: number;
+  max_policy_violations: number;
+  max_regression_delta: number;
+  canary_stages?: unknown;
+  rollback_rules?: unknown;
+  updated_by_user_id?: string;
+  active: boolean;
+  created_at: string;
+}
+
+export interface EvalReleaseGateDecision {
+  id: string;
+  org_id: string;
+  batch_id: string;
+  gate_id: string;
+  status: "passed" | "failed" | "no_data";
+  reason: string;
+  metrics?: Record<string, unknown>;
+  created_at: string;
 }
 
 // Lightweight signal arriving over the per-batch SSE stream. Mirrors
@@ -1811,18 +2601,37 @@ export interface EvalBootstrapUpdatedEvent {
   updated_at: string;
 }
 
-export const evalComplexityConfig: Record<EvalComplexity, { color: string; label: string }> = {
+export const evalComplexityConfig: Record<
+  EvalComplexity,
+  { color: string; label: string }
+> = {
   trivial: { color: "bg-muted text-muted-foreground", label: "Trivial" },
-  simple: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Simple" },
-  moderate: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Moderate" },
-  complex: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Complex" },
+  simple: {
+    color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+    label: "Simple",
+  },
+  moderate: {
+    color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+    label: "Moderate",
+  },
+  complex: {
+    color: "bg-red-500/10 text-red-700 dark:text-red-400",
+    label: "Complex",
+  },
 };
 
-export const evalRunStatusConfig: Record<EvalRunStatus, { color: string; label: string }> = {
+export const evalRunStatusConfig: Record<
+  EvalRunStatus,
+  { color: string; label: string }
+> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
-  running: { color: "bg-blue-500/10 text-blue-700 dark:text-blue-400", label: "Running" },
-  completed: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Completed" },
-  failed: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Failed" },
+  running: { color: "bg-info/10 text-info", label: "Running" },
+  grading: {
+    color: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+    label: "Grading",
+  },
+  completed: { color: "bg-success/10 text-success", label: "Completed" },
+  failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
 };
 
 export const evalSourceConfig: Record<EvalTaskSource, { label: string }> = {
@@ -1900,9 +2709,32 @@ export interface UsageBreakdownRow {
 }
 
 // Automation types
-export type AutomationScheduleType = 'interval' | 'cron';
-export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
-export type AutomationIdentityScope = 'org' | 'personal';
+export type AutomationScheduleType = "interval" | "cron" | "none";
+export type AutomationRunStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "completed_noop"
+  | "failed"
+  | "skipped";
+export type AutomationIdentityScope = "org" | "personal";
+export type AutomationGitHubEvent =
+  | "github.pull_request.opened"
+  | "github.pull_request.updated"
+  | "github.pull_request.merged"
+  | "github.check_suite.completed"
+  | "github.check_run.completed"
+  | "github.issue_comment.created"
+  | "github.pull_request_review.submitted"
+  | "github.pull_request_review_comment.created";
+
+export interface AutomationGitHubEventFilters {
+  base_branches?: string[];
+  authors?: string[];
+  paths?: string[];
+  feedback_types?: string[];
+  review_states?: string[];
+}
 
 export interface Automation {
   id: string;
@@ -1911,7 +2743,7 @@ export interface Automation {
   name: string;
   goal: string;
   scope?: string;
-  icon_type: 'emoji';
+  icon_type: "emoji";
   icon_value: string;
   agent_type?: string;
   model_override?: string;
@@ -1923,9 +2755,11 @@ export interface Automation {
   pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
-  interval_unit?: 'hours' | 'days' | 'weeks';
+  interval_unit?: "hours" | "days" | "weeks";
   interval_run_at?: string;
   cron_expression?: string;
+  github_event_triggers?: AutomationGitHubEvent[];
+  github_event_filters?: AutomationGitHubEventFilters;
   timezone: string;
   next_run_at?: string;
   last_run_at?: string;
@@ -1938,11 +2772,49 @@ export interface Automation {
   updated_at: string;
 }
 
+export type AutomationGoalImprovementMode = "fast" | "deep";
+export type AutomationGoalImprovementStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export interface AutomationGoalImprovementProposal {
+  rationale?: string;
+  changes?: string[];
+  evidence?: string[];
+  risks?: string[];
+}
+
+export interface AutomationGoalImprovement {
+  id: string;
+  org_id: string;
+  automation_id?: string;
+  repository_id?: string;
+  mode: AutomationGoalImprovementMode;
+  status: AutomationGoalImprovementStatus;
+  input_name?: string;
+  input_goal: string;
+  input_config?: Record<string, unknown>;
+  base_goal_hash: string;
+  evidence_snapshot?: Record<string, unknown>;
+  proposed_goal?: string;
+  proposal?: AutomationGoalImprovementProposal;
+  confidence?: string;
+  warnings?: string[];
+  error_message?: string;
+  analysis_session_id?: string;
+  applied_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AutomationRun {
   id: string;
   automation_id: string;
   triggered_at: string;
-  triggered_by: 'schedule' | 'manual';
+  triggered_by: "schedule" | "manual" | "github";
   triggered_by_user_id?: string;
   scheduled_time?: string;
   goal_snapshot: string;
@@ -1952,6 +2824,7 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+  capability_snapshot?: AgentCapabilitySnapshotItem[];
   // Compact view of the session this run spawned. Populated by the list
   // endpoint via a LATERAL join (see internal/db/automations.go); absent
   // when the run hasn't spawned a session yet (pending/skipped, or
@@ -1959,15 +2832,24 @@ export interface AutomationRun {
   session?: AutomationRunSession;
 }
 
-// Mirrors models.PRCreationState. Kept as a literal union so the row UI
-// gets exhaustiveness checks when branching on it (e.g. the "Creating PR…"
-// pill on completed_no_pr rows).
-export type PRCreationState =
-  | 'idle'
-  | 'queued'
-  | 'pushing'
-  | 'succeeded'
-  | 'failed';
+// Mirrors the session publish lifecycle enums in internal/models/session_enums.go.
+// Kept as a literal union so UI branches get exhaustiveness checks while only
+// accepting backend-defined enum values.
+export type SessionPublishState =
+  | "idle"
+  | "queued"
+  | "pushing"
+  | "succeeded"
+  | "failed";
+
+// Mirrors models.PRCreationState.
+export type PRCreationState = SessionPublishState;
+
+// Mirrors models.PRPushState.
+export type PRPushState = SessionPublishState;
+
+// Mirrors models.BranchCreationState.
+export type BranchCreationState = SessionPublishState;
 
 export interface AutomationRunSession {
   id: string;

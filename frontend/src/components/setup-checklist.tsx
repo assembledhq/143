@@ -44,7 +44,7 @@ function StepSection({
         <div
           className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ring-1 ${
             completed
-              ? "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 dark:text-emerald-400"
+              ? "bg-success/10 text-success ring-success/20"
               : "bg-muted text-muted-foreground ring-border/50"
           }`}
         >
@@ -75,11 +75,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
-    gemini_cli: {
-      description: "Your own Google Gemini API key is required for agent sessions. Platform keys are used for internal features only.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
     amp: {
       description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush) and stores auth in the shared coding-agent credential stack.",
       configureLabel: "Configure",
@@ -87,6 +82,11 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     },
     pi: {
       description: "Pi uses its own API key and lets you choose the provider/model pair it should target by default.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
+    opencode: {
+      description: "OpenCode uses explicit OpenCode-scoped keys and can route to lower-cost provider/model choices.",
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
@@ -116,23 +116,18 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
-  const { data: resolvedCredsResponse } = useQuery({
-    queryKey: queryKeys.credentials.resolved,
-    queryFn: () => api.userCredentials.listResolved(),
-  });
   const { data: resolvedCodingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
-    queryKey: ["coding-credentials", "resolved"],
+    queryKey: queryKeys.codingCredentials.list("resolved"),
     queryFn: () => api.codingCredentials.list("resolved"),
   });
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
-  const resolvedCredentials = resolvedCredsResponse?.data ?? [];
   const resolvedCodingCredentials = resolvedCodingCredentialsResponse?.data ?? [];
 
   const selectedAgentType: AgentType = selectedAgentTypeOverride ?? settings?.default_agent_type ?? "codex";
 
   const isSelectedAgentConnected = isAgentAvailable(
     selectedAgentType,
-    resolvedCredentials,
+    [],
     codexAuthResponse?.data,
     resolvedCodingCredentials,
   );
@@ -223,6 +218,7 @@ export function SetupChecklist() {
   const slackIntegration = integrations.find((integration) => integration.provider === "slack" && integration.status === "active");
   const notionIntegration = integrations.find((integration) => integration.provider === "notion" && integration.status === "active");
   const circleciIntegration = integrations.find((integration) => integration.provider === "circleci" && integration.status === "active");
+  const mezmoIntegration = integrations.find((integration) => integration.provider === "mezmo" && integration.status === "active");
 
   const githubConnected = Boolean(githubIntegration);
   const githubReady = githubConnected && repositories.length > 0;
@@ -253,12 +249,14 @@ export function SetupChecklist() {
             slackConnected={Boolean(slackIntegration)}
             notionConnected={Boolean(notionIntegration)}
             circleciConnected={Boolean(circleciIntegration)}
+            mezmoConnected={Boolean(mezmoIntegration)}
             linearLoading={false}
-            onConnectSentry={() => api.auth.loginSentry()}
+            onConnectSentry={() => api.integrations.loginSentry()}
             onConnectLinear={() => api.integrations.loginLinear()}
             onConnectSlack={() => api.integrations.loginSlack()}
             onConnectNotion={() => { /* Notion requires token input — use the Integrations page */ }}
             onConnectCircleCI={() => { /* CircleCI requires token + slug input — use the Integrations page */ }}
+            onConnectMezmo={() => { /* Mezmo requires service-key input — use the Integrations page */ }}
             onDisconnect={(provider) => disconnectMutation.mutate(provider)}
             disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
             disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}

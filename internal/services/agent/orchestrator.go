@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,8 +37,14 @@ import (
 )
 
 const (
-	defaultMaxConcurrent    = 10
-	mentionIndexWarmTimeout = 2 * time.Second
+	defaultMaxConcurrent = 10
+	// mentionIndexWarmTimeout bounds the proactive mention-index build at
+	// turn-complete. The build walks the whole workspace through a Docker
+	// exec and takes several seconds on large repos; the warm always runs
+	// off the request path (async goroutine or post-terminal cleanup), so a
+	// generous budget costs nothing and an undersized one silently produces
+	// a cold cache for the composer's @-mention picker.
+	mentionIndexWarmTimeout = 60 * time.Second
 	planModePrefix          = "[PLAN_MODE]\n"
 
 	// Claude Code access tokens are short-lived. A sandbox credential with an
@@ -265,7 +272,7 @@ type GitHubTokenProvider interface {
 
 // CodexAuthProvider abstracts retrieving valid ChatGPT OAuth tokens for Codex.
 type CodexAuthProvider interface {
-	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error)
+	GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAISubscriptionConfig, error)
 }
 
 // ClaudeCodeAuthProvider abstracts Claude Code subscription OAuth: the
@@ -294,16 +301,20 @@ type ClaudeCodeAuthTokenStore interface {
 	StoreTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error)
 }
 
+// ClaudeCodeInvalidSubscriptionProber reports whether a scope holds a Claude
+// subscription row that has been marked invalid (e.g. after Anthropic
+// rejected its token refresh). Optionally implemented by the auth provider;
+// the orchestrator uses it to fail a run with "your subscription was
+// invalidated — reconnect it" instead of the misleading "no credentials are
+// configured" when credential rows exist but none is usable.
+type ClaudeCodeInvalidSubscriptionProber interface {
+	HasInvalidSubscription(ctx context.Context, scope models.Scope) (bool, error)
+}
+
 // CredentialProvider abstracts retrieving org-scoped provider credentials.
 type CredentialProvider interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 	ListByProvider(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) ([]models.DecryptedCredential, error)
-}
-
-// UserCredentialProvider abstracts retrieving user-scoped provider credentials.
-type UserCredentialProvider interface {
-	GetForUser(ctx context.Context, orgID, userID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
-	GetTeamDefault(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedUserCredential, error)
 }
 
 // CodingCredentialProvider abstracts the unified coding-credentials resolver.
@@ -527,53 +538,63 @@ type AutomationRunUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
+type AutomationGoalImprovementUpdater interface {
+	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
+}
+
+type EvalBootstrapLookup interface {
+	GetBySessionThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.EvalBootstrapRun, error)
+}
+
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
-	provider            SandboxProvider
-	adapters            map[models.AgentType]AgentAdapter
-	sessions            SessionStore
-	agentRunLogs        SessionLogStore
-	agentRunQuestions   SessionQuestionStore
-	humanInputRequests  SessionHumanInputRequestStore
-	sessionMessages     SessionMessageStore
-	sessionThreads      SessionThreadStore
-	sessionIssueLinks   SessionIssueLinkStore
-	issueSnapshots      SessionIssueSnapshotStore
-	decisionLog         DecisionLogStore
-	projectTasks        ProjectTaskUpdater   // can be nil
-	automationRuns      AutomationRunUpdater // can be nil
-	issues              IssueStore
-	repositories        RepositoryStore
-	orgs                OrgStore
-	jobs                JobStore
-	github              GitHubTokenProvider
-	claudeCodeAuth      ClaudeCodeAuthProvider // can be nil
-	credentials         CredentialProvider     // can be nil — disables integration-skills doc generation
-	memory              MemoryService          // can be nil
-	snapshots           storage.SnapshotStore  // can be nil — multi-turn disabled if nil
-	uploads             storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
-	fileReader          sandbox.FileReader     // can be nil — disables proactive mention-index warmup
-	mentionIndexes      *workspace.MentionIndexCache
-	usageTracker        UsageRecorder        // can be nil — billing tracking disabled if nil
-	sandboxCapacity     *SandboxCapacityGate // can be nil — live local sandbox admission disabled
-	staticEgress        StaticEgressRuntimeConfig
-	threadRuntimes      ThreadRuntimeStore // can be nil — disables live thread-runtime routing
-	threadInbox         ThreadInboxStore   // can be nil — disables live inbox delivery
-	sandboxHolders      SessionSandboxHolderStore
-	threadDeliveryLocks sync.Map
-	env                 *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
-	identityResolver    *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
-	sandboxAuth         SandboxAuthServer  // can be nil — paired with identityResolver
-	users               UserLookup         // can be nil — needed for App-token Co-authored-by trailer
-	internalAPIURL      string
-	internalAPISecret   string
-	logger              zerolog.Logger
-	maxConcurrent       int
-	cancels             *CancelRegistry
-	threadCancels       *ThreadCancelRegistry // optional — enables per-tab SIGINT
-	nodeID              string
-	isDraining          func() bool
+	provider                   SandboxProvider
+	adapters                   map[models.AgentType]AgentAdapter
+	sessions                   SessionStore
+	agentRunLogs               SessionLogStore
+	agentRunQuestions          SessionQuestionStore
+	humanInputRequests         SessionHumanInputRequestStore
+	sessionMessages            SessionMessageStore
+	sessionThreads             SessionThreadStore
+	sessionIssueLinks          SessionIssueLinkStore
+	issueSnapshots             SessionIssueSnapshotStore
+	decisionLog                DecisionLogStore
+	projectTasks               ProjectTaskUpdater               // can be nil
+	automationRuns             AutomationRunUpdater             // can be nil
+	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
+	issues                     IssueStore
+	repositories               RepositoryStore
+	orgs                       OrgStore
+	jobs                       JobStore
+	github                     GitHubTokenProvider
+	claudeCodeAuth             ClaudeCodeAuthProvider // can be nil
+	credentials                CredentialProvider     // can be nil — disables integration-skills doc generation
+	memory                     MemoryService          // can be nil
+	snapshots                  storage.SnapshotStore  // can be nil — multi-turn disabled if nil
+	uploads                    storage.UploadStore    // can be nil — uploaded attachments remain warnings if nil
+	fileReader                 sandbox.FileReader     // can be nil — disables proactive mention-index warmup
+	mentionIndexes             *workspace.MentionIndexCache
+	usageTracker               UsageRecorder        // can be nil — billing tracking disabled if nil
+	sandboxCapacity            *SandboxCapacityGate // can be nil — live local sandbox admission disabled
+	staticEgress               StaticEgressRuntimeConfig
+	threadRuntimes             ThreadRuntimeStore // can be nil — disables live thread-runtime routing
+	threadInbox                ThreadInboxStore   // can be nil — disables live inbox delivery
+	sandboxHolders             SessionSandboxHolderStore
+	threadDeliveryLocks        sync.Map
+	env                        *AgentEnv          // owns env resolution, auth pre-flight, Codex auth injection
+	identityResolver           *identity.Resolver // can be nil — falls back to legacy GITHUB_TOKEN env injection
+	sandboxAuth                SandboxAuthServer  // can be nil — paired with identityResolver
+	users                      UserLookup         // can be nil — needed for App-token Co-authored-by trailer
+	evalBootstraps             EvalBootstrapLookup
+	internalAPIURL             string
+	internalAPISecret          string
+	logger                     zerolog.Logger
+	maxConcurrent              int
+	cancels                    *CancelRegistry
+	threadCancels              *ThreadCancelRegistry // optional — enables per-tab SIGINT
+	nodeID                     string
+	isDraining                 func() bool
 }
 
 // CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
@@ -739,6 +760,7 @@ type ContinueSessionOptions struct {
 	ResultAgentSessionID *string
 	PRRepair             *PRRepairContinueOptions
 	HumanInputRequestID  *uuid.UUID
+	QueuedMessageID      *int64
 
 	// ThreadID, when set, identifies the agent tab this turn belongs to.
 	// The orchestrator passes it to the thread cancel registry so a
@@ -769,43 +791,43 @@ type PRRepairContinueOptions struct {
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
-	Provider           SandboxProvider
-	Adapters           map[models.AgentType]AgentAdapter
-	Sessions           SessionStore
-	SessionLogs        SessionLogStore
-	SessionQuestions   SessionQuestionStore
-	HumanInputRequests SessionHumanInputRequestStore
-	SessionMessages    SessionMessageStore
-	SessionThreads     SessionThreadStore
-	SessionIssueLinks  SessionIssueLinkStore
-	IssueSnapshots     SessionIssueSnapshotStore
-	DecisionLog        DecisionLogStore
-	ProjectTasks       ProjectTaskUpdater   // optional — updates project tasks on run completion
-	AutomationRuns     AutomationRunUpdater // optional — updates automation_runs on session completion
-	Issues             IssueStore
-	Repositories       RepositoryStore
-	Orgs               OrgStore
-	Jobs               JobStore
-	GitHub             GitHubTokenProvider
-	CodexAuth          CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
-	ClaudeCodeAuth     ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
-	Credentials        CredentialProvider
-	Memory             MemoryService            // optional — injects learned memories into agent prompts
-	UserCredentials    UserCredentialProvider   // optional — enables legacy personal/team credential resolution
-	CodingCredentials  CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
-	Snapshots          storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
-	Uploads            storage.UploadStore      // optional — resolves session uploads into sandbox files
-	FileReader         sandbox.FileReader       // optional — enables proactive mention-index warmup
-	MentionIndexes     *workspace.MentionIndexCache
-	UsageTracker       UsageRecorder        // optional — enables billing observability
-	SandboxCapacity    *SandboxCapacityGate // optional — gates new local sandbox creation
-	StaticEgress       StaticEgressRuntimeConfig
-	ThreadRuntimes     ThreadRuntimeStore // optional — records per-thread live runtime ownership
-	ThreadInbox        ThreadInboxStore   // optional — durable per-thread input delivery log
-	SandboxHolders     SessionSandboxHolderStore
-	Cancels            *CancelRegistry       // optional — enables session cancellation from API
-	ThreadCancels      *ThreadCancelRegistry // optional — enables per-tab cancellation from API
-	OrgSettingsCache   *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
+	Provider                   SandboxProvider
+	Adapters                   map[models.AgentType]AgentAdapter
+	Sessions                   SessionStore
+	SessionLogs                SessionLogStore
+	SessionQuestions           SessionQuestionStore
+	HumanInputRequests         SessionHumanInputRequestStore
+	SessionMessages            SessionMessageStore
+	SessionThreads             SessionThreadStore
+	SessionIssueLinks          SessionIssueLinkStore
+	IssueSnapshots             SessionIssueSnapshotStore
+	DecisionLog                DecisionLogStore
+	ProjectTasks               ProjectTaskUpdater               // optional — updates project tasks on run completion
+	AutomationRuns             AutomationRunUpdater             // optional — updates automation_runs on session completion
+	AutomationGoalImprovements AutomationGoalImprovementUpdater // optional — updates goal-improvement proposals on analysis session completion
+	Issues                     IssueStore
+	Repositories               RepositoryStore
+	Orgs                       OrgStore
+	Jobs                       JobStore
+	GitHub                     GitHubTokenProvider
+	CodexAuth                  CodexAuthProvider      // optional — enables ChatGPT OAuth for Codex agent
+	ClaudeCodeAuth             ClaudeCodeAuthProvider // optional — enables Claude subscription OAuth for Claude Code agent
+	Credentials                CredentialProvider
+	Memory                     MemoryService            // optional — injects learned memories into agent prompts
+	CodingCredentials          CodingCredentialProvider // optional — preferred unified resolver; consulted before the legacy cascade
+	Snapshots                  storage.SnapshotStore    // optional — enables multi-turn snapshot/restore
+	Uploads                    storage.UploadStore      // optional — resolves session uploads into sandbox files
+	FileReader                 sandbox.FileReader       // optional — enables proactive mention-index warmup
+	MentionIndexes             *workspace.MentionIndexCache
+	UsageTracker               UsageRecorder        // optional — enables billing observability
+	SandboxCapacity            *SandboxCapacityGate // optional — gates new local sandbox creation
+	StaticEgress               StaticEgressRuntimeConfig
+	ThreadRuntimes             ThreadRuntimeStore // optional — records per-thread live runtime ownership
+	ThreadInbox                ThreadInboxStore   // optional — durable per-thread input delivery log
+	SandboxHolders             SessionSandboxHolderStore
+	Cancels                    *CancelRegistry       // optional — enables session cancellation from API
+	ThreadCancels              *ThreadCancelRegistry // optional — enables per-tab cancellation from API
+	OrgSettingsCache           *OrgSettingsCache     // optional — caches Amp/Pi agent_config lookups across session starts
 	// Env owns env resolution + auth pre-flight + Codex auth injection,
 	// shared with the PM service. Optional: when nil, NewOrchestrator
 	// constructs an AgentEnv from the other OrchestratorConfig fields so
@@ -824,6 +846,7 @@ type OrchestratorConfig struct {
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
 	Users             UserLookup
+	EvalBootstraps    EvalBootstrapLookup
 	InternalAPIURL    string
 	InternalAPISecret string
 	NodeID            string
@@ -851,7 +874,6 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	if env == nil {
 		env = NewAgentEnv(AgentEnvDeps{
 			Credentials:       cfg.Credentials,
-			UserCredentials:   cfg.UserCredentials,
 			CodingCredentials: cfg.CodingCredentials,
 			Orgs:              cfg.Orgs,
 			OrgSettingsCache:  cfg.OrgSettingsCache,
@@ -863,49 +885,51 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	}
 
 	return &Orchestrator{
-		provider:           cfg.Provider,
-		adapters:           cfg.Adapters,
-		sessions:           cfg.Sessions,
-		agentRunLogs:       cfg.SessionLogs,
-		agentRunQuestions:  cfg.SessionQuestions,
-		humanInputRequests: cfg.HumanInputRequests,
-		sessionMessages:    cfg.SessionMessages,
-		sessionThreads:     cfg.SessionThreads,
-		sessionIssueLinks:  cfg.SessionIssueLinks,
-		issueSnapshots:     cfg.IssueSnapshots,
-		decisionLog:        cfg.DecisionLog,
-		projectTasks:       cfg.ProjectTasks,
-		automationRuns:     cfg.AutomationRuns,
-		issues:             cfg.Issues,
-		repositories:       cfg.Repositories,
-		orgs:               cfg.Orgs,
-		jobs:               cfg.Jobs,
-		github:             cfg.GitHub,
-		claudeCodeAuth:     cfg.ClaudeCodeAuth,
-		credentials:        cfg.Credentials,
-		memory:             cfg.Memory,
-		snapshots:          cfg.Snapshots,
-		uploads:            cfg.Uploads,
-		fileReader:         cfg.FileReader,
-		mentionIndexes:     cfg.MentionIndexes,
-		usageTracker:       cfg.UsageTracker,
-		sandboxCapacity:    cfg.SandboxCapacity,
-		staticEgress:       cfg.StaticEgress,
-		threadRuntimes:     cfg.ThreadRuntimes,
-		threadInbox:        cfg.ThreadInbox,
-		sandboxHolders:     cfg.SandboxHolders,
-		env:                env,
-		identityResolver:   cfg.IdentityResolver,
-		sandboxAuth:        cfg.SandboxAuth,
-		users:              cfg.Users,
-		internalAPIURL:     cfg.InternalAPIURL,
-		internalAPISecret:  cfg.InternalAPISecret,
-		cancels:            cfg.Cancels,
-		threadCancels:      cfg.ThreadCancels,
-		logger:             cfg.Logger,
-		maxConcurrent:      maxConcurrent,
-		nodeID:             cfg.NodeID,
-		isDraining:         cfg.IsDraining,
+		provider:                   cfg.Provider,
+		adapters:                   cfg.Adapters,
+		sessions:                   cfg.Sessions,
+		agentRunLogs:               cfg.SessionLogs,
+		agentRunQuestions:          cfg.SessionQuestions,
+		humanInputRequests:         cfg.HumanInputRequests,
+		sessionMessages:            cfg.SessionMessages,
+		sessionThreads:             cfg.SessionThreads,
+		sessionIssueLinks:          cfg.SessionIssueLinks,
+		issueSnapshots:             cfg.IssueSnapshots,
+		decisionLog:                cfg.DecisionLog,
+		projectTasks:               cfg.ProjectTasks,
+		automationRuns:             cfg.AutomationRuns,
+		automationGoalImprovements: cfg.AutomationGoalImprovements,
+		issues:                     cfg.Issues,
+		repositories:               cfg.Repositories,
+		orgs:                       cfg.Orgs,
+		jobs:                       cfg.Jobs,
+		github:                     cfg.GitHub,
+		claudeCodeAuth:             cfg.ClaudeCodeAuth,
+		credentials:                cfg.Credentials,
+		memory:                     cfg.Memory,
+		snapshots:                  cfg.Snapshots,
+		uploads:                    cfg.Uploads,
+		fileReader:                 cfg.FileReader,
+		mentionIndexes:             cfg.MentionIndexes,
+		usageTracker:               cfg.UsageTracker,
+		sandboxCapacity:            cfg.SandboxCapacity,
+		staticEgress:               cfg.StaticEgress,
+		threadRuntimes:             cfg.ThreadRuntimes,
+		threadInbox:                cfg.ThreadInbox,
+		sandboxHolders:             cfg.SandboxHolders,
+		env:                        env,
+		identityResolver:           cfg.IdentityResolver,
+		sandboxAuth:                cfg.SandboxAuth,
+		users:                      cfg.Users,
+		evalBootstraps:             cfg.EvalBootstraps,
+		internalAPIURL:             cfg.InternalAPIURL,
+		internalAPISecret:          cfg.InternalAPISecret,
+		cancels:                    cfg.Cancels,
+		threadCancels:              cfg.ThreadCancels,
+		logger:                     cfg.Logger,
+		maxConcurrent:              maxConcurrent,
+		nodeID:                     cfg.NodeID,
+		isDraining:                 cfg.IsDraining,
 	}
 }
 
@@ -924,6 +948,13 @@ func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session 
 	}
 	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexCacheKey(&cacheSession), index); err != nil {
 		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index")
+	}
+	// Also warm the cross-turn stale alias. The exact key above is
+	// snapshot-flavored and the composer handler looks up a live-flavored
+	// key while the container is still running, so without the alias this
+	// warm never reaches the @-mention picker's cache lookups.
+	if err := o.mentionIndexes.Warm(ctx, workspace.SessionMentionIndexStaleCacheKey(&cacheSession), index); err != nil {
+		log.Warn().Err(err).Str("snapshot_key", snapshotKey).Msg("failed to warm proactive mention index alias")
 	}
 }
 
@@ -1111,7 +1142,23 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		sandboxCfg.Env = make(map[string]string)
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
-	internalToken, err := auth.GenerateSessionThreadToken(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, tokenTTL)
+	var scopes []string
+	sessionOrigin := string(session.Origin)
+	var evalBootstrapRunID *uuid.UUID
+	if session.Origin == models.SessionOriginEvalBootstrap {
+		if o.evalBootstraps != nil && threadID != nil && *threadID != uuid.Nil {
+			if run, err := o.evalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, *threadID); err == nil {
+				evalBootstrapRunID = &run.ID
+				scopes = []string{"eval:add"}
+			} else {
+				log.Warn().Err(err).Str("session_id", session.ID.String()).Str("thread_id", threadID.String()).Msg("failed to resolve eval bootstrap run for internal token claim; eval:add tool will be unavailable")
+			}
+		}
+	}
+	if session.Origin == models.SessionOriginAutomationGoalImprovement {
+		scopes = []string{"automation-goal-improvement:complete"}
+	}
+	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
 		return
@@ -1119,6 +1166,13 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
 	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
+	if evalBootstrapRunID != nil {
+		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
+		sandboxCfg.Env["EVAL_BOOTSTRAP_RUN_ID"] = evalBootstrapRunID.String()
+	}
+	if session.Origin == models.SessionOriginAutomationGoalImprovement {
+		sandboxCfg.Env["AUTOMATION_GOAL_IMPROVEMENT_TOOLS_ENABLED"] = "true"
+	}
 }
 
 func (o *Orchestrator) closeSandboxAuth(sessionID uuid.UUID, log zerolog.Logger) {
@@ -1144,37 +1198,62 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 	}
 }
 
-// installSandboxDependencies reads .143/config.json from the sandbox
-// workspace and installs the tools the repo declared (golangci-lint, etc.)
-// before bootstrap/validation commands run. Best-effort: a missing config,
-// malformed config, unknown dependency name, or install failure is logged
-// but never aborts the session — the agent can still run, just without the
-// linter. See sandboxdeps for the install/check contract.
-func (o *Orchestrator) installSandboxDependencies(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) {
+// prepareSandboxRepository reads .143/config.json from the sandbox workspace,
+// installs supported platform-managed tools, then runs repo-declared bootstrap
+// commands before the agent starts. Missing or malformed config stays
+// best-effort for compatibility. Explicit bootstrap command failures are
+// returned because the workspace is not ready for normal agent work.
+func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
 	if sandbox == nil || workDir == "" {
-		return
+		return nil
 	}
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
 	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
-			return
+			return nil
 		}
 		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
-		return
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
 	}
 	cfg, err := repoconfig.Parse(raw)
 	if err != nil {
 		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
-		return
+		return nil
 	}
-	if len(cfg.Dependencies) == 0 {
-		return
+	if len(cfg.Dependencies) > 0 {
+		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+		}
+		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
-		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+}
+
+func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
+	for _, command := range commands {
+		shellCmd := fmt.Sprintf("cd '%s' && %s", shellEscapeSingleQuote(workDir), command)
+		var stderr bytes.Buffer
+		exitCode, execErr := o.provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
+		stderrText := strings.TrimSpace(stderr.String())
+		if execErr != nil || exitCode != 0 {
+			log.Warn().
+				Err(execErr).
+				Int("exit_code", exitCode).
+				Str("command", command).
+				Str("stderr", stderrText).
+				Msg("repo bootstrap command failed")
+			if execErr != nil {
+				return fmt.Errorf("repo bootstrap command %q failed: exit=%d err=%w stderr=%s", command, exitCode, execErr, stderrText)
+			}
+			return fmt.Errorf("repo bootstrap command %q exited with code %d: %s", command, exitCode, stderrText)
+		}
+		log.Info().Str("command", command).Msg("repo bootstrap command completed")
 	}
-	sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
+	return nil
 }
 
 // RecoverSession resumes an interrupted session from its latest committed
@@ -1287,12 +1366,57 @@ const (
 )
 
 func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == models.MessageRoleUser {
-			return &messages[i]
+	latest := -1
+	for i := range messages {
+		if messages[i].Role != models.MessageRoleUser {
+			continue
+		}
+		if latest == -1 || messageRowIsNewer(messages[i], messages[latest]) {
+			latest = i
 		}
 	}
-	return nil
+	if latest == -1 {
+		return nil
+	}
+	return &messages[latest]
+}
+
+func queuedUserMessageInScope(messages []models.SessionMessage, queuedMessageID int64, threadID *uuid.UUID) (*models.SessionMessage, error) {
+	for i := range messages {
+		m := messages[i]
+		if m.ID != queuedMessageID {
+			continue
+		}
+		if m.Role != models.MessageRoleUser {
+			return nil, fmt.Errorf("queued message %d has role %s, not user", queuedMessageID, m.Role)
+		}
+		if !messageMatchesThreadScope(m, threadID) {
+			return nil, fmt.Errorf("queued message %d is outside the requested thread scope", queuedMessageID)
+		}
+		return &messages[i], nil
+	}
+	return nil, fmt.Errorf("queued user message %d not found", queuedMessageID)
+}
+
+func messageRowIsNewer(candidate, current models.SessionMessage) bool {
+	if candidate.ID != 0 || current.ID != 0 {
+		if candidate.ID != current.ID {
+			return candidate.ID > current.ID
+		}
+	}
+	if !candidate.CreatedAt.IsZero() || !current.CreatedAt.IsZero() {
+		if !candidate.CreatedAt.Equal(current.CreatedAt) {
+			return candidate.CreatedAt.After(current.CreatedAt)
+		}
+	}
+	return true
+}
+
+func messageMatchesThreadScope(message models.SessionMessage, threadID *uuid.UUID) bool {
+	if threadID == nil {
+		return message.ThreadID == nil
+	}
+	return message.ThreadID != nil && *message.ThreadID == *threadID
 }
 
 func derefMessage(msg *models.SessionMessage) models.SessionMessage {
@@ -1495,42 +1619,35 @@ func waitForRetryableSnapshotSave(ctx context.Context, attempt int) error {
 // is that specific thread.
 //
 // The scoped form exists because session_messages.ListBySession orders rows by
-// (turn_number, id) — and per-thread turn counters are independent — so the
-// globally-last user row in the slice is not necessarily the last message the
-// user actually sent. ContinueSession must scope to the thread the worker
-// payload identified, otherwise a sibling thread with a higher turn_number
-// will steal the run.
+// (turn_number, id) — and per-thread turn counters are independent. Some repair
+// paths also write thread-bound messages with the session turn number.
+// The row id is therefore the chronological authority for "latest" inside the
+// requested scope.
 func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.UUID) *models.SessionMessage {
-	matchesScope := func(m models.SessionMessage) bool {
-		if threadID == nil {
-			return m.ThreadID == nil
-		}
-		return m.ThreadID != nil && *m.ThreadID == *threadID
-	}
-	for i := len(messages) - 1; i >= 0; i-- {
+	latest := -1
+	for i := range messages {
 		m := messages[i]
 		if m.Role != models.MessageRoleUser {
 			continue
 		}
-		if !matchesScope(m) {
+		if !messageMatchesThreadScope(m, threadID) {
 			continue
 		}
-		return &messages[i]
+		if latest == -1 || messageRowIsNewer(m, messages[latest]) {
+			latest = i
+		}
 	}
-	return nil
+	if latest == -1 {
+		return nil
+	}
+	return &messages[latest]
 }
 
 func messagesInScope(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
 	scoped := make([]models.SessionMessage, 0, len(messages))
 	for _, message := range messages {
-		if threadID == nil {
-			if message.ThreadID != nil {
-				continue
-			}
-		} else {
-			if message.ThreadID == nil || *message.ThreadID != *threadID {
-				continue
-			}
+		if !messageMatchesThreadScope(message, threadID) {
+			continue
 		}
 		scoped = append(scoped, message)
 	}
@@ -1556,19 +1673,45 @@ func unprocessedUserMessages(messages []models.SessionMessage, threadID *uuid.UU
 // rows are inserted before the in-flight turn's assistant row; when the drain
 // job starts, that assistant must not hide the queued users.
 func unprocessedUserMessagesThrough(messages []models.SessionMessage, threadID *uuid.UUID, latestUserMessageID int64) []models.SessionMessage {
-	matchesScope := func(m models.SessionMessage) bool {
-		if threadID == nil {
-			return m.ThreadID == nil
+	hasMessageIDs := false
+	for _, m := range messages {
+		if messageMatchesThreadScope(m, threadID) && m.ID != 0 {
+			hasMessageIDs = true
+			break
 		}
-		return m.ThreadID != nil && *m.ThreadID == *threadID
 	}
+	if hasMessageIDs {
+		var latestAssistantID int64
+		for _, m := range messages {
+			if !messageMatchesThreadScope(m, threadID) || m.ID > latestUserMessageID {
+				continue
+			}
+			if m.Role == models.MessageRoleAssistant && m.ID > latestAssistantID {
+				latestAssistantID = m.ID
+			}
+		}
+		var pending []models.SessionMessage
+		for _, m := range messages {
+			if !messageMatchesThreadScope(m, threadID) || m.ID > latestUserMessageID || m.ID <= latestAssistantID {
+				continue
+			}
+			if m.Role == models.MessageRoleUser {
+				pending = append(pending, m)
+			}
+		}
+		sort.Slice(pending, func(i, j int) bool {
+			return pending[i].ID < pending[j].ID
+		})
+		return pending
+	}
+
 	var pending []models.SessionMessage
 	for i := len(messages) - 1; i >= 0; i-- {
 		m := messages[i]
 		if m.ID > latestUserMessageID {
 			continue
 		}
-		if !matchesScope(m) {
+		if !messageMatchesThreadScope(m, threadID) {
 			continue
 		}
 		if m.Role == models.MessageRoleAssistant {
@@ -2213,7 +2356,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	sandboxCfg.SessionID = run.ID.String()
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
-	sandboxCfg.Env = o.env.Resolve(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID)
+	sandboxCfg.Env = o.env.ResolveForModel(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID, stringPtrValue(run.ModelOverride))
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -2461,17 +2604,35 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			return fmt.Errorf("clone repo: %w", err)
 		}
 
-		baseCommitSHA, err := o.captureBaseCommitSHA(ctx, sandbox)
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to capture base commit sha")
-		} else if baseCommitSHA != "" {
+		if run.Origin == models.SessionOriginEvalRun && run.BaseCommitSHA != nil && strings.TrimSpace(*run.BaseCommitSHA) != "" {
 			if sandbox.Metadata == nil {
 				sandbox.Metadata = make(map[string]string)
 			}
+			baseCommitSHA := strings.TrimSpace(*run.BaseCommitSHA)
+			if err := o.checkoutEvalBaseCommit(ctx, sandbox, baseCommitSHA); err != nil {
+				o.failRun(ctx, run, fmt.Sprintf("checkout eval base commit: %s", err))
+				return fmt.Errorf("checkout eval base commit %s: %w", baseCommitSHA, err)
+			}
+			if configRef := evalConfigRefFromSession(run); configRef != "" {
+				if err := o.applyEvalConfigOverlay(ctx, sandbox, configRef); err != nil {
+					o.failRun(ctx, run, fmt.Sprintf("apply eval config overlay: %s", err))
+					return fmt.Errorf("apply eval config overlay %s: %w", configRef, err)
+				}
+			}
 			sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
-			run.BaseCommitSHA = &baseCommitSHA
-			if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
-				log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
+		} else {
+			baseCommitSHA, err := o.captureBaseCommitSHA(ctx, sandbox)
+			if err != nil {
+				log.Warn().Err(err).Msg("failed to capture base commit sha")
+			} else if baseCommitSHA != "" {
+				if sandbox.Metadata == nil {
+					sandbox.Metadata = make(map[string]string)
+				}
+				sandbox.Metadata[SandboxMetadataBaseCommitSHA] = baseCommitSHA
+				run.BaseCommitSHA = &baseCommitSHA
+				if dbErr := o.sessions.UpdateBaseCommitSHA(ctx, run.OrgID, run.ID, baseCommitSHA); dbErr != nil {
+					log.Warn().Err(dbErr).Str("base_commit_sha", baseCommitSHA).Msg("failed to persist base commit sha")
+				}
 			}
 		}
 
@@ -2516,7 +2677,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
+			return fmt.Errorf("prepare repository: %w", err)
+		}
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -2809,14 +2973,16 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Str("status", string(status))
 	})
 
-	payload := map[string]interface{}{
-		"session_id": run.ID.String(),
-		"org_id":     run.OrgID.String(),
+	if run.Origin != models.SessionOriginAutomationGoalImprovement {
+		payload := map[string]interface{}{
+			"session_id": run.ID.String(),
+			"org_id":     run.OrgID.String(),
+		}
+		if issueSnapshot != nil {
+			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
+		}
+		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 	}
-	if issueSnapshot != nil {
-		payload["issue_snapshot_id"] = issueSnapshot.ID.String()
-	}
-	o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
 		outcome := outcomeFromRunStatus(status)
@@ -2842,6 +3008,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if run.AutomationRunID != nil && o.automationRuns != nil {
 		if err := o.automationRuns.OnSessionComplete(ctx, run, status); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session completion")
+		}
+	}
+	if o.automationGoalImprovements != nil {
+		if err := o.automationGoalImprovements.OnSessionComplete(ctx, run, status); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation goal improvement on session completion")
 		}
 	}
 
@@ -2986,7 +3157,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// without a thread hint) we preserve the legacy global lookup so a
 	// threaded session can still recover its in-flight turn.
 	var latestMsg *models.SessionMessage
-	if opts != nil && opts.ThreadID != nil {
+	if opts != nil && opts.QueuedMessageID != nil {
+		latestMsg, err = queuedUserMessageInScope(messages, *opts.QueuedMessageID, opts.ThreadID)
+		if err != nil {
+			log.Warn().Err(err).Int64("queued_message_id", *opts.QueuedMessageID).Msg("continue_session queued message selection failed")
+			o.failRun(ctx, session, fmt.Sprintf("select queued user message: %s", err))
+			return fmt.Errorf("select queued user message: %w", err)
+		}
+	} else if opts != nil && opts.ThreadID != nil {
 		latestMsg = latestUserMessageInScope(messages, opts.ThreadID)
 	} else {
 		latestMsg = latestUserMessage(messages)
@@ -3086,7 +3264,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "continue_session"
-	sandboxCfg.Env = o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID)
+	sandboxCfg.Env = o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -3768,7 +3946,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-			o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+			if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
+				return fmt.Errorf("prepare repository: %w", err)
+			}
 		}
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
@@ -3904,7 +4085,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		authBillingMode = authMode
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
+			return fmt.Errorf("prepare repository: %w", err)
+		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.
@@ -5180,6 +5364,11 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation run on session failure")
 		}
 	}
+	if o.automationGoalImprovements != nil {
+		if err := o.automationGoalImprovements.OnSessionComplete(ctx, run, models.SessionStatusFailed); err != nil {
+			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation goal improvement on session failure")
+		}
+	}
 	o.enqueueLinearMilestone(ctx, run, "failed")
 }
 
@@ -5419,7 +5608,7 @@ func (o *Orchestrator) billingModeForAgent(
 			return TokenBillingModeAPIKey
 		}
 		return TokenBillingModeUnknown
-	case models.AgentTypeGeminiCLI, models.AgentTypeAmp, models.AgentTypePi:
+	case models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode:
 		return TokenBillingModeAPIKey
 	default:
 		return TokenBillingModeUnknown
@@ -5532,6 +5721,66 @@ func (o *Orchestrator) captureBaseCommitSHA(ctx context.Context, sandbox *Sandbo
 		return "", fmt.Errorf("capture base commit sha: exit=%d stderr=%s", exitCode, stderr.String())
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+func (o *Orchestrator) checkoutEvalBaseCommit(ctx context.Context, sandbox *Sandbox, baseCommitSHA string) error {
+	baseCommitSHA = strings.TrimSpace(baseCommitSHA)
+	if baseCommitSHA == "" {
+		return fmt.Errorf("base commit sha is required")
+	}
+	escapedSHA := shellEscapeSingleQuote(baseCommitSHA)
+	ensureCmd := fmt.Sprintf("git cat-file -e '%s^{commit}' || git fetch --depth=1 origin '%s'", escapedSHA, escapedSHA)
+	var ensureErr bytes.Buffer
+	if exitCode, execErr := o.provider.Exec(ctx, sandbox, ensureCmd, io.Discard, &ensureErr); execErr != nil {
+		return fmt.Errorf("ensure base commit: %w", execErr)
+	} else if exitCode != 0 {
+		return fmt.Errorf("ensure base commit: exit=%d stderr=%s", exitCode, ensureErr.String())
+	}
+	checkoutCmd := fmt.Sprintf("git checkout --detach '%s'", escapedSHA)
+	var checkoutErr bytes.Buffer
+	if exitCode, execErr := o.provider.Exec(ctx, sandbox, checkoutCmd, io.Discard, &checkoutErr); execErr != nil {
+		return fmt.Errorf("checkout base commit: %w", execErr)
+	} else if exitCode != 0 {
+		return fmt.Errorf("checkout base commit: exit=%d stderr=%s", exitCode, checkoutErr.String())
+	}
+	return nil
+}
+
+func evalConfigRefFromSession(session *models.Session) string {
+	if session == nil || len(session.InputManifest) == 0 {
+		return ""
+	}
+	var manifest struct {
+		ConfigRef string `json:"config_ref"`
+	}
+	if err := json.Unmarshal(session.InputManifest, &manifest); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(manifest.ConfigRef)
+}
+
+func (o *Orchestrator) applyEvalConfigOverlay(ctx context.Context, sandbox *Sandbox, configRef string) error {
+	configRef = strings.TrimSpace(configRef)
+	if configRef == "" {
+		return nil
+	}
+	escapedRef := shellEscapeSingleQuote(configRef)
+	cmd := fmt.Sprintf(`set -eu
+if ! git cat-file -e '%s^{commit}' 2>/dev/null; then
+  git fetch --depth=1 origin '%s'
+fi
+for path in AGENTS.md CLAUDE.md .claude .143 .codex; do
+  if git cat-file -e '%s:'"$path" 2>/dev/null; then
+    git checkout '%s' -- "$path"
+  fi
+done`, escapedRef, escapedRef, escapedRef, escapedRef)
+	var stderr bytes.Buffer
+	if exitCode, execErr := o.provider.Exec(ctx, sandbox, cmd, io.Discard, &stderr); execErr != nil {
+		return fmt.Errorf("apply config overlay: %w", execErr)
+	} else if exitCode != 0 {
+		return fmt.Errorf("apply config overlay: exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	return nil
 }
 
 // enqueueJob is a helper that enqueues a job and logs errors without failing the caller.
@@ -5882,7 +6131,20 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
 	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
-		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeAPIKey, "", model, claudeCodeVersion))
+		// prepareClaudeCodeAPIKeyFallback also removes any stale
+		// ~/.claude/.credentials.json left behind by a previous
+		// subscription-billed turn on a reused container — the CLI prefers
+		// the credentials file over the env var, so leaving it in place
+		// would silently bill a revoked/stale subscription token.
+		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr != nil {
+			o.failRunWithCategory(ctx, run,
+				fmt.Sprintf("claude API-key auth could not be prepared: %s", fallbackErr),
+				FailureCategoryClaudeCodeAuth,
+				"The Anthropic API key is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
+				[]string{"Retry the session after verifying sandbox access"},
+			)
+			return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr)
+		}
 		return TokenBillingModeAPIKey, nil
 	}
 
@@ -5955,6 +6217,22 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
 	}
 
+	// Distinguish "never connected anything" from "a subscription exists but
+	// was invalidated" — telling a user who DID connect a subscription that
+	// no credentials are configured sends them hunting in the wrong place.
+	if o.claudeCodeInvalidSubscriptionExists(ctx, run) {
+		o.failRunWithCategory(ctx, run,
+			"claude subscription is marked invalid; reconnect required",
+			FailureCategoryClaudeCodeAuth,
+			"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from the Agent settings page to continue.",
+			[]string{
+				"Reconnect your Claude subscription from the Agent settings page",
+				"Or add an Anthropic API key under Credentials",
+			},
+		)
+		return TokenBillingModeUnknown, fmt.Errorf("claude subscription invalid for claude code agent")
+	}
+
 	o.failRunWithCategory(ctx, run,
 		"no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key",
 		FailureCategoryClaudeCodeAuth,
@@ -5965,6 +6243,36 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		},
 	)
 	return TokenBillingModeUnknown, fmt.Errorf("no credentials for claude code agent")
+}
+
+// claudeCodeInvalidSubscriptionExists probes whether the run's org (or the
+// triggering user's personal stack) holds a Claude subscription that has been
+// marked invalid. Best-effort: probe errors fall back to the generic
+// missing-credentials failure rather than blocking the run's error path.
+func (o *Orchestrator) claudeCodeInvalidSubscriptionExists(ctx context.Context, run *models.Session) bool {
+	prober, ok := o.claudeCodeAuth.(ClaudeCodeInvalidSubscriptionProber)
+	if !ok {
+		return false
+	}
+	scopes := []models.Scope{{OrgID: run.OrgID}}
+	if run.TriggeredByUserID != nil {
+		scopes = append(scopes, models.Scope{OrgID: run.OrgID, UserID: run.TriggeredByUserID})
+	}
+	for _, scope := range scopes {
+		invalid, err := prober.HasInvalidSubscription(ctx, scope)
+		if err != nil {
+			o.logger.Warn().
+				Err(err).
+				Str("org_id", run.OrgID.String()).
+				Str("session_id", run.ID.String()).
+				Msg("invalid-subscription probe failed; reporting generic missing-credentials failure")
+			continue
+		}
+		if invalid {
+			return true
+		}
+	}
+	return false
 }
 
 var errClaudeCodeFallbackUnavailable = errors.New("claude code API-key fallback unavailable")
@@ -6621,6 +6929,13 @@ func strPtr(s string) *string {
 	return &s
 }
 
+func stringPtrValue(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // updatePrimaryThreadTerminal mirrors a session-level terminal transition onto
 // the seeded primary thread row. When result is non-nil, it persists the same
 // failure_explanation / failure_category / result_summary / diff the session
@@ -6964,7 +7279,7 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 }
 
 func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
-	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.Resolve(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID), session.AgentType)
+	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride)), session.AgentType)
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
@@ -7017,13 +7332,27 @@ func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) 
 	case models.AgentTypeCodex:
 		delete(env, "OPENAI_API_KEY")
 		delete(env, "OPENAI_BASE_URL")
-	case models.AgentTypeGeminiCLI:
-		delete(env, "GEMINI_API_KEY")
-		delete(env, "GEMINI_MODEL")
 	case models.AgentTypeAmp:
 		delete(env, "AMP_API_KEY")
 	case models.AgentTypePi:
 		delete(env, "PI_API_KEY")
+	case models.AgentTypeOpenCode:
+		delete(env, "OPENCODE_API_KEY")
+		delete(env, "OPENCODE_BASE_URL")
+		delete(env, "OPENCODE_BACKING_PROVIDER")
+		delete(env, "OPENCODE_DISABLE_AUTOUPDATE")
+		delete(env, "OPENCODE_DISABLE_DEFAULT_PLUGINS")
+		delete(env, "OPENCODE_DISABLE_MODELS_FETCH")
+		delete(env, "OPENCODE_CONFIG_CONTENT")
+		delete(env, "OPENCODE_PERMISSION")
+		delete(env, "OPENCODE_MODEL")
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_BASE_URL")
+		delete(env, "OPENAI_API_KEY")
+		delete(env, "OPENAI_BASE_URL")
+		delete(env, "GEMINI_API_KEY")
+		delete(env, "OPENROUTER_API_KEY")
+		delete(env, "OPENROUTER_BASE_URL")
 	}
 }
 
@@ -7153,12 +7482,12 @@ func codingProviderForAgent(agentType models.AgentType) models.ProviderName {
 		return models.ProviderAnthropic
 	case models.AgentTypeCodex:
 		return models.ProviderOpenAI
-	case models.AgentTypeGeminiCLI:
-		return models.ProviderGemini
 	case models.AgentTypeAmp:
 		return models.ProviderAmp
 	case models.AgentTypePi:
 		return models.ProviderPi
+	case models.AgentTypeOpenCode:
+		return models.ProviderOpenCode
 	default:
 		return ""
 	}

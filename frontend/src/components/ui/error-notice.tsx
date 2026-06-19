@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
+import type { HTMLAttributes, ReactNode } from "react";
+import { AlertTriangle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,12 +12,36 @@ interface ErrorNoticeAction {
 
 interface ErrorNoticeProps {
   title: ReactNode;
-  description: ReactNode;
+  description?: ReactNode;
   action?: ErrorNoticeAction;
+  onDismiss?: () => void;
+  dismissLabel?: string;
   className?: string;
 }
 
-export function ErrorNotice({ title, description, action, className }: ErrorNoticeProps) {
+type ErrorTextProps = HTMLAttributes<HTMLParagraphElement>;
+
+export function ErrorText({ className, ...props }: ErrorTextProps) {
+  return (
+    <p
+      className={cn(
+        errorSurfaceClassNames.textWrap,
+        "text-xs text-destructive",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+export function ErrorNotice({
+  title,
+  description,
+  action,
+  onDismiss,
+  dismissLabel = "Dismiss error",
+  className,
+}: ErrorNoticeProps) {
   return (
     <Card
       role="alert"
@@ -30,7 +54,9 @@ export function ErrorNotice({ title, description, action, className }: ErrorNoti
         </div>
         <div className="min-w-0 flex-1 space-y-1">
           <p className={errorSurfaceClassNames.title}>{title}</p>
-          <p className={errorSurfaceClassNames.description}>{description}</p>
+          {description && (
+            <p className={errorSurfaceClassNames.description}>{description}</p>
+          )}
         </div>
         {action && (
           <Button
@@ -40,6 +66,18 @@ export function ErrorNotice({ title, description, action, className }: ErrorNoti
             onClick={action.onClick}
           >
             {action.label}
+          </Button>
+        )}
+        {onDismiss && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            aria-label={dismissLabel}
+            onClick={onDismiss}
+          >
+            <X className="size-3.5" aria-hidden="true" />
           </Button>
         )}
       </CardContent>

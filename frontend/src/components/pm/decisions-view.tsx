@@ -14,7 +14,7 @@ function formatDate(dateStr: string): string {
 
 function DecisionBadge({ decision }: { decision: string }) {
   const styles: Record<string, string> = {
-    delegate: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+    delegate: "bg-info/10 text-info",
     skip: "bg-muted text-muted-foreground",
     cluster: "bg-purple-500/10 text-purple-700 dark:text-purple-400",
   };
@@ -28,7 +28,7 @@ function DecisionBadge({ decision }: { decision: string }) {
 function OutcomeCell({ outcome }: { outcome?: string }) {
   if (outcome === "succeeded") {
     return (
-      <span className="flex items-center gap-1 text-green-700 dark:text-green-400 text-xs font-medium">
+      <span className="flex items-center gap-1 text-success text-xs font-medium">
         <CheckCircle2 className="h-3.5 w-3.5" />
         Succeeded
       </span>
@@ -36,7 +36,7 @@ function OutcomeCell({ outcome }: { outcome?: string }) {
   }
   if (outcome === "failed") {
     return (
-      <span className="flex items-center gap-1 text-red-700 dark:text-red-400 text-xs font-medium">
+      <span className="flex items-center gap-1 text-destructive text-xs font-medium">
         <XCircle className="h-3.5 w-3.5" />
         Failed
       </span>
@@ -64,7 +64,7 @@ function SummaryBar({ summary }: { summary: PMDecisionSummary }) {
       </Card>
       <Card>
         <CardContent className="pt-4 pb-3 text-center">
-          <p className="text-2xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+          <p className="text-2xl font-semibold tabular-nums text-success">
             <TrendingUp className="h-4 w-4 inline mr-1" />
             {summary.succeeded}
           </p>

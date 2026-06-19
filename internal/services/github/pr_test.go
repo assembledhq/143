@@ -31,14 +31,25 @@ import (
 
 // mockLLMClient implements llm.Client for testing.
 type mockLLMClient struct {
-	response       string
-	err            error
-	lastUserPrompt string
+	response         string
+	err              error
+	lastSystemPrompt string
+	lastUserPrompt   string
 }
 
-func (m *mockLLMClient) Complete(_ context.Context, _, userPrompt string) (string, error) {
+func (m *mockLLMClient) Complete(_ context.Context, systemPrompt, userPrompt string) (string, error) {
+	m.lastSystemPrompt = systemPrompt
 	m.lastUserPrompt = userPrompt
 	return m.response, m.err
+}
+
+type fakeSessionThreadLister struct {
+	threads []models.SessionThread
+	err     error
+}
+
+func (f fakeSessionThreadLister) ListBySessionWithOptions(context.Context, uuid.UUID, uuid.UUID, bool) ([]models.SessionThread, error) {
+	return f.threads, f.err
 }
 
 var prTestIssueColumns = []string{
@@ -74,7 +85,13 @@ var prTestPullRequestColumns = []string{
 var prTestPreviewTargetColumns = []string{
 	"id", "org_id", "repository_id", "branch", "commit_sha",
 	"preview_config_name", "resolved_config_digest", "source_type", "source_id", "source_url",
-	"created_by_user_id", "request_id", "created_at",
+	"created_by_user_id", "request_id", "preview_group_id", "created_at",
+}
+
+var prTestPreviewGroupColumns = []string{
+	"id", "org_id", "repository_id", "group_kind", "branch", "preview_config_name",
+	"pull_request_number", "source_type", "source_id", "source_url", "current_target_id",
+	"latest_commit_sha", "current_status", "pinned", "created_by_user_id", "created_at", "last_activity_at",
 }
 
 var prTestPreviewLinkColumns = []string{
@@ -434,24 +451,15 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			newPRTestRow(prID, nil, orgID, repoName, time.Now(), nil)...,
 		))
-	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
-		Action: "completed",
-		CheckRun: struct {
-			PullRequests []struct {
-				Number int `json:"number"`
-			} `json:"pull_requests"`
-		}{
-			PullRequests: []struct {
-				Number int `json:"number"`
-			}{{Number: 42}},
-		},
-		Repository: struct {
-			ID       int64  `json:"id"`
-			FullName string `json:"full_name"`
-		}{
-			FullName: repoName,
-		},
-	})
+	checkRunEvent := CheckRunEvent{Action: "completed"}
+	checkRunEvent.CheckRun.PullRequests = append(checkRunEvent.CheckRun.PullRequests, struct {
+		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 42})
+	checkRunEvent.Repository.FullName = repoName
+	err = service.HandleCheckRunEvent(context.Background(), checkRunEvent)
 	require.NoError(t, err, "HandleCheckRunEvent should enqueue state sync for completed check runs")
 
 	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{Action: "created"})
@@ -460,24 +468,15 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
-	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
-		Action: "completed",
-		CheckRun: struct {
-			PullRequests []struct {
-				Number int `json:"number"`
-			} `json:"pull_requests"`
-		}{
-			PullRequests: []struct {
-				Number int `json:"number"`
-			}{{Number: 99}},
-		},
-		Repository: struct {
-			ID       int64  `json:"id"`
-			FullName string `json:"full_name"`
-		}{
-			FullName: repoName,
-		},
-	})
+	checkRunEvent = CheckRunEvent{Action: "completed"}
+	checkRunEvent.CheckRun.PullRequests = append(checkRunEvent.CheckRun.PullRequests, struct {
+		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 99})
+	checkRunEvent.Repository.FullName = repoName
+	err = service.HandleCheckRunEvent(context.Background(), checkRunEvent)
 	require.NoError(t, err, "HandleCheckRunEvent should ignore check runs for unmanaged pull requests")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check_run expectations should be met")
 }
@@ -1446,6 +1445,180 @@ func TestGeneratePRContent_WithRepoTemplate(t *testing.T) {
 	require.Contains(t, mockLLM.lastUserPrompt, "<pr_template>", "LLM prompt should wrap template in pr_template tags")
 }
 
+func TestGeneratePRContent_IncludesAllThreadSummaries(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	primaryThreadID := uuid.New()
+	reviewThreadID := uuid.New()
+	now := time.Now()
+	// The session ResultSummary matches the review thread (last to complete), simulating
+	// a review-loop session where the review thread's summary populated run.ResultSummary.
+	reviewSummary := "Review loop: checked the code and requested naming cleanup."
+	diff := "+++ b/internal/services/github/pr.go\n+func buildPRThreadContext() string { return \"\" }\n"
+	run := &models.Session{
+		ID:              sessionID,
+		PrimaryThreadID: &primaryThreadID,
+		OrgID:           orgID,
+		AgentType:       "claude-code",
+		ResultSummary:   &reviewSummary,
+		Diff:            &diff,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Use session threads for PR context</pr_title>\n<pr_body>\n## Summary\n\nUses all session thread summaries.\n</pr_body>",
+	}
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: []models.SessionThread{
+		{
+			ID:            primaryThreadID,
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         "Main",
+			Status:        models.ThreadStatusCompleted,
+			CreatedAt:     now,
+			ResultSummary: ptrString("Implemented PR context generation from thread summaries."),
+		},
+		{
+			ID:                reviewThreadID,
+			SessionID:         sessionID,
+			OrgID:             orgID,
+			Label:             "Review",
+			Status:            models.ThreadStatusCompleted,
+			CreatedAt:         now.Add(time.Minute),
+			CreatedBySource:   models.ThreadCreatedBySourceAgentTool,
+			CreatedByThreadID: &primaryThreadID,
+			ResultSummary:     ptrString(reviewSummary),
+		},
+	}})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "generatePRContent should succeed when thread context loads")
+	require.Contains(t, mockLLM.lastUserPrompt, "<session_threads>", "LLM prompt should include session thread context")
+	require.Contains(t, mockLLM.lastUserPrompt, "Main (primary)", "prompt should identify the primary implementation thread")
+	require.Contains(t, mockLLM.lastUserPrompt, "Implemented PR context generation from thread summaries.", "prompt should include primary thread summary")
+	// The review thread's summary matches run.ResultSummary and is already in <agent_summary>;
+	// it must not be duplicated inside <session_threads>.
+	require.Equal(t, 1, strings.Count(mockLLM.lastUserPrompt, reviewSummary),
+		"review summary should appear exactly once (in agent_summary only, not duplicated in session_threads)")
+	agentSummaryIdx := strings.Index(mockLLM.lastUserPrompt, "<agent_summary>")
+	sessionThreadsIdx := strings.Index(mockLLM.lastUserPrompt, "<session_threads>")
+	require.Greater(t, sessionThreadsIdx, agentSummaryIdx, "session_threads block should follow agent_summary block")
+	require.Contains(t, mockLLM.lastSystemPrompt, "Use the code diff and files changed as the source of truth", "system prompt should make the code changes the primary source of truth")
+	require.Contains(t, mockLLM.lastSystemPrompt, "Use the session title, issue, and session threads only as supporting context", "system prompt should keep conversation context secondary to the code changes")
+}
+
+func TestGeneratePRContent_ThreadStoreError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	summary := "Agent finished."
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:            uuid.New(),
+		OrgID:         orgID,
+		AgentType:     "claude-code",
+		ResultSummary: &summary,
+		Diff:          &diff,
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Title</pr_title>\n<pr_body>Body</pr_body>",
+	}
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+	svc.SetSessionThreadStore(fakeSessionThreadLister{err: errors.New("db unavailable")})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err, "generatePRContent should degrade gracefully when thread store errors")
+	require.NotContains(t, mockLLM.lastUserPrompt, "<session_threads>", "prompt should omit session_threads tag when thread store fails")
+}
+
+func TestGeneratePRContent_ThreadCapAndEmptySummaries(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	diff := "+++ b/x.go\n+func f() {}\n"
+	run := &models.Session{
+		ID:        sessionID,
+		OrgID:     orgID,
+		AgentType: "claude-code",
+		Diff:      &diff,
+	}
+
+	// Build 10 threads: one with no summary, nine with distinct summaries.
+	// The no-summary thread should be skipped; at most 8 of the 9 summaries should appear.
+	threads := make([]models.SessionThread, 0, 10)
+	threads = append(threads, models.SessionThread{
+		ID:        uuid.New(),
+		SessionID: sessionID,
+		OrgID:     orgID,
+		Label:     "Empty",
+		Status:    models.ThreadStatusCompleted,
+		CreatedAt: now,
+		// ResultSummary intentionally nil
+	})
+	for i := range 9 {
+		s := fmt.Sprintf("Thread summary number %d with distinct content.", i+1)
+		threads = append(threads, models.SessionThread{
+			ID:            uuid.New(),
+			SessionID:     sessionID,
+			OrgID:         orgID,
+			Label:         fmt.Sprintf("Thread%d", i+1),
+			Status:        models.ThreadStatusCompleted,
+			CreatedAt:     now.Add(time.Duration(i+1) * time.Minute),
+			ResultSummary: ptrString(s),
+		})
+	}
+
+	mockLLM := &mockLLMClient{
+		response: "<pr_title>Title</pr_title>\n<pr_body>Body</pr_body>",
+	}
+	svc := &PRService{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		llmClient:  mockLLM,
+		logger:     zerolog.Nop(),
+	}
+	svc.SetSessionThreadStore(fakeSessionThreadLister{threads: threads})
+
+	_, err := svc.generatePRContent(context.Background(), "token", "owner", "repo", "main", uuid.New(), orgID, run, nil)
+	require.NoError(t, err)
+	// Threads 1-8 should appear; thread 9 should be capped out.
+	for i := range 8 {
+		require.Contains(t, mockLLM.lastUserPrompt, fmt.Sprintf("Thread summary number %d", i+1))
+	}
+	require.NotContains(t, mockLLM.lastUserPrompt, "Thread summary number 9", "9th summary should be excluded by the 8-thread cap")
+	require.NotContains(t, mockLLM.lastUserPrompt, "Empty", "thread with nil summary should be excluded")
+}
+
 func TestParsePRContentResponse(t *testing.T) {
 	t.Parallel()
 
@@ -2192,9 +2365,25 @@ func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 			pgxmock.NewRows(prTestPreviewTargetColumns).AddRow(
 				targetID, orgID, repoID, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345",
 				"", "", string(models.PreviewSourceTypePullRequest), "owner/repo#42@abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42",
-				userID, nil, now,
+				userID, nil, nil, now,
 			),
 		)
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow("target_created"))
+	prNumber := 42
+	mock.ExpectQuery("INSERT INTO preview_groups").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(prTestPreviewGroupColumns).AddRow(
+				uuid.New(), orgID, repoID, models.PreviewGroupKindPullRequest, "143/abc123/changes", "", &prNumber,
+				models.PreviewSourceTypePullRequest, "owner/repo#42", "https://github.com/owner/repo/pull/42", &targetID,
+				"abc1234567890abcdef1234567890abcdef12345", "target_created", false, &userID, now, now,
+			),
+		)
+	mock.ExpectExec("UPDATE preview_targets SET preview_group_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO preview_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -2210,7 +2399,7 @@ func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 			"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 			"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 			"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-			"source_workspace_revision", "source_workspace_revision_updated_at", "preview_holding_container",
+			"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "preview_holding_container",
 		}))
 
 	svc := &PRService{
@@ -2221,8 +2410,60 @@ func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 
 	url := svc.prPreviewURL(context.Background(), run, repo, "owner", "repo", 42, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42")
 
-	require.Equal(t, "https://"+targetID.String()+".preview.143.dev", url, "PR preview URL should point at the durable preview-origin target host")
+	require.Equal(t, "https://143.dev/previews/github/owner/repo/pull/42?launch=1", url, "PR preview URL should point at the stable app launch route")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUpsertPRPreviewFooter(t *testing.T) {
+	t.Parallel()
+
+	stableURL := "https://143.dev/previews/github/owner/repo/pull/42?launch=1"
+	tests := []struct {
+		name     string
+		body     string
+		expected string
+	}{
+		{
+			name:     "appends stable preview footer",
+			body:     "Changes are ready.",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "keeps existing stable preview footer",
+			body:     "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "replaces stable preview footer missing launch intent",
+			body:     "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "replaces legacy preview origin footer",
+			body:     "Changes are ready.\n\nPreview: https://target-1.preview.143.dev",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "preserves non-footer preview template fields",
+			body:     "## Checklist\nPreview: TBD\n\nPreview: https://target-1.preview.143.dev",
+			expected: "## Checklist\nPreview: TBD\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "replaces legacy app subdomain stable route",
+			body:     "Changes are ready.\n\nPreview: https://app.143.dev/previews/github/owner/repo/pull/42",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := upsertPRPreviewFooter(tt.body, stableURL)
+
+			require.Equal(t, tt.expected, actual, "preview footer should be canonical and idempotent")
+		})
+	}
 }
 
 func TestFormatPRBody_WithIssueContext(t *testing.T) {
@@ -4191,6 +4432,7 @@ type fakeSandboxAuth struct {
 	listenCount   int
 	closeCount    int
 	lastListenKey uuid.UUID
+	lastCloseKey  uuid.UUID
 }
 
 func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *models.Session, _ *models.Repository, _ models.OrgSettings) (string, error) {
@@ -4202,8 +4444,9 @@ func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *mode
 	return f.socketPath, nil
 }
 
-func (f *fakeSandboxAuth) Close(_ uuid.UUID) {
+func (f *fakeSandboxAuth) Close(sessionID uuid.UUID) {
 	f.closeCount++
+	f.lastCloseKey = sessionID
 }
 
 // TestPushSessionBranch_RetryOnRejection_Succeeds locks in the self-healing
@@ -4354,11 +4597,12 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Listener keyed by a fresh per-push UUID, NOT the session ID — that's
-	// what keeps a still-active agent listener (e.g. preview holding the
-	// agent container alive) from being yanked.
-	require.Equal(t, 1, auth.listenCount)
-	require.NotEqual(t, run.ID, auth.lastListenKey, "auth listener must be keyed by a per-push UUID, not the session ID")
+	// The auth server API is session-keyed. Its lease client generates a
+	// separate holder ID internally, so PR push callers must pass the real
+	// session ID or the broker rejects the prepared session.
+	require.Equal(t, 1, auth.listenCount, "pushSessionBranch should open one auth listener")
+	require.Equal(t, run.ID, auth.lastListenKey, "auth listener should be keyed by the session ID")
+	require.Equal(t, run.ID, auth.lastCloseKey, "auth listener close should release the same session key")
 
 	// The sandbox config the provider saw must carry the host socket path
 	// + the in-container env var that 143-tools git-credential reads.
@@ -4369,6 +4613,37 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 	// never runs. The push script sets identity directly via `git config`.
 	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitNameEnvVar)
 	require.NotContains(t, provider.lastConfig.Env, sandboxauth.GitEmailEnvVar)
+}
+
+func TestPushSessionBranch_AuthSocketListenFailureWrapsSentinel(t *testing.T) {
+	t.Parallel()
+
+	provider := &prTestSandboxProvider{}
+	auth := &fakeSandboxAuth{listenErr: errors.New("broker mismatch")}
+	svc := &PRService{
+		sandboxProvider: provider,
+		snapshots:       &prTestSnapshotStore{payload: []byte("snapshot")},
+		sandboxAuth:     auth,
+		logger:          zerolog.Nop(),
+	}
+
+	_, err := svc.pushSessionBranch(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{FullName: "owner/repo"},
+		models.OrgSettings{},
+		"snapshots/key.tar",
+		"143/abc/fix",
+		"commit message",
+		"Bot",
+		"bot@example.com",
+	)
+
+	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should classify auth socket listener failures")
+	require.Contains(t, err.Error(), "open sandbox auth socket", "pushSessionBranch should preserve auth socket context")
+	require.Equal(t, 1, auth.listenCount, "pushSessionBranch should attempt to open the auth listener once")
+	require.Equal(t, 0, auth.closeCount, "pushSessionBranch should not close a listener that never opened")
+	require.Equal(t, 0, provider.destroyed, "pushSessionBranch should not destroy a sandbox when hydrate never started")
 }
 
 func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
@@ -4387,6 +4662,7 @@ func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
 		"k", "b", "m", "n", "e@x",
 	)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should preserve the sandbox auth sentinel")
 	require.Contains(t, err.Error(), "sandbox auth socket not configured")
 }
 

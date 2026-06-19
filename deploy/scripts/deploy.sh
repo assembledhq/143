@@ -58,6 +58,18 @@ repair_deploy_sudoers() {
   bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
 }
 
+# repair-deploy-sudoers.sh can ONLY fix one thing: a missing/incorrect NOPASSWD
+# grant for the deploy user. It reaches the host over root SSH, which is disabled
+# on the fleet, so it is a dead end for every other failure. Only route to it
+# when the remote command actually tripped the sudo policy — otherwise a real
+# error inside the invoked script (e.g. a leaked docker network endpoint) gets
+# misreported as a sudoers problem and the operator is sent chasing root SSH that
+# will never work. These signatures are what `sudo -n` prints when it refuses.
+is_sudoers_failure() {
+  printf '%s' "$1" | grep -qiE \
+    'sudo: (a password is required|sorry, a password is required|no tty present)|not allowed to execute|is not in the sudoers file'
+}
+
 warn_log_rotation_skipped() {
   echo "WARNING: docker log rotation was not updated on this deploy; continuing."
   echo "  The service deploy will continue, but local Docker json-file logs may remain unbounded."
@@ -138,22 +150,66 @@ apply_static_egress_worker_host_map() {
   done
 }
 
+# Canonical worker fingerprint input lists, shared by the staged fingerprint
+# gate and the blue/green rollover (including the detached rollover script).
+# Both sides MUST hash the same inputs: the gate repairs the persisted
+# baseline from these lists, and the rollover compares its own computation
+# against that baseline. If they diverge, every routine deploy fails with
+# "config changed" even when nothing changed — the gate writes one hash, the
+# rollover expects another, and DEPLOY_MODE=maintenance just re-arms the loop.
+WORKER_HOST_RUNTIME_FINGERPRINT_FILES='/opt/143/deploy/scripts/reconcile-worker-host.sh /opt/143/deploy/scripts/sandbox-firewall.sh /opt/143/deploy/scripts/sandbox-resolv-conf.sh /opt/143/deploy/scripts/install-static-egress-worker.sh'
+WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='/opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-log-rotation.sh'
+WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='/opt/143/Dockerfile.dnsmasq /opt/143/docker-compose.dns-probe.yml'
+WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='chrome gvisor-check sandbox-dns'
+
 run_worker_staged_fingerprint_gate() {
   if [ "$ROLE" != "worker" ]; then
     return 0
   fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+    "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
+    "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
     'bash -s' <<'REMOTE'
 set -euo pipefail
 
+: "${WORKER_HOST_RUNTIME_FINGERPRINT_FILES:?deploy.sh must pass the shared host-runtime fingerprint file list}"
+: "${WORKER_DOCKER_DAEMON_FINGERPRINT_FILES:?deploy.sh must pass the shared docker-daemon fingerprint file list}"
+: "${WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES:?deploy.sh must pass the shared support-service fingerprint file list}"
+: "${WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES:?deploy.sh must pass the shared support-service compose service list}"
+
 fingerprint_candidate_files() {
-  local existing=()
+  local selected=()
   local path
   for path in "$@"; do
     if [ -e "${path}.new" ]; then
-      existing+=("${path}.new")
+      selected+=("$path:${path}.new")
     elif [ -e "$path" ]; then
+      selected+=("$path:$path")
+    fi
+  done
+  if [ "${#selected[@]}" -eq 0 ]; then
+    echo "none"
+    return 0
+  fi
+  {
+    local entry logical_path selected_path file_hash
+    for entry in "${selected[@]}"; do
+      logical_path="${entry%%:*}"
+      selected_path="${entry#*:}"
+      file_hash="$(sha256sum "$selected_path" | awk '{print $1}')"
+      printf '%s  %s\n' "$file_hash" "$logical_path"
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+fingerprint_active_files() {
+  local existing=()
+  local path
+  for path in "$@"; do
+    if [ -e "$path" ]; then
       existing+=("$path")
     fi
   done
@@ -161,10 +217,43 @@ fingerprint_candidate_files() {
     echo "none"
     return 0
   fi
-  sha256sum "${existing[@]}" | sha256sum | awk '{print $1}'
+  {
+    local selected_path file_hash
+    for selected_path in "${existing[@]}"; do
+      file_hash="$(sha256sum "$selected_path" | awk '{print $1}')"
+      printf '%s  %s\n' "$file_hash" "$selected_path"
+    done
+  } | sha256sum | awk '{print $1}'
 }
 
 compose_service_fingerprint() {
+  local compose_file="$1"
+  shift
+  local read_file="$compose_file"
+  if [ -e "${compose_file}.new" ]; then
+    read_file="${compose_file}.new"
+  fi
+  if [ ! -e "$read_file" ]; then
+    printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
+    return 0
+  fi
+  {
+    local svc
+    for svc in "$@"; do
+      printf -- '--- %s:%s ---\n' "$compose_file" "$svc"
+      awk -v svc="$svc" '
+        /^  [A-Za-z0-9_.-]+:/ {
+          current=$1
+          sub(/:$/, "", current)
+          in_service=(current == svc)
+        }
+        in_service { print }
+      ' "$read_file"
+    done
+  } | sha256sum | awk '{print $1}'
+}
+
+compose_service_active_fingerprint() {
   local compose_file="$1"
   shift
   if [ ! -e "$compose_file" ]; then
@@ -191,27 +280,54 @@ worker_process_config_fingerprint() {
   compose_service_fingerprint /opt/143/docker-compose.worker.yml worker
 }
 
+# The shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES lists are intentionally
+# expanded unquoted: they are space-separated lists of paths/services.
 worker_support_service_fingerprint() {
   {
-    compose_service_fingerprint /opt/143/docker-compose.worker.yml chrome gvisor-check sandbox-dns
-    fingerprint_candidate_files \
-      /opt/143/Dockerfile.dnsmasq \
-      /opt/143/docker-compose.dns-probe.yml
+    # shellcheck disable=SC2086
+    compose_service_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+    # shellcheck disable=SC2086
+    fingerprint_candidate_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
+  } | sha256sum | awk '{print $1}'
+}
+
+worker_active_support_service_fingerprint() {
+  {
+    # shellcheck disable=SC2086
+    compose_service_active_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+    # shellcheck disable=SC2086
+    fingerprint_active_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
   } | sha256sum | awk '{print $1}'
 }
 
 worker_host_runtime_fingerprint() {
-  fingerprint_candidate_files \
-    /opt/143/deploy/scripts/reconcile-worker-host.sh \
-    /opt/143/deploy/scripts/sandbox-firewall.sh \
-    /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
-    /opt/143/deploy/scripts/install-static-egress-worker.sh
+  # shellcheck disable=SC2086
+  fingerprint_candidate_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
+}
+
+worker_active_host_runtime_fingerprint() {
+  # shellcheck disable=SC2086
+  fingerprint_active_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
 }
 
 worker_docker_daemon_fingerprint() {
-  fingerprint_candidate_files \
-    /opt/143/deploy/scripts/install-docker-dns.sh \
-    /opt/143/deploy/scripts/install-log-rotation.sh
+  # shellcheck disable=SC2086
+  fingerprint_candidate_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
+}
+
+worker_active_docker_daemon_fingerprint() {
+  # shellcheck disable=SC2086
+  fingerprint_active_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
+}
+
+repair_stale_worker_fingerprint() {
+  local label="$1" file="$2" expected="$3" candidate="$4" active="$5"
+  if [ "$expected" != "$candidate" ] && [ "$candidate" = "$active" ]; then
+    echo "WARNING: stored worker $label fingerprint is stale; repairing baseline because staged candidate matches active files." >&2
+    printf '%s\n' "$candidate" > "$file"
+    return 0
+  fi
+  return 1
 }
 
 mode="${DEPLOY_MODE:-routine}"
@@ -219,6 +335,9 @@ worker_process_fingerprint="$(worker_process_config_fingerprint)"
 support_fingerprint="$(worker_support_service_fingerprint)"
 host_runtime_fingerprint="$(worker_host_runtime_fingerprint)"
 docker_daemon_fingerprint="$(worker_docker_daemon_fingerprint)"
+active_support_fingerprint="$(worker_active_support_service_fingerprint)"
+active_host_runtime_fingerprint="$(worker_active_host_runtime_fingerprint)"
+active_docker_daemon_fingerprint="$(worker_active_docker_daemon_fingerprint)"
 
 worker_process_expected="$worker_process_fingerprint"
 support_expected="$support_fingerprint"
@@ -231,19 +350,33 @@ docker_daemon_expected="$docker_daemon_fingerprint"
 [ ! -f /opt/143/.worker-docker-daemon.fingerprint ] || docker_daemon_expected="$(cat /opt/143/.worker-docker-daemon.fingerprint)"
 
 if [ "$mode" = "routine" ] && [ "$support_expected" != "$support_fingerprint" ]; then
-  echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
-  echo "current=$support_expected candidate=$support_fingerprint" >&2
-  exit 1
+  if repair_stale_worker_fingerprint "support-service" /opt/143/.worker-support-services.v2.fingerprint "$support_expected" "$support_fingerprint" "$active_support_fingerprint"; then
+    support_expected="$support_fingerprint"
+  else
+    echo "ERROR: worker support-service config changed during routine deploy; this can recreate sandbox-dns/chrome while sessions are active." >&2
+    echo "  Routine deploys verify support services but do not activate support-service changes." >&2
+    echo "  Run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "current=$support_expected candidate=$support_fingerprint" >&2
+    exit 1
+  fi
 fi
 if [ "$mode" = "routine" ] && [ "$host_runtime_expected" != "$host_runtime_fingerprint" ]; then
-  echo "ERROR: worker host-runtime config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
-  echo "current=$host_runtime_expected candidate=$host_runtime_fingerprint" >&2
-  exit 1
+  if repair_stale_worker_fingerprint "host-runtime" /opt/143/.worker-host-runtime.fingerprint "$host_runtime_expected" "$host_runtime_fingerprint" "$active_host_runtime_fingerprint"; then
+    host_runtime_expected="$host_runtime_fingerprint"
+  else
+    echo "ERROR: worker host-runtime config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "current=$host_runtime_expected candidate=$host_runtime_fingerprint" >&2
+    exit 1
+  fi
 fi
 if [ "$mode" = "routine" ] && [ "$docker_daemon_expected" != "$docker_daemon_fingerprint" ]; then
-  echo "ERROR: worker docker-daemon config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
-  echo "current=$docker_daemon_expected candidate=$docker_daemon_fingerprint" >&2
-  exit 1
+  if repair_stale_worker_fingerprint "docker-daemon" /opt/143/.worker-docker-daemon.fingerprint "$docker_daemon_expected" "$docker_daemon_fingerprint" "$active_docker_daemon_fingerprint"; then
+    docker_daemon_expected="$docker_daemon_fingerprint"
+  else
+    echo "ERROR: worker docker-daemon config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+    echo "current=$docker_daemon_expected candidate=$docker_daemon_fingerprint" >&2
+    exit 1
+  fi
 fi
 REMOTE
 }
@@ -259,7 +392,18 @@ if [ -z "${SOPS_AGE_KEY:-}" ]; then
   fi
 fi
 
-ENC_FILE="$PROJECT_DIR/.env.production.enc"
+# The encrypted bundle lives in the private secrets checkout, not this
+# (public) repo. Resolved worktree-safely; see resolve-secrets-dir.sh.
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="$SECRETS_DIR/.env.production.enc"
+# Having the age key but no bundle means the private secrets checkout is
+# missing — deploying anyway would silently reuse stale /opt/143/.env and
+# skip the bundle scp. Fail loudly instead of degrading.
+if [ -n "${SOPS_AGE_KEY:-}" ] && [ ! -f "$ENC_FILE" ]; then
+  echo "ERROR: SOPS_AGE_KEY is set but $ENC_FILE does not exist." >&2
+  echo "Clone the private secrets repo next to the main checkout (see docs/secrets/README.md) or set SECRETS_DIR." >&2
+  exit 1
+fi
 if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
   echo "Refreshing secrets from .env.production.enc..."
   DECRYPTED=$(SOPS_AGE_KEY="$SOPS_AGE_KEY" sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE")
@@ -361,8 +505,14 @@ else
   echo "Skipping secret refresh (no SOPS key or .env.production.enc not found)."
 fi
 
-# Sync compose file so the remote always runs the latest version
-scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+# Sync compose file so the remote always runs the latest version. Worker
+# compose can include support-service changes, so stage it until the routine
+# worker fingerprint gate allows promotion.
+if [ "$ROLE" = "worker" ]; then
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new
+else
+  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
+fi
 if [ "$ROLE" = "db" ]; then
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy/postgres"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/postgresql.conf" deploy@"$HOST":/opt/143/deploy/postgres/
@@ -377,7 +527,11 @@ fi
 # own stack and doesn't include it). Stage the file so docker compose can
 # resolve the include directive.
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
-  scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+  if [ "$ROLE" = "worker" ]; then
+    scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/docker-compose.dns-probe.yml.new
+  else
+    scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
+  fi
 fi
 if [ "$ROLE" = "logging" ]; then
   # Older logging hosts may have root-owned vmalert/grafana dirs from a prior
@@ -478,7 +632,9 @@ if [ "$ROLE" = "worker" ]; then
     deploy@"$HOST":/opt/143/deploy/scripts/install-docker-dns.sh.new
   run_worker_staged_fingerprint_gate
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
+    "mv /opt/143/$COMPOSE_FILE.new /opt/143/$COMPOSE_FILE \
+     && mv /opt/143/docker-compose.dns-probe.yml.new /opt/143/docker-compose.dns-probe.yml \
+     && mv /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-firewall.sh \
      && mv /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      && chmod +x /opt/143/deploy/scripts/sandbox-resolv-conf.sh \
      && mv /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh \
@@ -486,7 +642,7 @@ if [ "$ROLE" = "worker" ]; then
      && mv /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh \
      && chmod +x /opt/143/deploy/scripts/reconcile-worker-host.sh \
      && mv /opt/143/Dockerfile.dnsmasq.new /opt/143/Dockerfile.dnsmasq \
-     || { rm -f /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
+     || { rm -f /opt/143/$COMPOSE_FILE.new /opt/143/docker-compose.dns-probe.yml.new /opt/143/deploy/scripts/sandbox-firewall.sh.new /opt/143/deploy/scripts/sandbox-resolv-conf.sh.new /opt/143/deploy/scripts/install-static-egress-worker.sh.new /opt/143/deploy/scripts/reconcile-worker-host.sh.new /opt/143/Dockerfile.dnsmasq.new; exit 1; }"
 
   echo "Reconciling worker host invariants..."
   if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
@@ -494,19 +650,43 @@ if [ "$ROLE" = "worker" ]; then
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       "docker pull \"$static_egress_probe_image\""
   fi
-  if ! run_worker_host_reconcile; then
-    echo "reconcile-worker-host.sh failed under deploy+sudo; trying no-teardown deploy sudoers repair..."
-    if repair_deploy_sudoers; then
-      echo "Retrying worker host reconciliation after sudoers repair..."
-      run_worker_host_reconcile
+  # Capture the reconcile output (while still streaming it live via tee) so we
+  # can tell a sudoers refusal apart from a genuine reconcile error. PIPESTATUS
+  # gives us the ssh exit status, which propagates the remote script's exit code;
+  # tee almost never fails. set +e keeps the failing pipeline from aborting the
+  # script before we classify it.
+  reconcile_log="$(mktemp)"
+  set +e
+  run_worker_host_reconcile 2>&1 | tee "$reconcile_log"
+  reconcile_rc="${PIPESTATUS[0]}"
+  set -e
+  if [ "$reconcile_rc" -ne 0 ]; then
+    if is_sudoers_failure "$(cat "$reconcile_log")"; then
+      echo "reconcile-worker-host.sh blocked by missing deploy sudoers; trying no-teardown deploy sudoers repair..."
+      if repair_deploy_sudoers; then
+        echo "Retrying worker host reconciliation after sudoers repair..."
+        run_worker_host_reconcile
+      else
+        echo "ERROR: reconcile-worker-host.sh was blocked by sudoers and repair via root SSH did not complete."
+        echo "  Run once from a machine with root SSH access:"
+        echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
+        echo "  Then re-run the deploy."
+        rm -f "$reconcile_log"
+        exit 1
+      fi
     else
-      echo "ERROR: reconcile-worker-host.sh failed and sudoers repair via root SSH did not complete."
-      echo "  Run once from a machine with root SSH access:"
-      echo "    make repair-deploy-sudoers ROLE=$ROLE HOST=$HOST SSH_KEY=$SSH_KEY"
-      echo "  Then re-run the deploy."
+      echo "ERROR: reconcile-worker-host.sh failed on $HOST. This is NOT a sudoers problem"
+      echo "  (the deploy sudo grant ran); the underlying reconcile error is printed above."
+      echo "  Common cause: a leaked docker network endpoint holding sandbox-dns's pinned IP"
+      echo "  (\"Address already in use\"). reconcile-worker-host.sh retries leaked-endpoint cleanup;"
+      echo "  if it persists, on the host run: docker network inspect 143-sandbox, then"
+      echo "  docker network disconnect -f 143-sandbox <stale-endpoint>, and re-run the deploy."
+      echo "  If instead you see an SSH 'Permission denied (publickey)', run: make sync-keys APPLY=true"
+      rm -f "$reconcile_log"
       exit 1
     fi
   fi
+  rm -f "$reconcile_log"
 fi
 
 if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
@@ -669,6 +849,10 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
   "$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")" \
   "$(remote_env_assignment DEPLOY_DOCKER_VOLUME_PRUNE "${DEPLOY_DOCKER_VOLUME_PRUNE:-0}")" \
+  "$(remote_env_assignment WORKER_HOST_RUNTIME_FINGERPRINT_FILES "$WORKER_HOST_RUNTIME_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_DOCKER_DAEMON_FINGERPRINT_FILES "$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES "$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES")" \
+  "$(remote_env_assignment WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES "$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES")" \
   bash << 'REMOTE'
   set -euo pipefail
   cd /opt/143
@@ -959,6 +1143,23 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     return 1
   }
 
+  preview_rpc_auth_preflight() {
+    local cid="$1"
+    # The app-side probe signs with the candidate's secret and validates against
+    # every active preview worker — the only place a worker with a divergent
+    # secret (stale bundle / incomplete rotation) is caught. Fail the deploy on
+    # any unverified *active* worker rather than silently tolerating it; set
+    # PREVIEW_RPC_AUTH_STRICT=0 to fall back to best-effort in an emergency.
+    local strict_flag="--fail-on-skipped"
+    if [ "${PREVIEW_RPC_AUTH_STRICT:-1}" != "1" ]; then
+      strict_flag=""
+      echo "PREVIEW_RPC_AUTH_STRICT=0: preview RPC auth-check will not fail on unverified active workers."
+    fi
+    echo "Running preview RPC auth compatibility check from candidate api container ${cid:0:12}..."
+    # shellcheck disable=SC2086 # $strict_flag is an optional single flag or empty
+    docker exec "$cid" /docker-entrypoint.sh /bin/worker-deployctl preview-auth-check --json $strict_flag
+  }
+
   # rolling_deploy_service SERVICE — roll a single service with zero-downtime:
   #   1. scale up by 1 alongside the existing container(s)
   #   2. wait for the new container's health check
@@ -1029,6 +1230,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ -n "$old_containers" ]; then
+      if [ "$service" = "api" ]; then
+        preview_rpc_auth_preflight "$new_container"
+      fi
       wait_caddy_upstream_discovery "$service" "$new_container"
       # Stop each old container with a long timeout so in-flight requests and
       # SSE streams have time to drain. Docker sends SIGTERM and only falls
@@ -1334,26 +1538,27 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     compose_service_fingerprint /opt/143/docker-compose.worker.yml worker
   }
 
+  # These fingerprints must match the staged fingerprint gate's computation
+  # exactly, so both read the shared *_FINGERPRINT_FILES / *_COMPOSE_SERVICES
+  # lists (passed via SSH env here, baked into the detached rollover script).
+  # The lists are space-separated, hence the intentional unquoted expansion.
   worker_support_service_fingerprint() {
     {
-      compose_service_fingerprint /opt/143/docker-compose.worker.yml chrome gvisor-check sandbox-dns
-      fingerprint_files \
-        /opt/143/Dockerfile.dnsmasq \
-        /opt/143/docker-compose.dns-probe.yml
+      # shellcheck disable=SC2086
+      compose_service_fingerprint /opt/143/docker-compose.worker.yml $WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES
+      # shellcheck disable=SC2086
+      fingerprint_files $WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES
     } | sha256sum | awk '{print $1}'
   }
 
   worker_host_runtime_fingerprint() {
-    fingerprint_files \
-      /opt/143/deploy/scripts/reconcile-worker-host.sh \
-      /opt/143/deploy/scripts/sandbox-firewall.sh \
-      /opt/143/deploy/scripts/sandbox-resolv-conf.sh
+    # shellcheck disable=SC2086
+    fingerprint_files $WORKER_HOST_RUNTIME_FINGERPRINT_FILES
   }
 
   worker_docker_daemon_fingerprint() {
-    fingerprint_files \
-      /opt/143/deploy/scripts/install-docker-dns.sh \
-      /opt/143/deploy/scripts/install-log-rotation.sh
+    # shellcheck disable=SC2086
+    fingerprint_files $WORKER_DOCKER_DAEMON_FINGERPRINT_FILES
   }
 
   ensure_routine_worker_fingerprints_compatible() {
@@ -1389,7 +1594,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
 
     if [ "$mode" = "routine" ] && [ "$WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT" != "$WORKER_SUPPORT_SERVICE_FINGERPRINT" ]; then
-      echo "ERROR: worker support-service config changed during routine deploy; run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
+      echo "ERROR: worker support-service config changed during routine deploy; this can recreate sandbox-dns/chrome while sessions are active." >&2
+      echo "  Routine deploys verify support services but do not activate support-service changes." >&2
+      echo "  Run DEPLOY_MODE=maintenance after reviewing active runtime impact." >&2
       echo "current=$WORKER_SUPPORT_SERVICE_EXPECTED_FINGERPRINT candidate=$WORKER_SUPPORT_SERVICE_FINGERPRINT" >&2
       return 1
     fi
@@ -1640,6 +1847,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       docker rm "$new_cid" >/dev/null 2>&1 || true
       return 1
     fi
+    if ! run_worker_deployctl preview-auth-check --node-id "$node_id" --json; then
+      echo "Rolling back worker generation ${new_cid:0:12} after preview RPC auth compatibility failure..."
+      docker stop "$new_cid" >/dev/null 2>&1 || true
+      docker rm "$new_cid" >/dev/null 2>&1 || true
+      return 1
+    fi
     if [ -n "$preflight_node_id" ]; then
       protect_active_executor_images "$preflight_node_id" "$deploy_id"
     fi
@@ -1834,10 +2047,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
   if [ "$ROLE" = "worker" ]; then
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
-    # Build sandbox-dns explicitly. Compose's auto-build on `up` only fires when
-    # the local image is absent, so a Dockerfile.dnsmasq change wouldn't take
-    # effect on a host that already has 143-sandbox-dns:local from a prior deploy.
-    docker compose -f "$COMPOSE_FILE" build sandbox-dns
+    if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
+      if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
+        echo "sandbox-dns image missing; building local support image for routine worker deploy..."
+        docker compose -f "$COMPOSE_FILE" build sandbox-dns
+      else
+        echo "Skipping sandbox-dns build for routine worker deploy; use DEPLOY_MODE=maintenance to activate support-service changes."
+      fi
+    else
+      # Maintenance deploys intentionally rebuild locally-built support images
+      # before recreating support services below.
+      docker compose -f "$COMPOSE_FILE" build sandbox-dns
+    fi
   elif [ "$ROLE" = "app" ]; then
     CADDY_DOCKERFILE_CHANGED=0
     if stage_caddy_dockerfile_if_changed; then
@@ -1861,8 +2082,6 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   if [ "$ROLE" = "app" ]; then
     echo "Running database migrations..."
     docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
-    echo "Running coding-credentials Anthropic split post-step..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate-coding-credentials-anthropic-split --allow-dual-set < /dev/null
   fi
 
   # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.
@@ -1942,6 +2161,10 @@ WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS='${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-}'
 WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS='${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-}'
 WORKER_BASE_NODE_ID='${WORKER_BASE_NODE_ID:-}'
 WORKER_DRAIN_TIMEOUT='${WORKER_DRAIN_TIMEOUT:-}'
+WORKER_HOST_RUNTIME_FINGERPRINT_FILES='$WORKER_HOST_RUNTIME_FINGERPRINT_FILES'
+WORKER_DOCKER_DAEMON_FINGERPRINT_FILES='$WORKER_DOCKER_DAEMON_FINGERPRINT_FILES'
+WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='$WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES'
+WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='$WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES'
 
 # Always write a status file so the verify step has a deterministic signal.
 # If we exit before the success line writes "ok", the trap leaves "fail".

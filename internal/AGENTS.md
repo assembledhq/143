@@ -41,6 +41,7 @@ FKs are the default; hot append-only tables need an exception process because pa
 **Default to immutability.** When transforming data, return a new struct value rather than mutating the input in place.
 
 - Return a new struct (or `*T` constructed with `&T{...}`) from transformation functions instead of taking a pointer and writing through it.
+- For response-building or enrichment helpers, prefer idempotent functions that accept the current response value and return an enriched copy. This keeps handler state flow explicit and makes repeated calls safe.
 - Build new slices with `append` onto a fresh slice rather than mutating an argument; same for maps — copy then write.
 - Avoid setter methods that mutate the receiver — prefer `WithFoo(v) T` style that returns a copy.
 - Don't expose mutable references across package boundaries. If you must return a slice/map, return a copy or document that the caller must not mutate it.
@@ -48,6 +49,12 @@ FKs are the default; hot append-only tables need an exception process because pa
 **Mutation is the exception, not the default.** Only reach for mutating code when there is a real, measured performance reason — e.g., a hot loop where allocations show up in a profile, or building a large structure incrementally where copying each step would be O(n²). When you do mutate, keep the mutation local and add a short comment explaining why immutability was rejected.
 
 When in doubt, write the immutable version first. It's almost always fast enough, and it eliminates an entire class of aliasing and data-race bugs (especially important for anything shared across goroutines).
+
+## Settings Documents: Merge Patch, Not Replace
+
+Endpoints that update a JSONB settings/preferences document (user settings, org settings, and anything similar added later) must accept an **RFC 7386 JSON merge patch**, not a full replacement document: omitted fields keep their stored value, `null` clears a field, nested objects merge per key. Full-document replace forces clients to rebuild the body from their local cache, which silently clobbers concurrent edits from other tabs (cross-tab last-write-wins).
+
+Apply the patch server-side as a read-merge-write inside a transaction with the row locked (`SELECT ... FOR UPDATE`) so concurrent patches compose, and validate the merged document before committing. Reference implementation: `UserStore.MergeSettings` (`internal/db/users.go`) + `models.ApplyUserSettingsMergePatch` (`internal/models/user_settings.go`), wired up in `AuthHandler.UpdateSettings`. The frontend-side rules live in `frontend/AGENTS.md` ("Settings Mutations: Patch, Don't Replace").
 
 ## No N+1 Queries
 

@@ -19,8 +19,9 @@ const (
 		summary_preview_json, enrichment_status, enriched_at, created_at, updated_at`
 	prHealthSnapshotSelectColumns = `pull_request_id, org_id, version, head_sha, base_sha, summary_json,
 		conflict_payload, failing_tests_payload, payload_size_bytes, enrichment_status, enriched_at, created_at`
-	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, action_type, health_version,
-		workspace_mode, active, obsoleted_by_version, created_at, updated_at`
+	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, thread_id, action_type, health_version,
+		workspace_mode, active, obsoleted_by_version, created_at, updated_at,
+		COALESCE(head_sha, '') AS head_sha, COALESCE(base_sha, '') AS base_sha`
 )
 
 func (s *PullRequestStore) beginTx(ctx context.Context) (pgx.Tx, error) {
@@ -163,10 +164,12 @@ func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullR
 			WHERE org_id = @org_id
 			  AND pull_request_id = @pull_request_id
 			  AND active = true
-			  AND health_version < @version`, pgx.NamedArgs{
+			  AND health_version < @version
+			  AND head_sha IS DISTINCT FROM @head_sha`, pgx.NamedArgs{
 			"org_id":          orgID,
 			"pull_request_id": pullRequestID,
 			"version":         version,
+			"head_sha":        headSHA,
 		}); err != nil {
 			return models.PullRequestHealthCurrent{}, fmt.Errorf("obsolete prior pull request repair runs: %w", err)
 		}
@@ -324,6 +327,30 @@ func (s *PullRequestStore) GetActiveRepairRun(ctx context.Context, orgID, pullRe
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
 }
 
+func (s *PullRequestStore) GetActiveRepairRunByHead(ctx context.Context, orgID, pullRequestID uuid.UUID, action models.PullRequestRepairActionType, headSHA string) (models.PullRequestRepairRun, error) {
+	query := `
+		SELECT ` + prRepairRunSelectColumns + `
+		FROM pull_request_repair_runs
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND action_type = @action_type
+		  AND head_sha = @head_sha
+		  AND active = true
+		ORDER BY created_at DESC
+		LIMIT 1`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+		"action_type":     action,
+		"head_sha":        headSHA,
+	})
+	if err != nil {
+		return models.PullRequestRepairRun{}, fmt.Errorf("query active pull request repair run by head: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
+}
+
 func (s *PullRequestStore) ListActiveRepairRuns(ctx context.Context, orgID, pullRequestID uuid.UUID, healthVersion int64) ([]models.PullRequestRepairRun, error) {
 	query := `
 		SELECT ` + prRepairRunSelectColumns + `
@@ -345,15 +372,38 @@ func (s *PullRequestStore) ListActiveRepairRuns(ctx context.Context, orgID, pull
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
 }
 
+func (s *PullRequestStore) ListActiveRepairRunsByHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string) ([]models.PullRequestRepairRun, error) {
+	query := `
+		SELECT ` + prRepairRunSelectColumns + `
+		FROM pull_request_repair_runs
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND head_sha = @head_sha
+		  AND active = true
+		ORDER BY created_at DESC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+		"head_sha":        headSHA,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list active pull request repair runs by head: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
+}
+
 func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.PullRequestRepairRun) error {
 	if run.WorkspaceMode == "" {
 		run.WorkspaceMode = models.PullRequestRepairWorkspaceModeSnapshotContinuation
 	}
 	query := `
 		INSERT INTO pull_request_repair_runs (
-			org_id, pull_request_id, session_id, action_type, health_version, workspace_mode, active, obsoleted_by_version
+			org_id, pull_request_id, session_id, thread_id, action_type, health_version, workspace_mode, active, obsoleted_by_version,
+			head_sha, base_sha
 		) VALUES (
-			@org_id, @pull_request_id, @session_id, @action_type, @health_version, @workspace_mode, @active, @obsoleted_by_version
+			@org_id, @pull_request_id, @session_id, @thread_id, @action_type, @health_version, @workspace_mode, @active, @obsoleted_by_version,
+			@head_sha, @base_sha
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -361,11 +411,14 @@ func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.Pull
 		"org_id":               run.OrgID,
 		"pull_request_id":      run.PullRequestID,
 		"session_id":           run.SessionID,
+		"thread_id":            run.ThreadID,
 		"action_type":          run.ActionType,
 		"health_version":       run.HealthVersion,
 		"workspace_mode":       run.WorkspaceMode,
 		"active":               run.Active,
 		"obsoleted_by_version": run.ObsoletedByVersion,
+		"head_sha":             run.HeadSHA,
+		"base_sha":             run.BaseSHA,
 	}).Scan(&run.ID, &run.CreatedAt, &run.UpdatedAt)
 }
 

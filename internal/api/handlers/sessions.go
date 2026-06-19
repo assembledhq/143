@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -65,6 +67,7 @@ type SessionHandler struct {
 	questionStore      *db.SessionQuestionStore
 	humanInputStore    *db.SessionHumanInputRequestStore
 	humanInputService  *humaninputsvc.Service
+	capabilityService  *agentcapabilities.Service
 	pullRequestStore   *db.PullRequestStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
@@ -473,6 +476,30 @@ func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRe
 		h.threadStore,
 		h.jobStore,
 	)
+	if h.capabilityService != nil {
+		h.humanInputService.SetCapabilityApprover(sessionCapabilityApprover{svc: h.capabilityService})
+	}
+}
+
+func (h *SessionHandler) SetCapabilityService(svc *agentcapabilities.Service) {
+	h.capabilityService = svc
+	if h.humanInputService != nil && svc != nil {
+		h.humanInputService.SetCapabilityApprover(sessionCapabilityApprover{svc: svc})
+	}
+}
+
+type sessionCapabilityApprover struct {
+	svc *agentcapabilities.Service
+}
+
+func (a sessionCapabilityApprover) ApplyApprovedGrant(ctx context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) ([]models.AgentCapabilitySnapshotItem, error) {
+	return a.svc.ApplyApprovedGrant(ctx, agentcapabilities.ApprovedGrantInput{
+		OrgID:               orgID,
+		SessionID:           sessionID,
+		HumanInputRequestID: requestID,
+		Capability:          capability,
+		AccessLevel:         accessLevel,
+	})
 }
 
 func (h *SessionHandler) SetThreadInboxStore(store *db.ThreadInboxStore) {
@@ -815,6 +842,14 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.enrichSessionLinks(r.Context(), orgID, &run)
 
 	detail := models.SessionDetail{Session: run}
+	if h.repoStore != nil && run.RepositoryID != nil {
+		repo, err := h.repoStore.GetByID(r.Context(), orgID, *run.RepositoryID)
+		if err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", runID.String()).Str("repository_id", run.RepositoryID.String()).Msg("failed to load repository for session detail")
+		} else {
+			detail.RepositoryFullName = &repo.FullName
+		}
+	}
 	if h.threadStore != nil {
 		threads, err := h.threadStore.ListBySession(r.Context(), orgID, runID)
 		if err != nil {
@@ -997,9 +1032,24 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 		AgentType     string `json:"agent_type"`
 		AutonomyLevel string `json:"autonomy_level"`
 		TokenMode     string `json:"token_mode"`
+		Message       string `json:"message"`
+		// Force allows an admin to kick off a session even when the autopilot
+		// state is blocked, failed, or skipped. Rejected for non-admins.
+		Force bool `json:"force"`
 	}
-	// Ignore decode errors — body is optional, fields default below.
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body", err)
+		return
+	}
+	if body.Force && middleware.ActiveRoleFromContext(r.Context()) != string(models.RoleAdmin) {
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "admin role required to force-start a session")
+		return
+	}
+	const maxMessageLength = 10000
+	if utf8.RuneCountInString(body.Message) > maxMessageLength {
+		writeError(w, r, http.StatusBadRequest, "MESSAGE_TOO_LONG", fmt.Sprintf("message must not exceed %d characters", maxMessageLength))
+		return
+	}
 
 	agentType := models.AgentType(body.AgentType)
 	if agentType == "" {
@@ -1066,6 +1116,23 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.Create(r.Context(), run); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create agent run", err)
 		return
+	}
+
+	if initialMessage := strings.TrimSpace(body.Message); h.messageStore != nil && initialMessage != "" {
+		msg := &models.SessionMessage{
+			SessionID:  run.ID,
+			OrgID:      orgID,
+			ThreadID:   run.PrimaryThreadID,
+			TurnNumber: 0,
+			Role:       models.MessageRoleUser,
+			Content:    initialMessage,
+		}
+		if user := middleware.UserFromContext(r.Context()); user != nil {
+			msg.UserID = &user.ID
+		}
+		if err := h.messageStore.Create(r.Context(), msg); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to persist initial session message; session will proceed without it")
+		}
 	}
 
 	// Generate a title from the issue for non-manual sessions.
@@ -1412,8 +1479,44 @@ func (h *SessionHandler) writeLogsForOrg(w http.ResponseWriter, r *http.Request,
 		logs = []models.SessionLog{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLog]{
-		Data: logs,
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionLogResponse]{
+		Data: models.NewSessionLogResponses(logs),
+	})
+}
+
+// GetLogDetail returns the full message for one session log. Historical log
+// list and timeline endpoints return previews, so expanded UI rows call this
+// endpoint only when full detail is needed.
+func (h *SessionHandler) GetLogDetail(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	logID, err := strconv.ParseInt(chi.URLParam(r, "log_id"), 10, 64)
+	if err != nil || logID <= 0 {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid log ID")
+		return
+	}
+
+	if _, err := h.runStore.GetByID(r.Context(), orgID, sessionID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	log, err := h.logStore.GetByID(r.Context(), orgID, sessionID, logID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "log not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GET_FAILED", "failed to get log", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionLogDetailResponse]{
+		Data: models.NewSessionLogDetailResponse(log),
 	})
 }
 
@@ -1792,11 +1895,12 @@ func writeSessionLogSSEEvent(sw *sse.Writer, log models.SessionLog) error {
 }
 
 func writeSessionLogSSEEventWithID(sw *sse.Writer, streamID string, log models.SessionLog) error {
-	if err := sw.WriteDataID(streamID, log); err != nil {
+	payload := models.NewSessionLogResponse(log)
+	if err := sw.WriteDataID(streamID, payload); err != nil {
 		return err
 	}
 	if eventType, ok := humanInputSSEEventType(log); ok {
-		if err := sw.WriteEventID(eventType, streamID, log); err != nil {
+		if err := sw.WriteEventID(eventType, streamID, payload); err != nil {
 			return err
 		}
 	}
@@ -1951,9 +2055,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 
 	// Parse optional request body for per-PR overrides and authorship flow.
 	var req struct {
-		Draft       *bool  `json:"draft,omitempty"`
-		AuthorMode  string `json:"author_mode,omitempty"`
-		ResumeToken string `json:"resume_token,omitempty"`
+		Draft          *bool  `json:"draft,omitempty"`
+		AuthorMode     string `json:"author_mode,omitempty"`
+		ResumeToken    string `json:"resume_token,omitempty"`
+		MergeWhenReady bool   `json:"merge_when_ready,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -1965,6 +2070,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
+	}
+	if req.ResumeToken != "" && len(h.prAuthSigningKey) > 0 {
+		if claims, tokenErr := parsePRAuthResumeToken(h.prAuthSigningKey, req.ResumeToken, time.Now()); tokenErr == nil && claims.MergeWhenReady {
+			req.MergeWhenReady = true
+		}
 	}
 
 	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
@@ -1991,6 +2101,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		ActionDescription:    "create this pull request",
 		ResumeExpiredMessage: "GitHub authorization completed, but the PR resume request expired. Please click Create PR again.",
 		Draft:                req.Draft,
+		MergeWhenReady:       req.MergeWhenReady,
 	}) {
 		return
 	}
@@ -2004,6 +2115,15 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	if authorMode != prAuthorModeAuto {
 		payload["author_mode"] = string(authorMode)
+	}
+	if req.MergeWhenReady {
+		user := middleware.UserFromContext(r.Context())
+		if user == nil {
+			writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "not authenticated")
+			return
+		}
+		payload["merge_when_ready"] = true
+		payload["requested_by_user_id"] = user.ID.String()
 	}
 	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
 	queued, err := h.enqueuePublishActionInTx(
@@ -2037,6 +2157,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	})
 	if req.Draft != nil {
 		prDetails["draft"] = *req.Draft
+	}
+	if req.MergeWhenReady {
+		prDetails["merge_when_ready"] = true
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionPRRequested, models.AuditResourceSession, &sessionIDStr, &session.ID, nil,
 		marshalAuditDetails(h.logger, prDetails))
@@ -3076,7 +3199,9 @@ func (h *SessionHandler) GetTimeline(w http.ResponseWriter, r *http.Request) {
 		timeline = []models.SessionTimelineEntry{}
 	}
 
-	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineEntry]{Data: timeline})
+	writeJSON(w, http.StatusOK, models.ListResponse[models.SessionTimelineResponseEntry]{
+		Data: models.NewSessionTimelineResponseEntries(timeline),
+	})
 }
 
 // EndSession handles POST /sessions/{id}/end — explicitly ends an idle session.
@@ -3522,6 +3647,18 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 		RepositoryID:            repoID,
 		LinearPrivate:           body.LinearPrivate,
 		LinearStateSyncDisabled: body.LinearStateSyncDisabled,
+	}
+	if h.capabilityService != nil {
+		snapshot, err := h.capabilityService.ResolveForSession(r.Context(), agentcapabilities.ResolveInput{
+			OrgID:         orgID,
+			RepositoryID:  repoID,
+			SessionOrigin: origin,
+		})
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CAPABILITY_RESOLUTION_FAILED", "failed to resolve session capabilities", err)
+			return
+		}
+		session.CapabilitySnapshot = snapshot
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)

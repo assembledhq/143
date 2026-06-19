@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_CLAUDE_CODE_MODELS,
-  AVAILABLE_GEMINI_CLI_MODELS,
+  AVAILABLE_OPENCODE_MODELS,
   AVAILABLE_PI_MODELS,
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
@@ -20,21 +20,13 @@ describe("model constants", () => {
 
   it("includes latest Claude Code models", () => {
     expect(AVAILABLE_CLAUDE_CODE_MODELS).toEqual([
+      "claude-fable-5",
       "claude-opus-4-8",
       "claude-opus-4-7",
       "claude-opus-4-6",
       "claude-sonnet-4-6",
       "claude-sonnet-4-5",
       "claude-haiku-4-5",
-    ]);
-  });
-
-  it("includes latest Gemini CLI models", () => {
-    expect(AVAILABLE_GEMINI_CLI_MODELS).toEqual([
-      "gemini-3.1-pro-preview",
-      "gemini-3-flash-preview",
-      "gemini-2.5-pro",
-      "gemini-2.5-flash",
     ]);
   });
 
@@ -46,6 +38,29 @@ describe("model constants", () => {
       "anthropic/claude-haiku-4-5",
       "openai/gpt-5.4",
       "google/gemini-2.5-pro",
+    ]);
+  });
+
+  it("includes OpenCode models with cheaper models first", () => {
+    expect(AVAILABLE_OPENCODE_MODELS).toEqual([
+      "openai/gpt-5.4-mini",
+      "openai/gpt-5.3-codex-spark",
+      "anthropic/claude-haiku-4-5",
+      "google/gemini-3-flash",
+      "google/gemini-2.5-flash",
+      "minimax/minimax-m2.1",
+      "qwen/qwen3-coder",
+      "deepseek/deepseek-chat",
+      "openai/gpt-5.4",
+      "openai/gpt-5.2-codex",
+      "anthropic/claude-sonnet-4-6",
+      "google/gemini-3-pro",
+      "moonshot/kimi-k2",
+      "opencode/gpt-5.2",
+      "opencode/gpt-5.1-codex",
+      "anthropic/claude-opus-4-8",
+      "anthropic/claude-opus-4-7",
+      "openai/gpt-5.5",
     ]);
   });
 

@@ -41,6 +41,24 @@ func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Cont
 	return c.available, c.err
 }
 
+type testRuntimeStatusSessionCounter struct {
+	count int
+	err   error
+}
+
+func (c testRuntimeStatusSessionCounter) CountRunningByOrg(context.Context, uuid.UUID) (int, error) {
+	return c.count, c.err
+}
+
+type testRuntimeStatusPreviewCounter struct {
+	count int
+	err   error
+}
+
+func (c testRuntimeStatusPreviewCounter) CountActivePreviewsByOrg(context.Context, uuid.UUID) (int, error) {
+	return c.count, c.err
+}
+
 func TestSettingsHandler_Get(t *testing.T) {
 	t.Parallel()
 
@@ -178,8 +196,51 @@ func TestSettingsHandler_GetNetworkStatusRequiresCapableWorker(t *testing.T) {
 	handler.GetNetworkStatus(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "network status should return success")
 	require.Contains(t, w.Body.String(), `"static_egress_available":false`, "network status should be unavailable without capable workers")
-	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"not all active session workers are static-egress-capable for the configured public IP"`, "network status should explain worker availability")
+	require.Contains(t, w.Body.String(), `"static_egress_unavailable_reason":"static egress is not currently available for new sandbox starts"`, "network status should explain worker availability generically")
 	require.Contains(t, w.Body.String(), `"static_egress_public_ip":"203.0.113.10"`, "network status should still expose the configured allowlist IP")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSettingsHandler_GetRuntimeStatus(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(orgColumns()).AddRow(
+				orgID,
+				"Test Org",
+				json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true},"max_concurrent_runs":5,"preview_max_previews_per_user":4}`),
+				now,
+				now,
+			),
+		)
+
+	handler := NewSettingsHandler(db.NewOrganizationStore(mock), nil)
+	handler.SetStaticEgressStatus(StaticEgressStatus{
+		Available: true,
+		PublicIP:  "203.0.113.10",
+	})
+	handler.SetRuntimeStatusCounters(
+		testRuntimeStatusSessionCounter{count: 2},
+		testRuntimeStatusPreviewCounter{count: 3},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/runtime/status", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetRuntimeStatus(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "runtime status should return success")
+	require.Contains(t, w.Body.String(), `"static_egress":{"available":true,"enabled":true,"public_ip":"203.0.113.10"}`, "runtime status should include sanitized static egress state")
+	require.Contains(t, w.Body.String(), `"capacity":{"state":"normal","active_agent_runs":2,"max_concurrent_agent_runs":5,"active_previews":3,"max_previews_per_user":4}`, "runtime status should include sanitized capacity counts")
+	require.NotContains(t, w.Body.String(), "static_egress_unavailable_reason", "runtime status must not expose backend diagnostics")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -394,6 +455,33 @@ func TestSettingsHandler_Update(t *testing.T) {
 			expectedBody: "INVALID_SETTINGS",
 		},
 		{
+			name: "returns bad request for invalid sandbox resource tier",
+			body: `{"settings":{"sandbox_resources":{"agent_default_tier":"xlarge"}}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
+			name: "returns bad request for preview resource cap above platform maximum",
+			body: `{"settings":{"sandbox_resources":{"preview_max_memory_mib":99999}}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
+			name: "returns bad request for invalid sandbox lifecycle retention",
+			body: `{"settings":{"sandbox_lifecycle":{"completed_session_retention_minutes":99999}}}`,
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				// no DB calls expected
+			},
+			expectedCode: http.StatusBadRequest,
+			expectedBody: "INVALID_SETTINGS",
+		},
+		{
 			name: "returns bad request for invalid codex model in agent_config",
 			body: `{"settings":{"agent_config":{"codex":{"OPENAI_MODEL":"not-a-model"}}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
@@ -425,7 +513,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 		},
 		{
 			name: "updates successfully with supported models",
-			body: `{"settings":{"pm_model":"claude-sonnet-4-5","agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.3-codex"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-5"},"gemini_cli":{"GEMINI_MODEL":"gemini-3.1-pro-preview"}}}}`,
+			body: `{"settings":{"pm_model":"claude-sonnet-4-5","agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.3-codex"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-5"},"opencode":{"OPENCODE_MODEL":"google/gemini-2.5-flash"}}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
@@ -548,7 +636,7 @@ func TestSettingsHandler_Update_SkipsNoOpPatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "no-op patch should not issue an UPDATE")
 }
 
-func TestSettingsHandler_UpdateRejectsStaticEgressEnableWhenUnavailable(t *testing.T) {
+func TestSettingsHandler_UpdateAllowsStaticEgressEnableWhenUnavailable(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -568,6 +656,11 @@ func TestSettingsHandler_UpdateRejectsStaticEgressEnableWhenUnavailable(t *testi
 				now,
 			),
 		)
+	mock.ExpectQuery("UPDATE organizations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"updated_at"}).AddRow(now),
+		)
 
 	store := db.NewOrganizationStore(mock)
 	handler := NewSettingsHandler(store, nil)
@@ -582,9 +675,9 @@ func TestSettingsHandler_UpdateRejectsStaticEgressEnableWhenUnavailable(t *testi
 	w := httptest.NewRecorder()
 
 	handler.Update(w, req)
-	require.Equal(t, http.StatusServiceUnavailable, w.Code, "enabling static egress should fail when no capable worker is available")
-	require.Contains(t, w.Body.String(), "STATIC_EGRESS_UNAVAILABLE", "response should explain static egress cannot be enabled")
-	require.NoError(t, mock.ExpectationsWereMet(), "unavailable static egress should not issue an UPDATE")
+	require.Equal(t, http.StatusOK, w.Code, "enabling static egress should succeed even when workers are not currently capable")
+	require.Contains(t, w.Body.String(), `"static_egress_enabled":true`, "response should persist the requested static egress setting")
+	require.NoError(t, mock.ExpectationsWereMet(), "unavailable static egress should still issue an UPDATE")
 }
 
 func TestSettingsHandler_Update_LogsPatchMetadata(t *testing.T) {

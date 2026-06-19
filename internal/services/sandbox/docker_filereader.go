@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -131,6 +133,104 @@ func (d *DockerFileReader) ListDir(ctx context.Context, containerID, workDir, di
 	return entries, nil
 }
 
+// ListDirRecursive returns all file and directory entries under the workspace
+// using one bounded recursive find call. It is an optional fast path for
+// mention-index construction, where one Docker exec per directory is too
+// expensive.
+func (d *DockerFileReader) ListDirRecursive(ctx context.Context, containerID, workDir string, maxEntries int, ignoredDirNames []string) ([]FileEntry, error) {
+	absPath := resolvePathInWorkDir(workDir, ".")
+	if err := validateExecPath(absPath); err != nil {
+		return nil, fmt.Errorf("list workspace recursively: %w", err)
+	}
+
+	stdout, _, exitCode, err := d.execCmd(ctx, containerID, workDir, recursiveFindArgv(absPath, ignoredDirNames, maxEntries))
+	if err != nil {
+		return nil, fmt.Errorf("list workspace recursively: %w", err)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("list workspace recursively: not found or not accessible")
+	}
+
+	return appendFindEntries(nil, absPath, stdout, maxEntries), nil
+}
+
+// recursiveFindScript labels each path as dir/file via two find passes piped
+// through sed, instead of one pass through a shell while-read loop. The shell
+// loop cost ~100µs per entry in busybox ash (read + stat + printf per line),
+// which is multiple seconds on 50k+ entry workspaces; sed processes the same
+// stream at C speed. The root dir itself is emitted by the -type d pass and
+// filtered out by appendFindEntries. The sed replacements contain a literal
+// tab to match the "kind\tpath" wire format.
+const recursiveFindScript = `root=$1
+limit=$2
+shift 2
+if [ "$limit" -le 0 ]; then
+  limit=2147483646
+fi
+limit=$((limit + 1))
+{
+  find "$root" "$@" -type d -print | sed "s|^|dir	|"
+  find "$root" "$@" -type f -print | sed "s|^|file	|"
+} | head -n "$limit"`
+
+func recursiveFindArgv(absPath string, ignoredDirNames []string, maxEntries int) []string {
+	argv := []string{"sh", "-c", recursiveFindScript, "find-recursive", absPath, strconv.Itoa(maxEntries)}
+	ignored := sanitizedFindIgnoredNames(ignoredDirNames)
+	if len(ignored) > 0 {
+		argv = append(argv, "(")
+		for i, name := range ignored {
+			if i > 0 {
+				argv = append(argv, "-o")
+			}
+			argv = append(argv, "-name", name)
+		}
+		argv = append(argv, ")", "-prune", "-o")
+	}
+	return argv
+}
+
+func sanitizedFindIgnoredNames(names []string) []string {
+	ignored := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.Contains(name, "/") || unsafePathRE.MatchString(name) {
+			continue
+		}
+		ignored = append(ignored, name)
+	}
+	sort.Strings(ignored)
+	return ignored
+}
+
+func appendFindEntries(entries []FileEntry, rootAbs, stdout string, maxEntries int) []FileEntry {
+	root := strings.TrimRight(filepath.ToSlash(filepath.Clean(rootAbs)), "/")
+	for _, raw := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+		if maxEntries > 0 && len(entries) >= maxEntries {
+			break
+		}
+		kind, rawPath, ok := strings.Cut(strings.TrimSpace(raw), "\t")
+		if !ok {
+			continue
+		}
+		if kind != "dir" && kind != "file" {
+			continue
+		}
+		clean := strings.TrimRight(filepath.ToSlash(filepath.Clean(rawPath)), "/")
+		if clean == "" || clean == "." || clean == root {
+			continue
+		}
+		if !strings.HasPrefix(clean, root+"/") {
+			continue
+		}
+		entries = append(entries, FileEntry{
+			Path: strings.TrimPrefix(clean, root+"/"),
+			Type: kind,
+			Size: 0,
+		})
+	}
+	return entries
+}
+
 // maxFileReadBytes is the maximum number of bytes to read from a file.
 const maxFileReadBytes = 1048576 // 1MB
 
@@ -162,7 +262,7 @@ func (d *DockerFileReader) ReadFile(ctx context.Context, containerID, workDir, f
 }
 
 // isNotFoundStderr detects the ENOENT message produced by the small utilities
-// we exec inside the sandbox (head, sed — GNU coreutils, busybox, or BSD all
+// we exec inside the sandbox (head, awk — GNU coreutils, busybox, or BSD all
 // surface ENOENT with the same phrase). Keeping this in one spot lets
 // ReadFile/ReadFileContext surface a single ErrFileNotFound sentinel to
 // callers instead of forcing them to pattern-match on stderr themselves.
@@ -183,8 +283,16 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 	}
 	endLine := line + below
 
-	// Use sed to extract the line range. Path is passed as an argument.
-	argv := []string{"sed", "-n", fmt.Sprintf("%d,%dp", startLine, endLine), absPath}
+	// Capture the requested window and total line count in one exec. Each line
+	// gets a stable prefix so empty file lines and arbitrary tabs in content
+	// round-trip without ambiguity.
+	argv := []string{
+		"awk",
+		"-v", fmt.Sprintf("start=%d", startLine),
+		"-v", fmt.Sprintf("end=%d", endLine),
+		`NR >= start && NR <= end { print "L" NR "\t" $0 } END { print "T" NR }`,
+		absPath,
+	}
 	stdout, stderrOut, exitCode, err := d.execCmd(ctx, containerID, workDir, argv)
 	if err != nil {
 		return FileContextResult{}, fmt.Errorf("read context %s:%d: %w", filePath, line, err)
@@ -198,35 +306,36 @@ func (d *DockerFileReader) ReadFileContext(ctx context.Context, containerID, wor
 	}
 
 	var lines []FileLine
-	for i, content := range strings.Split(stdout, "\n") {
-		lineNum := startLine + i
-		if lineNum > endLine {
-			break
+	totalLines := -1
+	for _, outputLine := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+		if outputLine == "" {
+			continue
 		}
-		lines = append(lines, FileLine{
-			Number:  lineNum,
-			Content: content,
-		})
-	}
-
-	totalLines := 0
-	for _, lineContent := range strings.Split(stdout, "\n") {
-		_ = lineContent
-	}
-
-	countStdout, countStderr, countExitCode, countErr := d.execCmd(ctx, containerID, workDir, []string{"awk", "END{print NR}", absPath})
-	if countErr != nil {
-		return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %w", filePath, line, countErr)
-	}
-	if countExitCode != 0 {
-		trimmed := strings.TrimSpace(countStderr)
-		if isNotFoundStderr(trimmed) {
-			return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %w", filePath, line, ErrFileNotFound)
+		if strings.HasPrefix(outputLine, "T") {
+			parsedTotal, scanErr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(outputLine, "T")))
+			if scanErr != nil {
+				return FileContextResult{}, fmt.Errorf("parse line count %s:%d: %w", filePath, line, scanErr)
+			}
+			totalLines = parsedTotal
+			continue
 		}
-		return FileContextResult{}, fmt.Errorf("count context lines %s:%d: %s", filePath, line, trimmed)
+		if strings.HasPrefix(outputLine, "L") {
+			numberPart, content, ok := strings.Cut(strings.TrimPrefix(outputLine, "L"), "\t")
+			if !ok {
+				return FileContextResult{}, fmt.Errorf("parse context line %s:%d: missing separator", filePath, line)
+			}
+			lineNum, scanErr := strconv.Atoi(numberPart)
+			if scanErr != nil {
+				return FileContextResult{}, fmt.Errorf("parse context line %s:%d: %w", filePath, line, scanErr)
+			}
+			lines = append(lines, FileLine{
+				Number:  lineNum,
+				Content: content,
+			})
+		}
 	}
-	if _, scanErr := fmt.Sscanf(strings.TrimSpace(countStdout), "%d", &totalLines); scanErr != nil {
-		return FileContextResult{}, fmt.Errorf("parse line count %s:%d: %w", filePath, line, scanErr)
+	if totalLines < 0 {
+		return FileContextResult{}, fmt.Errorf("parse line count %s:%d: missing total", filePath, line)
 	}
 
 	result := FileContextResult{

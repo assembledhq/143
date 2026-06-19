@@ -266,6 +266,7 @@ type streamingAgentConfig struct {
 	BuildCmd       func(escapedPromptPath string) string
 	BuildResumeCmd func(escapedPromptPath, escapedResumeSessionID string) string
 	ParseConfig    streamParseConfig
+	ParseLine      func(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastAssistant *string)
 	Profile        agent.AgentRuntimeProfile
 }
 
@@ -317,6 +318,10 @@ func runStreamingAgent(
 		Cmd:     cmd,
 		Profile: cfg.Profile,
 		OnStdout: func(line []byte) {
+			if cfg.ParseLine != nil {
+				cfg.ParseLine(line, result, logCh, &summaryParts, &lastAssistantContent)
+				return
+			}
 			parseAgentStreamLine(line, cfg.ParseConfig, result, logCh, &summaryParts, &lastAssistantContent)
 		},
 	})

@@ -146,6 +146,13 @@ type threadStoreWithProvenance interface {
 type LogStore interface {
 	ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
 	ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
+}
+
+// TranscriptStore defines the DB operations needed to serve the transcript
+// window endpoint.
+type TranscriptStore interface {
+	ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
 }
 
 // JobStore defines the job DB operations needed by the thread service.
@@ -261,6 +268,12 @@ type MessageWindowResult struct {
 	ThreadStatus models.ThreadStatus
 }
 
+// TranscriptWindowResult wraps the store result with thread status.
+type TranscriptWindowResult struct {
+	Window       db.SessionTranscriptWindow
+	ThreadStatus models.ThreadStatus
+}
+
 // Service handles thread business logic.
 type Service struct {
 	threadStore        ThreadStore
@@ -277,6 +290,7 @@ type Service struct {
 	questionStore      QuestionStore                 // optional — required to answer pending questions on awaiting_input resume
 	humanInputStore    HumanInputRequestStore        // optional — required to answer pending human-input requests on awaiting_input resume
 	ownerLoss          OwnerLossOrchestrator         // optional — proactively recovers lost runtime owners after queue-only sends
+	transcriptStore    TranscriptStore               // optional — required for GetTranscriptWindow
 	logger             zerolog.Logger
 }
 
@@ -353,6 +367,12 @@ func (s *Service) SetReviewCommentResolver(txStarter db.TxStarter, store *db.Ses
 // will resolve it on the next checkpoint).
 func (s *Service) SetQuestionStore(store QuestionStore) {
 	s.questionStore = store
+}
+
+// SetTranscriptStore wires the optional transcript store required for
+// GetTranscriptWindow.
+func (s *Service) SetTranscriptStore(store TranscriptStore) {
+	s.transcriptStore = store
 }
 
 // SetHumanInputRequestStore wires the optional durable human-input request
@@ -1524,13 +1544,36 @@ func (s *Service) GetLogs(ctx context.Context, orgID, sessionID, threadID uuid.U
 	}
 
 	var logs []models.SessionLog
-	if len(opts.TurnNumbers) > 0 {
+	switch {
+	case len(opts.TurnNumbers) > 0:
 		logs, err = s.logStore.ListByThreadTurns(ctx, orgID, threadID, opts.TurnNumbers)
-	} else {
+	case opts.LatestTurns > 0:
+		logs, err = s.logStore.ListByThreadLatestTurns(ctx, orgID, threadID, opts.LatestTurns)
+	default:
 		logs, err = s.logStore.ListByThread(ctx, orgID, threadID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list logs: %w", err)
 	}
 	return logs, nil
+}
+
+// GetTranscriptWindow returns a turn-grouped transcript window for a thread.
+func (s *Service) GetTranscriptWindow(ctx context.Context, orgID, sessionID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (TranscriptWindowResult, error) {
+	thread, err := s.threadStore.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return TranscriptWindowResult{}, fmt.Errorf("%w: %w", ErrThreadNotFound, err)
+	}
+	thread, err = visibleThreadInSession(thread, sessionID)
+	if err != nil {
+		return TranscriptWindowResult{}, err
+	}
+	if s.transcriptStore == nil {
+		return TranscriptWindowResult{}, fmt.Errorf("transcript store not configured")
+	}
+	window, err := s.transcriptStore.ListThreadWindow(ctx, orgID, threadID, opts)
+	if err != nil {
+		return TranscriptWindowResult{}, fmt.Errorf("list transcript window: %w", err)
+	}
+	return TranscriptWindowResult{Window: window, ThreadStatus: thread.Status}, nil
 }

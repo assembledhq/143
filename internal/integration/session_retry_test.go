@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
@@ -120,4 +122,47 @@ func TestIntegration_RetrySession_RejectsNonFailedSession(t *testing.T) {
 
 	jobs := listJobs(t, pool, orgID)
 	require.Empty(t, jobs, "rejected retry must not enqueue any job")
+}
+
+// Releasing a pinned job from a draining node (jobs.ClaimNextRunnable) lets a
+// sibling worker pick it up while the draining node may still be mid-turn. The
+// safety net is ClearContainerID: its recovery clear must refuse while an
+// active sandbox holder exists, so the live turn isn't clobbered — the sibling
+// reverts to pending and retries instead.
+func TestIntegration_ClearContainerID_RefusesWhileSandboxHolderActive(t *testing.T) {
+	pool := setup(t)
+	orgID := seedOrg(t, pool)
+	session := seedSession(t, pool, orgID, sessionOpts{Status: "running"})
+	sessions := db.NewSessionStore(pool)
+	holders := db.NewSessionSandboxHolderStore(pool)
+
+	const containerID = "container-mid-turn"
+	if _, err := sessions.AcquireTurnHold(context.Background(), orgID, session.ID, containerID); err != nil {
+		t.Fatalf("acquire turn hold: %v", err)
+	}
+
+	holderID, leaseToken := uuid.New(), uuid.New()
+	_, err := holders.CreateActive(context.Background(), orgID, db.CreateSessionSandboxHolderParams{
+		SessionID:     session.ID,
+		ContainerID:   containerID,
+		HolderKind:    models.SessionSandboxHolderKindThreadRuntime,
+		HolderID:      holderID,
+		OwnerNodeID:   "drain-node",
+		LeaseToken:    leaseToken,
+		LeaseDuration: 30 * time.Second,
+	})
+	require.NoError(t, err)
+
+	cleared, err := sessions.ClearContainerID(context.Background(), orgID, session.ID, containerID)
+	require.NoError(t, err)
+	require.False(t, cleared, "ClearContainerID must not clear container_id while a turn holds the sandbox")
+
+	released, err := holders.ReleaseWithLease(context.Background(), orgID, session.ID,
+		models.SessionSandboxHolderKindThreadRuntime, holderID, leaseToken)
+	require.NoError(t, err)
+	require.True(t, released)
+
+	cleared, err = sessions.ClearContainerID(context.Background(), orgID, session.ID, containerID)
+	require.NoError(t, err)
+	require.True(t, cleared, "once the holder is released the orphaned container_id is safe to clear")
 }

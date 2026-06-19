@@ -89,13 +89,16 @@ var (
 type SessionOrigin string
 
 const (
-	SessionOriginIssueTrigger SessionOrigin = "issue_trigger"
-	SessionOriginManual       SessionOrigin = "manual"
-	SessionOriginProject      SessionOrigin = "project"
-	SessionOriginAutomation   SessionOrigin = "automation"
-	SessionOriginRevision     SessionOrigin = "revision"
-	SessionOriginSlack        SessionOrigin = "slack"
-	SessionOriginExternalAPI  SessionOrigin = "external_api"
+	SessionOriginIssueTrigger              SessionOrigin = "issue_trigger"
+	SessionOriginManual                    SessionOrigin = "manual"
+	SessionOriginProject                   SessionOrigin = "project"
+	SessionOriginAutomation                SessionOrigin = "automation"
+	SessionOriginRevision                  SessionOrigin = "revision"
+	SessionOriginSlack                     SessionOrigin = "slack"
+	SessionOriginExternalAPI               SessionOrigin = "external_api"
+	SessionOriginEvalBootstrap             SessionOrigin = "eval_bootstrap"
+	SessionOriginEvalRun                   SessionOrigin = "eval_run"
+	SessionOriginAutomationGoalImprovement SessionOrigin = "automation_goal_improvement"
 )
 
 func (o SessionOrigin) Validate() error {
@@ -106,7 +109,10 @@ func (o SessionOrigin) Validate() error {
 		SessionOriginAutomation,
 		SessionOriginRevision,
 		SessionOriginSlack,
-		SessionOriginExternalAPI:
+		SessionOriginExternalAPI,
+		SessionOriginEvalBootstrap,
+		SessionOriginEvalRun,
+		SessionOriginAutomationGoalImprovement:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionOrigin: %q", o)

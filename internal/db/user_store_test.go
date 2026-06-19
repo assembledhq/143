@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ var userColumns = []string{
 }
 
 var userColumnsWithSettings = []string{
-	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "created_at", "settings",
+	"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
 }
 
 func ptrUUID(id uuid.UUID) *uuid.UUID {
@@ -186,6 +187,142 @@ func TestUserStore_GetByEmail(t *testing.T) {
 	}
 }
 
+func TestUserStore_GetByOrgAndEmail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		lookupEmail string
+		setupMock   func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time)
+		expectErr   bool
+	}{
+		{
+			name:        "returns org user when primary email matches case insensitively",
+			lookupEmail: "Creator@Example.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails.+ORDER BY.+LIMIT 1`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns org user when github noreply email matches",
+			lookupEmail: "12345+alice@users.noreply.github.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				noreply := "12345+alice@users.noreply.github.com"
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails.+ORDER BY.+LIMIT 1`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, &noreply, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns org user when secondary email matches",
+			lookupEmail: "alice@company.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails.+ORDER BY.+LIMIT 1`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(userColumns).
+							AddRow(userID, orgID, "alice@personal.com", "Alice", "member", nil, nil, nil, nil, nil, nil, now),
+					)
+			},
+		},
+		{
+			name:        "returns error when no org user matches either email column",
+			lookupEmail: "unknown@example.com",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails.+ORDER BY.+LIMIT 1`).
+					WithArgs(orgID, pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(userColumns))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			orgID := uuid.New()
+			now := time.Now()
+			tt.setupMock(mock, userID, orgID, now)
+
+			user, err := store.GetByOrgAndEmail(context.Background(), orgID, tt.lookupEmail)
+			if tt.expectErr {
+				require.Error(t, err, "GetByOrgAndEmail should return an error when the org has no matching user")
+				return
+			}
+			require.NoError(t, err, "GetByOrgAndEmail should return the matching org user")
+			require.Equal(t, userID, user.ID, "GetByOrgAndEmail should return the expected user ID")
+			require.Equal(t, orgID, user.OrgID, "GetByOrgAndEmail should keep the lookup scoped to the requested org")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestUserStore_AddSecondaryEmail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID)
+		expectErr bool
+	}{
+		{
+			name: "appends new lowercase email when not already present",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
+			name: "returns error when database exec fails",
+			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID) {
+				mock.ExpectExec(`(?s)UPDATE users\s+SET secondary_emails = array_append\(COALESCE\(secondary_emails`).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnError(errors.New("connection refused"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewUserStore(mock)
+			userID := uuid.New()
+			orgID := uuid.New()
+			tt.setupMock(mock, userID, orgID)
+
+			err = store.AddSecondaryEmail(context.Background(), orgID, userID, "Work@Example.com")
+			if tt.expectErr {
+				require.Error(t, err, "AddSecondaryEmail should return an error on DB failure")
+				return
+			}
+			require.NoError(t, err, "AddSecondaryEmail should succeed when DB exec succeeds")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestUserStore_GetByGoogleID(t *testing.T) {
 	t.Parallel()
 
@@ -284,7 +421,7 @@ func TestUserStore_GetByIDGlobalWithSettings(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, now, settings))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, now, settings))
 
 	u, err := store.GetByIDGlobalWithSettings(context.Background(), userID)
 	require.NoError(t, err, "GetByIDGlobalWithSettings should not return an error")
@@ -312,7 +449,7 @@ func TestUserStore_GetByIDGlobalWithSettings_InvalidSettings(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, now, []byte(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`)))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, now, []byte(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`)))
 
 	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
 	require.Error(t, err, "GetByIDGlobalWithSettings should reject invalid stored settings")
@@ -354,7 +491,7 @@ func TestUserStore_GetByIDGlobalWithSettings_ScanError(t *testing.T) {
 	mock.ExpectQuery(`SELECT .+ FROM users\s+WHERE id = @id`).
 		WithArgs(userID).
 		WillReturnRows(pgxmock.NewRows(userColumnsWithSettings).
-			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, "not-a-time", []byte(`{}`)))
+			AddRow(userID, orgID, "u@example.com", "Name", "admin", nil, nil, nil, nil, nil, "not-a-time", []byte(`{}`)))
 
 	_, err = store.GetByIDGlobalWithSettings(context.Background(), userID)
 	require.Error(t, err, "GetByIDGlobalWithSettings should surface scan failures")
@@ -617,7 +754,7 @@ func TestUserStore_LinkGoogleAccount(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestUserStore_UpdateSettings(t *testing.T) {
+func TestUserStore_MergeSettings(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -626,64 +763,73 @@ func TestUserStore_UpdateSettings(t *testing.T) {
 
 	store := NewUserStore(mock)
 	userID := uuid.New()
-	settings := models.UserSettings{
-		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
-		},
-	}
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+		WithArgs(userID).
+		WillReturnRows(pgxmock.NewRows([]string{"settings"}).
+			AddRow(json.RawMessage(`{"coding_agent_model_default":"claude-opus-4-7"}`)))
 	mock.ExpectExec("UPDATE users SET settings = @settings").
 		WithArgs(pgxmock.AnyArg(), userID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
-	err = store.UpdateSettings(context.Background(), userID, settings)
-	require.NoError(t, err, "UpdateSettings should not return an error")
+	merged, err := store.MergeSettings(context.Background(), userID, json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`))
+	require.NoError(t, err, "MergeSettings should not return an error")
+	require.Equal(t, models.UserSettings{
+		CodingAgentModelDefault: "claude-opus-4-7",
+		CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
+			models.AgentTypeClaudeCode: models.ReasoningEffortMax,
+		},
+	}, merged, "MergeSettings should keep stored fields the patch didn't touch")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func TestUserStore_UpdateSettings_ErrorPaths(t *testing.T) {
+func TestUserStore_MergeSettings_ErrorPaths(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
-		settings  models.UserSettings
+		patch     json.RawMessage
 		setupMock func(mock pgxmock.PgxPoolIface, userID uuid.UUID)
 		wantErr   string
 	}{
 		{
-			name: "returns marshal error for invalid settings",
-			settings: models.UserSettings{
-				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-					models.AgentTypeCodex: models.ReasoningEffortMax,
-				},
+			name:  "returns merge error for invalid patch values",
+			patch: json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`),
+			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
+				mock.ExpectRollback()
 			},
-			wantErr: "marshal user settings",
+			wantErr: "merge user settings",
 		},
 		{
-			name: "returns exec error",
-			settings: models.UserSettings{
-				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-					models.AgentTypeClaudeCode: models.ReasoningEffortMax,
-				},
-			},
+			name:  "returns exec error",
+			patch: json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
 			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}).AddRow(json.RawMessage(`{}`)))
 				mock.ExpectExec("UPDATE users SET settings = @settings").
 					WithArgs(pgxmock.AnyArg(), userID).
 					WillReturnError(errors.New("write failed"))
+				mock.ExpectRollback()
 			},
 			wantErr: "update user settings",
 		},
 		{
-			name: "returns no rows when user is missing",
-			settings: models.UserSettings{
-				CodingAgentReasoningDefaults: map[models.AgentType]models.ReasoningEffort{
-					models.AgentTypeClaudeCode: models.ReasoningEffortMax,
-				},
-			},
+			name:  "returns no rows when user is missing",
+			patch: json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
 			setupMock: func(mock pgxmock.PgxPoolIface, userID uuid.UUID) {
-				mock.ExpectExec("UPDATE users SET settings = @settings").
-					WithArgs(pgxmock.AnyArg(), userID).
-					WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT settings FROM users WHERE id = @id FOR UPDATE").
+					WithArgs(userID).
+					WillReturnRows(pgxmock.NewRows([]string{"settings"}))
+				mock.ExpectRollback()
 			},
 			wantErr: pgx.ErrNoRows.Error(),
 		},
@@ -704,9 +850,9 @@ func TestUserStore_UpdateSettings_ErrorPaths(t *testing.T) {
 				tt.setupMock(mock, userID)
 			}
 
-			err = store.UpdateSettings(context.Background(), userID, tt.settings)
-			require.Error(t, err, "UpdateSettings should return the expected error")
-			require.Contains(t, err.Error(), tt.wantErr, "UpdateSettings should describe the failure")
+			_, err = store.MergeSettings(context.Background(), userID, tt.patch)
+			require.Error(t, err, "MergeSettings should return the expected error")
+			require.Contains(t, err.Error(), tt.wantErr, "MergeSettings should describe the failure")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
@@ -818,13 +964,13 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	membershipTime1 := now.Add(-2 * time.Hour)
 	membershipTime2 := now.Add(-time.Hour)
 
-	cols := append(append([]string{}, userColumns...), "membership_created_at")
+	cols := append(append([]string{}, userColumns...), "captured_github_org_login", "membership_created_at")
 	mock.ExpectQuery("(?s)FROM users u.+JOIN organization_memberships m").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(cols).
-				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, now, membershipTime1).
-				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, now, membershipTime2),
+				AddRow(userID1, orgID, "alice@example.com", "Alice", "admin", nil, nil, nil, nil, nil, nil, now, "acme", membershipTime1).
+				AddRow(userID2, orgID, "bob@example.com", "Bob", "member", nil, nil, nil, nil, nil, nil, now, nil, membershipTime2),
 		)
 
 	users, lastMembershipTime, err := store.ListByOrgViaMemberships(context.Background(), orgID, MembershipPageFilters{Limit: 100})
@@ -832,8 +978,11 @@ func TestUserStore_ListByOrgViaMemberships(t *testing.T) {
 	require.Len(t, users, 2)
 	require.Equal(t, "Alice", users[0].Name)
 	require.Equal(t, models.RoleAdmin, users[0].Role)
+	require.NotNil(t, users[0].CapturedGitHubOrgLogin, "captured GitHub org login should be surfaced for removal warnings")
+	require.Equal(t, "acme", *users[0].CapturedGitHubOrgLogin, "captured GitHub org login should match the linked roster")
 	require.Equal(t, "Bob", users[1].Name)
 	require.Equal(t, models.RoleMember, users[1].Role)
+	require.Nil(t, users[1].CapturedGitHubOrgLogin, "users outside an enabled GitHub roster should not include a captured GitHub org login")
 	require.Equal(t, membershipTime2.UTC(), lastMembershipTime.UTC())
 	require.NoError(t, mock.ExpectationsWereMet())
 }

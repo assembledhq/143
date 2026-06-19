@@ -60,12 +60,15 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   notionLoading?: boolean;
   circleciConnected: boolean;
   circleciLoading?: boolean;
+  mezmoConnected: boolean;
+  mezmoLoading?: boolean;
   summaries?: Partial<Record<IntegrationKey, ReactNode>>;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
   onConnectSlack: () => void;
   onConnectNotion: () => void;
   onConnectCircleCI: () => void;
+  onConnectMezmo: () => void;
 };
 
 // readOnly hides connect/disconnect buttons on every card and the per-repo
@@ -149,11 +152,11 @@ function IntegrationAuthErrorAlert({ info }: { info: IntegrationAuthErrorInfo })
   return (
     <div
       role="alert"
-      className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+      className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"
     >
       <div className="font-medium">Reconnect required</div>
-      <p className="mt-0.5 text-amber-700/90 dark:text-amber-200/90">{info.reason}</p>
-      <p className="mt-0.5 text-xs text-amber-700/70 dark:text-amber-200/70">
+      <p className="mt-0.5 text-warning/90">{info.reason}</p>
+      <p className="mt-0.5 text-xs text-warning/70">
         Last seen at {observedAt}
       </p>
     </div>
@@ -182,7 +185,6 @@ const DISCONNECT_DESCRIPTIONS: Record<IntegrationKey, string> = {
   slack: "This will disconnect Slack from your organization. Channel monitoring will stop.",
   notion: "This will disconnect Notion from your organization. Product docs will no longer sync.",
   circleci: "This will disconnect CircleCI from your organization. Flaky-test data will no longer be available to agents.",
-  victorialogs: "This will disconnect VictoriaLogs from your organization. Production log queries will no longer be available to agents.",
   mezmo: "This will disconnect Mezmo from your organization. Production log queries will no longer be available to agents.",
 };
 
@@ -443,6 +445,7 @@ function optionalDescriptorsFromProps(
     { key: "slack", connected: p.slackConnected, summary: p.summaries?.slack, onConnect: p.onConnectSlack },
     { key: "notion", connected: p.notionConnected, loading: p.notionLoading, summary: p.summaries?.notion, onConnect: p.onConnectNotion },
     { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, summary: p.summaries?.circleci, onConnect: p.onConnectCircleCI },
+    { key: "mezmo", connected: p.mezmoConnected, loading: p.mezmoLoading, summary: p.summaries?.mezmo, onConnect: p.onConnectMezmo },
   ];
 }
 

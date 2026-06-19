@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
+import { pollMs } from "@/lib/poll-intervals";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import {
   ResponsiveModal,
   ResponsiveModalBody,
@@ -83,7 +85,7 @@ export function CodexDeviceCodeModal({
           if (timerRef.current) clearInterval(timerRef.current);
           setTimeout(() => {
             onConnectedRef.current?.();
-          }, 1500);
+          }, pollMs(1500));
         } else if (resp.data.status === "expired") {
           setStatus("expired");
           setError("Code expired. Please try again.");
@@ -98,7 +100,7 @@ export function CodexDeviceCodeModal({
       } catch (err) {
         captureError(err, { feature: "codex-auth-poll" });
       }
-    }, 3000);
+    }, pollMs(3000));
 
     timerRef.current = setInterval(() => {
       setTimeLeft((time) => Math.max(0, time - 1));
@@ -155,7 +157,7 @@ export function CodexDeviceCodeModal({
                   }}
                 >
                   {copied ? (
-                    <span className="flex items-center gap-1.5 text-green-600">
+                    <span className="flex items-center gap-1.5 text-success">
                       <Check className="h-3.5 w-3.5" />
                       Copied
                     </span>
@@ -177,10 +179,10 @@ export function CodexDeviceCodeModal({
             </div>
           </div>
         )}
-        {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-green-600">Connected successfully!</p></div>}
+        {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-success">Connected successfully!</p></div>}
         {(status === "error" || status === "expired") && (
           <div className="mt-4">
-            <p className="text-sm text-destructive">{error}</p>
+            <ErrorText className="text-sm">{error}</ErrorText>
           </div>
         )}
       </ResponsiveModalBody>

@@ -173,8 +173,9 @@ func (m *mockMessageStore) ListWindowByThread(ctx context.Context, orgID, thread
 }
 
 type mockLogStore struct {
-	listByThreadFn      func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
-	listByThreadTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadFn            func(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error)
+	listByThreadTurnsFn       func(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error)
+	listByThreadLatestTurnsFn func(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error)
 }
 
 func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UUID) ([]models.SessionLog, error) {
@@ -187,6 +188,13 @@ func (m *mockLogStore) ListByThread(ctx context.Context, orgID, threadID uuid.UU
 func (m *mockLogStore) ListByThreadTurns(ctx context.Context, orgID, threadID uuid.UUID, turnNumbers []int) ([]models.SessionLog, error) {
 	if m.listByThreadTurnsFn != nil {
 		return m.listByThreadTurnsFn(ctx, orgID, threadID, turnNumbers)
+	}
+	return nil, nil
+}
+
+func (m *mockLogStore) ListByThreadLatestTurns(ctx context.Context, orgID, threadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+	if m.listByThreadLatestTurnsFn != nil {
+		return m.listByThreadLatestTurnsFn(ctx, orgID, threadID, latestTurns)
 	}
 	return nil, nil
 }
@@ -359,7 +367,8 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 var threadHumanInputRequestColumns = []string{
 	"id", "org_id", "session_id", "thread_id", "turn_number", "agent_type",
 	"provider_request_id", "request_kind", "status", "title", "body",
-	"context", "blocks_phase", "choices", "response_schema", "provider_payload",
+	"context", "blocks_phase", "assigned_user_id", "sensitivity", "preferred_channel",
+	"choices", "response_schema", "provider_payload",
 	"answer_text", "answer_payload", "answered_by", "answered_at", "expires_at", "created_at",
 }
 
@@ -368,7 +377,8 @@ func threadHumanInputRequestRow(id, orgID, sessionID, threadID, userID uuid.UUID
 		id, orgID, sessionID, &threadID, 3, models.AgentTypeClaudeCode,
 		humanInputTestStringPtr("toolu_thread"), models.HumanInputRequestKindFreeText,
 		models.HumanInputRequestStatusAnswered, "Claude needs input", "What should Claude do?",
-		(*string)(nil), (*string)(nil), []byte("[]"), json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
+		(*string)(nil), (*string)(nil), (*uuid.UUID)(nil), models.HumanInputSensitivityTeam,
+		models.HumanInputPreferredChannelSlackThread, []byte("[]"), json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
 		&answer, json.RawMessage(`{"answer_text":"` + answer + `"}`), &userID, &now, (*time.Time)(nil), now,
 	}
 }
@@ -3123,6 +3133,7 @@ func TestService_GetMessageWindow(t *testing.T) {
 					require.Equal(t, orgID, gotOrgID, "message window should be scoped by org")
 					require.Equal(t, threadID, gotThreadID, "message window should use requested thread")
 					require.Equal(t, int64(44), opts.BeforeID, "message window should pass cursor options")
+					require.Equal(t, db.SessionMessageWindowPositionOlder, opts.Position, "message window should pass requested position")
 					return db.SessionMessageWindow{
 						Messages:                 []models.SessionMessage{{ID: 43}},
 						NextOlderCursor:          "43",
@@ -3170,7 +3181,7 @@ func TestService_GetMessageWindow(t *testing.T) {
 			svc, deps := newTestService(t)
 			tt.setupDeps(deps)
 
-			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{BeforeID: 44, Limit: 10})
+			result, err := svc.GetMessageWindow(context.Background(), orgID, sessionID, threadID, db.SessionMessageWindowOptions{Position: db.SessionMessageWindowPositionOlder, BeforeID: 44, Limit: 10})
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
 				return
@@ -3217,6 +3228,38 @@ func TestService_GetLogs(t *testing.T) {
 					require.Equal(t, threadID, gotThreadID, "filtered log lookup should preserve thread scope")
 					require.Equal(t, []int{5, 6}, turns, "filtered log lookup should pass requested turns")
 					return []models.SessionLog{{ID: 6}}, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
+			name: "success with latest turns window",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, gotOrgID, gotThreadID uuid.UUID, latestTurns int) ([]models.SessionLog, error) {
+					require.Equal(t, orgID, gotOrgID, "latest-turns log lookup should preserve org scope")
+					require.Equal(t, threadID, gotThreadID, "latest-turns log lookup should preserve thread scope")
+					require.Equal(t, 50, latestTurns, "latest-turns log lookup should pass the requested window")
+					return []models.SessionLog{{ID: 9}}, nil
+				}
+			},
+			expectLen: 1,
+		},
+		{
+			name: "turn filter wins over latest turns",
+			setupDeps: func(deps *testDeps) {
+				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID}, nil
+				}
+				deps.logStore.listByThreadTurnsFn = func(_ context.Context, _, _ uuid.UUID, turns []int) ([]models.SessionLog, error) {
+					require.Equal(t, []int{5, 6}, turns, "explicit turns should take precedence")
+					return []models.SessionLog{{ID: 6}}, nil
+				}
+				deps.logStore.listByThreadLatestTurnsFn = func(_ context.Context, _, _ uuid.UUID, _ int) ([]models.SessionLog, error) {
+					t.Fatal("latest-turns lookup must not run when explicit turn numbers are provided")
+					return nil, nil
 				}
 			},
 			expectLen: 1,
@@ -3273,6 +3316,13 @@ func TestService_GetLogs(t *testing.T) {
 			if tt.name == "success with turn filter" {
 				opts.TurnNumbers = []int{5, 6}
 			}
+			if tt.name == "success with latest turns window" {
+				opts.LatestTurns = 50
+			}
+			if tt.name == "turn filter wins over latest turns" {
+				opts.TurnNumbers = []int{5, 6}
+				opts.LatestTurns = 50
+			}
 			logs, err := svc.GetLogs(context.Background(), orgID, sessionID, threadID, opts)
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
@@ -3284,6 +3334,162 @@ func TestService_GetLogs(t *testing.T) {
 			}
 			require.NoError(t, err, "should not return an error")
 			require.Len(t, logs, tt.expectLen, "should return expected number of logs")
+		})
+	}
+}
+
+// --- mockTranscriptStore ---
+
+type mockTranscriptStore struct {
+	listWindowFn func(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error)
+}
+
+func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threadID uuid.UUID, opts db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+	if m.listWindowFn != nil {
+		return m.listWindowFn(ctx, orgID, threadID, opts)
+	}
+	return db.SessionTranscriptWindow{}, nil
+}
+
+// newServiceWithTranscript builds a Service with all default mocks and wires
+// the given TranscriptStore via SetTranscriptStore. Pass nil to leave the
+// transcript store unset (simulates a misconfigured service).
+func newServiceWithTranscript(t *testing.T, ts TranscriptStore) (*Service, *mockThreadStore) {
+	t.Helper()
+	threadStore := &mockThreadStore{}
+	svc := NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
+	if ts != nil {
+		svc.SetTranscriptStore(ts)
+	}
+	return svc, threadStore
+}
+
+func TestService_GetTranscriptWindow(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	opts := db.SessionTranscriptWindowOptions{}
+
+	tests := []struct {
+		name         string
+		setup        func(threadStore *mockThreadStore, ts *mockTranscriptStore)
+		useNilStore  bool
+		wantErr      bool
+		wantNotFound bool
+		wantContains string
+		wantHasOlder bool
+		wantStatus   models.ThreadStatus
+	}{
+		{
+			name: "thread not found",
+			setup: func(threadStore *mockThreadStore, _ *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{}, fmt.Errorf("no rows")
+				}
+			},
+			wantErr:      true,
+			wantNotFound: true,
+		},
+		{
+			name: "thread belongs to different session",
+			setup: func(threadStore *mockThreadStore, _ *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: uuid.New(), // different session
+						OrgID:     orgID,
+					}, nil
+				}
+			},
+			wantErr:      true,
+			wantNotFound: true, // visibleThreadInSession returns ErrThreadNotFound for session mismatch
+		},
+		{
+			name:        "transcript store not configured",
+			useNilStore: true,
+			setup: func(threadStore *mockThreadStore, _ *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+					}, nil
+				}
+			},
+			wantErr:      true,
+			wantContains: "not configured",
+		},
+		{
+			name: "store returns error",
+			setup: func(threadStore *mockThreadStore, ts *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+				storeErr := fmt.Errorf("db connection lost")
+				ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, _ db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+					return db.SessionTranscriptWindow{}, storeErr
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "success",
+			setup: func(threadStore *mockThreadStore, ts *mockTranscriptStore) {
+				threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
+					return models.SessionThread{
+						ID:        threadID,
+						SessionID: sessionID,
+						OrgID:     orgID,
+						Status:    models.ThreadStatusRunning,
+					}, nil
+				}
+				ts.listWindowFn = func(_ context.Context, _, _ uuid.UUID, _ db.SessionTranscriptWindowOptions) (db.SessionTranscriptWindow, error) {
+					return db.SessionTranscriptWindow{HasOlder: true}, nil
+				}
+			},
+			wantErr:      false,
+			wantHasOlder: true,
+			wantStatus:   models.ThreadStatusRunning,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ts := &mockTranscriptStore{}
+			var svc *Service
+			var threadStore *mockThreadStore
+			if tt.useNilStore {
+				threadStore = &mockThreadStore{}
+				svc = NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
+				// intentionally do NOT call svc.SetTranscriptStore
+			} else {
+				svc, threadStore = newServiceWithTranscript(t, ts)
+			}
+			tt.setup(threadStore, ts)
+
+			result, err := svc.GetTranscriptWindow(context.Background(), orgID, sessionID, threadID, opts)
+			if tt.wantErr {
+				require.Error(t, err, "expected an error")
+				if tt.wantNotFound {
+					require.True(t, errors.Is(err, ErrThreadNotFound), "expected ErrThreadNotFound, got: %v", err)
+				}
+				if tt.wantContains != "" {
+					require.Contains(t, err.Error(), tt.wantContains)
+				}
+				return
+			}
+			require.NoError(t, err, "unexpected error")
+			require.Equal(t, tt.wantHasOlder, result.Window.HasOlder, "HasOlder should match")
+			require.Equal(t, tt.wantStatus, result.ThreadStatus, "ThreadStatus should match")
 		})
 	}
 }

@@ -12,7 +12,7 @@
 #   export DB_PASSWORD="your-db-password"
 #   export DB_HOST="10.0.0.3"
 #   export NODE_ID="app-1"
-#   export ENV_PRODUCTION_ENC_B64="$(base64 < .env.production.enc)"
+#   export ENV_PRODUCTION_ENC_B64="$(base64 < "$(./deploy/scripts/resolve-secrets-dir.sh .)/.env.production.enc")"
 #   export REPO_URL="https://github.com/assembledhq/143.git"
 #   envsubst < deploy/cloud-init/app.yml > /tmp/user-data.yml
 

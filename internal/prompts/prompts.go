@@ -240,6 +240,40 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 	return render("review_loop_fix.template", data)
 }
 
+// ─── Automations ────────────────────────────────────────────────────────────
+
+type AutomationGoalFastImprovementPromptData struct {
+	MaxGoalChars int
+}
+
+func AutomationGoalFastImprovementPrompt(data AutomationGoalFastImprovementPromptData) string {
+	return render("automation_goal_fast_improvement.template", data)
+}
+
+type AutomationGoalProposalJudgePromptData struct {
+	MaxGoalChars int
+}
+
+func AutomationGoalProposalJudgePrompt(data AutomationGoalProposalJudgePromptData) string {
+	return render("automation_goal_proposal_judge.template", data)
+}
+
+type AutomationGoalDeepImprovementPromptData struct {
+	MaxGoalChars  int
+	ImprovementID string
+	AutomationID  string
+	RepositoryID  string
+	Name          string
+	Scope         string
+	CurrentGoal   string
+	ConfigJSON    string
+	EvidenceJSON  string
+}
+
+func AutomationGoalDeepImprovementPrompt(data AutomationGoalDeepImprovementPromptData) string {
+	return render("automation_goal_deep_improvement.template", data)
+}
+
 // ─── Slack ────────────────────────────────────────────────────────────────────
 
 // SlackSummarizerPrompt returns the system prompt for Slack thread analysis.
@@ -282,6 +316,7 @@ func PRContentPrompt(data PRContentPromptData) string {
 type PRContentUserPromptData struct {
 	RepoTemplate     string   // the repo's PR template (if any)
 	ResultSummary    string   // what the agent did
+	ThreadContext    string   // summaries from all visible session threads
 	SessionTitle     string   // session title (for manual sessions)
 	IssueTitle       string   // issue title
 	IssueSource      string   // issue source (e.g. "linear", "sentry")

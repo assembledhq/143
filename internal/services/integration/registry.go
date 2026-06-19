@@ -16,35 +16,71 @@ import (
 //   - MCP servers (for runtime tool access inside sandboxes)
 //   - Static context writers (for pre-populating sandbox files)
 type Registry struct {
-	mu                 sync.RWMutex
-	errorTrackers      map[string]ErrorTracker
-	taskManagers       map[string]TaskManager
-	documentStores     map[string]DocumentStore
-	messageSources     map[string]MessageSource
-	codeReviewSources  map[string]CodeReviewSource
-	issueCreators      map[string]IssueCreator
-	prCreators         map[string]PullRequestCreator
-	sessionTabManagers map[string]SessionTabManager
-	projectProposers   map[string]ProjectProposer
-	ciTestInsights     map[string]CITestInsights
-	logProviders       map[string]LogProvider
+	mu                                  sync.RWMutex
+	errorTrackers                       map[string]ErrorTracker
+	taskManagers                        map[string]TaskManager
+	documentStores                      map[string]DocumentStore
+	messageSources                      map[string]MessageSource
+	codeReviewSources                   map[string]CodeReviewSource
+	issueCreators                       map[string]IssueCreator
+	prCreators                          map[string]PullRequestCreator
+	sessionTabManagers                  map[string]SessionTabManager
+	projectProposers                    map[string]ProjectProposer
+	evalReporters                       map[string]EvalCandidateReporter
+	automationGoalImprovementCompleters map[string]AutomationGoalImprovementCompleter
+	ciTestInsights                      map[string]CITestInsights
+	logProviders                        map[string]LogProvider
 }
 
 // NewRegistry creates an empty integration registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		errorTrackers:      make(map[string]ErrorTracker),
-		taskManagers:       make(map[string]TaskManager),
-		documentStores:     make(map[string]DocumentStore),
-		messageSources:     make(map[string]MessageSource),
-		codeReviewSources:  make(map[string]CodeReviewSource),
-		issueCreators:      make(map[string]IssueCreator),
-		prCreators:         make(map[string]PullRequestCreator),
-		sessionTabManagers: make(map[string]SessionTabManager),
-		projectProposers:   make(map[string]ProjectProposer),
-		ciTestInsights:     make(map[string]CITestInsights),
-		logProviders:       make(map[string]LogProvider),
+		errorTrackers:                       make(map[string]ErrorTracker),
+		taskManagers:                        make(map[string]TaskManager),
+		documentStores:                      make(map[string]DocumentStore),
+		messageSources:                      make(map[string]MessageSource),
+		codeReviewSources:                   make(map[string]CodeReviewSource),
+		issueCreators:                       make(map[string]IssueCreator),
+		prCreators:                          make(map[string]PullRequestCreator),
+		sessionTabManagers:                  make(map[string]SessionTabManager),
+		projectProposers:                    make(map[string]ProjectProposer),
+		evalReporters:                       make(map[string]EvalCandidateReporter),
+		automationGoalImprovementCompleters: make(map[string]AutomationGoalImprovementCompleter),
+		ciTestInsights:                      make(map[string]CITestInsights),
+		logProviders:                        make(map[string]LogProvider),
 	}
+}
+
+func (r *Registry) RegisterAutomationGoalImprovementCompleter(provider AutomationGoalImprovementCompleter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.automationGoalImprovementCompleters[provider.Name()] = provider
+}
+
+func (r *Registry) AutomationGoalImprovementCompleters() []AutomationGoalImprovementCompleter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]AutomationGoalImprovementCompleter, 0, len(r.automationGoalImprovementCompleters))
+	for _, p := range r.automationGoalImprovementCompleters {
+		result = append(result, p)
+	}
+	return result
+}
+
+func (r *Registry) RegisterEvalCandidateReporter(provider EvalCandidateReporter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evalReporters[provider.Name()] = provider
+}
+
+func (r *Registry) EvalCandidateReporters() []EvalCandidateReporter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]EvalCandidateReporter, 0, len(r.evalReporters))
+	for _, p := range r.evalReporters {
+		result = append(result, p)
+	}
+	return result
 }
 
 func (r *Registry) RegisterSessionTabManager(provider SessionTabManager) {

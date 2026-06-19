@@ -25,6 +25,10 @@ type workerHeartbeatHealthStore interface {
 	WorkerHeartbeatHealth(ctx context.Context, staleBefore time.Time) (db.WorkerHeartbeatHealth, error)
 }
 
+type previewHealthStore interface {
+	PreviewHealthSample(ctx context.Context) (db.PreviewHealthSample, error)
+}
+
 const (
 	controlPlaneQueueAgeAlertThreshold      = 10 * time.Minute
 	controlPlaneWorkerHeartbeatStaleTimeout = 2 * time.Minute
@@ -67,6 +71,41 @@ func emitQueueHealthSample(ctx context.Context, store queueHealthStore, logger z
 			Float64("oldest_runnable_age_seconds", sample.OldestRunnableAgeSeconds).
 			Msg("platform health: job queue sample")
 	}
+}
+
+// RunPreviewHealthSampler emits the compact preview lifecycle snapshot used by
+// the preview health dashboard.
+func RunPreviewHealthSampler(ctx context.Context, store previewHealthStore, logger zerolog.Logger, interval time.Duration) {
+	if store == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	emitPreviewHealthSample(ctx, store, logger)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			emitPreviewHealthSample(ctx, store, logger)
+		}
+	}
+}
+
+func emitPreviewHealthSample(ctx context.Context, store previewHealthStore, logger zerolog.Logger) {
+	sample, err := store.PreviewHealthSample(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Msg("preview health: failed to sample lifecycle")
+		return
+	}
+	logger.Info().
+		Int64("active_previews", sample.ActivePreviews).
+		Int64("previews_started", sample.PreviewsStarted).
+		Int64("previews_ready", sample.PreviewsReady).
+		Int64("previews_failed_unavailable", sample.PreviewsFailedOrUnavailable).
+		Float64("startup_p50_seconds", sample.StartupP50Seconds).
+		Float64("startup_p95_seconds", sample.StartupP95Seconds).
+		Msg("preview health: lifecycle sample")
 }
 
 // RunControlPlaneHealthAlerts emits warning-level operational alerts from an

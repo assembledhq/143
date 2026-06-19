@@ -29,7 +29,22 @@ type PreviewMetrics struct {
 	DependencyCacheSaves           otelmetric.Int64Counter
 	DependencyCacheRestoreDuration otelmetric.Float64Histogram
 	DependencyCacheSaveDuration    otelmetric.Float64Histogram
+	PackageManagerCacheRestores    otelmetric.Int64Counter
+	PackageManagerCacheSaves       otelmetric.Int64Counter
+	PackageManagerRestoreDuration  otelmetric.Float64Histogram
+	PackageManagerSaveDuration     otelmetric.Float64Histogram
+	BuildCacheRestores             otelmetric.Int64Counter
+	BuildCacheSaves                otelmetric.Int64Counter
+	BuildCacheRestoreDuration      otelmetric.Float64Histogram
+	BuildCacheSaveDuration         otelmetric.Float64Histogram
+	PrewarmRuns                    otelmetric.Int64Counter
+	PrewarmRunDuration             otelmetric.Float64Histogram
 	SchedulerDecisions             otelmetric.Int64Counter
+	IndexListDuration              otelmetric.Float64Histogram
+	ResumeTotal                    otelmetric.Int64Counter
+	AutoBuildsTotal                otelmetric.Int64Counter
+	AutoPoolSaturation             otelmetric.Int64Counter
+	PRLaunchDecisions              otelmetric.Int64Counter
 }
 
 func getPreviewMetrics() *PreviewMetrics {
@@ -48,7 +63,22 @@ func getPreviewMetrics() *PreviewMetrics {
 		depSaves, _ := meter.Int64Counter("preview.session.dependency_cache.saves", otelmetric.WithUnit("{save}"))
 		depRestoreDuration, _ := meter.Float64Histogram("preview.session.dependency_cache.restore_duration", otelmetric.WithUnit("s"))
 		depSaveDuration, _ := meter.Float64Histogram("preview.session.dependency_cache.save_duration", otelmetric.WithUnit("s"))
+		pmRestores, _ := meter.Int64Counter("preview.session.package_manager_cache.restores", otelmetric.WithUnit("{restore}"))
+		pmSaves, _ := meter.Int64Counter("preview.session.package_manager_cache.saves", otelmetric.WithUnit("{save}"))
+		pmRestoreDuration, _ := meter.Float64Histogram("preview.session.package_manager_cache.restore_duration", otelmetric.WithUnit("s"))
+		pmSaveDuration, _ := meter.Float64Histogram("preview.session.package_manager_cache.save_duration", otelmetric.WithUnit("s"))
+		buildRestores, _ := meter.Int64Counter("preview.session.build_cache.restores", otelmetric.WithUnit("{restore}"))
+		buildSaves, _ := meter.Int64Counter("preview.session.build_cache.saves", otelmetric.WithUnit("{save}"))
+		buildRestoreDuration, _ := meter.Float64Histogram("preview.session.build_cache.restore_duration", otelmetric.WithUnit("s"))
+		buildSaveDuration, _ := meter.Float64Histogram("preview.session.build_cache.save_duration", otelmetric.WithUnit("s"))
+		prewarmRuns, _ := meter.Int64Counter("preview.cache_prewarm.runs", otelmetric.WithUnit("{run}"))
+		prewarmRunDuration, _ := meter.Float64Histogram("preview.cache_prewarm.run_duration", otelmetric.WithUnit("s"))
 		schedulerDecisions, _ := meter.Int64Counter("preview.session.dependency_cache.scheduler_decisions", otelmetric.WithUnit("{decision}"))
+		indexListDuration, _ := meter.Float64Histogram("preview.index.list_duration", otelmetric.WithUnit("s"))
+		resumeTotal, _ := meter.Int64Counter("preview.resume.total", otelmetric.WithUnit("{resume}"))
+		autoBuildsTotal, _ := meter.Int64Counter("preview.auto.builds_total", otelmetric.WithUnit("{build}"))
+		autoPoolSaturation, _ := meter.Int64Counter("preview.auto.pool_saturation", otelmetric.WithUnit("{event}"))
+		prLaunchDecisions, _ := meter.Int64Counter("preview.pr_launch.decisions", otelmetric.WithUnit("{decision}"))
 		previewMetrics = &PreviewMetrics{
 			CreatesTotal:                   creates,
 			IdempotencyHits:                idem,
@@ -63,7 +93,22 @@ func getPreviewMetrics() *PreviewMetrics {
 			DependencyCacheSaves:           depSaves,
 			DependencyCacheRestoreDuration: depRestoreDuration,
 			DependencyCacheSaveDuration:    depSaveDuration,
+			PackageManagerCacheRestores:    pmRestores,
+			PackageManagerCacheSaves:       pmSaves,
+			PackageManagerRestoreDuration:  pmRestoreDuration,
+			PackageManagerSaveDuration:     pmSaveDuration,
+			BuildCacheRestores:             buildRestores,
+			BuildCacheSaves:                buildSaves,
+			BuildCacheRestoreDuration:      buildRestoreDuration,
+			BuildCacheSaveDuration:         buildSaveDuration,
+			PrewarmRuns:                    prewarmRuns,
+			PrewarmRunDuration:             prewarmRunDuration,
 			SchedulerDecisions:             schedulerDecisions,
+			IndexListDuration:              indexListDuration,
+			ResumeTotal:                    resumeTotal,
+			AutoBuildsTotal:                autoBuildsTotal,
+			AutoPoolSaturation:             autoPoolSaturation,
+			PRLaunchDecisions:              prLaunchDecisions,
 		}
 	})
 	return previewMetrics
@@ -202,6 +247,70 @@ func RecordSessionDependencyCacheSave(ctx context.Context, orgID, result string,
 	}
 }
 
+func RecordSessionPackageManagerCacheRestore(ctx context.Context, orgID, result string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.PackageManagerCacheRestores == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(attribute.String("org.id", orgID), attribute.String("result", result))
+	m.PackageManagerCacheRestores.Add(ctx, 1, attrs)
+	if m.PackageManagerRestoreDuration != nil && duration > 0 {
+		m.PackageManagerRestoreDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordSessionPackageManagerCacheSave(ctx context.Context, orgID, result string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.PackageManagerCacheSaves == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(attribute.String("org.id", orgID), attribute.String("result", result))
+	m.PackageManagerCacheSaves.Add(ctx, 1, attrs)
+	if m.PackageManagerSaveDuration != nil && duration > 0 {
+		m.PackageManagerSaveDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordSessionBuildCacheRestore(ctx context.Context, orgID, result string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.BuildCacheRestores == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(attribute.String("org.id", orgID), attribute.String("result", result))
+	m.BuildCacheRestores.Add(ctx, 1, attrs)
+	if m.BuildCacheRestoreDuration != nil && duration > 0 {
+		m.BuildCacheRestoreDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordSessionBuildCacheSave(ctx context.Context, orgID, result string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.BuildCacheSaves == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(attribute.String("org.id", orgID), attribute.String("result", result))
+	m.BuildCacheSaves.Add(ctx, 1, attrs)
+	if m.BuildCacheSaveDuration != nil && duration > 0 {
+		m.BuildCacheSaveDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
+func RecordPreviewCachePrewarmRun(ctx context.Context, orgID, source, status string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.PrewarmRuns == nil {
+		return
+	}
+	attrs := otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("preview.source", source),
+		attribute.String("status", status),
+	)
+	m.PrewarmRuns.Add(ctx, 1, attrs)
+	if m.PrewarmRunDuration != nil && duration > 0 {
+		m.PrewarmRunDuration.Record(ctx, duration.Seconds(), attrs)
+	}
+}
+
 func RecordSessionDependencyCacheSchedulerDecision(ctx context.Context, orgID, decision string) {
 	m := getPreviewMetrics()
 	if m == nil || m.SchedulerDecisions == nil {
@@ -210,5 +319,62 @@ func RecordSessionDependencyCacheSchedulerDecision(ctx context.Context, orgID, d
 	m.SchedulerDecisions.Add(ctx, 1, otelmetric.WithAttributes(
 		attribute.String("org.id", orgID),
 		attribute.String("decision", decision),
+	))
+}
+
+func RecordPreviewIndexListDuration(ctx context.Context, orgID, scope string, duration time.Duration) {
+	m := getPreviewMetrics()
+	if m == nil || m.IndexListDuration == nil || duration <= 0 {
+		return
+	}
+	m.IndexListDuration.Record(ctx, duration.Seconds(), otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("preview.scope", scope),
+	))
+}
+
+func RecordPreviewResume(ctx context.Context, orgID, path string) {
+	m := getPreviewMetrics()
+	if m == nil || m.ResumeTotal == nil {
+		return
+	}
+	m.ResumeTotal.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("path", path),
+	))
+}
+
+func RecordPreviewAutoBuild(ctx context.Context, orgID, mode, result string) {
+	m := getPreviewMetrics()
+	if m == nil || m.AutoBuildsTotal == nil {
+		return
+	}
+	m.AutoBuildsTotal.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("mode", mode),
+		attribute.String("result", result),
+	))
+}
+
+func RecordPreviewAutoPoolSaturation(ctx context.Context, orgID string) {
+	m := getPreviewMetrics()
+	if m == nil || m.AutoPoolSaturation == nil {
+		return
+	}
+	m.AutoPoolSaturation.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("org.id", orgID)))
+}
+
+func RecordPRPreviewLaunchDecision(ctx context.Context, orgID, repo, intent, action, reason string, autoOpen bool) {
+	m := getPreviewMetrics()
+	if m == nil || m.PRLaunchDecisions == nil {
+		return
+	}
+	m.PRLaunchDecisions.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("repository.full_name", repo),
+		attribute.String("preview.intent", intent),
+		attribute.String("preview.launch_action", action),
+		attribute.String("preview.launch_reason", reason),
+		attribute.Bool("preview.auto_open", autoOpen),
 	))
 }

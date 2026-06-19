@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { parseAsString, useQueryState } from "nuqs";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
+import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Loader2, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { AutopilotConfigFooter } from "./autopilot-config-footer";
@@ -14,17 +14,22 @@ import { useAnalyze } from "@/hooks/use-analyze";
 import { AutopilotSteeringSheet } from "./autopilot-steering-sheet";
 import { AutopilotDocumentsSheet } from "./autopilot-documents-sheet";
 import { AutopilotProposalCard } from "@/components/autopilot-proposal-card";
+import { OpenPreviewButton } from "@/components/preview/open-preview-button";
 import { SessionLinearBadge } from "@/components/session-linear-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import type { AutopilotQueueRow, AutopilotRunState } from "@/lib/types";
+import { safeExternalUrl } from "@/lib/utils";
 
 const ALL_VALUE = "all";
 
@@ -64,12 +69,18 @@ const SORT_OPTIONS = [
   { value: "run_state", label: "Run state" },
 ];
 
+const PREVIEW_ORIGIN_TEMPLATE =
+  process.env.NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE ||
+  "http://{id}.preview.localhost:9090";
+
 export function AutopilotPageContent() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [showDirectionEditor, setShowDirectionEditor] = useState(false);
   const [showDocumentsEditor, setShowDocumentsEditor] = useState(false);
   const [selectedIssue, setSelectedIssue] = useState<AutopilotQueueRow | null>(null);
+  const [sessionNotes, setSessionNotes] = useState("");
   const [source, setSource] = useQueryState("source", parseAsString.withDefault(ALL_VALUE));
   const [runState, setRunState] = useQueryState("run_state", parseAsString.withDefault(ALL_VALUE));
   const [automation, setAutomation] = useQueryState("automation", parseAsString.withDefault(ALL_VALUE));
@@ -94,6 +105,7 @@ export function AutopilotPageContent() {
     q: search || null,
   });
   const { handleAnalyze, isAnalyzing, isPending } = useAnalyze(pmStatus.is_running);
+  const isAdmin = user?.role === "admin";
 
   useEffect(() => {
     if (!isLoading && !isSetupComplete) {
@@ -102,9 +114,16 @@ export function AutopilotPageContent() {
   }, [isLoading, isSetupComplete, router]);
 
   const startRunMutation = useMutation({
-    mutationFn: (issueId: string) => api.issues.triggerFix(issueId, { autonomy_level: "semi", token_mode: "low" }),
+    mutationFn: ({ issueId, message, force }: { issueId: string; message: string; force?: boolean }) =>
+      api.issues.triggerFix(issueId, {
+        autonomy_level: "semi",
+        token_mode: "low",
+        message: message.trim() || undefined,
+        force: force || undefined,
+      }),
     onSuccess: () => {
       setSelectedIssue(null);
+      setSessionNotes("");
       void queryClient.invalidateQueries({ queryKey: ["autopilot", "queue"] });
     },
   });
@@ -157,6 +176,7 @@ export function AutopilotPageContent() {
           loadingNextPage={isFetchingNextQueuePage}
           onLoadMore={() => void fetchNextQueuePage()}
           onStartRun={setSelectedIssue}
+          canOverrideBlocked={isAdmin}
         />
 
         <AutopilotProposalCard />
@@ -184,11 +204,19 @@ export function AutopilotPageContent() {
           row={selectedIssue}
           pending={startRunMutation.isPending}
           error={startRunMutation.error instanceof Error ? startRunMutation.error.message : null}
+          notes={sessionNotes}
+          onNotesChange={setSessionNotes}
           onOpenChange={(open) => {
-            if (!open) setSelectedIssue(null);
+            if (!open) {
+              setSelectedIssue(null);
+              setSessionNotes("");
+            }
           }}
           onConfirm={() => {
-            if (selectedIssue) startRunMutation.mutate(selectedIssue.id);
+            if (selectedIssue) {
+              const isOverride = selectedIssue.available_action === "blocked" || selectedIssue.available_action === "retry";
+              startRunMutation.mutate({ issueId: selectedIssue.id, message: sessionNotes, force: isOverride || undefined });
+            }
           }}
         />
       </div>
@@ -307,6 +335,7 @@ function QueueTable({
   loadingNextPage,
   onLoadMore,
   onStartRun,
+  canOverrideBlocked,
 }: {
   rows: AutopilotQueueRow[];
   loading: boolean;
@@ -314,6 +343,7 @@ function QueueTable({
   loadingNextPage: boolean;
   onLoadMore: () => void;
   onStartRun: (row: AutopilotQueueRow) => void;
+  canOverrideBlocked: boolean;
 }) {
   if (loading) {
     return <Card><CardContent className="py-8 text-sm text-muted-foreground">Loading ranked issues...</CardContent></Card>;
@@ -350,7 +380,7 @@ function QueueTable({
               <TableRow key={row.id}>
                 <TableCell className="font-medium text-muted-foreground">#{row.rank}</TableCell>
                 <TableCell className="whitespace-normal">
-                  <div className="font-medium text-foreground">{row.title}</div>
+                  <IssueTitle row={row} />
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>{row.repo?.name ?? "No repo"}</span>
                     <span>{row.issue_status}</span>
@@ -375,7 +405,7 @@ function QueueTable({
                   </Tooltip>
                 </TableCell>
                 <TableCell><RunState row={row} /></TableCell>
-                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} /></TableCell>
+                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} canOverrideBlocked={canOverrideBlocked} /></TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -389,6 +419,25 @@ function QueueTable({
         </div>
       )}
     </div>
+  );
+}
+
+function IssueTitle({ row }: { row: AutopilotQueueRow }) {
+  const issueUrl = safeExternalUrl(row.issue_url);
+  if (!issueUrl) {
+    return <div className="font-medium text-foreground">{row.title}</div>;
+  }
+
+  return (
+    <a
+      href={issueUrl}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex min-w-0 items-center gap-1 font-medium text-foreground underline-offset-4 hover:underline"
+    >
+      <span>{row.title}</span>
+      <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+    </a>
   );
 }
 
@@ -426,8 +475,12 @@ function RunState({ row }: { row: AutopilotQueueRow }) {
   );
 }
 
-function RowAction({ row, onStartRun }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void }) {
-  if (row.available_action === "start_run") {
+function RowAction({ row, onStartRun, canOverrideBlocked }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void; canOverrideBlocked: boolean }) {
+  if (hasPreviewAction(row)) {
+    return <PreviewRowAction row={row} />;
+  }
+
+  if (canStartSession(row, canOverrideBlocked)) {
     return <Button size="sm" onClick={() => onStartRun(row)}><Play className="h-3.5 w-3.5" />Start run</Button>;
   }
   if ((row.available_action === "view_run" || row.available_action === "review") && row.latest_session) {
@@ -449,7 +502,131 @@ function RowAction({ row, onStartRun }: { row: AutopilotQueueRow; onStartRun: (r
   );
 }
 
-function StartRunSheet({ row, pending, error, onOpenChange, onConfirm }: { row: AutopilotQueueRow | null; pending: boolean; error: string | null; onOpenChange: (open: boolean) => void; onConfirm: () => void }) {
+function PreviewRowAction({ row }: { row: AutopilotQueueRow }) {
+  const queryClient = useQueryClient();
+  const preview = row.latest_preview;
+  const refreshQueue = () => {
+    void queryClient.invalidateQueries({ queryKey: ["autopilot", "queue"] });
+  };
+  const startLatest = useMutation({
+    mutationFn: () => api.previews.startLatest(preview?.target_id ?? ""),
+    onSuccess: refreshQueue,
+    onError: (error) => {
+      console.error("Failed to start latest preview", error);
+    },
+  });
+  const retry = useMutation({
+    mutationFn: () => preview?.preview_id
+      ? api.previews.restart(preview.preview_id, { start_latest: true })
+      : api.previews.startLatest(preview?.target_id ?? ""),
+    onSuccess: refreshQueue,
+    onError: (error) => {
+      console.error("Failed to retry preview", error);
+    },
+  });
+
+  if (!preview) {
+    return null;
+  }
+
+  const previewUrl = previewURLForID(preview.preview_id);
+  const canOpen = Boolean(preview.preview_id && previewUrl);
+  const isCurrent = !preview.new_commits_available;
+  const isOpenable = preview.status === "ready" || preview.status === "partially_ready" || preview.status === "unhealthy";
+
+  if (preview.new_commits_available) {
+    return (
+      <div className="flex justify-end gap-2">
+        {canOpen && isOpenable ? (
+          <OpenPreviewButton
+            previewId={preview.preview_id}
+            previewUrl={previewUrl}
+            label="Open stale preview"
+            variant="outline"
+            size="sm"
+          />
+        ) : null}
+        <Button size="sm" onClick={() => startLatest.mutate()} disabled={startLatest.isPending}>
+          <Play className="h-3.5 w-3.5" />
+          {startLatest.isPending ? "Updating..." : "Update to latest"}
+        </Button>
+      </div>
+    );
+  }
+
+  if (isCurrent && isOpenable && canOpen) {
+    return (
+      <OpenPreviewButton
+        previewId={preview.preview_id}
+        previewUrl={previewUrl}
+        label="Open preview"
+        size="sm"
+      />
+    );
+  }
+
+  if (preview.status === "failed" || preview.status === "unavailable") {
+    return (
+      <Button size="sm" onClick={() => retry.mutate()} disabled={retry.isPending}>
+        <RotateCcw className="h-3.5 w-3.5" />
+        {retry.isPending ? "Retrying..." : "Retry preview"}
+      </Button>
+    );
+  }
+
+  if (preview.status === "stopped" || preview.status === "expired" || preview.status === "target_created") {
+    return (
+      <Button size="sm" onClick={() => startLatest.mutate()} disabled={startLatest.isPending}>
+        <Play className="h-3.5 w-3.5" />
+        {startLatest.isPending ? "Starting..." : "Start preview"}
+      </Button>
+    );
+  }
+
+  if (preview.status === "starting") {
+    return (
+      <Button size="sm" disabled>
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Starting...
+      </Button>
+    );
+  }
+
+  return null;
+}
+
+function hasPreviewAction(row: AutopilotQueueRow) {
+  return Boolean(row.available_action === "open_pr" && row.latest_preview && row.latest_pr?.status === "open");
+}
+
+function previewURLForID(previewID?: string) {
+  if (!previewID) return undefined;
+  return PREVIEW_ORIGIN_TEMPLATE.replace("{id}", previewID);
+}
+
+function canStartSession(row: AutopilotQueueRow, canOverrideBlocked: boolean) {
+  if (row.available_action === "start_run") return true;
+  if (!canOverrideBlocked || !row.repo) return false;
+  return row.available_action === "blocked" || row.available_action === "retry";
+}
+
+function StartRunSheet({
+  row,
+  pending,
+  error,
+  notes,
+  onNotesChange,
+  onOpenChange,
+  onConfirm,
+}: {
+  row: AutopilotQueueRow | null;
+  pending: boolean;
+  error: string | null;
+  notes: string;
+  onNotesChange: (value: string) => void;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
   return (
     <Sheet open={Boolean(row)} onOpenChange={onOpenChange}>
       <SheetContent>
@@ -469,9 +646,23 @@ function StartRunSheet({ row, pending, error, onOpenChange, onConfirm }: { row: 
               <InfoRow label="Token mode" value="Low" />
               <InfoRow label="Ranking" value={`${row.low_hanging_fruit.label}: ${row.low_hanging_fruit.reasons.join(", ") || "no details"}`} />
             </div>
-            {row.action_disabled_reason && <p className="text-sm text-destructive">{row.action_disabled_reason}</p>}
+            <div className="space-y-2">
+              <Label htmlFor="autopilot-session-notes">Session notes</Label>
+              <Textarea
+                id="autopilot-session-notes"
+                value={notes}
+                onChange={(event) => onNotesChange(event.target.value)}
+                placeholder="Add extra instructions for this run"
+                className="min-h-28 text-sm"
+              />
+            </div>
+            {row.action_disabled_reason && (
+              <p className={`text-sm ${row.repo ? "text-muted-foreground" : "text-destructive"}`}>
+                {row.action_disabled_reason}
+              </p>
+            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button className="w-full" onClick={onConfirm} disabled={pending || Boolean(row.action_disabled_reason)}>
+            <Button className="w-full" onClick={onConfirm} disabled={pending || !row.repo}>
               {pending ? "Starting..." : "Create session"}
             </Button>
           </div>

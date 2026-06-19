@@ -99,6 +99,7 @@ type CodingCredentialRateLimit struct {
 // CodingCredential is the DB row representation. Config is encrypted bytea.
 type CodingCredential struct {
 	ID                    uuid.UUID                 `db:"id"`
+	VersionID             uuid.UUID                 `db:"version_id"`
 	OrgID                 uuid.UUID                 `db:"org_id"`
 	UserID                *uuid.UUID                `db:"user_id"`
 	Provider              ProviderName              `db:"provider"`
@@ -111,6 +112,7 @@ type CodingCredential struct {
 	RateLimitedUntil      *time.Time                `db:"rate_limited_until"`
 	RateLimitedObservedAt *time.Time                `db:"rate_limited_observed_at"`
 	RateLimitMessage      *string                   `db:"rate_limit_message"`
+	Active                bool                      `db:"active"`
 	CreatedAt             time.Time                 `db:"created_at"`
 	UpdatedAt             time.Time                 `db:"updated_at"`
 }
@@ -120,7 +122,12 @@ type CodingCredential struct {
 // directly — callers convert to CodingCredentialSummary before crossing
 // the API boundary.
 type DecryptedCodingCredential struct {
-	ID                    uuid.UUID                 `json:"id"`
+	ID uuid.UUID `json:"id"`
+	// VersionID identifies the physical config-version row backing this
+	// read. Internal until a credential-history API exposes versions
+	// deliberately; omitempty is a no-op on a [16]byte array, so the field
+	// is excluded outright rather than always serialising.
+	VersionID             uuid.UUID                 `json:"-"`
 	OrgID                 uuid.UUID                 `json:"org_id"`
 	UserID                *uuid.UUID                `json:"user_id,omitempty"`
 	Provider              ProviderName              `json:"provider"`
@@ -202,8 +209,8 @@ func (i CreateCodingCredentialInput) Validate() error {
 		return errors.New("subscription auth must be created through the provider-specific auth flow")
 	}
 	if len(i.AgentDefaults) > 0 {
-		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi {
-			return errors.New("agent_defaults are only supported for amp and pi")
+		if i.Agent != AgentTypeAmp && i.Agent != AgentTypePi && i.Agent != AgentTypeOpenCode {
+			return errors.New("agent_defaults are only supported for amp, pi, and opencode")
 		}
 		if err := ValidateSettingsModels(OrgSettings{
 			AgentConfig: AgentEnvConfig{
@@ -298,11 +305,10 @@ func (i ReorderCodingCredentialsInput) Validate() error {
 
 // AnthropicSubscriptionConfig holds Claude Code OAuth tokens.
 //
-// Extracted from AnthropicConfig.Subscription as part of the unified-credentials
-// redesign. Provider name is ProviderAnthropicSubscription. Fields and lifecycle
-// match AnthropicSubscription exactly so the on-disk and over-the-wire JSON
-// shapes are identical to the legacy nested form — making the encrypted-blob
-// migration a pure rename of the surrounding wrapper.
+// Provider name is ProviderAnthropicSubscription. Fields and lifecycle match
+// the runtime AnthropicSubscription struct exactly (historically these tokens
+// were nested inside AnthropicConfig; the unified-credentials redesign split
+// them into their own provider).
 type AnthropicSubscriptionConfig struct {
 	AccessToken   string    `json:"access_token"`  // #nosec G117 -- JSON config field
 	RefreshToken  string    `json:"refresh_token"` // #nosec G117 -- JSON config field
@@ -356,10 +362,9 @@ func (c AnthropicSubscriptionConfig) MaskedSummary() CredentialSummary {
 
 // OpenAISubscriptionConfig holds Codex subscription OAuth tokens.
 //
-// Renamed from OpenAIChatGPTConfig. The on-disk JSON shape is identical to
-// the legacy form — only Provider() differs (returns ProviderOpenAISubscription
-// instead of ProviderOpenAIChatGPT). The data migration rewrites the surrounding
-// row's provider column; the encrypted bytea content is unchanged.
+// Renamed from the legacy OpenAIChatGPTConfig (provider "openai_chatgpt");
+// the on-disk JSON shape is unchanged, only the surrounding row's provider
+// column differs.
 type OpenAISubscriptionConfig struct {
 	AccessToken  string    `json:"access_token"`       // #nosec G117 -- JSON config field
 	RefreshToken string    `json:"refresh_token"`      // #nosec G117 -- JSON config field
@@ -389,7 +394,7 @@ func (c OpenAISubscriptionConfig) Provider() ProviderName {
 	return ProviderOpenAISubscription
 }
 
-// Validate enforces the same rules as OpenAIChatGPTConfig.Validate.
+// Validate requires both an access token and a refresh token.
 func (c OpenAISubscriptionConfig) Validate() error {
 	if c.AccessToken == "" {
 		return errors.New("access_token is required")
@@ -410,22 +415,19 @@ func (c OpenAISubscriptionConfig) MaskedSummary() CredentialSummary {
 	}
 }
 
-// AsOpenAIChatGPTConfig is a backwards-compat helper for code paths that
-// still expect the legacy struct shape. Removed in the cleanup PR.
-func (c OpenAISubscriptionConfig) AsOpenAIChatGPTConfig() OpenAIChatGPTConfig {
-	return OpenAIChatGPTConfig(c)
-}
-
-// FromOpenAIChatGPTConfig is the inverse of AsOpenAIChatGPTConfig.
-func FromOpenAIChatGPTConfig(c OpenAIChatGPTConfig) OpenAISubscriptionConfig {
-	return OpenAISubscriptionConfig(c)
-}
-
-// FromAnthropicSubscription extracts an AnthropicSubscriptionConfig from the
-// legacy AnthropicConfig.Subscription nested struct. Used by the Anthropic
-// split post-step migration.
+// FromAnthropicSubscription converts the runtime AnthropicSubscription token
+// shape into the persisted AnthropicSubscriptionConfig row shape. The two
+// structs carry identical fields.
 func FromAnthropicSubscription(s AnthropicSubscription) AnthropicSubscriptionConfig {
 	return AnthropicSubscriptionConfig(s)
+}
+
+// AsAnthropicSubscription is the inverse of FromAnthropicSubscription: it
+// converts a persisted AnthropicSubscriptionConfig row into the runtime
+// AnthropicSubscription token shape that GetValidToken returns and the
+// orchestrator injects into sandboxes.
+func (c AnthropicSubscriptionConfig) AsAnthropicSubscription() AnthropicSubscription {
+	return AnthropicSubscription(c)
 }
 
 // ParseCodingProviderConfig is the strict variant of ParseProviderConfig that
@@ -438,10 +440,6 @@ func FromAnthropicSubscription(s AnthropicSubscription) AnthropicSubscriptionCon
 // provider name (e.g. 'sentry') would otherwise round-trip silently through
 // decryptRow → ParseProviderConfig → typed config. Gating reads to the
 // known coding-provider set turns that into a typed error instead.
-//
-// ProviderOpenAIChatGPT is intentionally excluded: the SQL data-copy migration
-// renames it to ProviderOpenAISubscription on insert, so coding_credentials
-// rows must never carry the legacy spelling.
 func ParseCodingProviderConfig(provider ProviderName, data []byte) (ProviderConfig, error) {
 	switch provider {
 	case ProviderAnthropic,
@@ -451,6 +449,7 @@ func ParseCodingProviderConfig(provider ProviderName, data []byte) (ProviderConf
 		ProviderGemini,
 		ProviderAmp,
 		ProviderPi,
+		ProviderOpenCode,
 		ProviderOpenRouter:
 		return ParseProviderConfig(provider, data)
 	}

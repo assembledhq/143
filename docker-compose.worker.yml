@@ -113,6 +113,7 @@ services:
       SANDBOX_RUNTIME: runsc
       SANDBOX_REQUIRE_GVISOR: "true"
       SANDBOX_HEALTH_CHECK_IMAGE: ${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}
+      PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR: ${PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR:-/var/cache/143/preview-dependency-cache}
       # Bind-mounted into every sandbox at /etc/resolv.conf. The path here is
       # the *host* path because docker.sock resolves bind sources against the
       # host, not this worker container. Provisioned by provision.sh.
@@ -151,10 +152,15 @@ services:
       # path. The host directory is provisioned 0750 and owned 1000:1000
       # via systemd-tmpfiles in deploy/scripts/provision.sh.
       - /var/run/143/sandbox-auth:/var/run/143/sandbox-auth
+      # Worker-local preview dependency cache L1. This must be host-backed so
+      # DB cache-location hints remain useful after worker container recreates.
+      - /var/cache/143/preview-dependency-cache:/var/cache/143/preview-dependency-cache
       # Provisioning must stage this file before the first `docker compose up`.
       # If the bind source is missing, Docker creates a directory at the host
       # path and later deploy-time scp of the encrypted env file fails.
-      - .env.production.enc:/.env.production.enc:ro
+      # Mounted at /app (the workdir) — docker-entrypoint.sh resolves the
+      # bundle relative to the workdir; the image itself carries no secrets.
+      - .env.production.enc:/app/.env.production.enc:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
       interval: 15s

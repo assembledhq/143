@@ -7,10 +7,11 @@ set -euo pipefail
 
 HOST="${1:-${HOST:-}}"
 SSH_KEY="${2:-${SSH_KEY:-}}"
-SSH_USER="${SSH_USER:-root}"
+EGRESS_SSH_USER="${EGRESS_SSH_USER:-${SSH_USER:-}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$PROJECT_DIR/.env.production.enc}"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+ENC_FILE="${STATIC_EGRESS_ENV_FILE:-$SECRETS_DIR/.env.production.enc}"
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new)
 
 load_env_key() {
@@ -90,15 +91,34 @@ load_static_egress_env() {
 }
 
 remote_target() {
-  printf '%s@%s' "$SSH_USER" "$HOST"
+  printf '%s@%s' "$EGRESS_SSH_USER" "$HOST"
 }
 
 remote_sudo_prefix() {
-  if [ "$SSH_USER" = "root" ]; then
+  if [ "$EGRESS_SSH_USER" = "root" ]; then
     printf ''
   else
     printf 'sudo '
   fi
+}
+
+resolve_remote_user() {
+  if [ -n "$EGRESS_SSH_USER" ]; then
+    return
+  fi
+
+  local user
+  for user in root ubuntu; do
+    if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 "$user@$HOST" true >/dev/null 2>&1; then
+      EGRESS_SSH_USER="$user"
+      echo "Using egress SSH user $EGRESS_SSH_USER@$HOST"
+      return
+    fi
+  done
+
+  echo "ERROR: could not SSH to egress gateway $HOST as root or ubuntu with $SSH_KEY." >&2
+  echo "Set EGRESS_SSH_USER=<user> and/or EGRESS_SSH_KEY=<path>." >&2
+  exit 1
 }
 
 default_tailscale_hostname() {
@@ -163,6 +183,7 @@ fi
 : "${STATIC_EGRESS_GATEWAY_PRIVATE_KEY:?STATIC_EGRESS_GATEWAY_PRIVATE_KEY is required; run deploy/scripts/sync-static-egress-secrets.sh --apply}"
 : "${STATIC_EGRESS_WORKER_PEERS:?STATIC_EGRESS_WORKER_PEERS is required; run deploy/scripts/sync-static-egress-secrets.sh --apply}"
 
+resolve_remote_user
 REMOTE="$(remote_target)"
 SUDO_PREFIX="$(remote_sudo_prefix)"
 

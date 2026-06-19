@@ -34,13 +34,13 @@ func (m *helperPlanStore) Update(_ context.Context, _ *models.PMPlan) error {
 
 type helperNoTokenCodexAuth struct{}
 
-func (helperNoTokenCodexAuth) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (helperNoTokenCodexAuth) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	return nil, nil
 }
 
 type helperErrCodexAuth struct{}
 
-func (helperErrCodexAuth) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (helperErrCodexAuth) GetValidToken(_ context.Context, _ uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	return nil, errors.New("oauth lookup failed")
 }
 
@@ -200,8 +200,8 @@ func TestResolveAgentType(t *testing.T) {
 		},
 		{
 			name:     "settings default is used without override",
-			settings: models.OrgSettings{DefaultAgentType: models.AgentTypeGeminiCLI},
-			expected: models.AgentTypeGeminiCLI,
+			settings: models.OrgSettings{DefaultAgentType: models.AgentTypeOpenCode},
+			expected: models.AgentTypeOpenCode,
 		},
 		{
 			name:     "platform default is final fallback",

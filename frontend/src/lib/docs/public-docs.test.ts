@@ -138,6 +138,20 @@ describe("public docs source", () => {
     expect(raw.content).not.toContain("Design: Public Docs");
   });
 
+  it("keeps the homepage benefits bullets with team-level automation wording", () => {
+    const raw = getRawPublicDocBySlug([]);
+
+    expect(raw.content).toContain("built for engineering teams");
+    expect(raw.content).toContain("defaults to team-level workflows");
+    expect(raw.content).toContain("**A shared execution layer:**");
+    expect(raw.content).toContain("**Team-level automation:**");
+    expect(raw.content).toContain("Linear or an API");
+    expect(raw.content).toContain("self-host");
+    expect(raw.content).not.toContain("**Repo-specific contracts:**");
+    expect(raw.content).not.toContain("## Why teams use it");
+    expect(raw.content).not.toContain("**Controlled automation:**");
+  });
+
   it("keeps preview setup and secret guidance in the public preview docs", () => {
     const raw = getRawPublicDocBySlug(["guides", "previews"]);
 

@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,7 +35,7 @@ func NewUserStore(db DBTX) *UserStore {
 }
 
 const userSelectColumns = `id, org_id, email, name, role, github_id, github_login, github_noreply_email, avatar_url, password_hash, google_id, created_at`
-const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, created_at, settings`
+const userWithSettingsSelectColumns = `id, org_id, email, name, role, github_id, github_login, avatar_url, google_id, email_verified_at, created_at, settings`
 
 // UpsertFromGitHub creates or updates a user based on their GitHub ID.
 // On conflict, it updates the user's name, login, avatar, email, and the
@@ -142,6 +144,7 @@ func (s *UserStore) GetByIDGlobalWithSettings(ctx context.Context, userID uuid.U
 	return pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (models.UserWithSettings, error) {
 		var user models.UserWithSettings
 		var rawSettings json.RawMessage
+		var emailVerifiedAt *time.Time
 		if err := row.Scan(
 			&user.ID,
 			&user.OrgID,
@@ -152,11 +155,13 @@ func (s *UserStore) GetByIDGlobalWithSettings(ctx context.Context, userID uuid.U
 			&user.GitHubLogin,
 			&user.AvatarURL,
 			&user.GoogleID,
+			&emailVerifiedAt,
 			&user.CreatedAt,
 			&rawSettings,
 		); err != nil {
 			return models.UserWithSettings{}, err
 		}
+		user.EmailVerified = emailVerifiedAt != nil
 		settings, err := models.ParseUserSettings(rawSettings)
 		if err != nil {
 			return models.UserWithSettings{}, fmt.Errorf("parse user settings: %w", err)
@@ -240,6 +245,69 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, 
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
 }
 
+// GetByOrgAndEmail resolves a single org member by an email that may be their
+// primary, GitHub noreply, or one of their secondary emails. Nothing enforces
+// that an address is unique across users within an org (a secondary email could
+// collide with another member's primary), so the match is deterministically
+// tie-broken: a primary-email match wins over a github-noreply match, which
+// wins over a secondary-email match, and `created_at` (then `id`) breaks any
+// remaining tie so the same caller always resolves to the same user.
+//
+// secondary_emails are stored pre-lowercased by AddSecondaryEmail, so the array
+// comparison below compares against already-lowercased elements rather than
+// re-lowering each element.
+//
+// No dedicated email index is needed: the org_id predicate is served by
+// idx_users_org_id, which bounds the scan to a single org's members (a small
+// set), and the OR over the three email columns is then evaluated within that
+// subset. This lookup runs at session-creation frequency, so adding expression
+// or GIN indexes here would cost write amplification on every users write for a
+// scan the planner would not choose anyway.
+func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email string) (models.User, error) {
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM users
+		WHERE org_id = @org_id
+		  AND (LOWER(email) = LOWER(@email)
+		       OR LOWER(github_noreply_email) = LOWER(@email)
+		       OR LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))
+		ORDER BY
+		  (LOWER(email) = LOWER(@email)) DESC,
+		  (LOWER(github_noreply_email) = LOWER(@email)) DESC,
+		  created_at ASC,
+		  id ASC
+		LIMIT 1`, userSelectColumns)
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
+	if err != nil {
+		return models.User{}, fmt.Errorf("query user by org and email: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
+// AddSecondaryEmail appends email (lowercased) to the user's secondary_emails
+// array if it is not already present. Callers use this to record an invite
+// email that differs from the OAuth provider's primary email, so that a later
+// lookup by that invite address still resolves to the correct user.
+func (s *UserStore) AddSecondaryEmail(ctx context.Context, orgID, userID uuid.UUID, email string) error {
+	query := `
+		UPDATE users
+		SET secondary_emails = array_append(COALESCE(secondary_emails, '{}'::text[]), LOWER(@email))
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND NOT (LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     userID,
+		"org_id": orgID,
+		"email":  email,
+	})
+	if err != nil {
+		return fmt.Errorf("add secondary email: %w", err)
+	}
+	return nil
+}
+
 // GetByGoogleID looks up a user by Google subject ID.
 // lint:allow-no-orgid reason="pre-auth login lookup; Google subject id is globally unique"
 func (s *UserStore) GetByGoogleID(ctx context.Context, googleID string) (models.User, error) {
@@ -274,26 +342,51 @@ func (s *UserStore) CreateWithPassword(ctx context.Context, user *models.User) e
 	return row.Scan(&user.ID, &user.CreatedAt)
 }
 
-// UpdateSettings replaces the user's settings JSONB document.
+// MergeSettings applies an RFC 7386 JSON merge patch to the user's settings
+// JSONB document and returns the merged result. The read-merge-write runs in
+// a transaction holding the row lock, so concurrent patches from other tabs
+// compose instead of overwriting each other (the old replace-the-document
+// contract made every writer clobber whatever it hadn't read).
 //
 // lint:allow-no-orgid reason="user-scoped self-settings update by primary key"
-func (s *UserStore) UpdateSettings(ctx context.Context, userID uuid.UUID, settings models.UserSettings) error {
-	encodedSettings, err := settings.MarshalJSONB()
-	if err != nil {
-		return fmt.Errorf("marshal user settings: %w", err)
+func (s *UserStore) MergeSettings(ctx context.Context, userID uuid.UUID, patch json.RawMessage) (models.UserSettings, error) {
+	starter, ok := s.db.(TxStarter)
+	if !ok {
+		return models.UserSettings{}, fmt.Errorf("user store db does not support transactions")
 	}
-	query := `UPDATE users SET settings = @settings WHERE id = @id`
-	tag, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return models.UserSettings{}, fmt.Errorf("begin settings merge: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current json.RawMessage
+	row := tx.QueryRow(ctx, `SELECT settings FROM users WHERE id = @id FOR UPDATE`, pgx.NamedArgs{"id": userID})
+	if err := row.Scan(&current); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.UserSettings{}, pgx.ErrNoRows
+		}
+		return models.UserSettings{}, fmt.Errorf("load user settings for merge: %w", err)
+	}
+
+	merged, err := models.ApplyUserSettingsMergePatch(current, patch)
+	if err != nil {
+		return models.UserSettings{}, fmt.Errorf("merge user settings: %w", err)
+	}
+	encodedSettings, err := merged.MarshalJSONB()
+	if err != nil {
+		return models.UserSettings{}, fmt.Errorf("marshal user settings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET settings = @settings WHERE id = @id`, pgx.NamedArgs{
 		"settings": encodedSettings,
 		"id":       userID,
-	})
-	if err != nil {
-		return fmt.Errorf("update user settings: %w", err)
+	}); err != nil {
+		return models.UserSettings{}, fmt.Errorf("update user settings: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
+	if err := tx.Commit(ctx); err != nil {
+		return models.UserSettings{}, fmt.Errorf("commit settings merge: %w", err)
 	}
-	return nil
+	return merged, nil
 }
 
 // UpsertFromGoogle creates or updates a user based on their Google subject ID.
@@ -407,9 +500,23 @@ func (s *UserStore) ListByOrgViaMemberships(
 		SELECT u.id, m.org_id, u.email, u.name, m.role,
 		       u.github_id, u.github_login, u.github_noreply_email, u.avatar_url,
 		       u.password_hash, u.google_id, u.created_at,
+		       captured.github_org_login AS captured_github_org_login,
 		       m.created_at AS membership_created_at
 		FROM users u
 		JOIN organization_memberships m ON m.user_id = u.id
+		LEFT JOIN LATERAL (
+			SELECT l.account_login AS github_org_login
+			FROM github_org_members gom
+			JOIN github_installation_org_links l ON l.installation_id = gom.installation_id
+			JOIN github_installations gi ON gi.installation_id = l.installation_id
+			WHERE gom.github_user_id = u.github_id
+			  AND l.org_id = m.org_id
+			  AND l.status = 'active'
+			  AND l.auto_join_enabled
+			  AND gi.status = 'active'
+			ORDER BY l.updated_at ASC, l.org_id ASC
+			LIMIT 1
+		) captured ON u.github_id IS NOT NULL
 		WHERE m.org_id = @org_id
 		  AND (
 		      @cursor_created_at::timestamptz IS NULL
@@ -438,16 +545,21 @@ func (s *UserStore) ListByOrgViaMemberships(
 	)
 	for rows.Next() {
 		var (
-			u       models.User
-			memTime time.Time
+			u                 models.User
+			capturedGitHubOrg sql.NullString
+			memTime           time.Time
 		)
 		if err := rows.Scan(
 			&u.ID, &u.OrgID, &u.Email, &u.Name, &u.Role,
 			&u.GitHubID, &u.GitHubLogin, &u.GitHubNoreplyEmail, &u.AvatarURL,
 			&u.PasswordHash, &u.GoogleID, &u.CreatedAt,
+			&capturedGitHubOrg,
 			&memTime,
 		); err != nil {
 			return nil, time.Time{}, fmt.Errorf("scan user via memberships: %w", err)
+		}
+		if capturedGitHubOrg.Valid {
+			u.CapturedGitHubOrgLogin = &capturedGitHubOrg.String
 		}
 		users = append(users, u)
 		lastMembershipTime = memTime
@@ -487,6 +599,44 @@ func (s *UserStore) IsGitHubLoginMemberOfOrg(ctx context.Context, githubLogin st
 		return false, fmt.Errorf("check github login membership: %w", err)
 	}
 	return exists, nil
+}
+
+// SetEmailVerification synchronizes users.email_verified_at with the OAuth
+// provider's attestation of the given address: stamped when verified,
+// CLEARED when the provider reports the address unverified. The clearing
+// half is load-bearing — OAuth upserts overwrite users.email on every
+// login, so a user who switches their provider email to an unverified
+// address must not retain a stamp earned by the previous address (that
+// stale stamp would let an unverified email pass the domain-join gate).
+//
+// The email predicate guards against touching a stale stored address: the
+// caller passes the provider-asserted email, and the write only lands when
+// it matches what we have on file (e.g. a Google login won't clear a stamp
+// belonging to the user's differing GitHub-managed email).
+//
+// lint:allow-no-orgid reason="user-scoped identity update by globally unique user id"
+func (s *UserStore) SetEmailVerification(ctx context.Context, userID uuid.UUID, providerEmail string, verified bool) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE users SET email_verified_at = CASE WHEN @verified THEN now() ELSE NULL END
+		 WHERE id = @id AND LOWER(email) = LOWER(@email)`,
+		pgx.NamedArgs{"id": userID, "email": providerEmail, "verified": verified})
+	return err
+}
+
+// GetEmailVerifiedAt returns the provider-verification watermark for the
+// user's current email, or nil when the address has never been attested.
+//
+// lint:allow-no-orgid reason="user-scoped identity read by globally unique user id"
+func (s *UserStore) GetEmailVerifiedAt(ctx context.Context, userID uuid.UUID) (*time.Time, error) {
+	var verifiedAt *time.Time
+	err := s.db.QueryRow(ctx,
+		`SELECT email_verified_at FROM users WHERE id = @id`,
+		pgx.NamedArgs{"id": userID},
+	).Scan(&verifiedAt)
+	if err != nil {
+		return nil, err
+	}
+	return verifiedAt, nil
 }
 
 // LinkGoogleAccount attaches a Google identity to an existing user.

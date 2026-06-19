@@ -120,6 +120,27 @@ func TestLatestUserMessageInScope_ThreadScopedSelection(t *testing.T) {
 	require.Equal(t, "A turn 9", scopedA.Content, "scoped lookup should return thread A's most recent user when asked for thread A")
 }
 
+func TestLatestUserMessageInScope_UsesNewestMessageIDWithinThread(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.New()
+
+	// Regression: PR repair used to insert a thread-bound message with the
+	// session turn number. That older repair message can therefore sort after
+	// a newer thread-local follow-up in ListBySession's (turn_number, id)
+	// ordering. The scoped selector must choose the newest row in the thread,
+	// not the last row in the DB ordering.
+	messages := []models.SessionMessage{
+		{ID: 5127, Role: models.MessageRoleUser, Content: "new design follow-up", ThreadID: &threadID, TurnNumber: 5},
+		{ID: 5113, Role: models.MessageRoleUser, Content: "old repair prompt", ThreadID: &threadID, TurnNumber: 27},
+		{ID: 5114, Role: models.MessageRoleAssistant, Content: "old repair reply", ThreadID: &threadID, TurnNumber: 27},
+	}
+
+	got := latestUserMessageInScope(messages, &threadID)
+	require.NotNil(t, got, "should find a user message in the thread")
+	require.Equal(t, "new design follow-up", got.Content, "scoped lookup should prefer the newest message row over an older higher-turn repair prompt")
+}
+
 func TestLatestUserMessageInScope_NoThreadFallback(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +153,23 @@ func TestLatestUserMessageInScope_NoThreadFallback(t *testing.T) {
 	got := latestUserMessageInScope(messages, nil)
 	require.NotNil(t, got)
 	require.Equal(t, "session-level", got.Content, "nil scope should ignore threaded messages and return the latest no-thread user")
+}
+
+func TestUnprocessedUserMessagesThrough_UsesMessageIDBoundaryWithinThread(t *testing.T) {
+	t.Parallel()
+
+	threadID := uuid.New()
+
+	messages := []models.SessionMessage{
+		{ID: 5127, Role: models.MessageRoleUser, Content: "new design follow-up", ThreadID: &threadID, TurnNumber: 5},
+		{ID: 5113, Role: models.MessageRoleUser, Content: "old repair prompt", ThreadID: &threadID, TurnNumber: 27},
+		{ID: 5114, Role: models.MessageRoleAssistant, Content: "old repair reply", ThreadID: &threadID, TurnNumber: 27},
+	}
+
+	got := unprocessedUserMessagesThrough(messages, &threadID, 5127)
+	require.Equal(t, []models.SessionMessage{
+		{ID: 5127, Role: models.MessageRoleUser, Content: "new design follow-up", ThreadID: &threadID, TurnNumber: 5},
+	}, got, "unprocessed lookup should ignore older high-turn assistant rows that sort after the newer user message")
 }
 
 func TestUnprocessedUserMessages_SessionScope(t *testing.T) {
@@ -1039,8 +1077,8 @@ func TestShedOnRunResultDispatch(t *testing.T) {
 			wantAuthRejected: false,
 		},
 		{
-			name:             "gemini quota error sheds rate limited",
-			agentType:        models.AgentTypeGeminiCLI,
+			name:             "opencode quota error sheds rate limited",
+			agentType:        models.AgentTypeOpenCode,
 			result:           &AgentResult{Error: "quota exceeded: retry-after=90"},
 			wantRateLimited:  true,
 			wantAuthRejected: false,
@@ -1126,6 +1164,12 @@ func testConfigForShedProvider(provider models.ProviderName) models.ProviderConf
 		return models.AmpConfig{APIKey: "amp-test-1234"}
 	case models.ProviderPi:
 		return models.PiConfig{APIKey: "pi-test-1234"}
+	case models.ProviderOpenCode:
+		return models.OpenCodeConfig{
+			APIKey:          "opencode-test-1234",
+			BackingProvider: models.ProviderOpenCode,
+			Model:           models.OpenCodeModelGPT54Mini,
+		}
 	default:
 		return nil
 	}
@@ -1239,9 +1283,9 @@ func TestCodingProviderForAgent(t *testing.T) {
 		want      models.ProviderName
 	}{
 		{"claude code maps to anthropic api key", models.AgentTypeClaudeCode, models.ProviderAnthropic},
-		{"gemini cli maps to gemini", models.AgentTypeGeminiCLI, models.ProviderGemini},
 		{"amp maps to amp", models.AgentTypeAmp, models.ProviderAmp},
 		{"pi maps to pi", models.AgentTypePi, models.ProviderPi},
+		{"opencode maps to opencode", models.AgentTypeOpenCode, models.ProviderOpenCode},
 		{"codex maps to openai api key", models.AgentTypeCodex, models.ProviderOpenAI},
 		{"unknown agent type returns empty", models.AgentType("unknown"), ""},
 	}
@@ -1266,4 +1310,37 @@ func TestTruncateForLog(t *testing.T) {
 	out := truncateForLog("héllo", 2)
 	require.Equal(t, "h…", out, "should rewind to a rune boundary before appending the ellipsis")
 	require.Equal(t, "x", truncateForLog("x", 0), "non-positive max disables truncation")
+}
+
+// TestBillingModeForAgent locks the agent-type → billing-mode mapping so that
+// cost derivation works correctly for each agent. API-key-only agents must
+// return APIKey so deriveTokenCost doesn't short-circuit to nil.
+func TestBillingModeForAgent(t *testing.T) {
+	t.Parallel()
+
+	o := &Orchestrator{}
+	ctx := context.Background()
+	orgID := uuid.New()
+
+	cases := []struct {
+		name      string
+		agentType models.AgentType
+		env       map[string]string
+		want      TokenBillingMode
+	}{
+		{"amp returns api key", models.AgentTypeAmp, nil, TokenBillingModeAPIKey},
+		{"pi returns api key", models.AgentTypePi, nil, TokenBillingModeAPIKey},
+		{"opencode returns api key", models.AgentTypeOpenCode, nil, TokenBillingModeAPIKey},
+		{"codex with api key env returns api key", models.AgentTypeCodex, map[string]string{"OPENAI_API_KEY": "sk-test"}, TokenBillingModeAPIKey},
+		{"codex without api key returns subscription", models.AgentTypeCodex, nil, TokenBillingModeSubscription},
+		{"unknown agent type returns unknown", models.AgentType("unknown"), nil, TokenBillingModeUnknown},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := o.billingModeForAgent(ctx, tc.agentType, orgID, nil, tc.env, "")
+			require.Equal(t, tc.want, got)
+		})
+	}
 }

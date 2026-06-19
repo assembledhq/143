@@ -13,9 +13,22 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/server ./cmd/server && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/session-executor ./cmd/server && \
     CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate && \
-    CGO_ENABLED=0 go build -o /bin/migrate-coding-credentials-anthropic-split ./cmd/migrate-coding-credentials-anthropic-split && \
     CGO_ENABLED=0 go build -o /bin/deploy-guardrail ./cmd/deploy-guardrail && \
     CGO_ENABLED=0 go build -o /bin/worker-deployctl ./cmd/worker-deployctl
+
+# Cross-compile the 143-tools CLI for laptop installs (darwin/linux ×
+# amd64/arm64) and generate the checksums.txt the installer verifies. Served
+# by the Go server from /opt/143/cli via /install.sh and /download/143-tools/*.
+# Keep the matrix in sync with `make build-cli` and cli_distribution.go.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    mkdir -p /opt/143/cli && \
+    for platform in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do \
+      GOOS=${platform%/*} GOARCH=${platform#*/} CGO_ENABLED=0 \
+      go build -trimpath -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" \
+        -o /opt/143/cli/143-tools-${platform%/*}-${platform#*/} ./cmd/tools; \
+    done && \
+    cd /opt/143/cli && sha256sum 143-tools-* > checksums.txt
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -37,14 +50,15 @@ RUN apt-get update && apt-get install -y ca-certificates wget libheif-examples &
 COPY --from=go-builder /bin/server /bin/server
 COPY --from=go-builder /bin/session-executor /bin/session-executor
 COPY --from=go-builder /bin/migrate /bin/migrate
-COPY --from=go-builder /bin/migrate-coding-credentials-anthropic-split /bin/migrate-coding-credentials-anthropic-split
 COPY --from=go-builder /bin/deploy-guardrail /bin/deploy-guardrail
 COPY --from=go-builder /bin/worker-deployctl /bin/worker-deployctl
 COPY --from=go-builder /app/migrations /migrations
+COPY --from=go-builder /opt/143/cli /opt/143/cli
 
-# Copy entrypoint and encrypted production secrets
+# Copy entrypoint. The encrypted production env bundle is NOT baked into
+# the image (this image is public on GHCR) — deploy bind-mounts it from
+# /opt/143/.env.production.enc on the host to /app/.env.production.enc.
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-COPY .env.production.enc .env.production.enc
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -10,12 +10,30 @@ import (
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/sandbox"
 )
 
 const (
 	defaultMentionIndexMaxPaths     = 100000
 	defaultMentionIndexMaxBlobBytes = 8 << 20
 )
+
+var mentionIndexIgnoredDirNames = map[string]struct{}{
+	".git":         {},
+	".next":        {},
+	".nuxt":        {},
+	".pnpm-store":  {},
+	".turbo":       {},
+	".venv":        {},
+	"__pycache__":  {},
+	"build":        {},
+	"coverage":     {},
+	"dist":         {},
+	"node_modules": {},
+	"target":       {},
+	"vendor":       {},
+	"venv":         {},
+}
 
 type MentionIndexEntry struct {
 	Kind string `json:"kind"`
@@ -31,6 +49,10 @@ type MentionIndex struct {
 type MentionIndexBuildConfig struct {
 	MaxPaths     int
 	MaxBlobBytes int
+}
+
+type recursiveMentionIndexReader interface {
+	ListDirRecursive(ctx context.Context, maxEntries int, ignoredDirNames []string) ([]sandbox.FileEntry, error)
 }
 
 func (c MentionIndexBuildConfig) withDefaults() MentionIndexBuildConfig {
@@ -51,6 +73,13 @@ func BuildMentionIndexWithConfig(ctx context.Context, reader Reader, cfg Mention
 	cfg = cfg.withDefaults()
 	if reader == nil {
 		return MentionIndex{}, errors.New("mention index reader is required")
+	}
+	if recursiveReader, ok := reader.(recursiveMentionIndexReader); ok {
+		entries, err := recursiveReader.ListDirRecursive(ctx, cfg.MaxPaths, mentionIndexIgnoredDirNameList())
+		if err != nil {
+			return MentionIndex{}, fmt.Errorf("list mention index recursively: %w", err)
+		}
+		return buildMentionIndexFromEntries(ctx, entries, cfg)
 	}
 
 	index := MentionIndex{Entries: make([]MentionIndexEntry, 0, 256)}
@@ -79,7 +108,7 @@ func BuildMentionIndexWithConfig(ctx context.Context, reader Reader, cfg Mention
 			if cleanPath == "" || cleanPath == "." {
 				continue
 			}
-			if cleanPath == ".git" || strings.HasPrefix(cleanPath, ".git/") {
+			if mentionIndexShouldIgnorePath(cleanPath) {
 				continue
 			}
 
@@ -112,6 +141,57 @@ func BuildMentionIndexWithConfig(ctx context.Context, reader Reader, cfg Mention
 	sortMentionIndexEntries(index.Entries)
 	index.EntryCount = len(index.Entries)
 	return clampMentionIndexBlob(index, cfg.MaxBlobBytes)
+}
+
+func buildMentionIndexFromEntries(ctx context.Context, entries []sandbox.FileEntry, cfg MentionIndexBuildConfig) (MentionIndex, error) {
+	index := MentionIndex{Entries: make([]MentionIndexEntry, 0, len(entries))}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return MentionIndex{}, err
+		}
+
+		cleanPath := strings.Trim(path.Clean(strings.TrimSpace(entry.Path)), "/")
+		if cleanPath == "" || cleanPath == "." || mentionIndexShouldIgnorePath(cleanPath) {
+			continue
+		}
+
+		kind := mentionIndexKindForEntryType(entry.Type)
+		if kind == "" {
+			continue
+		}
+		index.Entries = append(index.Entries, MentionIndexEntry{
+			Kind: kind,
+			Path: cleanPath,
+		})
+		if len(index.Entries) >= cfg.MaxPaths {
+			index.Truncated = true
+			index.EntryCount = len(index.Entries)
+			sortMentionIndexEntries(index.Entries)
+			return clampMentionIndexBlob(index, cfg.MaxBlobBytes)
+		}
+	}
+
+	sortMentionIndexEntries(index.Entries)
+	index.EntryCount = len(index.Entries)
+	return clampMentionIndexBlob(index, cfg.MaxBlobBytes)
+}
+
+func mentionIndexIgnoredDirNameList() []string {
+	names := make([]string, 0, len(mentionIndexIgnoredDirNames))
+	for name := range mentionIndexIgnoredDirNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func mentionIndexShouldIgnorePath(cleanPath string) bool {
+	for _, part := range strings.Split(cleanPath, "/") {
+		if _, ok := mentionIndexIgnoredDirNames[part]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func mentionIndexKindForEntryType(entryType string) string {
@@ -162,6 +242,20 @@ func clampMentionIndexBlob(index MentionIndex, maxBlobBytes int) (MentionIndex, 
 	return index, nil
 }
 
+// SessionMentionIndexStaleCacheKey identifies the most recently built index
+// for a session regardless of which container, snapshot, turn, or workspace
+// generation produced it. The exact key (SessionMentionIndexCacheKey) churns
+// on every completed turn, so the picker would otherwise pay a full rebuild
+// each time the composer is opened; this alias lets the handler serve the
+// previous turn's index immediately while a background refresh repopulates
+// the exact key.
+func SessionMentionIndexStaleCacheKey(session *models.Session) string {
+	if session == nil {
+		return "session-mention-index:v1:unknown:latest"
+	}
+	return fmt.Sprintf("session-mention-index:v1:%s:%s:latest", session.OrgID, session.ID)
+}
+
 func SessionMentionIndexCacheKey(session *models.Session) string {
 	if session == nil {
 		return "session-mention-index:v1:unknown"
@@ -173,5 +267,5 @@ func SessionMentionIndexCacheKey(session *models.Session) string {
 	if session.ContainerID != nil {
 		containerID = *session.ContainerID
 	}
-	return fmt.Sprintf("session-mention-index:v1:%s:%s:live:%s:turn:%d:activity:%d", session.OrgID, session.ID, containerID, session.CurrentTurn, session.LastActivityAt.UTC().UnixNano())
+	return fmt.Sprintf("session-mention-index:v1:%s:%s:live:%s:turn:%d:workspace:%d", session.OrgID, session.ID, containerID, session.CurrentTurn, session.WorkspaceGeneration)
 }

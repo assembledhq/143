@@ -131,11 +131,11 @@ function FullCard({ run, kind, navigateTo }: FullCardProps) {
 function cardSurfaceClass(kind: FullCardKind): string {
   switch (kind) {
     case "failed":
-      return "border-red-200/80 bg-red-50/55 dark:border-red-900/40 dark:bg-red-950/20";
+      return "border-destructive/30 bg-destructive/5";
     case "needs_input":
-      return "border-amber-300/80 bg-amber-50/60 dark:border-amber-900/45 dark:bg-amber-950/20";
+      return "border-warning/40 bg-warning/5";
     case "running":
-      return "border-blue-200/80 bg-blue-50/50 dark:border-blue-900/40 dark:bg-blue-950/20";
+      return "border-info/30 bg-info/5";
     default:
       return "border-border/70 bg-card";
   }
@@ -160,7 +160,7 @@ function Header({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
               variant={kind === "failed" ? "destructive" : "outline"}
               className={cn(
                 "text-xs uppercase tracking-[0.18em]",
-                kind === "needs_input" && "border-amber-500/40 text-amber-700 dark:text-amber-400",
+                kind === "needs_input" && "border-warning/40 text-warning",
               )}
             >
               {run.session.failure_category.replaceAll("_", " ")}
@@ -195,30 +195,30 @@ function headlineFor(kind: FullCardKind): {
       return {
         icon: RefreshCw,
         label: "Running",
-        iconClass: "text-blue-500",
-        labelClass: "text-blue-700 dark:text-blue-300",
+        iconClass: "text-info",
+        labelClass: "text-info",
       };
     case "needs_input":
       return {
         icon: MessageCircleWarning,
         label: "Needs your input",
-        iconClass: "text-amber-600 dark:text-amber-500",
-        labelClass: "text-amber-800 dark:text-amber-300",
+        iconClass: "text-warning",
+        labelClass: "text-warning",
       };
     case "completed_with_pr":
     case "completed_no_pr":
       return {
         icon: CheckCircle2,
         label: "Completed",
-        iconClass: "text-emerald-500",
-        labelClass: "text-emerald-700 dark:text-emerald-300",
+        iconClass: "text-success",
+        labelClass: "text-success",
       };
     case "failed":
       return {
         icon: AlertTriangle,
         label: "Failed",
-        iconClass: "text-red-500",
-        labelClass: "text-red-700 dark:text-red-300",
+        iconClass: "text-destructive",
+        labelClass: "text-destructive",
       };
   }
 }
@@ -231,7 +231,7 @@ function Body({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
     <p
       className={cn(
         "line-clamp-2 text-sm leading-5",
-        kind === "failed" ? "text-red-800/90 dark:text-red-200/90" : "text-muted-foreground",
+        kind === "failed" ? "text-destructive/90" : "text-muted-foreground",
       )}
       title={subline}
     >
@@ -287,8 +287,11 @@ function MetadataRail({ run, kind }: { run: AutomationRun; kind: FullCardKind })
 
 function metadataItems(run: AutomationRun, kind: FullCardKind): string[] {
   const items: string[] = [];
-  items.push(run.triggered_by === "manual" ? "Manual run" : "Scheduled run");
+  items.push(automationRunTriggerLabel(run.triggered_by));
   if (run.session?.id) items.push("Linked session");
+  if (run.capability_snapshot?.length) {
+    items.push(`${run.capability_snapshot.length} capabilities`);
+  }
   if (run.session?.pr) items.push(`PR #${run.session.pr.number}`);
 
   const filesChanged = run.session?.diff_stats?.files_changed;
@@ -408,7 +411,7 @@ function formatDuration(start: string, end: string): string {
 }
 
 function PendingRow({ run }: { run: AutomationRun }) {
-  const triggerLabel = run.triggered_by === "manual" ? "Manual run" : "Scheduled run";
+  const triggerLabel = automationRunTriggerLabel(run.triggered_by);
   return (
     <Card className="border-dashed border-border/70 bg-muted/10">
       <CardContent className="flex items-center justify-between gap-3 px-4 py-3">
@@ -464,7 +467,7 @@ export function QuietRunRow({
               <p className="truncate text-sm font-medium text-foreground/80">{headline}</p>
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-              <span>{run.triggered_by === "manual" ? "Manual run" : "Scheduled run"}</span>
+              <span>{automationRunTriggerLabel(run.triggered_by)}</span>
               {run.session?.id && (
                 <span className="flex items-center gap-2">
                   <span aria-hidden className="text-muted-foreground/40">·</span>
@@ -492,4 +495,16 @@ export function QuietRunRow({
       </CardContent>
     </Card>
   );
+}
+
+function automationRunTriggerLabel(triggeredBy: AutomationRun["triggered_by"]): string {
+  switch (triggeredBy) {
+    case "manual":
+      return "Manual run";
+    case "github":
+      return "GitHub event";
+    case "schedule":
+    default:
+      return "Scheduled run";
+  }
 }

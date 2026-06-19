@@ -25,11 +25,15 @@ type CLIAction string
 // Provider-derived namespaces such as "sentry" or "linear" are not declared as
 // constants because they are derived from configured integrations at runtime.
 const (
-	NamespaceLogs    CLINamespace = "logs"
-	NamespaceIssue   CLINamespace = "issue"
-	NamespacePR      CLINamespace = "pr"
-	NamespaceProject CLINamespace = "project"
-	NamespaceTabs    CLINamespace = "session-tabs"
+	NamespaceLogs                      CLINamespace = "logs"
+	NamespaceIssue                     CLINamespace = "issue"
+	NamespacePR                        CLINamespace = "pr"
+	NamespaceProject                   CLINamespace = "project"
+	NamespaceTabs                      CLINamespace = "session-tabs"
+	NamespaceEval                      CLINamespace = "eval"
+	NamespaceAutomationGoalImprovement CLINamespace = "automation-goal-improvement"
+	NamespaceCapability                CLINamespace = "capability"
+	NamespaceSessionHistory            CLINamespace = "session-history"
 )
 
 // Fixed actions for the hardcoded 143-owned namespace mappings.
@@ -40,6 +44,10 @@ const (
 	ActionMessages CLIAction = "messages"
 	ActionPropose  CLIAction = "propose"
 	ActionSend     CLIAction = "send"
+	ActionAdd      CLIAction = "add"
+	ActionComplete CLIAction = "complete"
+	ActionRequest  CLIAction = "request"
+	ActionSearch   CLIAction = "search"
 )
 
 // RunCLI executes a tool call from command-line arguments, printing the result
@@ -54,7 +62,7 @@ const (
 //	143-tools --help
 //	143-tools <namespace> --help
 //	143-tools <namespace> <action> --help
-func RunCLI(ctx context.Context, tr *ToolRegistry, args []string, stdout, stderr io.Writer) int {
+func RunCLI(ctx context.Context, tr ToolSource, args []string, stdout, stderr io.Writer) int {
 	commands := buildCLICommands(tr.ListTools())
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printCLIUsage(commands, stdout)
@@ -200,6 +208,20 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceTabs, ActionSend, true
 	case name == "session_tabs_messages":
 		return NamespaceTabs, ActionMessages, true
+	case name == "eval_add":
+		return NamespaceEval, ActionAdd, true
+	case name == "automation_goal_improvement_complete":
+		return NamespaceAutomationGoalImprovement, ActionComplete, true
+	case name == "capability_list":
+		return NamespaceCapability, ActionList, true
+	case name == "capability_request":
+		return NamespaceCapability, ActionRequest, true
+	case name == "session_history_search":
+		return NamespaceSessionHistory, ActionSearch, true
+	case name == "session_history_get":
+		return NamespaceSessionHistory, ActionGet, true
+	case name == "session_history_messages":
+		return NamespaceSessionHistory, ActionMessages, true
 	case strings.HasPrefix(name, "log_"):
 		return NamespaceLogs, CLIAction(strings.TrimPrefix(name, "log_")), true
 	default:
@@ -223,6 +245,14 @@ func cliCategory(namespace CLINamespace, action CLIAction) string {
 		return "143 projects"
 	case NamespaceTabs:
 		return "Session tabs"
+	case NamespaceEval:
+		return "Eval"
+	case NamespaceAutomationGoalImprovement:
+		return "Automation goal improvement"
+	case NamespaceCapability:
+		return "Agent capabilities"
+	case NamespaceSessionHistory:
+		return "Session history"
 	}
 	a := string(action)
 	switch {

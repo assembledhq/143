@@ -100,6 +100,61 @@ describe("PRHealthBanner", () => {
     expect(onFixTests).toHaveBeenCalledTimes(1);
   });
 
+  it("offers Fix without pushing changes from the Fix tests dropdown", async () => {
+    const onFixTestsWithoutPushing = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          checks_confirmed: true,
+          failing_test_count: 1,
+          checks: [{ name: "backend", category: "test", status: "failed" }],
+          summary: "PR #42 has a failing CI check.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onFixTestsWithoutPushing={onFixTestsWithoutPushing}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "More fix tests actions" }));
+    await user.click(await screen.findByText("Fix without pushing changes"));
+
+    expect(onFixTestsWithoutPushing).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers Resolve without pushing changes from the Resolve conflicts dropdown", async () => {
+    const onResolveConflictsWithoutPushing = vi.fn();
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          has_conflicts: true,
+          can_resolve_conflicts: true,
+          summary: "PR #42 is blocked by merge conflicts.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onResolveConflictsWithoutPushing={onResolveConflictsWithoutPushing}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "More resolve conflicts actions" }));
+    await user.click(await screen.findByText("Resolve without pushing changes"));
+
+    expect(onResolveConflictsWithoutPushing).toHaveBeenCalledTimes(1);
+  });
+
   it("shows pending mergeability as a disabled Merge button state", () => {
     renderWithProviders(
       <PRHealthBanner
@@ -664,6 +719,72 @@ describe("PRHealthBanner", () => {
     expect(screen.queryByRole("button", { name: "Fix tests" })).toBeNull();
     expect(screen.getByRole("button", { name: /^Merge$/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Open repair session" })).toBeInTheDocument();
+  });
+
+  it("opens an active repair running in another thread of the current session", async () => {
+    const onOpenRepairSession = vi.fn();
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          can_merge: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            thread_id: "thread-repair",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        currentThreadId="thread-main"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={onOpenRepairSession}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Open repair session" }));
+
+    expect(onOpenRepairSession).toHaveBeenCalledWith("session-current", "thread-repair");
+  });
+
+  it("does not show Open repair session when currentThreadId is null and repair is in the same session", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          can_merge: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            thread_id: "thread-repair",
+            session_status: "running",
+            health_version: 2,
+          }],
+        }}
+        currentSessionId="session-current"
+        currentThreadId={null}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onOpenRepairSession={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Fix tests running")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open repair session" })).toBeNull();
   });
 
   it("suppresses both repair CTAs when resolve conflicts is already running for the current PR state", () => {

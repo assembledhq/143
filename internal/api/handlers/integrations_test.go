@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghapp "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -72,6 +73,7 @@ func (f fakeGitHubMembershipStore) Get(context.Context, uuid.UUID, uuid.UUID) (m
 type fakeIntegrationCredentialStore struct {
 	credentials map[models.ProviderName]*models.DecryptedCredential
 	err         error
+	disabled    *[]models.ProviderName
 }
 
 func (f fakeIntegrationCredentialStore) Get(_ context.Context, _ uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error) {
@@ -89,6 +91,16 @@ func (f fakeIntegrationCredentialStore) Upsert(context.Context, uuid.UUID, model
 	return nil
 }
 
+func (f fakeIntegrationCredentialStore) Disable(_ context.Context, _ uuid.UUID, provider models.ProviderName) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.disabled != nil {
+		*f.disabled = append(*f.disabled, provider)
+	}
+	return nil
+}
+
 type fakeSlackUserInfoClient struct {
 	user ingestion.SlackUser
 	err  error
@@ -99,6 +111,18 @@ func (f fakeSlackUserInfoClient) FetchUserInfo(context.Context, string, string) 
 		return ingestion.SlackUser{}, f.err
 	}
 	return f.user, nil
+}
+
+type fakeSlackAuthTestClient struct {
+	info ingestion.SlackAuthInfo
+	err  error
+}
+
+func (f fakeSlackAuthTestClient) AuthTest(context.Context, string) (ingestion.SlackAuthInfo, error) {
+	if f.err != nil {
+		return ingestion.SlackAuthInfo{}, f.err
+	}
+	return f.info, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -115,6 +139,162 @@ func TestNewIntegrationHandler(t *testing.T) {
 	store := db.NewIntegrationStore(mock)
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	require.NotNil(t, handler, "handler should not be nil")
+}
+
+func TestIntegrationHandler_GetSlackHealthReportsMissingScopes(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM slack_installations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", []string{"chat:write"}, models.SlackInstallationStatusActive, nil, now,
+			nil, now, now,
+		))
+
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test"}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackInstallationStore(db.NewSlackInstallationStore(mock)),
+	)
+	handler.slackAuthTestClient = fakeSlackAuthTestClient{info: ingestion.SlackAuthInfo{TeamID: "T123", UserID: "U143"}}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/health", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlackHealth(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "GetSlackHealth should return health for connected Slack")
+	var resp models.SingleResponse[models.SlackInstallationHealth]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "GetSlackHealth response should decode")
+	require.False(t, resp.Data.AuthOK, "missing scopes should mark Slack health unhealthy")
+	require.Contains(t, resp.Data.MissingScopes, "app_mentions:read", "health should include missing required scopes")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetSlackHealth should satisfy expected SQL")
+}
+
+func TestIntegrationHandler_GetSlackHealthReportsRecentCallbackFailures(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	deliveryID := uuid.New()
+	slackDeliveryID := "Ev-failed"
+	errMessage := "insert slack inbound event: constraint failed"
+	now := time.Now().UTC()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM slack_installations").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "team_id", "team_name", "enterprise_id", "api_app_id",
+			"bot_user_id", "bot_id", "scope", "status", "installed_by_user_id", "installed_at",
+			"last_event_at", "created_at", "updated_at",
+		}).AddRow(
+			installationID, orgID, integrationID, "T123", "Acme", nil, "A123",
+			"U143", "B143", append([]string(nil), requiredSlackBotScopes...), models.SlackInstallationStatusActive, nil, now,
+			&now, now, now,
+		))
+	mock.ExpectQuery(`WHERE org_id = @org_id\s+AND provider = @provider\s+AND status = 'failed'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "provider", "delivery_id", "event_type",
+			"signature_valid", "received_at", "processed_at", "status", "attempts",
+			"error", "payload", "headers", "created_at",
+		}).AddRow(
+			deliveryID, orgID, integrationID, "slack", &slackDeliveryID, "app_mention",
+			boolPtr(true), now, &now, "failed", 1,
+			&errMessage, json.RawMessage(`{"type":"event_callback"}`), nil, now,
+		))
+
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test"}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackInstallationStore(db.NewSlackInstallationStore(mock)),
+	)
+	handler.webhookDeliveryStore = db.NewWebhookDeliveryStore(mock)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/health", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetSlackHealth(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "GetSlackHealth should return health for connected Slack")
+	var resp models.SingleResponse[models.SlackInstallationHealth]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "GetSlackHealth response should decode")
+	require.Len(t, resp.Data.RecentCallbackFailures, 1, "health should include recent failed Slack callbacks")
+	require.Equal(t, slackDeliveryID, *resp.Data.RecentCallbackFailures[0].DeliveryID, "health should expose failed Slack delivery id")
+	require.Contains(t, resp.Data.Symptoms, "recent_callback_failures", "health should include a callback failure symptom")
+	require.NoError(t, mock.ExpectationsWereMet(), "GetSlackHealth should satisfy expected SQL")
+}
+
+func TestIntegrationHandler_ListSlackChannelsReturnsBotManagementFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	handler := NewIntegrationHandler(
+		nil,
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {Config: models.SlackConfig{AccessToken: "xoxb-test", ChannelIDs: []string{"C123"}}},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, slackAPIURL+"/conversations.list", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path, "ListSlackChannels should call Slack conversations.list")
+		require.Equal(t, "Bearer xoxb-test", req.Header.Get("Authorization"), "ListSlackChannels should use the Slack bot token")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"channels":[{"id":"C123","name":"engineering","is_channel":true},{"id":"G123","name":"leadership","is_group":true}]}`)),
+			Request:    req,
+		}, nil
+	})}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/integrations/slack/channels", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListSlackChannels(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "ListSlackChannels should return Slack channel data")
+	var resp struct {
+		Data []struct {
+			ID                string `json:"id"`
+			Name              string `json:"name"`
+			Type              string `json:"type"`
+			Selected          bool   `json:"selected"`
+			MonitoringEnabled bool   `json:"monitoring_enabled"`
+			BotConfigured     bool   `json:"bot_configured"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "ListSlackChannels response should decode")
+	require.Equal(t, 2, len(resp.Data), "ListSlackChannels should return every Slack channel from Slack")
+	require.Equal(t, "channel", resp.Data[0].Type, "public Slack channels should be typed for the settings UI")
+	require.True(t, resp.Data[0].Selected, "legacy selected channels should remain selected")
+	require.True(t, resp.Data[0].MonitoringEnabled, "monitoring_enabled should mirror the legacy selected state")
+	require.Equal(t, "private_channel", resp.Data[1].Type, "private Slack channels should be typed for channel settings")
+	require.False(t, resp.Data[1].BotConfigured, "channels without explicit settings should not report channel overrides")
 }
 
 func TestNewIntegrationHandler_WithOptions(t *testing.T) {
@@ -265,13 +445,23 @@ func TestIntegrationHandler_ListIntegrations_DerivesSafeCredentialMetadata(t *te
 					ProjectSlug: "gh/acme/api",
 				},
 			},
+			models.ProviderMezmo: {
+				OrgID:    orgID,
+				Provider: models.ProviderMezmo,
+				Config: models.MezmoConfig{
+					APIKey:  "secret-mezmo-key",
+					BaseURL: "https://logs.acme.com",
+					Dataset: "prod",
+				},
+			},
 		},
 	}
 	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
 
 	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 		AddRow(uuid.New(), orgID, "notion", json.RawMessage(`{}`), "active", nil, now).
-		AddRow(uuid.New(), orgID, "circleci", json.RawMessage(`{}`), "active", nil, now)
+		AddRow(uuid.New(), orgID, "circleci", json.RawMessage(`{}`), "active", nil, now).
+		AddRow(uuid.New(), orgID, "mezmo", json.RawMessage(`{}`), "active", nil, now)
 	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(rows)
@@ -285,15 +475,17 @@ func TestIntegrationHandler_ListIntegrations_DerivesSafeCredentialMetadata(t *te
 	require.Equal(t, http.StatusOK, w.Code, "list integrations should succeed")
 	var resp models.ListResponse[models.Integration]
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), "response should decode as integration list")
-	require.Len(t, resp.Data, 2, "response should include both integrations")
+	require.Len(t, resp.Data, 3, "response should include all integrations")
 
-	var notionIntegration, circleciIntegration *models.Integration
+	var notionIntegration, circleciIntegration, mezmoIntegration *models.Integration
 	for i := range resp.Data {
 		switch resp.Data[i].Provider {
 		case models.IntegrationProviderNotion:
 			notionIntegration = &resp.Data[i]
 		case models.IntegrationProviderCircleCI:
 			circleciIntegration = &resp.Data[i]
+		case models.IntegrationProviderMezmo:
+			mezmoIntegration = &resp.Data[i]
 		}
 	}
 	require.NotNil(t, notionIntegration, "Notion integration should be present in response")
@@ -302,8 +494,13 @@ func TestIntegrationHandler_ListIntegrations_DerivesSafeCredentialMetadata(t *te
 	require.NotNil(t, circleciIntegration, "CircleCI integration should be present in response")
 	require.NotNil(t, circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be derived from credential metadata")
 	require.Equal(t, "gh/acme/api", *circleciIntegration.CircleCIProjectSlug, "CircleCI project slug should be exposed without token data")
+	require.NotNil(t, mezmoIntegration, "Mezmo integration should be present in response")
+	require.Nil(t, mezmoIntegration.MezmoDataset, "Mezmo dataset should not be exposed because dataset scoping is unsupported")
+	require.NotNil(t, mezmoIntegration.MezmoBaseURL, "Mezmo base URL should be derived from credential metadata")
+	require.Equal(t, "https://logs.acme.com", *mezmoIntegration.MezmoBaseURL, "Mezmo base URL should be exposed without key data")
 	require.NotContains(t, w.Body.String(), "secret-notion-token", "response should not expose Notion token")
 	require.NotContains(t, w.Body.String(), "secret-circle-token", "response should not expose CircleCI token")
+	require.NotContains(t, w.Body.String(), "secret-mezmo-key", "response should not expose Mezmo key")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -496,6 +693,83 @@ func TestIntegrationHandler_DisconnectIntegration_GitHubRepoDisconnectError(t *t
 	require.Equal(t, http.StatusInternalServerError, w.Code, "disconnect integration should surface github repo disconnect failures")
 	require.Contains(t, w.Body.String(), "UPDATE_FAILED", "disconnect integration should return update failed on github repo disconnect errors")
 	require.NoError(t, mock.ExpectationsWereMet(), "all integration-store expectations should be met")
+}
+
+// Disconnecting a credential-backed provider must disable the stored org
+// credential, not just flip the integration row to inactive — otherwise the
+// sandbox env-injection path (which reads org_credentials, not integrations)
+// keeps handing the secret to agents after the user thinks they revoked it.
+func TestIntegrationHandler_DisconnectIntegration_DisablesCredential(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+
+	disabled := make([]models.ProviderName, 0, 1)
+	credentialStore := fakeIntegrationCredentialStore{disabled: &disabled}
+	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(integrationID, orgID, "mezmo", []byte(`{}`), "active", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+	mock.ExpectExec("UPDATE integrations SET status = @status WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/mezmo/disconnect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.DisconnectIntegration(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code, "disconnect should succeed")
+	require.Equal(t, []models.ProviderName{models.ProviderMezmo}, disabled,
+		"disconnect should disable the stored mezmo credential so it stops being injected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all integration-store expectations should be met")
+}
+
+// A credential-disable failure must fail the disconnect rather than silently
+// leaving an injectable secret behind.
+func TestIntegrationHandler_DisconnectIntegration_CredentialDisableError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now().UTC()
+	store := db.NewIntegrationStore(mock)
+
+	credentialStore := fakeIntegrationCredentialStore{err: context.DeadlineExceeded}
+	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	rows := pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
+		AddRow(integrationID, orgID, "mezmo", []byte(`{}`), "active", nil, now)
+	mock.ExpectQuery("SELECT .+ FROM integrations WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(rows)
+	mock.ExpectExec("UPDATE integrations SET status = @status WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/mezmo/disconnect", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.DisconnectIntegration(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "a credential-disable failure must fail the disconnect")
+	require.Contains(t, w.Body.String(), "UPDATE_FAILED")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2628,7 +2902,7 @@ func TestIntegrationHandler_GitHubInstallationLink_FallsBackToRepoInstallationFo
 
 	mock.ExpectQuery("SELECT l.id, l.org_id, l.integration_id, l.installation_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "created_at", "updated_at"}))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at"}))
 	mock.ExpectQuery("SELECT id, org_id, provider, config, status, last_synced_at, created_at FROM integrations WHERE org_id = @org_id AND provider = @provider AND status = 'active'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
@@ -2675,10 +2949,10 @@ func TestIntegrationHandler_GitHubInstallationLink_DoesNotFallBackToDeletedInsta
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}).
 			AddRow(integrationID, orgID, "github", json.RawMessage(`{"installation_id":12345,"account_login":"acme"}`), "active", nil, now))
-	mock.ExpectQuery("SELECT installation_id, account_id, account_login, account_type, repository_selection, status, created_at, updated_at").
+	mock.ExpectQuery("SELECT installation_id, account_id, account_login, account_type, repository_selection, status, roster_synced_at, created_at, updated_at").
 		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "created_at", "updated_at"}).
-			AddRow(int64(12345), int64(987), "acme", nil, nil, "deleted", now, now))
+		WillReturnRows(pgxmock.NewRows([]string{"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "roster_synced_at", "created_at", "updated_at"}).
+			AddRow(int64(12345), int64(987), "acme", nil, nil, "deleted", nil, now, now))
 
 	link, ok := handler.githubInstallationLink(context.Background(), orgID, 12345)
 
@@ -3269,4 +3543,757 @@ func TestIntegrationHandler_ConnectCircleCI_InvalidToken(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "INVALID_TOKEN")
+}
+
+func TestIntegrationHandler_ConnectMezmo_Success(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, http.MethodGet, req.Method, "validation should use the documented Mezmo export method")
+		require.Equal(t, "https", req.URL.Scheme, "validation should use the default Mezmo API scheme")
+		require.Equal(t, "api.mezmo.com", req.URL.Host, "validation should use the default Mezmo API host")
+		require.Equal(t, "/v2/export", req.URL.Path, "validation should use the documented Mezmo export path")
+		require.Equal(t, "Token mezmo_key", req.Header.Get("Authorization"), "validation should send the documented Mezmo access-token auth header")
+		require.Equal(t, "1", req.URL.Query().Get("size"), "validation should request a minimal export")
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"lines":[]}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(
+		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
+	)
+	handler.client = &http.Client{Transport: transport}
+
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	body := `{"api_key":"mezmo_key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	require.Contains(t, w.Body.String(), `"provider":"mezmo"`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ConnectMezmo_MissingAPIKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"dataset":"prod"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "MISSING_API_KEY")
+}
+
+func TestIntegrationHandler_ConnectMezmo_RejectsMalformedBaseURL(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"api_key":"key","base_url":"not-a-url"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_BASE_URL")
+}
+
+func TestIntegrationHandler_ConnectMezmo_HonorsCustomBaseURL(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "https://logs.example.com/v2/export", req.URL.Scheme+"://"+req.URL.Host+req.URL.Path,
+			"validation should target the operator-supplied base URL")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"lines":[]}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	body := `{"api_key":"mezmo_key","base_url":"https://logs.example.com/"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_ConnectMezmo_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"forbidden"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"api_key":"bad"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN")
+}
+
+func TestIntegrationHandler_ConnectMezmo_InvalidJSON(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(`{bad json`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_JSON")
+}
+
+func TestIntegrationHandler_ConnectMezmo_RejectsDataset(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+
+	body := `{"api_key":"mezmo_key","dataset":"production"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "ConnectMezmo should reject unsupported dataset scopes")
+	require.Contains(t, w.Body.String(), "UNSUPPORTED_DATASET", "response should identify unsupported dataset scope")
+}
+
+func TestIntegrationHandler_ConnectMezmo_RejectsNotFound(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v2/export", req.URL.Path, "validation should probe the documented Mezmo export endpoint")
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"No Resource Found"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"api_key":"mezmo_key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "missing Mezmo endpoint should reject the connection")
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN", "response should identify validation failure")
+	require.Contains(t, w.Body.String(), "mezmo API endpoint not found", "response should explain that the endpoint probe failed")
+}
+
+// A 4xx that isn't an auth rejection (e.g. a query-shape quirk) means the key
+// was accepted, so connect should still succeed — we validate the key, not the
+// probe query.
+func TestIntegrationHandler_ConnectMezmo_AcceptsNonAuth4xx(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+
+	store := db.NewIntegrationStore(mock)
+	credentialStore := db.NewOrgCredentialStore(mock, nil)
+
+	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"unknown dataset"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	mock.ExpectQuery("INSERT INTO org_credentials").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectQuery("SELECT .+ FROM integrations .+ provider = @provider .+ status IN \\('active', 'error'\\)").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "config", "status", "last_synced_at", "created_at"}))
+	mock.ExpectQuery("INSERT INTO integrations").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(integrationID, now))
+
+	body := `{"api_key":"mezmo_key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "body=%s", w.Body.String())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A 5xx means Mezmo is unhealthy; block the connect so the user retries rather
+// than persisting a credential we couldn't verify against a working API.
+func TestIntegrationHandler_ConnectMezmo_RejectsServerError(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	store := db.NewIntegrationStore(mock)
+
+	transport := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"upstream"}`)),
+		}, nil
+	})
+
+	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.client = &http.Client{Transport: transport}
+
+	body := `{"api_key":"mezmo_key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	w := httptest.NewRecorder()
+
+	handler.ConnectMezmo(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN")
+}
+
+// fakeGitHubOrgAutoJoinService is a test double for githubOrgAutoJoinService.
+type fakeGitHubOrgAutoJoinService struct {
+	details    ghapp.InstallationDetails
+	detailsErr error
+}
+
+func (f *fakeGitHubOrgAutoJoinService) GetInstallationDetails(_ context.Context, _ int64) (ghapp.InstallationDetails, error) {
+	return f.details, f.detailsErr
+}
+
+func (f *fakeGitHubOrgAutoJoinService) ListOrgMembers(_ context.Context, _ int64, _ string) ([]ghapp.OrgMember, error) {
+	return nil, nil
+}
+
+func TestIntegrationHandler_ListGitHubOrgAutoJoin_PermissionGranted(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	accountType := "Organization"
+	now := time.Now().UTC()
+
+	mock.ExpectQuery("FROM github_installation_org_links").
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"installation_id", "account_login", "account_type", "auto_join_enabled", "roster_synced_at", "captured_by_other_org",
+		}).AddRow(int64(12345), "acme", &accountType, true, &now, false))
+
+	details := ghapp.InstallationDetails{}
+	details.Account.Login = "acme"
+	details.Account.Type = "Organization"
+	details.Permissions.Members = "read"
+
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+	handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/team/github-orgs", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.ListGitHubOrgAutoJoin(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "list should return 200")
+	var resp githubOrgAutoJoinResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode")
+	require.Len(t, resp.GitHubOrgs, 1, "should return one org row")
+	require.Equal(t, int64(12345), resp.GitHubOrgs[0].InstallationID)
+	require.Equal(t, "granted", resp.GitHubOrgs[0].MembersPermission, "should report granted when members permission is 'read'")
+	require.True(t, resp.GitHubOrgs[0].AutoJoinEnabled)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_DisableSuccess(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now().UTC()
+
+	// SetOrgLinkAutoJoin(false) RETURNING the updated link.
+	mock.ExpectQuery("UPDATE github_installation_org_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+		}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", false, now, now))
+
+	// ClearRosterForInstallation.
+	mock.ExpectExec("DELETE FROM github_org_members").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 5))
+
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+
+	body := `{"auto_join_enabled":false}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/github-orgs/12345", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("installation_id", "12345")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	handler.UpdateGitHubOrgAutoJoin(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "disable should return 200")
+	require.NoError(t, mock.ExpectationsWereMet(), "disable must clear the roster")
+}
+
+func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnableMissingPermission(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now().UTC()
+	accountType := "Organization"
+
+	// GetOrgLink.
+	mock.ExpectQuery("SELECT l.id, l.org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+		}).AddRow(linkID, orgID, nil, int64(12345), "acme", nil, "active", false, now, now))
+
+	// GetByInstallationID.
+	mock.ExpectQuery("SELECT installation_id, account_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "roster_synced_at", "created_at", "updated_at",
+		}).AddRow(int64(12345), int64(99), "acme", &accountType, nil, "active", nil, now, now))
+
+	// GetInstallationDetails returns members permission as "none" (not yet approved).
+	details := ghapp.InstallationDetails{}
+	details.Account.Login = "acme"
+	details.Account.Type = "Organization"
+	details.Permissions.Members = "none"
+
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+	handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
+
+	body := `{"auto_join_enabled":true}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/github-orgs/12345", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("installation_id", "12345")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	handler.UpdateGitHubOrgAutoJoin(w, req)
+
+	require.Equal(t, http.StatusPreconditionFailed, w.Code, "missing members permission should return 412")
+	require.Contains(t, w.Body.String(), "MEMBERS_PERMISSION_MISSING", "response should name the missing permission error")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnableNotAnOrganization(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now().UTC()
+	userAccountType := "User"
+
+	mock.ExpectQuery("SELECT l.id, l.org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "installation_id", "account_login", "linked_by_user_id", "status", "auto_join_enabled", "created_at", "updated_at",
+		}).AddRow(linkID, orgID, nil, int64(12345), "someguy", nil, "active", false, now, now))
+
+	mock.ExpectQuery("SELECT installation_id, account_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"installation_id", "account_id", "account_login", "account_type", "repository_selection", "status", "roster_synced_at", "created_at", "updated_at",
+		}).AddRow(int64(12345), int64(99), "someguy", &userAccountType, nil, "active", nil, now, now))
+
+	details := ghapp.InstallationDetails{}
+	details.Account.Login = "someguy"
+	details.Account.Type = "User"
+	details.Permissions.Members = "read"
+
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.githubInstallations = db.NewGitHubInstallationStore(mock)
+	handler.githubOrgAutoJoin = &fakeGitHubOrgAutoJoinService{details: details}
+
+	body := `{"auto_join_enabled":true}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/team/github-orgs/12345", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("installation_id", "12345")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+
+	handler.UpdateGitHubOrgAutoJoin(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "user-account installation should return 422")
+	require.Contains(t, w.Body.String(), "NOT_AN_ORGANIZATION", "response should name the account type error")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSlackSettingsPatchRequestApply(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+	branch := " main "
+
+	tests := []struct {
+		name      string
+		req       slackSettingsPatchRequest
+		initial   models.SlackBotSettings
+		expected  models.SlackBotSettings
+		expectErr bool
+	}{
+		{
+			name: "applies typed patch fields",
+			req: slackSettingsPatchRequest{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               "start_work",
+				ResponseVisibility:        "dm",
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        "custom",
+				NotificationSubscriptions: json.RawMessage(`{"session.completed":{"channel":true}}`),
+			},
+			expected: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetCustom,
+				NotificationSubscriptions: json.RawMessage(`{"session.completed":{"channel":true}}`),
+			},
+		},
+		{
+			name: "preserves omitted fields",
+			req:  slackSettingsPatchRequest{NotificationPreset: "quiet"},
+			initial: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetCustom,
+				NotificationSubscriptions: json.RawMessage(`{"events":["session.completed"]}`),
+			},
+			expected: models.SlackBotSettings{
+				DefaultRepositoryID:       &repoID,
+				DefaultBranch:             &branch,
+				RoutingMode:               models.SlackRoutingModeStartWork,
+				ResponseVisibility:        models.SlackResponseVisibilityDM,
+				AllowedActions:            []string{"session", "preview"},
+				NotificationPreset:        models.SlackNotificationPresetQuiet,
+				NotificationSubscriptions: json.RawMessage(`{"events":["session.completed"]}`),
+			},
+		},
+		{
+			name: "rejects invalid enum values",
+			req: slackSettingsPatchRequest{
+				RoutingMode: "ship_it",
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			settings := tt.initial
+			if settings.NotificationPreset == "" {
+				settings = models.SlackBotSettings{
+					RoutingMode:               models.SlackRoutingModeAuto,
+					ResponseVisibility:        models.SlackResponseVisibilityThread,
+					AllowedActions:            []string{"session"},
+					NotificationPreset:        models.SlackNotificationPresetBalanced,
+					NotificationSubscriptions: json.RawMessage(`{}`),
+				}
+			}
+
+			err := tt.req.Apply(&settings)
+			if tt.expectErr {
+				require.Error(t, err, "Apply should reject invalid Slack settings")
+				return
+			}
+
+			require.NoError(t, err, "Apply should accept valid Slack settings")
+			require.Equal(t, tt.expected.DefaultRepositoryID, settings.DefaultRepositoryID, "Apply should set default repository")
+			require.Equal(t, tt.expected.DefaultBranch, settings.DefaultBranch, "Apply should set default branch")
+			require.Equal(t, tt.expected.RoutingMode, settings.RoutingMode, "Apply should set routing mode")
+			require.Equal(t, tt.expected.ResponseVisibility, settings.ResponseVisibility, "Apply should set response visibility")
+			require.Equal(t, tt.expected.AllowedActions, settings.AllowedActions, "Apply should set allowed actions")
+			require.Equal(t, tt.expected.NotificationPreset, settings.NotificationPreset, "Apply should set notification preset")
+			require.JSONEq(t, string(tt.expected.NotificationSubscriptions), string(settings.NotificationSubscriptions), "Apply should set notification subscriptions")
+		})
+	}
+}
+
+func TestSlackUserLinkRequestsValidate(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	tests := []struct {
+		name      string
+		req       interface{ Validate() error }
+		expectErr bool
+	}{
+		{name: "admin link valid", req: &slackUserLinkAdminUpsertRequest{UserID: userID, SlackUserID: " U123 "}},
+		{name: "admin link missing user", req: &slackUserLinkAdminUpsertRequest{SlackUserID: "U123"}, expectErr: true},
+		{name: "admin link missing slack user", req: &slackUserLinkAdminUpsertRequest{UserID: userID}, expectErr: true},
+		{name: "self link valid", req: &slackUserLinkSelfRequest{SlackUserID: " U123 "}},
+		{name: "self link missing slack user", req: &slackUserLinkSelfRequest{}, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.req.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject incomplete Slack user-link requests")
+				return
+			}
+			require.NoError(t, err, "Validate should accept complete Slack user-link requests")
+		})
+	}
+}
+
+func TestSlackChannelSettingsPatchRequestToSettings(t *testing.T) {
+	t.Parallel()
+
+	installationID := uuid.New()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	routing := "answer_only"
+	visibility := "thread"
+	preset := "quiet"
+	req := slackChannelSettingsPatchRequest{
+		SlackChannelName:          "eng",
+		ChannelType:               "",
+		DefaultRepositoryID:       &repoID,
+		RoutingMode:               &routing,
+		ResponseVisibility:        &visibility,
+		AllowedActions:            []string{"session"},
+		NotificationPreset:        &preset,
+		NotificationSubscriptions: json.RawMessage(`{"preview.ready":{"channel":true}}`),
+	}
+
+	settings, err := req.ToSettings(orgID, installationID, "T123", "C123")
+
+	require.NoError(t, err, "ToSettings should accept valid channel settings")
+	require.Equal(t, orgID, settings.OrgID, "ToSettings should set org")
+	require.Equal(t, installationID, settings.SlackInstallationID, "ToSettings should set installation")
+	require.Equal(t, "T123", settings.SlackTeamID, "ToSettings should set Slack team")
+	require.Equal(t, "C123", settings.SlackChannelID, "ToSettings should set Slack channel")
+	require.Equal(t, "channel", settings.ChannelType, "ToSettings should default channel type")
+	require.Equal(t, models.SlackRoutingModeAnswerOnly, *settings.RoutingMode, "ToSettings should convert routing mode")
+	require.Equal(t, models.SlackResponseVisibilityThread, *settings.ResponseVisibility, "ToSettings should convert response visibility")
+	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "ToSettings should convert notification preset")
+	require.JSONEq(t, `{"preview.ready":{"channel":true}}`, string(settings.NotificationSubscriptions), "ToSettings should preserve notification subscriptions")
+}
+
+func TestSlackChannelSettingsPatchRequestApplyPreservesOmittedFields(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	repoID := uuid.New()
+	branch := "main"
+	routing := models.SlackRoutingModeStartWork
+	visibility := models.SlackResponseVisibilityDM
+	preset := models.SlackNotificationPresetCustom
+	settings := models.SlackChannelSettings{
+		OrgID:                     orgID,
+		SlackInstallationID:       installationID,
+		SlackTeamID:               "T123",
+		SlackChannelID:            "C123",
+		SlackChannelName:          "eng",
+		ChannelType:               "channel",
+		DefaultRepositoryID:       &repoID,
+		DefaultBranch:             &branch,
+		RoutingMode:               &routing,
+		ResponseVisibility:        &visibility,
+		AllowedActions:            []string{"session", "preview"},
+		NotificationPreset:        &preset,
+		NotificationSubscriptions: json.RawMessage(`{"events":["preview.ready"]}`),
+		Active:                    true,
+	}
+	nextPreset := "quiet"
+	req := slackChannelSettingsPatchRequest{NotificationPreset: &nextPreset}
+
+	err := req.Apply(&settings)
+
+	require.NoError(t, err, "Apply should accept a partial channel settings patch")
+	require.Equal(t, "eng", settings.SlackChannelName, "Apply should preserve omitted channel name")
+	require.Equal(t, "channel", settings.ChannelType, "Apply should preserve omitted channel type")
+	require.Equal(t, &repoID, settings.DefaultRepositoryID, "Apply should preserve omitted default repository")
+	require.Equal(t, &branch, settings.DefaultBranch, "Apply should preserve omitted default branch")
+	require.Equal(t, &routing, settings.RoutingMode, "Apply should preserve omitted routing mode")
+	require.Equal(t, &visibility, settings.ResponseVisibility, "Apply should preserve omitted response visibility")
+	require.Equal(t, []string{"session", "preview"}, settings.AllowedActions, "Apply should preserve omitted allowed actions")
+	require.NotNil(t, settings.NotificationPreset, "Apply should keep notification preset pointer")
+	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "Apply should update provided notification preset")
+	require.JSONEq(t, `{"events":["preview.ready"]}`, string(settings.NotificationSubscriptions), "Apply should preserve omitted notification subscriptions")
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

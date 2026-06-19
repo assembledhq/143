@@ -66,13 +66,11 @@ func (s *claudeStoreStub) GetByID(context.Context, models.Scope, uuid.UUID) (*mo
 		return &models.DecryptedCredential{
 			ID:       uuid.New(),
 			OrgID:    uuid.New(),
-			Provider: models.ProviderAnthropic,
+			Provider: models.ProviderAnthropicSubscription,
 			Label:    "team-a",
-			Config: models.AnthropicConfig{
-				Subscription: &models.AnthropicSubscription{
-					AccessToken:  "access",
-					RefreshToken: "refresh",
-				},
+			Config: models.AnthropicSubscriptionConfig{
+				AccessToken:  "access",
+				RefreshToken: "refresh",
 			},
 			Status: "active",
 		}, nil

@@ -43,16 +43,19 @@ export type ReviewPRAction = {
 type PRHealthBannerProps = {
   health: PullRequestHealthResponse;
   currentSessionId?: string;
+  currentThreadId?: string | null;
   pendingAction: PRBannerAction;
   repairError?: string | null;
   mergeAuthRequired?: boolean;
   mergeWhenReadyPending?: boolean;
   onFixTests: () => void;
+  onFixTestsWithoutPushing?: () => void;
   onResolveConflicts: () => void;
+  onResolveConflictsWithoutPushing?: () => void;
   onMerge: () => void;
   onQueueMergeWhenReady?: () => void;
   onCancelMergeWhenReady?: () => void;
-  onOpenRepairSession?: (sessionId: string) => void;
+  onOpenRepairSession?: (sessionId: string, threadId?: string) => void;
   pushChanges?: PushChangesAction;
   reviewAction?: ReviewPRAction;
 };
@@ -60,12 +63,15 @@ type PRHealthBannerProps = {
 export function PRHealthBanner({
   health,
   currentSessionId,
+  currentThreadId,
   pendingAction,
   repairError,
   mergeAuthRequired = false,
   mergeWhenReadyPending = false,
   onFixTests,
+  onFixTestsWithoutPushing,
   onResolveConflicts,
+  onResolveConflictsWithoutPushing,
   onMerge,
   onQueueMergeWhenReady,
   onCancelMergeWhenReady,
@@ -73,7 +79,7 @@ export function PRHealthBanner({
   pushChanges,
   reviewAction,
 }: PRHealthBannerProps) {
-  const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId);
+  const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId, currentThreadId);
   const isHealthy = activeRepairState.label === null && health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
@@ -115,7 +121,7 @@ export function PRHealthBanner({
             <div className="flex items-center gap-2">
               <div className={cn(
                 "flex h-8 w-8 items-center justify-center rounded-full",
-                isHealthy ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400" : "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400",
+                isHealthy ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
               )}>
                 {isHealthy ? <CheckCircle2 className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
               </div>
@@ -204,7 +210,7 @@ export function PRHealthBanner({
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => onOpenRepairSession(activeRepairState.openSessionID!)}
+                        onClick={() => onOpenRepairSession(activeRepairState.openSessionID!, activeRepairState.openThreadID ?? undefined)}
                       >
                         Open repair session
                       </Button>
@@ -265,38 +271,88 @@ export function PRHealthBanner({
                   )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={pendingAction !== null}
-                        title={pendingAction !== null ? "Wait for the current PR action to finish" : "Resolve conflicts (p r)"}
-                        onClick={onResolveConflicts}
-                      >
-                        {pendingAction === "resolve_conflicts" ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                      <span className="inline-flex">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={onResolveConflictsWithoutPushing ? "rounded-r-none" : undefined}
+                          disabled={pendingAction !== null}
+                          title={pendingAction !== null ? "Wait for the current PR action to finish" : "Resolve conflicts (p r)"}
+                          onClick={onResolveConflicts}
+                        >
+                          {pendingAction === "resolve_conflicts" ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
+                        </Button>
+                        {onResolveConflictsWithoutPushing && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7 rounded-l-none border-l-0"
+                                disabled={pendingAction !== null}
+                                title={pendingAction !== null ? "Wait for the current PR action to finish" : "More resolve conflicts actions"}
+                                aria-label="More resolve conflicts actions"
+                              >
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={onResolveConflictsWithoutPushing} disabled={pendingAction !== null}>
+                                <Wrench className="h-3.5 w-3.5" />
+                                Resolve without pushing changes
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         )}
-                        {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
-                      </Button>
+                      </span>
                     </DisabledTooltip>
                   )}
                   {canShowFixTestsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={pendingAction !== null}
-                        title={pendingAction !== null ? "Wait for the current PR action to finish" : "Fix tests (p t)"}
-                        onClick={onFixTests}
-                      >
-                        {pendingAction === "fix_tests" ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                      <span className="inline-flex">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={onFixTestsWithoutPushing ? "rounded-r-none" : undefined}
+                          disabled={pendingAction !== null}
+                          title={pendingAction !== null ? "Wait for the current PR action to finish" : "Fix tests (p t)"}
+                          onClick={onFixTests}
+                        >
+                          {pendingAction === "fix_tests" ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Wrench className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
+                        </Button>
+                        {onFixTestsWithoutPushing && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7 rounded-l-none border-l-0"
+                                disabled={pendingAction !== null}
+                                title={pendingAction !== null ? "Wait for the current PR action to finish" : "More fix tests actions"}
+                                aria-label="More fix tests actions"
+                              >
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={onFixTestsWithoutPushing} disabled={pendingAction !== null}>
+                                <Wrench className="h-3.5 w-3.5" />
+                                Fix without pushing changes
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         )}
-                        {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
-                      </Button>
+                      </span>
                     </DisabledTooltip>
                   )}
                   {reviewAction && (
@@ -382,9 +438,11 @@ export function PRHealthBanner({
 function deriveActiveRepairState(
   activeRepairs: PullRequestHealthResponse["active_repairs"],
   currentSessionId?: string,
+  currentThreadId?: string | null,
 ): {
   label: string | null;
   openSessionID: string | null;
+  openThreadID: string | null;
   suppressFixTests: boolean;
   suppressResolveConflicts: boolean;
   suppressMerge: boolean;
@@ -393,6 +451,10 @@ function deriveActiveRepairState(
   const resolveConflicts = repairs.find((repair) => repair.action_type === "resolve_conflicts");
   const fixTests = repairs.find((repair) => repair.action_type === "fix_tests");
   const dominantRepair = resolveConflicts ?? fixTests ?? null;
+  const repairIsInDifferentView = !!dominantRepair && (
+    dominantRepair.session_id !== currentSessionId ||
+    (currentThreadId != null && !!dominantRepair.thread_id && dominantRepair.thread_id !== currentThreadId)
+  );
 
   return {
     label: dominantRepair
@@ -400,7 +462,8 @@ function deriveActiveRepairState(
         ? "Resolve conflicts running"
         : "Fix tests running"
       : null,
-    openSessionID: dominantRepair && dominantRepair.session_id !== currentSessionId ? dominantRepair.session_id : null,
+    openSessionID: dominantRepair && repairIsInDifferentView ? dominantRepair.session_id : null,
+    openThreadID: dominantRepair?.thread_id ?? null,
     suppressFixTests: !!fixTests || !!resolveConflicts,
     suppressResolveConflicts: !!resolveConflicts,
     suppressMerge: repairs.length > 0,
@@ -453,8 +516,8 @@ function checkStatusBadgeClassName(status: PullRequestCheckStatus) {
     case "failed":
       return "bg-destructive/10 text-destructive";
     case "pending":
-      return "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400";
+      return "bg-warning/10 text-warning";
     case "passed":
-      return "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400";
+      return "bg-success/10 text-success";
   }
 }

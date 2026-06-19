@@ -145,7 +145,7 @@ export function ProjectSidebar() {
   const canManage = canListTeamMembers;
 
   return (
-    <div className="w-full h-full border-r border-border bg-muted/30 flex flex-col">
+    <div className="w-full h-full border-r border-border bg-panel flex flex-col">
       {/* Header */}
       <div className="px-4 pt-3 pb-3 space-y-3">
         <div className="flex items-center gap-2">
@@ -170,7 +170,7 @@ export function ProjectSidebar() {
 
         {/* New project button */}
         {canManage && (
-          <Button asChild variant="outline" className="w-full gap-2 bg-background text-xs shadow-sm">
+          <Button asChild className="w-full gap-2 text-xs">
             <Link href="/projects/new">
               <Plus className="h-4 w-4" />
               New project
@@ -210,7 +210,7 @@ export function ProjectSidebar() {
         {canManage && isNewProject && (
           <Link
             href="/projects/new"
-            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-background shadow-sm border border-border/50"
+            className="block rounded-lg px-3 py-2.5 mb-0.5 bg-card shadow-sm border border-border/50"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <span className="inline-flex rounded-full h-2 w-2 border border-muted-foreground/30 shrink-0" />
@@ -275,16 +275,16 @@ export function ProjectSidebar() {
               <Link
                 href={`/projects/${project.id}${filterSuffix}`}
                 className={cn(
-                  "block rounded-lg bg-muted/30 px-3 py-2.5 transition-all duration-150",
+                  "block rounded-lg px-3 py-2.5 transition-all duration-150",
                   isSelected
-                    ? "bg-background shadow-sm border border-border/50"
-                    : "hover:bg-background/60"
+                    ? "bg-card shadow-sm border border-primary/25 ring-1 ring-primary/10"
+                    : "hover:bg-muted/50"
                 )}
               >
                 <div className="flex items-start gap-2.5 min-w-0">
                   <div className="mt-1.5 shrink-0">
                     {isActiveProject ? (
-                      <StatusDot animate color="bg-blue-500" pingColor="bg-blue-400/60" />
+                      <StatusDot animate color="bg-info" pingColor="bg-info/60" />
                     ) : (
                       <StatusDot color={projectStatusDotColor[project.status] || "bg-muted-foreground/50"} />
                     )}

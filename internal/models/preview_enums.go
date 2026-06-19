@@ -52,26 +52,254 @@ func (s PreviewStatus) IsTerminal() bool {
 	}
 }
 
+// PreviewAutoMode controls repository-level automatic PR preview behavior.
+type PreviewAutoMode string
+
+const (
+	PreviewAutoModeOff  PreviewAutoMode = "off"
+	PreviewAutoModeWarm PreviewAutoMode = "warm"
+	PreviewAutoModeOn   PreviewAutoMode = "on"
+)
+
+func (m PreviewAutoMode) Validate() error {
+	switch m {
+	case PreviewAutoModeOff, PreviewAutoModeWarm, PreviewAutoModeOn:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewAutoMode: %q", m)
+	}
+}
+
+// PreviewStoppedReason records why a preview instance entered a terminal stop.
+type PreviewStoppedReason string
+
+const (
+	PreviewStoppedReasonNone       PreviewStoppedReason = ""
+	PreviewStoppedReasonUser       PreviewStoppedReason = "user"
+	PreviewStoppedReasonExpired    PreviewStoppedReason = "expired"
+	PreviewStoppedReasonWarmPolicy PreviewStoppedReason = "warm_policy"
+	PreviewStoppedReasonPRClosed   PreviewStoppedReason = "pr_closed"
+	PreviewStoppedReasonDrain      PreviewStoppedReason = "drain"
+	PreviewStoppedReasonError      PreviewStoppedReason = "error"
+)
+
+func (r PreviewStoppedReason) Validate() error {
+	switch r {
+	case PreviewStoppedReasonNone,
+		PreviewStoppedReasonUser,
+		PreviewStoppedReasonExpired,
+		PreviewStoppedReasonWarmPolicy,
+		PreviewStoppedReasonPRClosed,
+		PreviewStoppedReasonDrain,
+		PreviewStoppedReasonError:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewStoppedReason: %q", r)
+	}
+}
+
+// PreviewLaunchAction describes the next product action for a PR preview launch.
+type PreviewLaunchAction string
+
+const (
+	PreviewLaunchActionOpen        PreviewLaunchAction = "open"
+	PreviewLaunchActionWait        PreviewLaunchAction = "wait"
+	PreviewLaunchActionResume      PreviewLaunchAction = "resume"
+	PreviewLaunchActionStart       PreviewLaunchAction = "start"
+	PreviewLaunchActionStartLatest PreviewLaunchAction = "start_latest"
+	PreviewLaunchActionRestart     PreviewLaunchAction = "restart"
+	PreviewLaunchActionRetry       PreviewLaunchAction = "retry"
+	PreviewLaunchActionCancel      PreviewLaunchAction = "cancel"
+	PreviewLaunchActionBlocked     PreviewLaunchAction = "blocked"
+	PreviewLaunchActionClosed      PreviewLaunchAction = "closed"
+	PreviewLaunchActionNone        PreviewLaunchAction = "none"
+)
+
+func (a PreviewLaunchAction) Validate() error {
+	switch a {
+	case PreviewLaunchActionOpen,
+		PreviewLaunchActionWait,
+		PreviewLaunchActionResume,
+		PreviewLaunchActionStart,
+		PreviewLaunchActionStartLatest,
+		PreviewLaunchActionRestart,
+		PreviewLaunchActionRetry,
+		PreviewLaunchActionCancel,
+		PreviewLaunchActionBlocked,
+		PreviewLaunchActionClosed,
+		PreviewLaunchActionNone:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewLaunchAction: %q", a)
+	}
+}
+
+// PreviewGroupKind describes the user-facing grouping for the current preview index.
+type PreviewGroupKind string
+
+const (
+	PreviewGroupKindPullRequest PreviewGroupKind = "pull_request"
+	PreviewGroupKindBranch      PreviewGroupKind = "branch"
+	PreviewGroupKindSource      PreviewGroupKind = "source"
+	PreviewGroupKindSession     PreviewGroupKind = "session"
+	PreviewGroupKindPinned      PreviewGroupKind = "pinned"
+)
+
+func (k PreviewGroupKind) Validate() error {
+	switch k {
+	case PreviewGroupKindPullRequest,
+		PreviewGroupKindBranch,
+		PreviewGroupKindSource,
+		PreviewGroupKindSession,
+		PreviewGroupKindPinned:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewGroupKind: %q", k)
+	}
+}
+
+// PreviewCurrentFreshness describes whether a grouped branch/PR preview is at
+// the latest known head. It is intentionally distinct from PreviewFreshness,
+// which is the session-preview freshness payload.
+type PreviewCurrentFreshness string
+
+const (
+	PreviewCurrentFreshnessCurrent  PreviewCurrentFreshness = "current"
+	PreviewCurrentFreshnessOutdated PreviewCurrentFreshness = "outdated"
+	PreviewCurrentFreshnessUnknown  PreviewCurrentFreshness = "unknown"
+	PreviewCurrentFreshnessPinned   PreviewCurrentFreshness = "pinned"
+)
+
+func (f PreviewCurrentFreshness) Validate() error {
+	switch f {
+	case PreviewCurrentFreshnessCurrent,
+		PreviewCurrentFreshnessOutdated,
+		PreviewCurrentFreshnessUnknown,
+		PreviewCurrentFreshnessPinned:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewCurrentFreshness: %q", f)
+	}
+}
+
+// PreviewLaunchReason explains why a PR preview launch action was chosen.
+type PreviewLaunchReason string
+
+const (
+	PreviewLaunchReasonReady              PreviewLaunchReason = "ready"
+	PreviewLaunchReasonStarting           PreviewLaunchReason = "starting"
+	PreviewLaunchReasonResumable          PreviewLaunchReason = "resumable"
+	PreviewLaunchReasonNoRuntime          PreviewLaunchReason = "no_runtime"
+	PreviewLaunchReasonStale              PreviewLaunchReason = "stale"
+	PreviewLaunchReasonFailed             PreviewLaunchReason = "failed"
+	PreviewLaunchReasonRoleForbidden      PreviewLaunchReason = "role_forbidden"
+	PreviewLaunchReasonTokenForbidden     PreviewLaunchReason = "token_forbidden"
+	PreviewLaunchReasonCapacity           PreviewLaunchReason = "capacity"
+	PreviewLaunchReasonConfigRequired     PreviewLaunchReason = "config_required"
+	PreviewLaunchReasonConfigInvalid      PreviewLaunchReason = "config_invalid"
+	PreviewLaunchReasonRepositoryMissing  PreviewLaunchReason = "repository_missing"
+	PreviewLaunchReasonGitHubUnavailable  PreviewLaunchReason = "github_unavailable"
+	PreviewLaunchReasonPullRequestClosed  PreviewLaunchReason = "pull_request_closed"
+	PreviewLaunchReasonPreviewUnavailable PreviewLaunchReason = "preview_unavailable"
+)
+
+func (r PreviewLaunchReason) Validate() error {
+	switch r {
+	case PreviewLaunchReasonReady,
+		PreviewLaunchReasonStarting,
+		PreviewLaunchReasonResumable,
+		PreviewLaunchReasonNoRuntime,
+		PreviewLaunchReasonStale,
+		PreviewLaunchReasonFailed,
+		PreviewLaunchReasonRoleForbidden,
+		PreviewLaunchReasonTokenForbidden,
+		PreviewLaunchReasonCapacity,
+		PreviewLaunchReasonConfigRequired,
+		PreviewLaunchReasonConfigInvalid,
+		PreviewLaunchReasonRepositoryMissing,
+		PreviewLaunchReasonGitHubUnavailable,
+		PreviewLaunchReasonPullRequestClosed,
+		PreviewLaunchReasonPreviewUnavailable:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewLaunchReason: %q", r)
+	}
+}
+
 // PreviewFreshnessState describes whether a session preview was launched from
 // the latest durable workspace revision.
 type PreviewFreshnessState string
 
 const (
-	PreviewFreshnessCurrent   PreviewFreshnessState = "current"
-	PreviewFreshnessOutOfDate PreviewFreshnessState = "out_of_date"
-	PreviewFreshnessUpdating  PreviewFreshnessState = "updating"
-	PreviewFreshnessUnknown   PreviewFreshnessState = "unknown"
+	PreviewFreshnessCurrent         PreviewFreshnessState = "current"
+	PreviewFreshnessLiveUpdated     PreviewFreshnessState = "live_updated"
+	PreviewFreshnessRestartRequired PreviewFreshnessState = "restart_required"
+	PreviewFreshnessOutOfDate       PreviewFreshnessState = "out_of_date"
+	PreviewFreshnessUpdating        PreviewFreshnessState = "updating"
+	PreviewFreshnessUnknown         PreviewFreshnessState = "unknown"
 )
 
 func (s PreviewFreshnessState) Validate() error {
 	switch s {
 	case PreviewFreshnessCurrent,
+		PreviewFreshnessLiveUpdated,
+		PreviewFreshnessRestartRequired,
 		PreviewFreshnessOutOfDate,
 		PreviewFreshnessUpdating,
 		PreviewFreshnessUnknown:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewFreshnessState: %q", s)
+	}
+}
+
+// PreviewRuntimeRevisionSource identifies how the live preview runtime proved
+// it had observed a session workspace revision.
+type PreviewRuntimeRevisionSource string
+
+const (
+	PreviewRuntimeRevisionSourceNone      PreviewRuntimeRevisionSource = ""
+	PreviewRuntimeRevisionSourceLaunch    PreviewRuntimeRevisionSource = "launch"
+	PreviewRuntimeRevisionSourceRecycle   PreviewRuntimeRevisionSource = "recycle"
+	PreviewRuntimeRevisionSourceHMR       PreviewRuntimeRevisionSource = "hmr"
+	PreviewRuntimeRevisionSourceFileEvent PreviewRuntimeRevisionSource = "file_event"
+)
+
+func (s PreviewRuntimeRevisionSource) Validate() error {
+	switch s {
+	case PreviewRuntimeRevisionSourceNone,
+		PreviewRuntimeRevisionSourceLaunch,
+		PreviewRuntimeRevisionSourceRecycle,
+		PreviewRuntimeRevisionSourceHMR,
+		PreviewRuntimeRevisionSourceFileEvent:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewRuntimeRevisionSource: %q", s)
+	}
+}
+
+// PreviewRestartReasonKind describes why a preview needs a full restart rather
+// than trusting live HMR/file watchers.
+type PreviewRestartReasonKind string
+
+const (
+	PreviewRestartReasonDependencyChanged        PreviewRestartReasonKind = "dependency_changed"
+	PreviewRestartReasonPreviewConfigChanged     PreviewRestartReasonKind = "preview_config_changed"
+	PreviewRestartReasonBuildConfigChanged       PreviewRestartReasonKind = "build_config_changed"
+	PreviewRestartReasonEnvironmentConfigChanged PreviewRestartReasonKind = "environment_config_changed"
+	PreviewRestartReasonDatabaseSchemaChanged    PreviewRestartReasonKind = "database_schema_changed"
+)
+
+func (k PreviewRestartReasonKind) Validate() error {
+	switch k {
+	case PreviewRestartReasonDependencyChanged,
+		PreviewRestartReasonPreviewConfigChanged,
+		PreviewRestartReasonBuildConfigChanged,
+		PreviewRestartReasonEnvironmentConfigChanged,
+		PreviewRestartReasonDatabaseSchemaChanged:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewRestartReasonKind: %q", k)
 	}
 }
 

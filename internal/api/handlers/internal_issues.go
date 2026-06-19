@@ -88,6 +88,10 @@ func (h *InternalIssueHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token", err)
 		return
 	}
+	if claims.SessionOrigin == string(models.SessionOriginAutomationGoalImprovement) {
+		writeError(w, r, http.StatusForbidden, "TOOL_NOT_AVAILABLE", "issue creation is not available to automation goal improvement sessions")
+		return
+	}
 
 	// Rate limit: max issues per PM run (keyed by token hash).
 	tokenHash := hashToken(tokenStr)

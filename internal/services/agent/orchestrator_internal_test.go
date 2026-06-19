@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
@@ -109,6 +111,56 @@ func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
 		return
 	}
 	close(release)
+}
+
+func TestPrepareSandboxRepositoryRunsBootstrapCommandsFromWorkDir(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/home/sandbox/backend"
+	provider := &testInternalSandboxProvider{
+		readFiles: map[string][]byte{
+			path.Join(workDir, repoconfig.ConfigPath): []byte(`{
+				"bootstrap": {
+					"commands": ["npm install", "npm run lint:js -w assets"]
+				}
+			}`),
+		},
+	}
+	o := &Orchestrator{provider: provider}
+	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
+
+	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+
+	require.NoError(t, err, "prepareSandboxRepository should run configured bootstrap commands successfully")
+	require.Equal(t, []string{
+		"cd '/home/sandbox/backend' && npm install",
+		"cd '/home/sandbox/backend' && npm run lint:js -w assets",
+	}, provider.execCalls, "bootstrap commands should run in order from the repository workdir")
+}
+
+func TestPrepareSandboxRepositoryReturnsBootstrapCommandFailure(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/home/sandbox/backend"
+	provider := &testInternalSandboxProvider{
+		execExit:   127,
+		execStderr: "sh: eslint: not found",
+		readFiles: map[string][]byte{
+			path.Join(workDir, repoconfig.ConfigPath): []byte(`{
+				"bootstrap": {
+					"commands": ["npm run lint:js -w assets"]
+				}
+			}`),
+		},
+	}
+	o := &Orchestrator{provider: provider}
+	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
+
+	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+
+	require.Error(t, err, "prepareSandboxRepository should fail when a configured bootstrap command exits non-zero")
+	require.Contains(t, err.Error(), "npm run lint:js -w assets", "bootstrap setup error should identify the command that failed")
+	require.Contains(t, err.Error(), "sh: eslint: not found", "bootstrap setup error should include stderr so missing tool failures are actionable")
 }
 
 type blockingMentionIndexFileReader struct {
@@ -417,19 +469,24 @@ func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the selected unified credential is an API key")
 }
 
-func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
+func TestSetupFreshSandbox_CodexOrgAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.MustParse("10101010-1111-2222-3333-444444444444")
 	userID := uuid.MustParse("55555555-6666-7777-8888-999999999999")
 	provider := &testInternalSandboxProvider{}
 	env := NewAgentEnv(AgentEnvDeps{
-		Credentials: &envCredentialProvider{
-			creds: map[models.ProviderName]*models.DecryptedCredential{
+		CodingCredentials: testInternalCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
 				models.ProviderOpenAI: {
-					OrgID:  orgID,
-					Status: models.CredentialStatusActive,
-					Config: models.OpenAIConfig{APIKey: "sk-legacy-openai"},
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderOpenAI,
+						Priority: 1,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   models.OpenAIConfig{APIKey: "sk-org-openai"},
+					},
 				},
 			},
 		},
@@ -451,9 +508,9 @@ func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T
 
 	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-legacy", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars, nil)
 
-	require.NoError(t, err, "setupFreshSandbox should continue to honor the documented legacy OpenAI API-key fallback")
-	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the legacy OpenAI credential as an API-key billing mode")
-	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the legacy fallback resolved an OpenAI API key")
+	require.NoError(t, err, "setupFreshSandbox should honor the org-scoped OpenAI API-key fallback")
+	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the org OpenAI credential as an API-key billing mode")
+	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the resolved unified credential is an API key")
 }
 
 func TestBuildTokenUsageHint_PreservesExplicitClaudeSubscriptionBillingMode(t *testing.T) {
@@ -481,7 +538,7 @@ func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *tes
 
 	orgID := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
 	userID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
-	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"gemini_cli":{"GEMINI_MODEL":"gemini-2.5-pro"}}}`)
+	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"opencode":{"OPENCODE_MODEL":"google/gemini-2.5-flash"}}}`)
 	env := NewAgentEnv(AgentEnvDeps{
 		Orgs: testInternalOrgStore{
 			org: models.Organization{
@@ -503,7 +560,7 @@ func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *tes
 	}{
 		{name: "codex", agentType: models.AgentTypeCodex, expected: models.CodexModelGPT54},
 		{name: "claude", agentType: models.AgentTypeClaudeCode, expected: models.ClaudeCodeModelSonnet46},
-		{name: "gemini", agentType: models.AgentTypeGeminiCLI, expected: models.GeminiCLIModelGemini25Pro},
+		{name: "opencode", agentType: models.AgentTypeOpenCode, expected: models.OpenCodeModelGemini25Flash},
 	}
 
 	for _, tt := range tests {

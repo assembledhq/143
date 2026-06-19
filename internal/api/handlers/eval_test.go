@@ -32,6 +32,14 @@ func anyArgs(n int) []interface{} {
 	return args
 }
 
+func TestEvalAllowedModelsIncludesOpenCode(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, allowedModels[models.OpenCodeModelGPT54Mini], "eval runs should allow the default inexpensive OpenCode model")
+	require.True(t, allowedModels[models.OpenCodeModelClaudeHaiku45], "eval runs should allow a cheap Anthropic-backed OpenCode model")
+	require.True(t, allowedModels[models.OpenCodeModelDeepSeekChat], "eval runs should allow a cheap non-flagship OpenCode model")
+}
+
 var evalTaskColumns = []string{
 	"id", "org_id", "repo_id", "name", "description",
 	"base_commit_sha", "solution_commit_sha", "solution_diff",
@@ -46,6 +54,7 @@ var evalTaskColumns = []string{
 
 var evalRunColumns = []string{
 	"id", "task_id", "org_id", "batch_id",
+	"session_id", "thread_id",
 	"input_manifest", "model", "server_deploy_sha", "pm_document_set_pin_id",
 	"config_ref", "context_overrides",
 	"agent_diff", "agent_trace", "token_usage",
@@ -75,6 +84,7 @@ func newTestEvalTaskRow(taskID, orgID, repoID uuid.UUID, now time.Time) []interf
 func newTestEvalRunRow(runID, taskID, orgID uuid.UUID, now time.Time) []interface{} {
 	return []interface{}{
 		runID, taskID, orgID, nil,
+		nil, nil,
 		nil, "claude-sonnet-4-6", nil, nil,
 		nil, json.RawMessage(`{}`),
 		nil, nil, nil,
@@ -101,6 +111,64 @@ func newEvalHandler(mock pgxmock.PgxPoolIface) *EvalHandler {
 	)
 }
 
+func TestEvalHandler_CreateDatasetRejectsRepositoryOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	handler := newEvalHandler(mock)
+	handler.SetDatasetStore(db.NewEvalDatasetStore(mock))
+	handler.SetRepositoryStore(db.NewRepositoryStore(mock))
+
+	mock.ExpectQuery("(?s)SELECT .* FROM repositories.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(anyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	body := fmt.Sprintf(`{"repository_id":%q,"name":"Golden set","dataset_type":"golden"}`, repoID.String())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/datasets", strings.NewReader(body))
+	req = req.WithContext(evalCtx(orgID, userID))
+	w := httptest.NewRecorder()
+
+	handler.CreateDataset(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "CreateDataset should reject repositories that are not in the active org")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEvalHandler_UpsertReleaseGateRejectsDatasetOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	datasetID := uuid.New()
+	handler := newEvalHandler(mock)
+	handler.SetDatasetStore(db.NewEvalDatasetStore(mock))
+	handler.SetReleaseGateStore(db.NewEvalReleaseGateStore(mock))
+
+	mock.ExpectQuery("(?s)SELECT .* FROM eval_datasets").
+		WithArgs(anyArgs(2)...).
+		WillReturnError(pgx.ErrNoRows)
+
+	body := fmt.Sprintf(`{"gate_name":"default","dataset_id":%q}`, datasetID.String())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/release-gates", strings.NewReader(body))
+	req = req.WithContext(evalCtx(orgID, userID))
+	w := httptest.NewRecorder()
+
+	handler.UpsertReleaseGate(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "UpsertReleaseGate should reject datasets that are not in the active org")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func evalCtx(orgID uuid.UUID, userID uuid.UUID) context.Context {
 	ctx := context.Background()
 	ctx = middleware.WithOrgID(ctx, orgID)
@@ -115,6 +183,14 @@ func evalCtxWithChi(orgID uuid.UUID, userID uuid.UUID, params map[string]string)
 		rctx.URLParams.Add(k, v)
 	}
 	return context.WithValue(ctx, chi.RouteCtxKey, rctx)
+}
+
+type fakeEvalCandidateValidator struct {
+	err error
+}
+
+func (v fakeEvalCandidateValidator) ValidateEvalCandidate(ctx context.Context, orgID uuid.UUID, repoID uuid.UUID, candidate models.EvalBootstrapCandidate) error {
+	return v.err
 }
 
 // --- ListTasks ---
@@ -1069,6 +1145,26 @@ func TestEvalHandler_StartRun(t *testing.T) {
 	})
 }
 
+func TestEvalRunSessionFromTaskPinsBaseCommit(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	task := models.EvalTask{
+		Name:             "Fix auth race",
+		RepoID:           repoID,
+		BaseCommitSHA:    "abc1234",
+		IssueDescription: "Fix the auth race.",
+	}
+
+	session := evalRunSessionFromTask(orgID, task, "claude-sonnet-4-6", nil, &models.User{ID: userID, OrgID: orgID})
+
+	require.NotNil(t, session.BaseCommitSHA, "eval run sessions should pin the task base commit on the session row")
+	require.Equal(t, task.BaseCommitSHA, *session.BaseCommitSHA, "eval run sessions should use the eval task base commit")
+	require.Equal(t, models.SessionOriginEvalRun, session.Origin, "eval run sessions should carry eval_run origin")
+}
+
 // --- ListRuns ---
 
 func TestEvalHandler_ListRuns(t *testing.T) {
@@ -1619,12 +1715,13 @@ func TestEvalHandler_StartBatch(t *testing.T) {
 
 var bootstrapRunColumns = []string{
 	"id", "org_id", "repo_id", "status", "candidates", "session_id",
-	"created_by", "created_at", "completed_at", "error_message",
+	"thread_id", "created_by", "created_at", "completed_at", "error_message",
 }
 
 func newTestBootstrapRunRow(runID, orgID, repoID uuid.UUID, userID *uuid.UUID, status string, candidates json.RawMessage, now time.Time) []interface{} {
 	return []interface{}{
 		runID, orgID, repoID, status, candidates, nil,
+		nil,
 		userID, now, nil, nil,
 	}
 }
@@ -1632,7 +1729,7 @@ func newTestBootstrapRunRow(runID, orgID, repoID uuid.UUID, userID *uuid.UUID, s
 func TestEvalHandler_Bootstrap(t *testing.T) {
 	t.Parallel()
 
-	t.Run("creates bootstrap run and enqueues job", func(t *testing.T) {
+	t.Run("requires session-backed execution", func(t *testing.T) {
 		t.Parallel()
 
 		mock, err := pgxmock.NewPool()
@@ -1642,17 +1739,7 @@ func TestEvalHandler_Bootstrap(t *testing.T) {
 		orgID := uuid.New()
 		userID := uuid.New()
 		repoID := uuid.New()
-		runID := uuid.New()
-		now := time.Now()
 		handler := newEvalHandler(mock)
-
-		mock.ExpectQuery("INSERT INTO eval_bootstrap_runs").
-			WithArgs(anyArgs(4)...).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
-
-		mock.ExpectQuery("INSERT INTO jobs").
-			WithArgs(anyArgs(6)...).
-			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 		body := fmt.Sprintf(`{"repo_id": %q}`, repoID.String())
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(body))
@@ -1661,12 +1748,8 @@ func TestEvalHandler_Bootstrap(t *testing.T) {
 		w := httptest.NewRecorder()
 
 		handler.Bootstrap(w, req)
-		require.Equal(t, http.StatusAccepted, w.Code)
-
-		var resp models.SingleResponse[models.EvalBootstrapRun]
-		err = json.Unmarshal(w.Body.Bytes(), &resp)
-		require.NoError(t, err)
-		require.Equal(t, runID, resp.Data.ID)
+		require.Equal(t, http.StatusInternalServerError, w.Code)
+		require.Contains(t, w.Body.String(), "SESSION_BACKING_REQUIRED")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -1714,67 +1797,6 @@ func TestEvalHandler_Bootstrap(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
-	t.Run("returns error on bootstrap store create failure", func(t *testing.T) {
-		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		userID := uuid.New()
-		repoID := uuid.New()
-		handler := newEvalHandler(mock)
-
-		mock.ExpectQuery("INSERT INTO eval_bootstrap_runs").
-			WithArgs(anyArgs(4)...).
-			WillReturnError(fmt.Errorf("db error"))
-
-		body := fmt.Sprintf(`{"repo_id": %q}`, repoID.String())
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req = req.WithContext(evalCtx(orgID, userID))
-		w := httptest.NewRecorder()
-
-		handler.Bootstrap(w, req)
-		require.Equal(t, http.StatusInternalServerError, w.Code)
-		require.Contains(t, w.Body.String(), "CREATE_FAILED")
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
-
-	t.Run("returns error on enqueue failure", func(t *testing.T) {
-		t.Parallel()
-
-		mock, err := pgxmock.NewPool()
-		require.NoError(t, err)
-		defer mock.Close()
-
-		orgID := uuid.New()
-		userID := uuid.New()
-		repoID := uuid.New()
-		runID := uuid.New()
-		now := time.Now()
-		handler := newEvalHandler(mock)
-
-		mock.ExpectQuery("INSERT INTO eval_bootstrap_runs").
-			WithArgs(anyArgs(4)...).
-			WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(runID, now))
-
-		mock.ExpectQuery("INSERT INTO jobs").
-			WithArgs(anyArgs(6)...).
-			WillReturnError(fmt.Errorf("queue full"))
-
-		body := fmt.Sprintf(`{"repo_id": %q}`, repoID.String())
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req = req.WithContext(evalCtx(orgID, userID))
-		w := httptest.NewRecorder()
-
-		handler.Bootstrap(w, req)
-		require.Equal(t, http.StatusInternalServerError, w.Code)
-		require.Contains(t, w.Body.String(), "ENQUEUE_FAILED")
-		require.NoError(t, mock.ExpectationsWereMet())
-	})
 }
 
 func TestEvalHandler_GetBootstrapCandidates(t *testing.T) {
@@ -2023,6 +2045,8 @@ func TestEvalHandler_GetBootstrapCandidates(t *testing.T) {
 func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 	t.Parallel()
 
+	validBootstrapCandidate := json.RawMessage(`[{"pr_number":42,"pr_title":"Fix auth","base_commit_sha":"abcd1234","solution_commit_sha":"def4567","solution_diff":"diff --git","issue_description":"Auth broken","scoring_criteria":[{"name":"auth fixed","notes":"Authentication succeeds","grader_type":"llm_judge","weight":1,"required":true}],"complexity":"moderate","fitness_score":0.8,"fitness_reasoning":"good"}]`)
+
 	t.Run("creates tasks from selected candidates", func(t *testing.T) {
 		t.Parallel()
 
@@ -2038,7 +2062,7 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		now := time.Now()
 		handler := newEvalHandler(mock)
 
-		candidates := json.RawMessage(`[{"pr_number":42,"pr_title":"Fix auth","base_commit_sha":"aaa","solution_commit_sha":"bbb","solution_diff":"diff","issue_description":"Auth broken","scoring_criteria":[],"complexity":"moderate","fitness_score":0.8,"fitness_reasoning":"good"}]`)
+		candidates := validBootstrapCandidate
 
 		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
 			WithArgs(anyArgs(2)...).
@@ -2066,6 +2090,40 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		err = json.Unmarshal(w.Body.Bytes(), &resp)
 		require.NoError(t, err)
 		require.Len(t, resp.Data, 1)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("rejects candidate when repository validation fails", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		repoID := uuid.New()
+		runID := uuid.New()
+		now := time.Now()
+		handler := newEvalHandler(mock)
+		handler.SetCandidateValidator(fakeEvalCandidateValidator{err: fmt.Errorf("solution diff does not match commit range")})
+
+		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
+			WithArgs(anyArgs(2)...).
+			WillReturnRows(pgxmock.NewRows(bootstrapRunColumns).
+				AddRow(newTestBootstrapRunRow(runID, orgID, repoID, &userID, "completed", validBootstrapCandidate, now)...))
+		mock.ExpectBegin()
+		mock.ExpectRollback()
+
+		body := fmt.Sprintf(`{"bootstrap_run_id": %q, "candidate_indices": [0]}`, runID.String())
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/evals/bootstrap/accept", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtx(orgID, userID))
+		w := httptest.NewRecorder()
+
+		handler.AcceptBootstrapCandidates(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, "invalid repository validation should block candidate acceptance")
+		require.Contains(t, w.Body.String(), "INVALID_CANDIDATE", "response should identify candidate validation failure")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
@@ -2214,7 +2272,7 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		now := time.Now()
 		handler := newEvalHandler(mock)
 
-		candidates := json.RawMessage(`[{"pr_number":1,"pr_title":"PR1","base_commit_sha":"aaa","solution_commit_sha":"bbb","solution_diff":"diff","issue_description":"desc","scoring_criteria":[],"complexity":"simple","fitness_score":0.9,"fitness_reasoning":"ok"}]`)
+		candidates := validBootstrapCandidate
 
 		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
 			WithArgs(anyArgs(2)...).
@@ -2272,7 +2330,7 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		now := time.Now()
 		handler := newEvalHandler(mock)
 
-		candidates := json.RawMessage(`[{"pr_number":42,"pr_title":"Fix auth","base_commit_sha":"aaa","solution_commit_sha":"bbb","solution_diff":"diff","issue_description":"Auth broken","scoring_criteria":[],"complexity":"moderate","fitness_score":0.8,"fitness_reasoning":"good"}]`)
+		candidates := validBootstrapCandidate
 
 		mock.ExpectQuery("SELECT .+ FROM eval_bootstrap_runs WHERE id").
 			WithArgs(anyArgs(2)...).
@@ -2297,6 +2355,38 @@ func TestEvalHandler_AcceptBootstrapCandidates(t *testing.T) {
 		require.Equal(t, http.StatusInternalServerError, w.Code)
 		require.Contains(t, w.Body.String(), "CREATE_FAILED")
 		require.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+func TestEvalHandler_ReviewBootstrapCandidate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("marks candidate as needs revision", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "pgxmock should initialize")
+		defer mock.Close()
+
+		orgID := uuid.New()
+		userID := uuid.New()
+		candidateID := uuid.New()
+		handler := newEvalHandler(mock)
+
+		mock.ExpectExec("UPDATE eval_bootstrap_candidates").
+			WithArgs(anyArgs(5)...).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+		body := `{"status":"needs_revision","rejection_reason":"Needs a deterministic test command."}`
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/evals/bootstrap/candidates/"+candidateID.String(), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(evalCtxWithChi(orgID, userID, map[string]string{"candidate_id": candidateID.String()}))
+		w := httptest.NewRecorder()
+
+		handler.ReviewBootstrapCandidate(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "ReviewBootstrapCandidate should accept needs_revision status")
+		require.Contains(t, w.Body.String(), "needs_revision", "ReviewBootstrapCandidate should return the new review status")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	})
 }
 
@@ -2970,4 +3060,15 @@ func TestEvalHandler_StreamBootstrapUpdates_DeliversPublishedEvent(t *testing.T)
 
 	require.Contains(t, rr.BodyString(), runID.String(), "SSE response should include the published bootstrap run ID")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestEvalRunAgentType(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, models.AgentTypeClaudeCode, evalRunAgentType("claude-opus-4-6"))
+	require.Equal(t, models.AgentTypeClaudeCode, evalRunAgentType("claude-sonnet-4-6"))
+	require.Equal(t, models.AgentTypeCodex, evalRunAgentType("codex"))
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelDeepSeekChat), "OpenCode models should dispatch to the OpenCode adapter")
 }

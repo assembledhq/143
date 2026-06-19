@@ -11,6 +11,9 @@ function makeLog(metadata: Record<string, unknown> | null): SessionLog {
     metadata,
     turn_number: 1,
     created_at: "2026-04-20T00:00:00Z",
+    message_bytes: 0,
+    message_chars: 0,
+    message_truncated: false,
   };
 }
 
@@ -65,7 +68,7 @@ describe("deriveToolDisplay", () => {
     });
   });
 
-  describe("Gemini CLI run_shell_command", () => {
+  describe("run_shell_command", () => {
     it("maps to bash canonical", () => {
       const log = makeLog({
         tool: "run_shell_command",

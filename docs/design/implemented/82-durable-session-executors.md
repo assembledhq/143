@@ -1,6 +1,6 @@
 # Durable Session Executors
 
-> **Status:** Enabled by default for worker-dispatched session turns | **Last reviewed:** 2026-05-28
+> **Status:** Enabled by default for worker-dispatched session turns | **Last reviewed:** 2026-06-16
 
 Long-running `run_agent` and `continue_session` jobs should not be owned by the deployable worker process for the full turn. The durable executor design splits workers into short-lived dispatchers and per-session executor containers that own one active session turn until it completes, checkpoints, drains, or fails.
 
@@ -19,6 +19,8 @@ Long-running `run_agent` and `continue_session` jobs should not be owned by the 
 - The handoff dispatcher creates an executor row, launches a Docker executor container, transfers the running job to `owner_kind=session_executor`, and preserves the existing `lock_token`. Launch and handoff failures mark the reserved executor failed; a launched container is force-removed if handoff does not land.
 - Worker poll treats `HandoffError` as successful dispatch and skips terminal writes.
 - `session-executor` is a first-class binary entrypoint that reuses the worker orchestrator dependencies without starting the API/router.
+- Session executors do not own sandbox GitHub auth socket listeners. They use signed worker RPC to acquire and release holder leases from the worker-owned sandbox auth broker, which keeps `/var/run/143/sandbox-auth/<session>/sock` alive until the final active holder releases.
+- Worker startup may rehydrate auth listeners for containers it already owns, but it must not broadly sweep the shared auth socket directory. Rolling deploys intentionally overlap worker generations on the same host, so a new worker cannot prove that another generation's session directory is stale. Cleanup is owner-local: listener close removes its own socket, and the next `Listen` for the same session replaces only that session's socket path.
 - Executor boot validates the executor row, running job state, `owner_kind=session_executor`, and matching lock token. It waits briefly for the dispatcher handoff to become visible because the container is launched before the handoff update.
 - Executors heartbeat every 10s, renew the job lease every 20s, and fence terminal writes by the preserved lock token plus executor owner id. Final job writes use bounded contexts detached from process SIGTERM so graceful exits can persist terminal state.
 - Executor SIGTERM marks the row `draining` and asks the orchestrator cancel registry for a typed `worker_drain` graceful stop. This path is explicitly not a user cancel: a drain interruption restores a retryable session status, records `runtime_stop_reason='worker_drain'`, snapshots the workspace when possible without advancing `current_turn`, and requeues the original job instead of closing it as succeeded or terminally marking the session `cancelled`.

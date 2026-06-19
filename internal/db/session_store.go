@@ -149,12 +149,22 @@ const sessionSelectColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, git_identity_source, git_identity_user_id, created_at`
+	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
 
 const (
 	sessionDiffMaxChars        = 2 * 1024 * 1024
 	sessionDiffHistoryMaxBytes = 512 * 1024
 )
+
+const sessionResumeRuntimeResetAssignments = `runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL,
+		    runtime_last_progress_at = NULL,
+		    runtime_last_progress_type = '',
+		    runtime_last_progress_strength = '',
+		    runtime_extension_count = 0,
+		    runtime_extension_seconds = 0,
+		    runtime_stop_reason = '',
+		    runtime_graceful_stop_at = NULL`
 
 // sessionListColumns excludes raw diff payloads and large JSONB blobs
 // (diff_history) from list queries to avoid returning multi-megabyte payloads
@@ -176,7 +186,7 @@ const sessionListColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, git_identity_source, git_identity_user_id, created_at`
+	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
 
 // sessionAPIDetailColumns is used by the session-detail HTTP endpoint. It keeps
 // the same metadata as a full session fetch, but leaves the large diff payloads
@@ -199,7 +209,7 @@ const sessionAPIDetailColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, git_identity_source, git_identity_user_id, created_at`
+	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -588,6 +598,29 @@ func (s *SessionStore) GetDiffByID(ctx context.Context, orgID, sessionID uuid.UU
 	return payload, nil
 }
 
+func (s *SessionStore) GetLatestDiffSnapshot(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionDiffSnapshot, error) {
+	query := `
+		SELECT id, session_id, org_id, turn_number, sequence_number, source,
+		       base_commit_sha, head_commit_sha, workspace_dirty, working_branch,
+		       target_branch, diff, files_changed, lines_added, lines_removed, captured_at
+		FROM session_diff_snapshots
+		WHERE org_id = @org_id AND session_id = @session_id
+		ORDER BY captured_at DESC, sequence_number DESC
+		LIMIT 1`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.SessionDiffSnapshot{}, fmt.Errorf("query latest session diff snapshot: %w", err)
+	}
+	snapshot, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionDiffSnapshot])
+	if err != nil {
+		return models.SessionDiffSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 func (s *SessionStore) Create(ctx context.Context, run *models.Session) error {
 	tx, err := s.Begin(ctx)
 	if err != nil {
@@ -621,20 +654,23 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.LinearPrepareState == "" {
 		run.LinearPrepareState = models.LinearPrepareStateNone
 	}
+	if run.CapabilitySnapshot == nil {
+		run.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
+	}
 	query := `
 		INSERT INTO sessions (
 			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, reasoning_effort, triggered_by_user_id, target_branch, repository_id, automation_run_id,
+			model_override, reasoning_effort, triggered_by_user_id, target_branch, base_commit_sha, repository_id, input_manifest, automation_run_id,
 			origin, interaction_mode, validation_policy,
-			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state
+			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state, capability_snapshot
 		)
 		VALUES (
 			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @repository_id, @automation_run_id,
+			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @base_commit_sha, @repository_id, @input_manifest, @automation_run_id,
 			@origin, @interaction_mode, @validation_policy,
-			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state
+			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state, @capability_snapshot
 		)
 		RETURNING id, created_at, last_activity_at`
 
@@ -656,7 +692,9 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		"reasoning_effort":           run.ReasoningEffort,
 		"triggered_by_user_id":       run.TriggeredByUserID,
 		"target_branch":              run.TargetBranch,
+		"base_commit_sha":            run.BaseCommitSHA,
 		"repository_id":              run.RepositoryID,
+		"input_manifest":             run.InputManifest,
 		"automation_run_id":          run.AutomationRunID,
 		"origin":                     run.Origin,
 		"interaction_mode":           run.InteractionMode,
@@ -665,6 +703,7 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		"linear_state_sync_disabled": run.LinearStateSyncDisabled,
 		"linear_identifier_hint":     run.LinearIdentifierHint,
 		"linear_prepare_state":       run.LinearPrepareState,
+		"capability_snapshot":        run.CapabilitySnapshot,
 	}
 
 	row := q.QueryRow(ctx, query, args)
@@ -1189,6 +1228,32 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	return nil
 }
 
+func (s *SessionStore) SetRepositoryContext(ctx context.Context, orgID, sessionID, repositoryID uuid.UUID, targetBranch *string) (models.Session, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET repository_id = @repository_id,
+			target_branch = NULLIF(@target_branch::text, ''),
+			last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING `+sessionSelectColumns,
+		pgx.NamedArgs{
+			"id":            sessionID,
+			"org_id":        orgID,
+			"repository_id": repositoryID,
+			"target_branch": targetBranch,
+		})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("set session repository context: %w", err)
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, fmt.Errorf("collect session repository context: %w", err)
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return session, nil
+}
+
 // UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
 // method is self-contained — callers do not have to remember to pair it with
 // a separate activity bump. Today's sole caller already calls UpdateResult
@@ -1394,13 +1459,14 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 // single source of truth.
 // Sessions whose sandbox snapshot has been destroyed cannot be resumed.
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
-	query := `
+	query := fmt.Sprintf(`
 		UPDATE sessions
-		SET status = 'running', completed_at = NULL,
+		SET status = 'running', started_at = now(), completed_at = NULL,
+		    %s,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = ANY(@statuses)
 		  AND sandbox_state != 'destroyed'
-		RETURNING ` + sessionSelectColumns
+		RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,

@@ -11,7 +11,39 @@ The platform already has two preview acceleration mechanisms:
 - Live session sandbox reuse: fastest path, but only works while the session container is still running.
 - Branch/PR preview startup snapshots: worker-local full-workspace snapshots keyed by commit, lockfiles, and preview config.
 
-Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as package-manager stores or framework build caches.
+Session previews cannot safely use full-workspace snapshots from another preview because they must reflect unpushed agent edits. This design adds a default-on dependency artifact cache for `preview.install`. By default, 143 caches repo-declared `clean_paths` and a small set of conservative paths inferred from known dependency files. Repos can opt out or add extra cache paths such as framework build caches.
+
+## 2026-06 Update: Package-Manager Caches And Prewarming
+
+The cache implementation now treats preview install caching as a generic path-cache with two durable `cache_kind` values:
+
+- `install_artifact`: WorkDir-relative dependency/build artifacts. These are the original dependency artifact caches and remain marker-gated on restore.
+- `package_manager`: HomeDir-relative package-manager global caches. These restore before `preview.install` even when the install marker is absent, because package-manager download caches are useful to first cold installs and are not removed by repo `clean_paths`.
+
+`preview.install.cache.package_manager` supports `enabled`, `include`, and additive HomeDir-relative `paths`. Omitted `include` infers managers from lockfiles and install command. Default paths are:
+
+| Manager | HomeDir-relative paths |
+|---|---|
+| npm | `.npm` |
+| pnpm | `.local/share/pnpm/store` |
+| yarn | `.yarn/berry/cache` |
+| bun | `.bun/install/cache` |
+| pip | `.cache/pip` |
+| uv | `.cache/uv` |
+| poetry | `.cache/pypoetry` |
+| go | `go/pkg/mod`, `.cache/go-build` |
+
+Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive directories such as `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, `.143`, and parents/children of those sensitive paths.
+
+The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-artifact local paths still readable during rollout.
+
+Preview startup uses cache placement as a scheduling hint, not a correctness primitive. Exact config-derived placement keys prefer workers with known L1 blobs. When the API cannot know the exact config before worker selection, the repo-level fallback is marked approximate and the scheduler prefers recent repo cache holders before rendezvous hashing. The worker still recomputes exact cache keys inside the hydrated workspace before restore.
+
+Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-artifact archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
+
+The preview gateway keeps a short-lived access-session validation cache so asset-heavy preview page loads do not hit Postgres for every JS/CSS/image request. The cache is scoped to the decoded org, public host, and runtime preview ID, and is intentionally short TTL so revocation/expiry changes converge quickly while protecting hot page-load latency.
+
+Prewarming is implemented as a low-priority `preview_cache_prewarm` worker job with branch and session payload sources. The automatic triggers are branch/PR preview target creation or commit update, plus successful snapshot-producing `run_agent` and `continue_session` turns. The runner creates an ephemeral sandbox with purpose `preview_cache_prewarm`, checks out, hydrates, or live-clones the workspace when the session sandbox is still owned by the same worker, reads the selected preview config, skips when install/cache inputs are absent or both cache kinds are already warm in L2, runs only `preview.install.command`, saves package-manager and install-artifact caches synchronously, and then destroys the sandbox. Capacity exhaustion returns `skipped_capacity` and does not retry or dead-letter. Runtime rollout is controlled by `PREVIEW_CACHE_PREWARM_ENABLED=false` by default, `PREVIEW_CACHE_PREWARM_TIMEOUT=15m`, and `PREVIEW_CACHE_PREWARM_PRIORITY=-50`.
 
 ## Goals
 
@@ -55,22 +87,24 @@ The new flow:
    - Caching is enabled by default when `preview.install` has at least one `lockfiles` entry and at least one effective cache path.
    - Effective cache paths are `preview.install.clean_paths`, optional `preview.install.cache.paths`, and conservative paths inferred from known dependency files.
    - `preview.install.cache.enabled: false` disables restore and save.
-4. If caching is enabled:
+4. Compute the preview install marker key and check whether the marker exists.
+5. If caching is enabled and the install marker exists:
    - Compute a dependency cache key from install config, declared lockfiles, sandbox runtime/image, and effective cache paths.
    - Look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The DB metadata is authoritative for effective paths and checksum.
    - If metadata is found, check worker-local L1 by `cache_key` and use it when the checksum matches; otherwise stream the L2 blob from object storage into a bounded worker temp file.
-   - Verify checksum, populate worker-local L1 when configured, upsert the worker's L1 location hint, and restore only the effective cache paths.
+   - Preflight the recorded compressed size, verify checksum, validate tar members against the stored effective paths on the worker, stage downloaded compressed blobs under the worker-local dependency cache staging directory instead of `/tmp`, stream extraction into the sandbox over stdin, populate worker-local L1 when configured, and upsert the worker's L1 location hint.
    - If both L1 and L2 miss, continue to the normal install path.
-5. Run the existing `preview.install` flow:
-   - Compute the existing install marker key.
-   - If the marker and `verify_paths` are present, skip install.
+   - If the install marker is absent and the config declares no `verify_paths`, skip restore entirely and go straight to the normal install path; commands such as `npm ci` clean/reinstall the same paths, so restoring first only adds latency on first-ever cold starts.
+   - If the install marker is absent but the config declares `verify_paths`, attempt the restore anyway: the cache key proves the blob was produced by this exact install command against these exact lockfile contents on this sandbox image, so when every declared verify path exists after restore, the marker is written and install skips with restore status `restored_satisfied_install`. When verify paths are incomplete after restore, the normal install command runs.
+6. Run the existing `preview.install` flow:
+   - If the dependency-cache restore did not fail and the marker and `verify_paths` are present, skip install.
    - Otherwise clean `clean_paths`, run `command`, then write the marker.
-6. If install succeeds and caching is enabled, archive the effective cache paths once, write the archive to worker-local L1 when configured, upload it to shared L2 object storage, upsert the durable L2 metadata row, and upsert the worker's L1 location hint.
-7. Start preview services and readiness as today.
+7. If install succeeds and caching is enabled, archive the effective cache paths once, write the archive to worker-local L1 when configured, upload it to shared L2 object storage, upsert the durable L2 metadata row, and upsert the worker's L1 location hint.
+8. Start preview services and readiness as today.
 
 This means cache restore is an accelerator, not the source of truth. The hydrated session snapshot remains authoritative for source files.
 
-**Restore and marker interaction:** The restore step runs before the install marker check. When the session snapshot already contains the install marker and the restored artifacts satisfy `verify_paths`, the marker check passes and install is skipped entirely — this is the primary fast path. When the marker is absent (e.g. a new session that has never completed install), effective cache paths that overlap with `clean_paths` will be wiped before install runs, making the prior restore wasteful for install commands such as `npm ci` that unconditionally reinstall. A future optimization may check for marker-file existence before deciding to restore and skip the restore when the marker is absent; the initial implementation should restore unconditionally and accept the I/O cost on first-ever cold starts, since the common case is returning to a session that has already run install. Document this trade-off in the service implementation.
+**Restore and marker interaction:** The marker-existence check runs before dependency-cache lookup/restore. When the marker is absent and no `verify_paths` are declared (e.g. a new session for a repo without an install-output contract), restore is skipped with `skipped_marker_missing` and the normal install command runs. When the marker is absent but `verify_paths` are declared, restore runs and — when all verify paths exist afterwards — writes the marker and skips install (`restored_satisfied_install`); this is the cold-start fast path that production data showed was otherwise unreachable, because session snapshots either carry both the marker and the dependency tree or neither. When the session snapshot already contains the install marker, restore may run before full `verify_paths` validation so restored artifacts can satisfy `verify_paths` and skip install entirely. If dependency-cache restore fails for any reason, the marker is treated as untrusted for that launch and the normal `preview.install` command runs. This is conservative: some failures happen before sandbox mutation, but forcing install prevents a partially cleaned or partially extracted dependency tree from being accepted because an old marker still exists.
 
 ### Cache-Key-Aware Scheduling
 
@@ -86,7 +120,7 @@ Use two keys:
 Worker selection order:
 
 1. Existing live session sandbox worker, when the session container is still running.
-2. Healthy workers with a recent local L1 cache location for the same `(org_id, repo_id, placement_key)`, subject to capacity and region constraints.
+2. Healthy workers with a recent local L1 cache location for the same `(org_id, repo_id, placement_key)`, subject to capacity and region constraints. If multiple holders are eligible, choose the least-loaded holder and use hint recency only as a tie-breaker.
 3. The top N workers from rendezvous hashing over `(org_id, repo_id, placement_key)` among healthy workers in the preferred region, subject to capacity. Start with N between 4 and 8 so load can spill while preserving locality.
 4. Least-loaded healthy worker in the preferred region.
 5. Cross-region fallback only when no preferred-region worker can accept the preview.
@@ -197,7 +231,7 @@ Rules:
 - Absolute paths are rejected.
 - `..` traversal is rejected.
 - `.git` and any path below `.git` are rejected.
-- `.143/cache/preview-install` is rejected so restored cache blobs cannot forge the install marker.
+- `.143/cache` and descendants are rejected so restored cache blobs cannot include platform-owned preview state or forge install markers.
 - Empty paths and `.` are rejected because they are too broad.
 - Shell metacharacters should be rejected using the same conservative character policy as `clean_paths`, unless path handling is fully tar-list based and never shell-interpolated.
 
@@ -350,22 +384,27 @@ type DependencyCacheHit struct {
 }
 
 type DependencyCacheMetadata struct {
-    OrgID          uuid.UUID         `json:"org_id"`
-    RepoID         uuid.UUID         `json:"repo_id"`
-    SessionID      uuid.UUID         `json:"session_id"`
-    InstallCommand []string          `json:"install_command"`
-    EffectivePaths []string          `json:"effective_paths"`
-    LockfileHashes map[string]string `json:"lockfile_hashes"`
+    OrgID               uuid.UUID         `json:"org_id"`
+    RepoID              uuid.UUID         `json:"repo_id"`
+    SessionID           uuid.UUID         `json:"session_id"`
+    InstallCommand      []string          `json:"install_command"`
+    EffectivePaths      []string          `json:"effective_paths"`
+    LockfileHashes      map[string]string `json:"lockfile_hashes"`
+    ChecksumSHA256      string            `json:"checksum_sha256"`
+    ArchiveBytes        int64             `json:"archive_bytes,omitempty"`
+    ArchivePayloadBytes int64             `json:"archive_payload_bytes,omitempty"`
+    ArchiveFileCount    int64             `json:"archive_file_count,omitempty"`
 }
 ```
 
-`DependencyCacheMetadata.EffectivePaths` is the authoritative list of paths in the blob. `Restore` reads this field from `hit.Entry.Metadata` rather than accepting a separate `paths` argument. This eliminates the class of bugs where the caller passes a different path list than what was saved, and makes the restore self-contained. `LockfileHashes` is stored for debugging stale-cache incidents without requiring a session config lookup.
+`DependencyCacheMetadata.EffectivePaths` is the authoritative list of paths in the blob. `Restore` reads this field from `hit.Entry.Metadata` rather than accepting a separate `paths` argument. This eliminates the class of bugs where the caller passes a different path list than what was saved, and makes the restore self-contained. `LockfileHashes` is stored for debugging stale-cache incidents without requiring a session config lookup. Archive byte and file-count metadata is for operations/debugging and future cache admission policy; correctness still comes from checksum and member validation.
 
 The concrete implementation should use the same executor shape as `SnapshotCache`:
 
 - `Exec`
 - `ReadFile`
 - `WriteFile`
+- `ExecWithStdin` for restore extraction of large archives without sandbox temp-file staging
 
 ### Cache Key
 
@@ -665,16 +704,16 @@ PreviewDependencyCacheKeepNewestPerRepo int `env:"PREVIEW_DEPENDENCY_CACHE_KEEP_
 When `PREVIEW_DEPENDENCY_CACHE_BUCKET` is empty, dependency caching is disabled regardless of per-repo config. This is the safe default for environments that have not provisioned the bucket.
 When `PREVIEW_DEPENDENCY_CACHE_BUCKET` is set, dependency caching is enabled by default; the former `PREVIEW_DEPENDENCY_CACHE_ENABLED` flag is obsolete and should not be required for new deployments.
 
-### Worker-local download cache (optional L1)
+### Worker-local download cache (default L1)
 
 After streaming a blob from object storage, the worker may cache it on local disk so that repeated cold starts for the same repo on the same worker do not re-download the blob. This is a pure latency optimization and is not required for correctness or global cache availability.
 
 ```go
-PreviewDependencyCacheLocalDir      string `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR" envDefault:""`
+PreviewDependencyCacheLocalDir      string `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR" envDefault:"/var/cache/143/preview-dependency-cache"`
 PreviewDependencyCacheLocalMaxBytes int64  `env:"PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES" envDefault:"10737418240"`
 ```
 
-When `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR` is empty, every restore streams directly from object storage. The local cache is not required and should not be required in tests.
+When `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR` is left at its default, workers keep a bounded local L1 download cache at `/var/cache/143/preview-dependency-cache` and use a `.staging` directory beneath it for remote dependency-cache downloads and save archives. Production worker compose bind-mounts that host path into the worker container, and worker provisioning/cloud-init creates it as `1000:1000` with mode `0750`, so L1 blobs survive worker container recreation. This keeps large compressed blobs off small system tmpfs mounts and keeps DB cache-location hints useful across routine deploys. Operators may still set the env var to an explicit worker-local disk path if they also provide a matching compose bind mount. To disable local L1 while keeping shared L2 cache enabled, set `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR=off` (also accepts `none` or `disabled`); in that mode every restore streams through a process temp staging directory and no local location hints are written.
 
 When local L1 is configured, successful restores and saves upsert `preview_dependency_cache_locations` with the worker's stable node ID. Local L1 eviction removes the oldest blobs when the worker-local byte budget is exceeded and best-effort deletes the matching location rows. Stale location rows are acceptable because they only affect scheduling preference; the worker still verifies local file existence before restore and falls back to object storage.
 
@@ -700,14 +739,16 @@ Restore should:
 
 1. Look up the DB record for `(org_id, repo_id, cache_key)`.
 2. Use the DB metadata as the source of truth for effective paths and checksum. If local L1 is configured and has the blob for this `cache_key`, stage that local blob first; otherwise stream the blob from object storage to a bounded worker temp file.
-3. Verify checksum against stored hash.
-4. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
-5. Extract the tarball into the repo root, validating that no entry escapes via absolute paths or `..` traversal.
-6. Touch the DB `last_used_at` entry.
+3. Reject blobs whose recorded compressed size exceeds the restore cap before object-store download.
+4. Verify checksum against stored hash.
+5. Validate the gzip tar on the worker before sandbox mutation. Every member must be relative, must not traverse with `..`, must not target preview install markers, and must be contained by one of the stored effective paths.
+6. Remove only the effective cache paths listed in `hit.Entry.Metadata.EffectivePaths` from the sandbox.
+7. Stream the tarball into `tar xzf - -C <workdir>` so restore does not create an extra compressed archive under sandbox `/tmp`.
+8. Touch the DB `last_used_at` entry.
 
-On checksum mismatch or object-not-found, delete the DB record and fall through to a cold install.
+On checksum mismatch or object-not-found, delete the DB record and fall through to a cold install. Other restore failures do not delete durable metadata unless they prove the blob is corrupt, but they still force the normal install path for that launch.
 
-Do not extract absolute paths or parent traversal entries. Validate tar entries during extraction, not just at archive creation time. Effective paths come from the blob's stored metadata, not from the caller, so there is no risk of a path-list mismatch between save and restore.
+Do not extract absolute paths or parent traversal entries. Validate tar entries during save and again during restore. Effective paths come from the blob's stored metadata, not from the caller, so there is no risk of a path-list mismatch between save and restore.
 
 ### Eviction
 
@@ -716,7 +757,7 @@ Object storage lifecycle rules (e.g. S3 Object Lifecycle Policies) should expire
 ## Security and Secret Handling
 
 1. Runtime secret files are written after `preview.install` today. Keep that order so dependency cache save cannot include runtime secret files.
-2. Reject `.143/cache/preview-install` in all effective cache paths so cache restore cannot forge install success markers.
+2. Reject `.143/cache` and descendants in all dependency-cache paths so cache restore cannot persist platform-owned preview state or forge install success markers. Broad `clean_paths` may still be used for fresh installs, but unsafe paths are excluded from dependency artifact caching.
 3. Reject `.git` to avoid credential remnants and repository metadata corruption.
 4. Cache blobs are stored in shared object storage. Access must be restricted to the service's IAM role or equivalent; the bucket must not be public. If a worker-local L1 cache is used, those files should be `0600` and the directory `0750`.
 5. Cache metadata must not include secret values, env dumps, install output, or file contents.
@@ -731,7 +772,7 @@ Add OpenTelemetry metrics:
 - `preview.session.dependency_cache.restores` counter with `result=disabled|restored|miss|restore_failed`
 - `preview.session.dependency_cache.saves` counter with `result=saved|skipped|save_failed`
 - `preview.session.dependency_cache.scheduler_decisions` counter with `decision=live_session|local_cache_holder|rendezvous|least_loaded|cross_region|fallback_error`
-- `preview.session.phase_duration` histogram with `phase=hydrate|config|dependency_cache_restore|install_build|start_services|readiness`
+- `preview.session.phase_duration` histogram with `phase=hydrate|config|install_marker_check|dependency_cache_key|dependency_cache_lookup|dependency_cache_restore|install_build|install_command|start_services|readiness`
 
 **Metrics cardinality:** Do not use `repo_id` as a metric dimension. In a multi-tenant system with many repos, per-repo cardinality will exceed most metric backend limits. Use `org_id` as the finest-grained dimension for counters and histograms, and rely on preview logs (which include `repo_id` as a structured field) for per-repo debugging. Existing branch preview phase metrics should remain branch-specific and follow the same cardinality constraint.
 
@@ -823,11 +864,11 @@ Verification:
 8. Add `DependencyCache` implementation backed by shared S3-compatible object storage. Restore finds durable DB metadata first, then checks optional worker-local L1 before streaming from S3 to a bounded worker temp file on L1 miss, derives effective paths from `DependencyCacheMetadata.EffectivePaths`, and upserts local L1 location rows after successful L1 population. Save uploads to S3, writes checksum sidecars, upserts the DB record, and registers local L1 location when configured. Background cleanup deletes expired DB metadata, objects, and stale location hints; worker-local L1 eviction enforces the local byte budget.
 9. Add exact cache key computation using version string `preview-dependency-cache-v1`.
 10. Add placement key computation and scheduler tests.
-11. Update worker selection to prefer live session worker, matching local-cache holders, rendezvous candidates for placement key, least-loaded same-region fallback, then cross-region fallback.
+11. Update worker selection to prefer live session worker, matching local-cache holders, rendezvous candidates for placement key, least-loaded same-region fallback, then cross-region fallback. Cache-holder selection remains load-aware: among matching holders, pick the least-loaded worker before falling back to hint recency.
 12. Add cache metrics using `org_id` dimension only (not `repo_id`); align result labels with observer statuses and add scheduler-decision metrics.
 13. Change `PreviewCapableProvider.StartPreview` to accept `StartPreviewOptions`; update all provider implementations and tests.
 14. Thread org/repo/session metadata through `Manager.LaunchPreview` into provider options.
-15. Wire dependency cache into worker/server startup config with `PREVIEW_DEPENDENCY_CACHE_BUCKET` defaulting to empty (disabled) and optional `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR`/`PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES` for the worker-local L1 cache. When the bucket is present, the cache starts automatically.
+15. Wire dependency cache into worker/server startup config with `PREVIEW_DEPENDENCY_CACHE_BUCKET` defaulting to empty (disabled), a host-backed default `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR=/var/cache/143/preview-dependency-cache`, and `PREVIEW_DEPENDENCY_CACHE_LOCAL_MAX_BYTES` for the worker-local L1 cache. When the bucket is present, the cache starts automatically; set `PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR=off` to disable only the L1 layer.
 16. Integrate restore/save around `runPreviewInstall`; add a comment documenting the restore-then-clean trade-off for marker-absent cold starts.
 17. Extend observer/logging for cache events; implement clarified status semantics (no `hit` terminal status; `restored` and `save_failed`/`saved`/`skipped` only).
 18. Add provider tests for cache hit/miss/failure/concurrent-save paths.

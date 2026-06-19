@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +17,8 @@ import (
 )
 
 const PreviewDependencyCacheRuntimeVersion = "preview-dependency-cache-v1"
+const PreviewPackageManagerCacheRuntimeVersion = "preview-package-manager-cache-v1"
+const PreviewBuildCacheRuntimeVersion = "preview-build-cache-v1"
 
 type PreviewInstallLockfileKey struct {
 	Path   string `json:"path"`
@@ -26,10 +29,12 @@ type previewDependencyCacheKey struct {
 	RuntimeVersion  string                      `json:"runtime_version"`
 	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
 	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	Kind            models.PreviewCacheKind     `json:"kind,omitempty"`
 	InstallCommand  []string                    `json:"install_command"`
 	InstallCwd      string                      `json:"install_cwd"`
 	Lockfiles       []PreviewInstallLockfileKey `json:"lockfiles"`
 	EffectivePaths  []string                    `json:"effective_paths"`
+	PackageManagers []string                    `json:"package_managers,omitempty"`
 }
 
 type previewDependencyCachePlacementKey struct {
@@ -49,6 +54,14 @@ type dependencyCacheKeyReader interface {
 }
 
 func ComputePreviewDependencyCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, effectivePaths []string) (string, []PreviewInstallLockfileKey, error) {
+	return computePreviewPathCacheKey(ctx, executor, sb, install, PreviewDependencyCacheRuntimeVersion, models.PreviewCacheKindInstallArtifact, effectivePaths, nil)
+}
+
+func ComputePreviewPackageManagerCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, homeRelativePaths []string, packageManagers []string) (string, []PreviewInstallLockfileKey, error) {
+	return computePreviewPathCacheKey(ctx, executor, sb, install, PreviewPackageManagerCacheRuntimeVersion, models.PreviewCacheKindPackageManager, homeRelativePaths, packageManagers)
+}
+
+func computePreviewPathCacheKey(ctx context.Context, executor dependencyCacheKeyReader, sb *agent.Sandbox, install *models.PreviewInstallConfig, runtimeVersion string, kind models.PreviewCacheKind, effectivePaths []string, packageManagers []string) (string, []PreviewInstallLockfileKey, error) {
 	if executor == nil {
 		return "", nil, fmt.Errorf("dependency cache key: executor is required")
 	}
@@ -79,11 +92,13 @@ func ComputePreviewDependencyCacheKey(ctx context.Context, executor dependencyCa
 		}
 	}
 	payload := previewDependencyCacheKey{
-		RuntimeVersion: PreviewDependencyCacheRuntimeVersion,
-		InstallCommand: append([]string(nil), install.Command...),
-		InstallCwd:     cwd,
-		Lockfiles:      lockfiles,
-		EffectivePaths: sortedNormalizedDependencyPaths(effectivePaths),
+		RuntimeVersion:  runtimeVersion,
+		Kind:            kind,
+		InstallCommand:  append([]string(nil), install.Command...),
+		InstallCwd:      cwd,
+		Lockfiles:       lockfiles,
+		EffectivePaths:  sortedNormalizedDependencyPaths(effectivePaths),
+		PackageManagers: sortedNormalizedDependencyPaths(packageManagers),
 	}
 	if sb != nil {
 		payload.SandboxProvider = sb.Provider
@@ -118,6 +133,37 @@ func ComputePreviewDependencyCachePlacementKey(orgID, repoID uuid.UUID, configNa
 	key, err := stableJSONSHA256(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal dependency cache placement key: %w", err)
+	}
+	return key, nil
+}
+
+// ComputePreviewBuildCacheKey returns the latest-wins key for the
+// build-artifact cache. Unlike install-artifact keys it deliberately excludes
+// lockfile contents and sandbox identity: build tools (e.g. turbo) content-hash
+// their own cache entries, so a single blob per (org, repo, config, install,
+// paths) slot that is overwritten after every ready preview maximizes hit rate,
+// and a stale blob degrades to partial build-tool hits rather than wrong
+// output.
+func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {
+	payload := previewDependencyCachePlacementKey{
+		RuntimeVersion: PreviewBuildCacheRuntimeVersion,
+		OrgID:          orgID,
+		RepoID:         repoID,
+		ConfigName:     strings.TrimSpace(configName),
+		ConfigDigest:   strings.TrimSpace(configDigest),
+		EffectivePaths: sortedNormalizedDependencyPaths(effectivePaths),
+	}
+	if install != nil {
+		payload.InstallCommand = append([]string(nil), install.Command...)
+		payload.InstallCwd = install.Cwd
+		if payload.InstallCwd == "" {
+			payload.InstallCwd = "."
+		}
+		payload.LockfilePaths = sortedNormalizedDependencyPaths(install.Lockfiles)
+	}
+	key, err := stableJSONSHA256(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal build cache key: %w", err)
 	}
 	return key, nil
 }
@@ -190,8 +236,76 @@ func cleanDependencyCacheRepoPath(raw string, allowGlob bool) (string, error) {
 	if clean == ".git" || strings.HasPrefix(clean, ".git/") {
 		return "", fmt.Errorf("path must not target .git")
 	}
-	if clean == ".143/cache/preview-install" || strings.HasPrefix(clean, ".143/cache/preview-install/") {
+	if dependencyCachePathTargetsPreviewInstallMarkers(clean) {
 		return "", fmt.Errorf("path must not target preview install markers")
 	}
+	if dependencyCachePathTargetsPlatformCache(clean) {
+		return "", fmt.Errorf("path must not target platform preview cache")
+	}
 	return clean, nil
+}
+
+func dependencyCachePathTargetsPreviewInstallMarkers(clean string) bool {
+	const marker = ".143/cache/preview-install"
+	clean = filepath.ToSlash(filepath.Clean(strings.TrimSpace(clean)))
+	if clean == "" || clean == "." {
+		return false
+	}
+	if clean == marker || strings.HasPrefix(clean, marker+"/") {
+		return true
+	}
+	if !strings.Contains(clean, "*") {
+		return strings.HasPrefix(marker, clean+"/")
+	}
+	return dependencyCacheGlobTargetsPathOrDescendant(clean, marker)
+}
+
+func dependencyCachePathTargetsPlatformCache(clean string) bool {
+	const platformCache = ".143/cache"
+	clean = filepath.ToSlash(filepath.Clean(strings.TrimSpace(clean)))
+	if clean == "" || clean == "." {
+		return false
+	}
+	if clean == platformCache || strings.HasPrefix(clean, platformCache+"/") {
+		return true
+	}
+	if !strings.Contains(clean, "*") {
+		return strings.HasPrefix(platformCache, clean+"/")
+	}
+	return dependencyCacheGlobTargetsPathOrDescendant(clean, platformCache)
+}
+
+func dependencyCacheGlobTargetsPathOrDescendant(pattern, target string) bool {
+	patternParts := strings.Split(pattern, "/")
+	targetParts := strings.Split(target, "/")
+	if len(patternParts) <= len(targetParts) {
+		for i, patternPart := range patternParts {
+			ok, err := path.Match(patternPart, targetParts[i])
+			if err != nil || !ok {
+				return false
+			}
+		}
+		return true
+	}
+	for i, targetPart := range targetParts {
+		ok, err := path.Match(patternParts[i], targetPart)
+		if err != nil || !ok {
+			return false
+		}
+	}
+	for _, patternPart := range patternParts[len(targetParts):] {
+		if !dependencyCacheGlobSegmentCanMatchNonEmpty(patternPart) {
+			return false
+		}
+	}
+	return true
+}
+
+func dependencyCacheGlobSegmentCanMatchNonEmpty(pattern string) bool {
+	candidate := strings.ReplaceAll(pattern, "*", "x")
+	if candidate == "" {
+		candidate = "x"
+	}
+	ok, err := path.Match(pattern, candidate)
+	return err == nil && ok
 }

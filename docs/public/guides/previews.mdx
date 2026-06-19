@@ -16,6 +16,22 @@ A preview turns a session from "read the diff" into "try the changed app." It is
 
 Previews are configured in `.143/config.json` under the top-level `preview` key. Commit that file to the repository so sessions, branch previews, and API-triggered previews all read the same contract.
 
+## How previews run
+
+143 starts your app inside the session sandbox, then exposes the primary service on an isolated preview URL. Services share the sandbox filesystem and can call each other on `localhost`; browser traffic only reaches the configured primary service.
+
+On startup, 143:
+
+<Steps>
+  <Step>Reads the selected preview config.</Step>
+  <Step>Starts managed infrastructure when the config declares it.</Step>
+  <Step>Restores safe caches and runs `preview.install` when needed.</Step>
+  <Step>Starts preview services.</Step>
+  <Step>Waits for readiness before showing the preview as openable.</Step>
+</Steps>
+
+Session previews always use the session workspace as the source of truth. Caches can restore dependencies and build tool artifacts, but they never replace the agent's current source files.
+
 ## Set up the config
 
 Start with the smallest shape that can boot your app:
@@ -83,6 +99,18 @@ Use services when the app needs a frontend and backend:
 
 Services share the same sandbox filesystem and `localhost` network namespace, so the frontend can call the backend at `http://localhost:8080`.
 
+## Keep previews current
+
+When an agent changes code, a running dev server usually applies the update through its normal hot-reload path. 143 records that live update so the preview can stay current without a full restart.
+
+Some changes need a restart because the process, dependency tree, or runtime contract changed. 143 marks the preview as needing refresh when changes touch files such as:
+
+- dependency manifests or lockfiles
+- `.143/config.json` or `.143/preview-start.sh`
+- build config, environment config, or database migrations
+
+Refreshing a preview restarts the preview runtime with the latest workspace. Dependency, package-manager, and build caches are reused when their keys still match, so refreshes do not have to reinstall or rebuild everything from scratch.
+
 ## Multiple preview configs
 
 If a repository has more than one previewable app, use named configs:
@@ -119,7 +147,7 @@ The Previews page can auto-select the default config or let you choose a named c
 
 ## Add dependencies
 
-Use `preview.install` when preview services need dependencies installed before they boot. This keeps package-manager work out of long service commands and lets 143 cache successful installs.
+Use `preview.install` when services need dependencies before they boot. Keep source-dependent builds out of `install`; put them in the service command so they run against the latest code.
 
 ```json
 {
@@ -141,9 +169,21 @@ Use `preview.install` when preview services need dependencies installed before t
 }
 ```
 
-143 reruns the install when the config or declared lockfiles change, or when a declared verify path is missing.
+143 reruns `install.command` when declared lockfiles or config change, or when a declared `verify_paths` entry is missing. With `verify_paths`, a fresh workspace can skip install after restoring a matching dependency cache.
 
-Dependency artifact caching is enabled by default for session previews when `preview.install.lockfiles` and effective cache paths exist. Effective paths are:
+For cache tuning, see [Optimize preview startup](#optimize-preview-startup).
+
+## Optimize preview startup
+
+Use this section when previews boot correctly but cold starts are too slow.
+
+### Reuse dependency artifacts
+
+Declaring `verify_paths` lets fresh workspaces skip install entirely. When a cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and skips `install.command` once every verify path exists. Without `verify_paths`, fresh workspaces run `install.command`.
+
+Because the dependency cache key does not include the commit SHA, `install.command` must produce output that depends only on the install config and lockfiles. Do dependency installation here, not application builds. Source-dependent builds belong in the service `command`, where they run on every preview start.
+
+Effective dependency cache paths are:
 
 ```text
 clean_paths + cache.paths + inferred paths from known dependency files
@@ -157,7 +197,7 @@ clean_paths + cache.paths + inferred paths from known dependency files
 
 Inference is relative to the lockfile directory: `package-lock.json` infers `node_modules`, `services/api/poetry.lock` infers `services/api/.venv`, and `go.mod` infers `vendor`.
 
-For Python projects, no `cache` object is needed when a listed lockfile has a conventional local virtualenv:
+For Python projects, no `cache` object is needed when a listed lockfile uses a conventional local virtualenv:
 
 ```json
 {
@@ -185,7 +225,9 @@ For Go projects that use vendoring, `go.mod` infers `vendor`:
 }
 ```
 
-Add framework or package-manager caches with `cache.paths`:
+### Add framework and package-manager caches
+
+Add framework artifact caches with WorkDir-relative `cache.paths`, and add extra package-manager global caches with HomeDir-relative `cache.package_manager.paths`.
 
 ```json
 {
@@ -194,7 +236,13 @@ Add framework or package-manager caches with `cache.paths`:
       "command": ["npm", "ci"],
       "lockfiles": ["package-lock.json"],
       "clean_paths": ["node_modules"],
-      "cache": { "paths": [".next/cache", ".turbo/cache"] }
+      "cache": {
+        "paths": [".next/cache", ".turbo/cache"],
+        "package_manager": {
+          "paths": [".cache/custom-package-manager"]
+        },
+        "prewarm": { "enabled": true }
+      }
     }
   }
 }
@@ -215,9 +263,11 @@ Opt out when dependency artifacts are not safe to reuse:
 }
 ```
 
-Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. `requirements.txt` can be unsafe if dependencies are not pinned; use a lockfile or opt out. Mutable image tags such as `latest` can also leave stale dependency artifacts, so prefer immutable digests or versioned tags.
+Do not cache source directories, secret files, `.git`, or `.143/cache/preview-install`. If dependencies look stale, change the lockfile so the key changes or temporarily set `cache.enabled: false`.
 
-If dependencies look stale, change the lockfile so the cache key changes, clear the preview cache when an admin cache API is available, or temporarily set `cache.enabled: false`.
+Package-manager paths are relative to the sandbox home directory. Broad or sensitive paths such as `.`, `.ssh`, `.gnupg`, `.codex`, `.claude`, `.config/gh`, and `.143` are rejected.
+
+`requirements.txt` can be unsafe if dependencies are not pinned; use a lockfile or opt out. Mutable image tags such as `latest` can also leave stale dependency artifacts, so prefer immutable digests or versioned tags.
 
 ## Add local infrastructure
 
@@ -334,13 +384,13 @@ Scope env secrets to the smallest service list with `services` or legacy `inject
 Any preview with `preview.secrets`, `preview.credentials.mode` other than `none`, or `preview.network.destinations` is treated as connected. Connected previews pin launch behavior to the base branch so a session diff cannot change commands, ports, env handling, secret bundle names, or generated secret file paths while secrets are in scope.
 </Callout>
 
-## How readiness works
+## Readiness
 
 143 starts declared services and waits for their readiness probes. A preview becomes available only after the primary service is reachable.
 
 <Steps>
   <Step>143 reads `.143/config.json` from the repo.</Step>
-  <Step>It starts infrastructure and services in dependency order.</Step>
+  <Step>It starts infrastructure, install steps, and services in dependency order.</Step>
   <Step>Each service must pass its readiness probe.</Step>
   <Step>The session page exposes the preview on an isolated preview origin.</Step>
 </Steps>

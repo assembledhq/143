@@ -46,6 +46,17 @@ func requestWithChiURLParam(req *http.Request, key, value string) *http.Request 
 // ListPendingInvitations rejects unauthenticated requests with 401 — anyone
 // reading this endpoint must have a session, since the response is filtered
 // to the caller's email/github_login.
+// expectInvitationEmailVerified satisfies the attestation lookup the in-app
+// invitation surfaces perform before matching by email (the anti-spoofing
+// gate added with verified domains). A verified timestamp restores the
+// pre-gate matching behavior for these fixtures.
+func expectInvitationEmailVerified(mock pgxmock.PgxPoolIface) {
+	verifiedAt := time.Now()
+	mock.ExpectQuery("SELECT email_verified_at FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"email_verified_at"}).AddRow(&verifiedAt))
+}
+
 func TestAuthHandler_ListPendingInvitations_Unauthenticated(t *testing.T) {
 	t.Parallel()
 
@@ -66,6 +77,7 @@ func TestAuthHandler_ListPendingInvitations_Empty(t *testing.T) {
 	require.NoError(t, err)
 	defer mock.Close()
 
+	expectInvitationEmailVerified(mock)
 	mock.ExpectQuery("FROM invitations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(pendingForUserRowColumns))
@@ -97,6 +109,7 @@ func TestAuthHandler_ListPendingInvitations_Success(t *testing.T) {
 	inviterID := uuid.New()
 	invID := uuid.New()
 
+	expectInvitationEmailVerified(mock)
 	mock.ExpectQuery("FROM invitations").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -172,6 +185,7 @@ func TestAuthHandler_AcceptInvitationByID_Success(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 		WithArgs(pgxmock.AnyArg()).
@@ -224,6 +238,7 @@ func TestAuthHandler_AcceptInvitationByID_Mismatch_Returns403(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("someone-else@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	user := &models.User{ID: uuid.New(), Email: "wrong@example.com"}
@@ -256,6 +271,7 @@ func TestAuthHandler_AcceptInvitationByID_Expired_Returns410(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
 		)
+	expectInvitationEmailVerified(mock)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	user := &models.User{ID: uuid.New(), Email: "u@example.com"}
@@ -289,6 +305,7 @@ func TestAuthHandler_AcceptInvitationByID_AcceptRace_Returns410(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 		WithArgs(pgxmock.AnyArg()).
@@ -339,6 +356,7 @@ func TestAuthHandler_AcceptInvitationByID_DoesNotUpdateLastOrgID(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
 		WithArgs(pgxmock.AnyArg()).
@@ -380,6 +398,7 @@ func TestAuthHandler_DeclineInvitationByID_Success(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 	mock.ExpectExec("UPDATE invitations SET status = 'revoked'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -425,6 +444,7 @@ func TestAuthHandler_DeclineInvitationByID_Mismatch_Returns403(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("someone-else@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	user := &models.User{ID: uuid.New(), Email: "wrong@example.com"}
@@ -456,6 +476,7 @@ func TestAuthHandler_DeclineInvitationByID_AlreadyResolved_Returns410(t *testing
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
 		)
+	expectInvitationEmailVerified(mock)
 	mock.ExpectExec("UPDATE invitations SET status = 'revoked'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -494,6 +515,7 @@ func TestAuthHandler_DeclineInvitationByID_Expired_AllowsDismissal(t *testing.T)
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, invOrgID, strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
 		)
+	expectInvitationEmailVerified(mock)
 	mock.ExpectExec("UPDATE invitations SET status = 'revoked'").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -540,6 +562,7 @@ func TestAuthHandler_AcceptInvitationByID_Expired_Still410(t *testing.T) {
 			pgxmock.NewRows(invitationRowColumns).
 				AddRow(invID, uuid.New(), strPtr("u@example.com"), nil, models.InvitationAcceptanceMethodEither, "member", uuid.New(), "tok", "pending", now.Add(-time.Hour), now.Add(-2*time.Hour), nil),
 		)
+	expectInvitationEmailVerified(mock)
 
 	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
 	user := &models.User{ID: uuid.New(), Email: "u@example.com"}
@@ -576,5 +599,91 @@ func TestAuthHandler_AcceptInvitationByID_NotFound(t *testing.T) {
 	handler.AcceptInvitationByID(w, req)
 	require.Equal(t, http.StatusNotFound, w.Code)
 	require.Contains(t, w.Body.String(), "INVITE_NOT_FOUND")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The anti-spoofing gate: a password account that never proved ownership of
+// its email must not be able to accept an invitation addressed to that
+// email — otherwise registering victim@corp.com (no verification required)
+// would grant the victim's pending invitations, at whatever role they
+// carry. The unverified email is treated as no identifier at all, so the
+// recipient match fails closed as a 403.
+func TestAuthHandler_AcceptInvitationByID_UnverifiedEmailRejected(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	invID := uuid.New()
+
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(invitationRowColumns).
+				AddRow(invID, uuid.New(), strPtr("victim@corp.example"), nil, models.InvitationAcceptanceMethodEither, "admin", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+		)
+	// email_verified_at is NULL → the email arm of the match is disabled.
+	// No transaction may begin.
+	mock.ExpectQuery("SELECT email_verified_at FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"email_verified_at"}).AddRow(nil))
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	user := &models.User{ID: uuid.New(), Email: "victim@corp.example"}
+
+	req := requestWithChiURLParam(httptest.NewRequest(http.MethodPost, "/api/v1/invitations/x/accept", nil), "id", invID.String())
+	req = req.WithContext(middleware.WithUser(req.Context(), user))
+	w := httptest.NewRecorder()
+
+	handler.AcceptInvitationByID(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, "an unverified email must not satisfy the recipient match")
+	require.Contains(t, w.Body.String(), "INVITE_MISMATCH")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// The GitHub identity arm stays trusted for unverified emails: the session's
+// github_login came from OAuth, not user input, so a github-addressed
+// invitation is still acceptable in-app even when the account's email has
+// no attestation.
+func TestAuthHandler_AcceptInvitationByID_GitHubMatchWorksWithoutVerifiedEmail(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	now := time.Now()
+	invID := uuid.New()
+	ghLogin := "alicehub"
+
+	mock.ExpectQuery("SELECT .+ FROM invitations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(invitationRowColumns).
+				AddRow(invID, uuid.New(), nil, &ghLogin, models.InvitationAcceptanceMethodGitHub, "member", uuid.New(), "tok", "pending", now.Add(time.Hour), now, nil),
+		)
+	mock.ExpectQuery("SELECT email_verified_at FROM users").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"email_verified_at"}).AddRow(nil))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE invitations SET status = 'accepted'").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO organization_memberships").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("member"))
+	mock.ExpectCommit()
+
+	handler := NewAuthHandler(&config.Config{}, mock, db.NewUserStore(mock), nil, db.NewInvitationStore(mock), db.NewOrganizationMembershipStore(mock))
+	user := &models.User{ID: uuid.New(), Email: "unverified@elsewhere.example", GitHubLogin: &ghLogin}
+
+	req := requestWithChiURLParam(httptest.NewRequest(http.MethodPost, "/api/v1/invitations/x/accept", nil), "id", invID.String())
+	req = req.WithContext(middleware.WithUser(req.Context(), user))
+	w := httptest.NewRecorder()
+
+	handler.AcceptInvitationByID(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "OAuth-derived github identity should still satisfy the match")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

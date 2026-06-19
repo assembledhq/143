@@ -34,7 +34,7 @@ const (
 	DefaultMaxPreviewsPerOrg    = 5
 	DefaultMaxPreviewsPerWorker = 3
 
-	DefaultIdleTimeout = 15 * time.Minute
+	DefaultIdleTimeout = 30 * time.Minute
 	DefaultHardTTL     = 30 * time.Minute
 	DefaultMaxTTL      = 2 * time.Hour
 	MinLifetimeTTL     = 1 * time.Minute
@@ -110,6 +110,8 @@ type Manager struct {
 	maxPerUser   int
 	maxPerOrg    int
 	maxPerWorker int
+
+	previewIdleTimeout time.Duration
 }
 
 type OrgSettingsStore interface {
@@ -140,6 +142,10 @@ type ManagerConfig struct {
 	MaxPerUser   int
 	MaxPerOrg    int
 	MaxPerWorker int
+
+	// PreviewIdleTimeout is the sliding retention window applied when a live
+	// preview receives real gateway traffic. Zero falls back to DefaultIdleTimeout.
+	PreviewIdleTimeout time.Duration
 
 	// PreviewOriginTemplate is the URL template used to compute the public
 	// origin each preview is served from, with "{id}" replaced by the preview
@@ -175,6 +181,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		maxPerUser:             cfg.MaxPerUser,
 		maxPerOrg:              cfg.MaxPerOrg,
 		maxPerWorker:           cfg.MaxPerWorker,
+		previewIdleTimeout:     cfg.PreviewIdleTimeout,
 	}
 	if m.maxPerUser <= 0 {
 		m.maxPerUser = DefaultMaxPreviewsPerUser
@@ -184,6 +191,9 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if m.maxPerWorker <= 0 {
 		m.maxPerWorker = DefaultMaxPreviewsPerWorker
+	}
+	if m.previewIdleTimeout <= 0 {
+		m.previewIdleTimeout = DefaultIdleTimeout
 	}
 	return m
 }
@@ -282,7 +292,11 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 	if input.PreviewTargetID == uuid.Nil {
 		return nil, fmt.Errorf("preview target id is required")
 	}
-	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+	resourcePolicy, err := m.resourcePolicy(ctx, input.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateConfigWithResourcePolicy(input.Config, resourcePolicy); len(errs) > 0 {
 		return nil, fmt.Errorf("invalid preview config: %s", strings.Join(errs, "; "))
 	}
 	existing, err := store.GetActivePreviewForTarget(ctx, input.OrgID, input.PreviewTargetID)
@@ -295,7 +309,7 @@ func (m *Manager) reserveBranchPreview(ctx context.Context, store *db.PreviewSto
 		return nil, err
 	}
 
-	limits := ResolveResourceLimits(input.Config)
+	limits := ResolveResourceLimitsWithPolicy(input.Config, resourcePolicy)
 	configDigest := computeConfigDigest(input.Config)
 	profileName := input.ProfileName
 	if profileName == "" {
@@ -365,7 +379,11 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 	if store == nil {
 		return nil, fmt.Errorf("preview store is not configured")
 	}
-	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+	resourcePolicy, err := m.resourcePolicy(ctx, input.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateConfigWithResourcePolicy(input.Config, resourcePolicy); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
@@ -383,7 +401,7 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		return nil, err
 	}
 
-	limits := ResolveResourceLimits(input.Config)
+	limits := ResolveResourceLimitsWithPolicy(input.Config, resourcePolicy)
 	configDigest := computeConfigDigest(input.Config)
 	profileName := input.ProfileName
 	if profileName == "" {
@@ -414,6 +432,9 @@ func (m *Manager) reservePreview(ctx context.Context, store *db.PreviewStore, in
 		updatedAt := input.WorkspaceRevisionUpdatedAt
 		instance.SourceWorkspaceRevision = &revision
 		instance.SourceWorkspaceRevisionUpdatedAt = &updatedAt
+		instance.RuntimeWorkspaceRevision = &revision
+		instance.RuntimeWorkspaceRevisionUpdatedAt = &updatedAt
+		instance.RuntimeWorkspaceRevisionSource = models.PreviewRuntimeRevisionSourceLaunch
 	}
 	// Only store recycle bytes if we already have a sandbox at reservation
 	// time. The handler flow reserves before hydrate, so Sandbox is typically
@@ -541,7 +562,11 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if input.Sandbox == nil {
 		return nil, fmt.Errorf("sandbox must not be nil")
 	}
-	if errs := ValidateConfig(input.Config); len(errs) > 0 {
+	resourcePolicy, err := m.resourcePolicy(ctx, input.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	if errs := ValidateConfigWithResourcePolicy(input.Config, resourcePolicy); len(errs) > 0 {
 		return nil, fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 	}
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
@@ -554,7 +579,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	newDigest := computeConfigDigest(input.Config)
 	needsUpdate := newDigest != instance.ConfigDigest || len(instance.RecycleSandbox) == 0
 	if needsUpdate {
-		limits := ResolveResourceLimits(input.Config)
+		limits := ResolveResourceLimitsWithPolicy(input.Config, resourcePolicy)
 		scratch := &models.PreviewInstance{}
 		if err := storeRecycleInput(scratch, input); err != nil {
 			return nil, fmt.Errorf("marshal recycle input: %w", err)
@@ -832,32 +857,37 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // even if the request context has already been canceled.
 func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo string) *managerServiceObserver {
 	observer := &managerServiceObserver{
-		manager:     m,
-		orgID:       orgID,
-		previewID:   previewID,
-		source:      strings.TrimSpace(metricsSource),
-		repository:  strings.TrimSpace(metricsRepo),
-		phaseStarts: make(map[string]time.Time),
-		outputCh:    make(chan previewServiceOutput, serviceOutputBufferSize),
-		outputDone:  make(chan struct{}),
+		manager:       m,
+		orgID:         orgID,
+		previewID:     previewID,
+		source:        strings.TrimSpace(metricsSource),
+		repository:    strings.TrimSpace(metricsRepo),
+		phaseStarts:   make(map[string]time.Time),
+		outputCh:      make(chan previewServiceOutput, serviceOutputBufferSize),
+		outputDone:    make(chan struct{}),
+		lifecycleCh:   make(chan previewLifecycleLog, lifecycleLogBufferSize),
+		lifecycleDone: make(chan struct{}),
 	}
 	go observer.runServiceOutputWriter()
+	go observer.runLifecycleLogWriter()
 	return observer
 }
 
 type managerServiceObserver struct {
-	manager      *Manager
-	orgID        uuid.UUID
-	previewID    uuid.UUID
-	source       string
-	repository   string
-	phaseMu      sync.Mutex
-	phaseStarts  map[string]time.Time
-	outputCh     chan previewServiceOutput
-	outputDone   chan struct{}
-	outputMu     sync.Mutex
-	outputClosed bool
-	closeOnce    sync.Once
+	manager       *Manager
+	orgID         uuid.UUID
+	previewID     uuid.UUID
+	source        string
+	repository    string
+	phaseMu       sync.Mutex
+	phaseStarts   map[string]time.Time
+	outputCh      chan previewServiceOutput
+	outputDone    chan struct{}
+	lifecycleCh   chan previewLifecycleLog
+	lifecycleDone chan struct{}
+	outputMu      sync.Mutex
+	outputClosed  bool
+	closeOnce     sync.Once
 }
 
 const observerWriteTimeout = 5 * time.Second
@@ -865,10 +895,19 @@ const maxPersistedServiceOutputRunes = 4000
 const serviceOutputBufferSize = 512
 const serviceOutputFlushInterval = 250 * time.Millisecond
 const serviceOutputBatchLines = 50
+const lifecycleLogBufferSize = 256
 
 type previewServiceOutput struct {
 	name string
 	line string
+	step models.PreviewLogStep
+}
+
+type previewLifecycleLog struct {
+	level    string
+	step     models.PreviewLogStep
+	message  string
+	metadata json.RawMessage
 }
 
 func previewServiceOutputMessage(name, line string) string {
@@ -889,13 +928,26 @@ func (o *managerServiceObserver) OnServiceOutput(name, line string) {
 	if o.outputClosed {
 		return
 	}
+	o.enqueueOutputLocked(previewServiceOutput{name: name, line: line, step: models.PreviewLogStepStart})
+}
+
+func (o *managerServiceObserver) OnInstallOutput(line string) {
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	if o.outputClosed {
+		return
+	}
+	o.enqueueOutputLocked(previewServiceOutput{name: "install", line: line, step: models.PreviewLogStepInstall})
+}
+
+func (o *managerServiceObserver) enqueueOutputLocked(output previewServiceOutput) {
 	select {
-	case o.outputCh <- previewServiceOutput{name: name, line: line}:
+	case o.outputCh <- output:
 	default:
 		o.manager.logger.Warn().
 			Str("preview_id", o.previewID.String()).
-			Str("service", name).
-			Msg("observer: dropping preview service output because the buffer is full")
+			Str("source", output.name).
+			Msg("observer: dropping preview output because the buffer is full")
 	}
 }
 
@@ -904,8 +956,10 @@ func (o *managerServiceObserver) Close() {
 		o.outputMu.Lock()
 		o.outputClosed = true
 		close(o.outputCh)
+		close(o.lifecycleCh)
 		o.outputMu.Unlock()
 		<-o.outputDone
+		<-o.lifecycleDone
 	})
 }
 
@@ -914,13 +968,15 @@ func (o *managerServiceObserver) runServiceOutputWriter() {
 	ticker := time.NewTicker(serviceOutputFlushInterval)
 	defer ticker.Stop()
 
-	batch := make([]string, 0, serviceOutputBatchLines)
+	batches := make(map[models.PreviewLogStep][]string)
 	flush := func() {
-		if len(batch) == 0 {
-			return
+		for step, batch := range batches {
+			if len(batch) == 0 {
+				continue
+			}
+			o.writeOutputLog(step, strings.Join(batch, "\n"))
+			delete(batches, step)
 		}
-		o.writeServiceOutputLog(strings.Join(batch, "\n"))
-		batch = batch[:0]
 	}
 
 	for {
@@ -934,8 +990,12 @@ func (o *managerServiceObserver) runServiceOutputWriter() {
 			if msg == "" {
 				continue
 			}
-			batch = append(batch, msg)
-			if len(batch) >= serviceOutputBatchLines {
+			step := output.step
+			if step == "" {
+				step = models.PreviewLogStepStart
+			}
+			batches[step] = append(batches[step], msg)
+			if len(batches[step]) >= serviceOutputBatchLines {
 				flush()
 			}
 		case <-ticker.C:
@@ -944,14 +1004,21 @@ func (o *managerServiceObserver) runServiceOutputWriter() {
 	}
 }
 
-func (o *managerServiceObserver) writeServiceOutputLog(msg string) {
+func (o *managerServiceObserver) runLifecycleLogWriter() {
+	defer close(o.lifecycleDone)
+	for entry := range o.lifecycleCh {
+		o.persistLifecycleLog(entry)
+	}
+}
+
+func (o *managerServiceObserver) writeOutputLog(step models.PreviewLogStep, msg string) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
 	defer cancel()
 	logEntry := &models.PreviewLog{
 		PreviewInstanceID: o.previewID,
 		OrgID:             o.orgID,
 		Level:             "info",
-		Step:              models.PreviewLogStepStart,
+		Step:              step,
 		Message:           msg,
 		Metadata:          json.RawMessage(`{"batched":true}`),
 	}
@@ -979,6 +1046,10 @@ func (o *managerServiceObserver) OnPhaseStart(name string) {
 			Str("phase", name).
 			Msg("observer: failed to update preview phase")
 	}
+	o.enqueueLifecycleLog("info", previewLogStepForPhase(name), fmt.Sprintf("preview phase started: %s", name), map[string]any{
+		"phase":  name,
+		"status": "started",
+	})
 }
 
 func (o *managerServiceObserver) OnPhaseEnd(name string, phaseErr error) {
@@ -993,10 +1064,25 @@ func (o *managerServiceObserver) OnPhaseEnd(name string, phaseErr error) {
 		delete(o.phaseStarts, name)
 	}
 	o.phaseMu.Unlock()
-	if !ok || o.source == "" || o.repository == "" {
-		return
+	metadata := map[string]any{
+		"phase":  name,
+		"status": "completed",
 	}
-	metrics.RecordBranchPreviewPhaseDuration(context.Background(), o.orgID.String(), o.source, o.repository, name, time.Since(started))
+	if ok {
+		metadata["duration_ms"] = time.Since(started).Milliseconds()
+	}
+	level := "info"
+	message := fmt.Sprintf("preview phase completed: %s", name)
+	if phaseErr != nil {
+		level = "warn"
+		message = fmt.Sprintf("preview phase failed: %s: %v", name, phaseErr)
+		metadata["status"] = "failed"
+		metadata["error"] = phaseErr.Error()
+	}
+	o.enqueueLifecycleLog(level, previewLogStepForPhase(name), message, metadata)
+	if ok && o.source != "" && o.repository != "" {
+		metrics.RecordBranchPreviewPhaseDuration(context.Background(), o.orgID.String(), o.source, o.repository, name, time.Since(started))
+	}
 }
 
 func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
@@ -1069,7 +1155,9 @@ func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
 }
 
 func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
-	if status != "restore_failed" && status != "restored" {
+	switch status {
+	case "disabled", "miss", "restore_failed", "restored", "restored_satisfied_install", "skipped_marker_missing":
+	default:
 		return
 	}
 	level := "info"
@@ -1078,15 +1166,85 @@ func (o *managerServiceObserver) OnDependencyCacheRestore(status string, cacheKe
 		level = "warn"
 		msg = fmt.Sprintf("preview dependency cache restore failed: %v", err)
 	}
+	o.logPreviewHealthCacheEvent("dependency", "restore", status, sizeBytes)
 	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
 func (o *managerServiceObserver) OnDependencyCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
-	if status != "save_failed" {
+	switch status {
+	case "saved", "skipped", "skipped_fresh_restore", "skipped_no_paths", "unchanged", "save_failed":
+	default:
 		return
 	}
-	msg := fmt.Sprintf("preview dependency cache save failed: %v", err)
-	o.writeDependencyCacheLog("warn", msg, cacheKey, sizeBytes)
+	level := "info"
+	msg := fmt.Sprintf("preview dependency cache save %s", status)
+	if err != nil || status == "save_failed" {
+		level = "warn"
+		msg = fmt.Sprintf("preview dependency cache save failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) OnPackageManagerCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
+	switch status {
+	case "disabled", "miss", "restore_failed", "restored", "key_failed", "skipped_no_paths":
+	default:
+		return
+	}
+	level := "info"
+	msg := fmt.Sprintf("preview package-manager cache %s", status)
+	if err != nil {
+		level = "warn"
+		msg = fmt.Sprintf("preview package-manager cache restore failed: %v", err)
+	}
+	o.logPreviewHealthCacheEvent("package_manager", "restore", status, sizeBytes)
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) OnPackageManagerCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
+	switch status {
+	case "saved", "skipped", "skipped_no_paths", "unchanged", "save_failed":
+	default:
+		return
+	}
+	level := "info"
+	msg := fmt.Sprintf("preview package-manager cache save %s", status)
+	if err != nil || status == "save_failed" {
+		level = "warn"
+		msg = fmt.Sprintf("preview package-manager cache save failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) OnBuildCacheRestore(status string, cacheKey string, sizeBytes int64, err error) {
+	switch status {
+	case "disabled", "miss", "restore_failed", "restored", "key_failed":
+	default:
+		return
+	}
+	level := "info"
+	msg := fmt.Sprintf("preview build cache %s", status)
+	if err != nil {
+		level = "warn"
+		msg = fmt.Sprintf("preview build cache restore failed: %v", err)
+	}
+	o.logPreviewHealthCacheEvent("build", "restore", status, sizeBytes)
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
+}
+
+func (o *managerServiceObserver) OnBuildCacheSave(status string, cacheKey string, sizeBytes int64, err error) {
+	switch status {
+	case "saved", "skipped", "skipped_no_paths", "unchanged", "save_failed":
+	default:
+		return
+	}
+	level := "info"
+	msg := fmt.Sprintf("preview build cache save %s", status)
+	if err != nil || status == "save_failed" {
+		level = "warn"
+		msg = fmt.Sprintf("preview build cache save failed: %v", err)
+	}
+	o.writeDependencyCacheLog(level, msg, cacheKey, sizeBytes)
 }
 
 func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey string, sizeBytes int64) {
@@ -1096,16 +1254,106 @@ func (o *managerServiceObserver) writeDependencyCacheLog(level, msg, cacheKey st
 		"cache_key":  cacheKey,
 		"size_bytes": sizeBytes,
 	})
+	step := models.PreviewLogStepInstall
+	if strings.Contains(msg, "build cache") {
+		step = models.PreviewLogStepBuild
+	}
 	logEntry := &models.PreviewLog{
 		PreviewInstanceID: o.previewID,
 		OrgID:             o.orgID,
 		Level:             level,
-		Step:              models.PreviewLogStepInstall,
+		Step:              step,
 		Message:           msg,
 		Metadata:          metadata,
 	}
 	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
 		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to write preview dependency cache log")
+	}
+}
+
+func (o *managerServiceObserver) logPreviewHealthCacheEvent(cacheKind, operation, status string, sizeBytes int64) {
+	o.manager.logger.Info().
+		Str("org_id", o.orgID.String()).
+		Str("preview_id", o.previewID.String()).
+		Str("cache_kind", cacheKind).
+		Str("operation", operation).
+		Str("status", status).
+		Bool("cache_hit", previewCacheStatusIsHit(status)).
+		Int("cache_hit_value", previewCacheStatusHitValue(status)).
+		Int64("size_bytes", sizeBytes).
+		Msg("preview health: cache event")
+}
+
+func previewCacheStatusIsHit(status string) bool {
+	return status == "restored" || status == "restored_satisfied_install"
+}
+
+func previewCacheStatusHitValue(status string) int {
+	if previewCacheStatusIsHit(status) {
+		return 1
+	}
+	return 0
+}
+
+func (o *managerServiceObserver) enqueueLifecycleLog(level string, step models.PreviewLogStep, msg string, metadata map[string]any) {
+	rawMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to marshal preview lifecycle log metadata")
+		rawMetadata = json.RawMessage(`{}`)
+	}
+	o.outputMu.Lock()
+	defer o.outputMu.Unlock()
+	if o.outputClosed {
+		return
+	}
+	entry := previewLifecycleLog{
+		level:    level,
+		step:     step,
+		message:  msg,
+		metadata: rawMetadata,
+	}
+	select {
+	case o.lifecycleCh <- entry:
+	default:
+		o.manager.logger.Warn().
+			Str("preview_id", o.previewID.String()).
+			Str("phase", fmt.Sprint(metadata["phase"])).
+			Msg("observer: dropping preview lifecycle log because the buffer is full")
+	}
+}
+
+func (o *managerServiceObserver) persistLifecycleLog(entry previewLifecycleLog) {
+	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
+	defer cancel()
+	logEntry := &models.PreviewLog{
+		PreviewInstanceID: o.previewID,
+		OrgID:             o.orgID,
+		Level:             entry.level,
+		Step:              entry.step,
+		Message:           entry.message,
+		Metadata:          entry.metadata,
+	}
+	if err := o.manager.store.CreatePreviewLog(ctx, logEntry); err != nil {
+		o.manager.logger.Warn().Err(err).Str("preview_id", o.previewID.String()).Msg("observer: failed to write preview lifecycle log")
+	}
+}
+
+func previewLogStepForPhase(phase string) models.PreviewLogStep {
+	switch {
+	case strings.Contains(phase, "install"),
+		strings.Contains(phase, "dependency_cache"),
+		strings.Contains(phase, "package_manager_cache"):
+		return models.PreviewLogStepInstall
+	case strings.Contains(phase, "build_cache"):
+		return models.PreviewLogStepBuild
+	case strings.Contains(phase, "infra"),
+		strings.Contains(phase, "init"):
+		return models.PreviewLogStepInit
+	case strings.Contains(phase, "service"),
+		strings.Contains(phase, "readiness"):
+		return models.PreviewLogStepStart
+	default:
+		return models.PreviewLogStepBuild
 	}
 }
 
@@ -1220,6 +1468,12 @@ func (m *Manager) pollSupportServiceStatus(stopCh <-chan struct{}, orgID, previe
 
 // StopPreview stops a preview and revokes all access sessions.
 func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error {
+	return m.StopPreviewWithReason(ctx, orgID, previewID, models.PreviewStoppedReasonNone)
+}
+
+// StopPreviewWithReason stops a preview, records a stop cause when supplied,
+// and revokes all access sessions.
+func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uuid.UUID, reason models.PreviewStoppedReason) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
 		return fmt.Errorf("get preview instance: %w", err)
@@ -1249,7 +1503,7 @@ func (m *Manager) StopPreview(ctx context.Context, orgID, previewID uuid.UUID) e
 	}
 
 	// Atomically stop + revoke access sessions.
-	if err := m.store.StopPreviewWithRevocation(ctx, orgID, previewID); err != nil {
+	if err := m.store.StopPreviewWithRevocationAndReason(ctx, orgID, previewID, reason); err != nil {
 		return fmt.Errorf("stop preview: %w", err)
 	}
 	if instance.PreviewTargetID != nil {
@@ -1356,11 +1610,17 @@ func (m *Manager) GetStatus(ctx context.Context, orgID, previewID uuid.UUID) (*m
 		return nil, fmt.Errorf("list infrastructure: %w", err)
 	}
 
+	startupEstimate, err := m.store.GetPreviewStartupEstimate(ctx, orgID, previewID, instance.ConfigDigest)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to compute preview startup estimate")
+	}
+
 	return &models.PreviewStatusResponse{
-		Instance:       instance,
-		Services:       services,
-		Infrastructure: infra,
-		PreviewOrigin:  m.previewOrigin(previewID),
+		Instance:        instance,
+		Services:        services,
+		Infrastructure:  infra,
+		PreviewOrigin:   m.previewOrigin(previewID),
+		StartupEstimate: startupEstimate,
 	}, nil
 }
 
@@ -1392,7 +1652,10 @@ func (m *Manager) MintBootstrapToken(ctx context.Context, orgID, userID, preview
 		UserID:            userID,
 		PreviewInstanceID: previewID,
 		SessionTokenHash:  tokenHash,
-		ExpiresAt:         time.Now().Add(5 * time.Minute),
+		// Deliberately short: this initial window only needs to cover token
+		// redemption. The gateway extends the session to its full sliding
+		// lifetime (accessSessionTTL) on the first proxied request.
+		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
 
 	if err := m.store.CreateAccessSession(ctx, sess); err != nil {
@@ -1489,7 +1752,7 @@ func (m *Manager) SetLifetime(ctx context.Context, orgID, previewID uuid.UUID, d
 
 // RecordAccess updates the last_accessed_at timestamp for activity-aware timeouts.
 func (m *Manager) RecordAccess(ctx context.Context, orgID, previewID uuid.UUID) error {
-	return m.store.UpdatePreviewAccess(ctx, orgID, previewID)
+	return m.store.UpdatePreviewAccessAndExtend(ctx, orgID, previewID, m.previewIdleTimeout, DefaultMaxTTL)
 }
 
 // =============================================================================
@@ -1618,11 +1881,15 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		return fmt.Errorf("load recycle input: %w", err)
 	}
 	if refreshedConfig != nil {
-		if errs := ValidateConfig(refreshedConfig); len(errs) > 0 {
+		resourcePolicy, policyErr := m.resourcePolicy(ctx, orgID)
+		if policyErr != nil {
+			return policyErr
+		}
+		if errs := ValidateConfigWithResourcePolicy(refreshedConfig, resourcePolicy); len(errs) > 0 {
 			return fmt.Errorf("%w: validate %s: %s", ErrInvalidConfig, repoconfig.ConfigPath, strings.Join(errs, "; "))
 		}
 		input.Config = refreshedConfig
-		limits := ResolveResourceLimits(refreshedConfig)
+		limits := ResolveResourceLimitsWithPolicy(refreshedConfig, resourcePolicy)
 		configJSON, err := json.Marshal(refreshedConfig)
 		if err != nil {
 			return fmt.Errorf("marshal refreshed recycle config: %w", err)
@@ -1666,6 +1933,9 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	}
 	if revisionStamp != nil && !revisionStamp.updatedAt.IsZero() {
 		if err := m.store.UpdatePreviewSourceWorkspaceRevision(ctx, orgID, previewID, revisionStamp.revision, revisionStamp.updatedAt); err != nil {
+			return err
+		}
+		if err := m.store.UpdatePreviewRuntimeWorkspaceRevision(ctx, orgID, previewID, revisionStamp.revision, revisionStamp.updatedAt, models.PreviewRuntimeRevisionSourceRecycle); err != nil {
 			return err
 		}
 	}
@@ -1980,6 +2250,21 @@ func (m *Manager) maxPreviewsPerUser(ctx context.Context, orgID uuid.UUID) (int,
 	return m.maxPerUser, nil
 }
 
+func (m *Manager) resourcePolicy(ctx context.Context, orgID uuid.UUID) (ResourcePolicy, error) {
+	if m.orgSettings == nil {
+		return defaultResourcePolicy(), nil
+	}
+	org, err := m.orgSettings.GetByID(ctx, orgID)
+	if err != nil {
+		return ResourcePolicy{}, fmt.Errorf("load org preview resource settings: %w", err)
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return ResourcePolicy{}, fmt.Errorf("parse org preview resource settings: %w", err)
+	}
+	return ResourcePolicyFromOrgSettings(settings), nil
+}
+
 func hasPreviewMaxPreviewsPerUserSetting(raw json.RawMessage) (bool, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return false, nil
@@ -2173,7 +2458,7 @@ func (m *Manager) rebuildLegacyRecycleInput(ctx context.Context, instance *model
 		SessionID:     instance.SessionID,
 		OrgID:         instance.OrgID,
 		UserID:        instance.UserID,
-		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace"},
+		Sandbox:       &agent.Sandbox{ID: *session.ContainerID, Provider: instance.Provider, WorkDir: "/workspace", HomeDir: agent.DefaultSandboxConfig().HomeDir},
 		Config:        cfg,
 		RepositoryID:  uuidPointerValue(session.RepositoryID),
 		BaseCommitSHA: instance.BaseCommitSHA,

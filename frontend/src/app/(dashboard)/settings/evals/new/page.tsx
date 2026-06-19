@@ -8,6 +8,7 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -359,11 +360,11 @@ export default function CreateEvalTaskPage() {
                 <p className="mt-1 text-xs whitespace-pre-wrap line-clamp-4">{issueDescription}</p>
               </div>
               {createMutation.isError && (
-                <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <ErrorText className="rounded-md bg-destructive/10 px-3 py-2">
                   {createMutation.error instanceof Error
                     ? createMutation.error.message
                     : "Failed to create eval task. Please try again."}
-                </div>
+                </ErrorText>
               )}
               <div className="flex justify-between">
                 <Button variant="outline" onClick={() => setStep(3)}>Back</Button>

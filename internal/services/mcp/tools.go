@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/google/uuid"
 )
 
 // taskManagerError formats a TaskManager error into an ErrorResult with a
@@ -50,6 +51,16 @@ func taskManagerUnauthorizedDetail(providerName string, err error) string {
 		return fallback
 	}
 	return detail
+}
+
+// ToolSource is the dispatch surface shared by the MCP server and the CLI:
+// a listing of available tools plus a call entry point. Implemented by
+// ToolRegistry (direct execution with local credentials, the sandbox model)
+// and by the CLI's server-proxied source (laptop model — credentials stay
+// server-side and every call is audited per-user).
+type ToolSource interface {
+	ListTools() []Tool
+	CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult
 }
 
 // ToolRegistry builds MCP tool definitions from an integration registry and
@@ -293,6 +304,52 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		tools = append(tools, sessionTabToolDefinitions()...)
 	}
 
+	if len(tr.integrations.EvalCandidateReporters()) > 0 {
+		tools = append(tools, Tool{
+			Name:        "eval_add",
+			Description: "Add a candidate eval task from the current eval bootstrap session. Only available to sessions launched from eval settings.",
+			InputSchema: ToolSchema{
+				Type: "object",
+				Properties: map[string]SchemaProperty{
+					"pr_number":           {Type: "number", Description: "Source pull request number"},
+					"pr_title":            {Type: "string", Description: "Source pull request title"},
+					"base_commit_sha":     {Type: "string", Description: "Commit SHA before the fix"},
+					"solution_commit_sha": {Type: "string", Description: "Commit SHA containing the fix"},
+					"solution_diff":       {Type: "string", Description: "Diff that solved the issue"},
+					"issue_description":   {Type: "string", Description: "Reproducible task prompt for the eval"},
+					"scoring_criteria":    {Type: "string", Description: "JSON array of scoring criteria"},
+					"complexity":          {Type: "string", Description: "Task complexity", Enum: []string{"trivial", "simple", "moderate", "complex"}, Default: "moderate"},
+					"fitness_score":       {Type: "number", Description: "Candidate quality score from 0 to 1"},
+					"fitness_reasoning":   {Type: "string", Description: "Why this candidate is useful for regression protection"},
+					"evidence":            {Type: "string", Description: "Optional JSON evidence gathered while selecting the candidate"},
+					"warnings":            {Type: "array", Description: "Optional warnings reviewers should consider", Items: &SchemaProperty{Type: "string"}},
+				},
+				Required: []string{"pr_number", "pr_title", "base_commit_sha", "solution_commit_sha", "solution_diff", "issue_description", "scoring_criteria", "complexity", "fitness_score", "fitness_reasoning"},
+			},
+		})
+	}
+
+	if len(tr.integrations.AutomationGoalImprovementCompleters()) > 0 {
+		tools = append(tools, Tool{
+			Name:        "automation_goal_improvement_complete",
+			Description: "Complete the current deep automation-goal improvement session with one structured proposal for human review.",
+			InputSchema: ToolSchema{
+				Type: "object",
+				Properties: map[string]SchemaProperty{
+					"improvement_id": {Type: "string", Description: "Automation goal improvement UUID"},
+					"proposed_goal":  {Type: "string", Description: "Complete improved automation goal"},
+					"rationale":      {Type: "string", Description: "Short rationale for the proposal"},
+					"changes":        {Type: "array", Description: "Important changes", Items: &SchemaProperty{Type: "string"}},
+					"evidence":       {Type: "array", Description: "Evidence used", Items: &SchemaProperty{Type: "string"}},
+					"risks":          {Type: "array", Description: "Risks or tradeoffs", Items: &SchemaProperty{Type: "string"}},
+					"confidence":     {Type: "string", Description: "Confidence level", Enum: []string{"low", "medium", "high"}, Default: "medium"},
+					"warnings":       {Type: "array", Description: "Reviewer warnings", Items: &SchemaProperty{Type: "string"}},
+				},
+				Required: []string{"improvement_id", "proposed_goal", "rationale", "confidence"},
+			},
+		})
+	}
+
 	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
 		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
@@ -413,6 +470,18 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("session tab manager not registered")
 		}
 		return tr.callSessionTabs(ctx, managers[0], name, args)
+	case "eval_add":
+		reporters := tr.integrations.EvalCandidateReporters()
+		if len(reporters) == 0 {
+			return ErrorResult("eval candidate reporter not registered")
+		}
+		return tr.callEvalCandidateReporter(ctx, reporters[0], name, args)
+	case "automation_goal_improvement_complete":
+		completers := tr.integrations.AutomationGoalImprovementCompleters()
+		if len(completers) == 0 {
+			return ErrorResult("automation goal improvement completer not registered")
+		}
+		return tr.callAutomationGoalImprovementCompleter(ctx, completers[0], name, args)
 	}
 
 	switch name {
@@ -976,6 +1045,162 @@ func (tr *ToolRegistry) callPullRequestCreator(ctx context.Context, pc integrati
 	}
 }
 
+// --------------------------------------------------------------------------
+// Eval candidate reporter dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callEvalCandidateReporter(ctx context.Context, reporter integration.EvalCandidateReporter, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "eval_add":
+		var p struct {
+			PRNumber          int             `json:"pr_number"`
+			PRTitle           string          `json:"pr_title"`
+			BaseCommitSHA     string          `json:"base_commit_sha"`
+			SolutionCommitSHA string          `json:"solution_commit_sha"`
+			SolutionDiff      string          `json:"solution_diff"`
+			IssueDescription  string          `json:"issue_description"`
+			ScoringCriteria   json.RawMessage `json:"scoring_criteria"`
+			Complexity        string          `json:"complexity"`
+			FitnessScore      float64         `json:"fitness_score"`
+			FitnessReasoning  string          `json:"fitness_reasoning"`
+			Evidence          json.RawMessage `json:"evidence"`
+			Warnings          []string        `json:"warnings"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if p.PRNumber <= 0 {
+			return ErrorResult("pr_number is required")
+		}
+		if strings.TrimSpace(p.PRTitle) == "" {
+			return ErrorResult("pr_title is required")
+		}
+		if strings.TrimSpace(p.BaseCommitSHA) == "" {
+			return ErrorResult("base_commit_sha is required")
+		}
+		if strings.TrimSpace(p.SolutionCommitSHA) == "" {
+			return ErrorResult("solution_commit_sha is required")
+		}
+		if strings.TrimSpace(p.SolutionDiff) == "" {
+			return ErrorResult("solution_diff is required")
+		}
+		if strings.TrimSpace(p.IssueDescription) == "" {
+			return ErrorResult("issue_description is required")
+		}
+		if strings.TrimSpace(p.Complexity) == "" {
+			return ErrorResult("complexity is required")
+		}
+		if strings.TrimSpace(p.FitnessReasoning) == "" {
+			return ErrorResult("fitness_reasoning is required")
+		}
+		criteria := p.ScoringCriteria
+		if len(criteria) == 0 {
+			return ErrorResult("scoring_criteria is required")
+		}
+		var criteriaProbe []any
+		if err := json.Unmarshal(criteria, &criteriaProbe); err != nil {
+			var criteriaString string
+			if strErr := json.Unmarshal(criteria, &criteriaString); strErr != nil {
+				return ErrorResult("scoring_criteria must be a JSON array")
+			}
+			criteria = json.RawMessage(criteriaString)
+			if err := json.Unmarshal(criteria, &criteriaProbe); err != nil {
+				return ErrorResult("scoring_criteria must be a JSON array")
+			}
+		}
+		evidence := p.Evidence
+		if len(evidence) > 0 {
+			var evidenceProbe any
+			if err := json.Unmarshal(evidence, &evidenceProbe); err != nil {
+				var evidenceString string
+				if strErr := json.Unmarshal(evidence, &evidenceString); strErr != nil {
+					return ErrorResult("evidence must be valid JSON when provided")
+				}
+				evidence = json.RawMessage(evidenceString)
+				if err := json.Unmarshal(evidence, &evidenceProbe); err != nil {
+					return ErrorResult("evidence must be valid JSON when provided")
+				}
+			}
+		}
+
+		result, err := reporter.AddCandidate(ctx, integration.AddEvalCandidateParams{
+			PRNumber:          p.PRNumber,
+			PRTitle:           p.PRTitle,
+			BaseCommitSHA:     p.BaseCommitSHA,
+			SolutionCommitSHA: p.SolutionCommitSHA,
+			SolutionDiff:      p.SolutionDiff,
+			IssueDescription:  p.IssueDescription,
+			ScoringCriteria:   criteria,
+			Complexity:        p.Complexity,
+			FitnessScore:      p.FitnessScore,
+			FitnessReasoning:  p.FitnessReasoning,
+			Evidence:          evidence,
+			Warnings:          p.Warnings,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("add eval candidate failed: %s", err))
+		}
+		return jsonResult(result)
+	default:
+		return ErrorResult(fmt.Sprintf("unknown eval candidate reporter method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Automation goal improvement completer dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callAutomationGoalImprovementCompleter(ctx context.Context, completer integration.AutomationGoalImprovementCompleter, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "automation_goal_improvement_complete":
+		var p struct {
+			ImprovementID string   `json:"improvement_id"`
+			ProposedGoal  string   `json:"proposed_goal"`
+			Rationale     string   `json:"rationale"`
+			Changes       []string `json:"changes"`
+			Evidence      []string `json:"evidence"`
+			Risks         []string `json:"risks"`
+			Confidence    string   `json:"confidence"`
+			Warnings      []string `json:"warnings"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if strings.TrimSpace(p.ImprovementID) == "" {
+			return ErrorResult("improvement_id is required")
+		}
+		if _, err := uuid.Parse(p.ImprovementID); err != nil {
+			return ErrorResult("improvement_id must be a valid UUID")
+		}
+		if strings.TrimSpace(p.ProposedGoal) == "" {
+			return ErrorResult("proposed_goal is required")
+		}
+		if strings.TrimSpace(p.Rationale) == "" {
+			return ErrorResult("rationale is required")
+		}
+		confidence := strings.TrimSpace(p.Confidence)
+		if confidence == "" {
+			confidence = "medium"
+		}
+		result, err := completer.CompleteGoalImprovement(ctx, integration.CompleteAutomationGoalImprovementParams{
+			ImprovementID: p.ImprovementID,
+			ProposedGoal:  p.ProposedGoal,
+			Rationale:     p.Rationale,
+			Changes:       p.Changes,
+			Evidence:      p.Evidence,
+			Risks:         p.Risks,
+			Confidence:    confidence,
+			Warnings:      p.Warnings,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("complete automation goal improvement failed: %s", err))
+		}
+		return jsonResult(result)
+	default:
+		return ErrorResult(fmt.Sprintf("unknown automation goal improvement completer method: %s", method))
+	}
+}
+
 func sessionTabToolDefinitions() []Tool {
 	return []Tool{
 		{
@@ -996,7 +1221,7 @@ func sessionTabToolDefinitions() []Tool {
 			Name:        "session_tabs_create",
 			Description: "Create a blank idle tab in the current session only. Does not start agent execution.",
 			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
-				"agent":        {Type: "string", Description: "Agent type for the new tab", Enum: []string{"codex", "claude_code", "gemini_cli", "amp", "pi"}},
+				"agent":        {Type: "string", Description: "Agent type for the new tab", Enum: []string{"codex", "claude_code", "amp", "pi", "opencode"}},
 				"instructions": {Type: "string", Description: "Optional stored instructions for the new tab"},
 				"label":        {Type: "string", Description: "Optional tab label"},
 				"model":        {Type: "string", Description: "Optional model override"},

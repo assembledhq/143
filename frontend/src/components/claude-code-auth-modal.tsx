@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import {
   ResponsiveModal,
@@ -163,19 +164,19 @@ export function ClaudeCodeAuthModal({
                 string.
               </p>
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && <ErrorText className="text-sm">{error}</ErrorText>}
           </div>
         )}
 
         {status === "completed" && (
           <div className="mt-4">
-            <p className="text-sm font-medium text-green-600">Connected successfully!</p>
+            <p className="text-sm font-medium text-success">Connected successfully!</p>
           </div>
         )}
 
         {status === "error" && (
           <div className="mt-4">
-            <p className="text-sm text-destructive">{error}</p>
+            <ErrorText className="text-sm">{error}</ErrorText>
           </div>
         )}
       </ResponsiveModalBody>

@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useState, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, AlertTriangle, FileCode2, FileText, ClipboardList, Check, PenLine, FolderTree, Loader2, Square } from "lucide-react";
 import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +13,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { MarkdownContent } from "@/components/markdown";
+import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
+import { CopyButton } from "@/components/copy-button";
 import { HumanInputRequestCard } from "@/components/human-input-request-card";
 import { LinearIcon } from "@/components/linear-icon";
 import { looksLikeLinearRef } from "@/lib/linear-refs";
@@ -22,10 +24,66 @@ import type { HumanInputAnswerBody, HumanInputRequest, SessionInputReference, Se
 import { isImageURL, fileNameFromURL } from "@/lib/utils";
 import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 
 // Shared max-width for chat bubbles (user, assistant, plan) so they line up
 // consistently across the timeline.
 const BUBBLE_MAX_WIDTH = "max-w-[92%]";
+
+function LogMessageDetail({
+  log,
+  className,
+  loadingLabel = "Loading full output...",
+}: {
+  log: SessionLog;
+  className: string;
+  loadingLabel?: string;
+}) {
+  if (log.message_truncated !== true) {
+    return <pre className={className}>{log.message}</pre>;
+  }
+
+  return (
+    <FetchedLogMessageDetail
+      log={log}
+      className={className}
+      loadingLabel={loadingLabel}
+    />
+  );
+}
+
+function FetchedLogMessageDetail({
+  log,
+  className,
+  loadingLabel,
+}: {
+  log: SessionLog;
+  className: string;
+  loadingLabel: string;
+}) {
+  const detailQuery = useQuery({
+    queryKey: queryKeys.sessions.logDetail(log.session_id, log.id),
+    queryFn: () => api.sessions.getLogDetail(log.session_id, log.id),
+    staleTime: Infinity,
+  });
+  const message = detailQuery.data?.data.message ?? log.message;
+
+  return (
+    <div className="space-y-1">
+      <pre className={className}>{message}</pre>
+      {detailQuery.isLoading && (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          {loadingLabel}
+        </div>
+      )}
+      {detailQuery.isError && (
+        <div className="text-xs text-destructive">Failed to load full output</div>
+      )}
+    </div>
+  );
+}
 
 function safeDate(dateStr: string): Date | null {
   const d = new Date(dateStr);
@@ -142,9 +200,10 @@ const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { t
           )}
           {toolResult ? (
             <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
-              <pre className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground max-w-full">
-                {toolResult.message}
-              </pre>
+              <LogMessageDetail
+                log={toolResult}
+                className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground max-w-full"
+              />
             </div>
           ) : (
             !inputDetail && (
@@ -161,21 +220,28 @@ const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { t
 
 const ErrorEntry = memo(function ErrorEntry({ log }: { log: SessionLog }) {
   const [expanded, setExpanded] = useState(false);
-  const isLong = log.message.length > 200;
+  const isLong = log.message.length > 200 || log.message_truncated === true;
   const displayMessage = !isLong || expanded ? log.message : log.message.slice(0, 200) + "...";
 
   return (
-    <div className="mx-2 min-w-0 max-w-full rounded-md border border-red-200 dark:border-red-900/50 bg-red-500/5 px-3 py-2">
+    <div className="mx-2 min-w-0 max-w-full rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
       <div className="flex items-start gap-2 min-w-0">
-        <AlertTriangle className="h-3.5 w-3.5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+        <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
-          <pre className="text-xs font-mono whitespace-pre-wrap break-all text-red-700 dark:text-red-400 max-w-full">
-            {displayMessage}
-          </pre>
+          {expanded ? (
+            <LogMessageDetail
+              log={log}
+              className="text-xs font-mono whitespace-pre-wrap break-all text-destructive max-w-full"
+            />
+          ) : (
+            <pre className="text-xs font-mono whitespace-pre-wrap break-all text-destructive max-w-full">
+              {displayMessage}
+            </pre>
+          )}
           {isLong && (
             <button
               onClick={() => setExpanded(!expanded)}
-              className="text-xs text-red-600 dark:text-red-400 hover:underline mt-1"
+              className="text-xs text-destructive hover:underline mt-1"
             >
               {expanded ? "Show less" : "Show more"}
             </button>
@@ -192,6 +258,9 @@ const ErrorEntry = memo(function ErrorEntry({ log }: { log: SessionLog }) {
 });
 
 const HiddenLogEntry = memo(function HiddenLogEntry({ log }: { log: SessionLog }) {
+  const [expanded, setExpanded] = useState(false);
+  const canExpand = log.message_truncated === true;
+
   return (
     <div className="flex items-start gap-2 px-2 py-0.5 text-xs font-mono text-muted-foreground/70 min-w-0">
       <TimestampLabel
@@ -205,7 +274,25 @@ const HiddenLogEntry = memo(function HiddenLogEntry({ log }: { log: SessionLog }
       >
         {log.level}
       </Badge>
-      <span className="min-w-0 flex-1 break-all">{log.message}</span>
+      <div className="min-w-0 flex-1 break-all">
+        {expanded ? (
+          <LogMessageDetail
+            log={log}
+            className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground/70 max-w-full"
+          />
+        ) : (
+          <span>{log.message}</span>
+        )}
+        {canExpand && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="ml-2 text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            {expanded ? "Show preview" : "Load full output"}
+          </button>
+        )}
+      </div>
     </div>
   );
 });
@@ -264,7 +351,7 @@ export function formatMessageTime(dateStr: string): string {
   });
 }
 
-const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
+export const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { attachments: string[] }) {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
 
   const closeLightbox = useCallback(() => setLightboxSrc(null), []);
@@ -398,7 +485,7 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words`}>
+        <div className={`chat-user-bubble ${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words`}>
           {isPlanModeUser && (
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />
@@ -412,11 +499,18 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentGrid attachments={msg.attachments} />
           )}
-          <TimestampLabel
-            dateStr={msg.created_at}
-            formatter={formatMessageTime}
-            className="block text-xs mt-1 text-white/70"
-          />
+          <div className="mt-1 flex items-center justify-end gap-1">
+            <TimestampLabel
+              dateStr={msg.created_at}
+              formatter={formatMessageTime}
+              className="block text-xs text-white/70"
+            />
+            <CopyButton
+              value={displayContent}
+              label="Copy prompt"
+              className="-mr-1 h-6 w-6 text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/40"
+            />
+          </div>
         </div>
       </div>
     );
@@ -424,15 +518,22 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
 
   return (
     <AssistantBubble>
-      <MarkdownContent content={msg.content} />
+      <LazyMarkdownContent content={msg.content} />
       {msg.attachments && msg.attachments.length > 0 && (
         <AttachmentGrid attachments={msg.attachments} />
       )}
-      <TimestampLabel
-        dateStr={msg.created_at}
-        formatter={formatMessageTime}
-        className="block text-xs mt-1 text-muted-foreground"
-      />
+      <div className="mt-1 flex items-center gap-1">
+        <TimestampLabel
+          dateStr={msg.created_at}
+          formatter={formatMessageTime}
+          className="block text-xs text-muted-foreground"
+        />
+        <CopyButton
+          value={msg.content}
+          label="Copy final response"
+          className="h-6 w-6 text-muted-foreground hover:text-foreground"
+        />
+      </div>
     </AssistantBubble>
   );
 });
@@ -545,7 +646,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
-  let hiddenBatch: SessionLog[] = [];
+  let hiddenBatch: Array<{ entry: Extract<TimelineEntry, { kind: "log" }>; index: number }> = [];
   let lastDay: string | null = null;
 
   function wrapEntry(node: React.ReactNode, entry: TimelineEntry, index: number, key: string) {
@@ -563,8 +664,17 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
 
   function flushHidden() {
     if (hiddenBatch.length > 0) {
+      const first = hiddenBatch[0];
       rendered.push(
-        <HiddenLogsGroup key={`hidden-${hiddenBatch[0].id}`} logs={[...hiddenBatch]} />
+        wrapEntry(
+          <HiddenLogsGroup
+            key={`hidden-${first.entry.data.id}`}
+            logs={hiddenBatch.map((item) => item.entry.data)}
+          />,
+          first.entry,
+          first.index,
+          `hidden-${first.entry.data.id}`,
+        )
       );
       hiddenBatch = [];
     }
@@ -581,7 +691,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
 
   for (const [index, entry] of entries.entries()) {
     if (entry.kind === "log") {
-      hiddenBatch.push(entry.data);
+      hiddenBatch.push({ entry, index });
       continue;
     }
 
@@ -606,7 +716,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
         rendered.push(
           wrapEntry(
             <AssistantBubble key={`aout-${entry.data.id}`}>
-              <MarkdownContent content={entry.data.message} />
+              <LazyMarkdownContent content={entry.data.message} />
             </AssistantBubble>,
             entry,
             index,
@@ -623,7 +733,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
               onAdjust={onAdjustPlan}
               isRunning={isRunning}
             >
-              <MarkdownContent content={entry.data.message} />
+              <LazyMarkdownContent content={entry.data.message} />
             </PlanOutputBubble>,
             entry,
             index,
@@ -640,7 +750,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
               onAdjust={onAdjustPlan}
               isRunning={isRunning}
             >
-              <MarkdownContent content={entry.data.content} />
+              <LazyMarkdownContent content={entry.data.content} />
               <TimestampLabel
                 dateStr={entry.data.created_at}
                 formatter={formatMessageTime}

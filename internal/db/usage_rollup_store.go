@@ -1612,9 +1612,9 @@ func breakdownLabelSQL(dimension, keyExpr string) string {
 		return `CASE ` + keyExpr + `
 			WHEN 'codex' THEN 'Codex'
 			WHEN 'claude_code' THEN 'Claude Code'
-			WHEN 'gemini_cli' THEN 'Gemini CLI'
 			WHEN 'amp' THEN 'Amp'
 			WHEN 'pi' THEN 'Pi'
+			WHEN 'opencode' THEN 'OpenCode'
 			ELSE ` + keyExpr + ` END`
 	case "model":
 		return `CASE WHEN ` + keyExpr + ` = 'unknown' THEN 'Unknown' ELSE ` + keyExpr + ` END`

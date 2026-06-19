@@ -117,7 +117,7 @@ var sessionColumnsForFiles = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func sessionFileTestRow(values ...interface{}) []interface{} {
@@ -128,11 +128,12 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 	//   - workspace_generation immediately after sandbox_state
 	//   - 2 nils right after snapshot_key (pending_snapshot_key, pending_snapshot_set_at)
 	//   - 4 linear_* defaults (migration 000103) just before deleted_at
-	//   - 2 git_identity nils between deleted_at and created_at
+	//   - capability_snapshot plus 2 git_identity nils between deleted_at and created_at
 	// Callers already supply has_unpushed_changes, so this helper only backfills
-	// policy, workspace_generation, pending_snapshot_*, linear_*, and git_identity_*.
-	if len(values) == len(sessionColumnsForFiles)-3-1-2-4-2 {
-		row := make([]interface{}, 0, len(values)+12)
+	// policy, workspace_generation, pending_snapshot_*, linear_*, capability_snapshot,
+	// and git_identity_*.
+	if len(values) == len(sessionColumnsForFiles)-3-1-2-4-1-2 {
+		row := make([]interface{}, 0, len(values)+13)
 		row = append(row, values[:3]...)
 		row = append(row, "", "", "")
 		// Legacy values[3..38] = agent_type through snapshot_key (36 values).
@@ -142,6 +143,7 @@ func sessionFileTestRow(values ...interface{}) []interface{} {
 		row = append(row, values[39:len(values)-2]...)
 		row = append(row, false, false, (*string)(nil), string(models.LinearPrepareStateNone))
 		row = append(row, values[len(values)-2]) // deleted_at
+		row = append(row, nil)                   // capability_snapshot
 		row = append(row, nil, nil)              // git_identity_source, git_identity_user_id
 		row = append(row, values[len(values)-1]) // created_at
 		row = append(row[:38], append([]interface{}{int64(0)}, row[38:]...)...)

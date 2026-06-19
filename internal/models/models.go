@@ -17,13 +17,14 @@ type Organization struct {
 }
 
 type User struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	OrgID       uuid.UUID `db:"org_id" json:"org_id"`
-	Email       string    `db:"email" json:"email"`
-	Name        string    `db:"name" json:"name"`
-	Role        Role      `db:"role" json:"role"`
-	GitHubID    *int64    `db:"github_id" json:"github_id,omitempty"`
-	GitHubLogin *string   `db:"github_login" json:"github_login,omitempty"`
+	ID                     uuid.UUID `db:"id" json:"id"`
+	OrgID                  uuid.UUID `db:"org_id" json:"org_id"`
+	Email                  string    `db:"email" json:"email"`
+	Name                   string    `db:"name" json:"name"`
+	Role                   Role      `db:"role" json:"role"`
+	GitHubID               *int64    `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin            *string   `db:"github_login" json:"github_login,omitempty"`
+	CapturedGitHubOrgLogin *string   `db:"-" json:"captured_github_org_login,omitempty"`
 	// GitHubNoreplyEmail is the address used to attribute git commits so they
 	// link back to the user's GitHub profile. Stored separately from Email
 	// (the human-facing contact address) because GitHub only links commits
@@ -38,17 +39,22 @@ type User struct {
 }
 
 type UserWithSettings struct {
-	ID          uuid.UUID    `db:"id" json:"id"`
-	OrgID       uuid.UUID    `db:"org_id" json:"org_id"`
-	Email       string       `db:"email" json:"email"`
-	Name        string       `db:"name" json:"name"`
-	Role        Role         `db:"role" json:"role"`
-	GitHubID    *int64       `db:"github_id" json:"github_id,omitempty"`
-	GitHubLogin *string      `db:"github_login" json:"github_login,omitempty"`
-	AvatarURL   *string      `db:"avatar_url" json:"avatar_url,omitempty"`
-	GoogleID    *string      `db:"google_id" json:"google_id,omitempty"`
-	Settings    UserSettings `json:"settings"`
-	CreatedAt   time.Time    `db:"created_at" json:"created_at"`
+	ID          uuid.UUID `db:"id" json:"id"`
+	OrgID       uuid.UUID `db:"org_id" json:"org_id"`
+	Email       string    `db:"email" json:"email"`
+	Name        string    `db:"name" json:"name"`
+	Role        Role      `db:"role" json:"role"`
+	GitHubID    *int64    `db:"github_id" json:"github_id,omitempty"`
+	GitHubLogin *string   `db:"github_login" json:"github_login,omitempty"`
+	AvatarURL   *string   `db:"avatar_url" json:"avatar_url,omitempty"`
+	GoogleID    *string   `db:"google_id" json:"google_id,omitempty"`
+	// EmailVerified reports whether the account's current email is attested
+	// (OAuth provider claim, verification link, or emailed-invite claim).
+	// Drives the frontend's "verify your email" prompt and email-domain
+	// auto-join eligibility.
+	EmailVerified bool         `json:"email_verified"`
+	Settings      UserSettings `json:"settings"`
+	CreatedAt     time.Time    `db:"created_at" json:"created_at"`
 }
 
 type AuthSession struct {
@@ -79,6 +85,8 @@ type Integration struct {
 	NotionWorkspaceID           *string             `db:"-" json:"notion_workspace_id,omitempty"`
 	NotionWorkspaceName         *string             `db:"-" json:"notion_workspace_name,omitempty"`
 	CircleCIProjectSlug         *string             `db:"-" json:"circleci_project_slug,omitempty"`
+	MezmoDataset                *string             `db:"-" json:"mezmo_dataset,omitempty"`
+	MezmoBaseURL                *string             `db:"-" json:"mezmo_base_url,omitempty"`
 	// AuthError is a derived view of the auth-failure markers stamped into
 	// config jsonb when a provider rejects our access token (currently only
 	// Linear). Populated by ListIntegrations / Get* paths via deriveIntegrationStatus
@@ -91,26 +99,53 @@ type Integration struct {
 }
 
 type GitHubInstallation struct {
-	InstallationID      int64     `db:"installation_id" json:"installation_id"`
-	AccountID           int64     `db:"account_id" json:"account_id"`
-	AccountLogin        string    `db:"account_login" json:"account_login"`
-	AccountType         *string   `db:"account_type" json:"account_type,omitempty"`
-	RepositorySelection *string   `db:"repository_selection" json:"repository_selection,omitempty"`
-	Status              string    `db:"status" json:"status"`
-	CreatedAt           time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt           time.Time `db:"updated_at" json:"updated_at"`
+	InstallationID      int64      `db:"installation_id" json:"installation_id"`
+	AccountID           int64      `db:"account_id" json:"account_id"`
+	AccountLogin        string     `db:"account_login" json:"account_login"`
+	AccountType         *string    `db:"account_type" json:"account_type,omitempty"`
+	RepositorySelection *string    `db:"repository_selection" json:"repository_selection,omitempty"`
+	Status              string     `db:"status" json:"status"`
+	RosterSyncedAt      *time.Time `db:"roster_synced_at" json:"roster_synced_at,omitempty"`
+	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 type GitHubInstallationOrgLink struct {
-	ID             uuid.UUID  `db:"id" json:"id"`
-	OrgID          uuid.UUID  `db:"org_id" json:"org_id"`
-	IntegrationID  *uuid.UUID `db:"integration_id" json:"integration_id,omitempty"`
-	InstallationID int64      `db:"installation_id" json:"installation_id"`
-	AccountLogin   string     `db:"account_login" json:"account_login"`
-	LinkedByUserID *uuid.UUID `db:"linked_by_user_id" json:"linked_by_user_id,omitempty"`
-	Status         string     `db:"status" json:"status"`
-	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+	ID              uuid.UUID  `db:"id" json:"id"`
+	OrgID           uuid.UUID  `db:"org_id" json:"org_id"`
+	IntegrationID   *uuid.UUID `db:"integration_id" json:"integration_id,omitempty"`
+	InstallationID  int64      `db:"installation_id" json:"installation_id"`
+	AccountLogin    string     `db:"account_login" json:"account_login"`
+	LinkedByUserID  *uuid.UUID `db:"linked_by_user_id" json:"linked_by_user_id,omitempty"`
+	Status          string     `db:"status" json:"status"`
+	AutoJoinEnabled bool       `db:"auto_join_enabled" json:"auto_join_enabled"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+type GitHubOrgMember struct {
+	InstallationID int64     `db:"installation_id" json:"installation_id"`
+	GitHubUserID   int64     `db:"github_user_id" json:"github_user_id"`
+	GitHubLogin    string    `db:"github_login" json:"github_login"`
+	SyncedAt       time.Time `db:"synced_at" json:"synced_at"`
+}
+
+type GitHubOrgAutoJoinCandidate struct {
+	OrgID          uuid.UUID `db:"org_id" json:"org_id"`
+	OrgName        string    `db:"org_name" json:"org_name"`
+	InstallationID int64     `db:"installation_id" json:"installation_id"`
+	AccountLogin   string    `db:"account_login" json:"account_login"`
+	AccountType    *string   `db:"account_type" json:"account_type,omitempty"`
+	EnabledAt      time.Time `db:"enabled_at" json:"enabled_at"`
+}
+
+type GitHubOrgAutoJoinSummary struct {
+	InstallationID     int64      `db:"installation_id" json:"installation_id"`
+	AccountLogin       string     `db:"account_login" json:"account_login"`
+	AccountType        *string    `db:"account_type" json:"account_type,omitempty"`
+	AutoJoinEnabled    bool       `db:"auto_join_enabled" json:"auto_join_enabled"`
+	RosterSyncedAt     *time.Time `db:"roster_synced_at" json:"roster_synced_at,omitempty"`
+	CapturedByOtherOrg bool       `db:"captured_by_other_org" json:"captured_by_other_org"`
 }
 
 type GitHubRepositoryClaimCandidate struct {
@@ -380,8 +415,9 @@ type Session struct {
 	// LinearPrepareState reflects the pre-start preparation step. "ready"
 	// gates turn 1 from starting until the primary Linear context snapshot
 	// has been captured.
-	LinearPrepareState LinearPrepareState `db:"linear_prepare_state" json:"linear_prepare_state"`
-	DeletedAt          *time.Time         `db:"deleted_at" json:"-"`
+	LinearPrepareState LinearPrepareState            `db:"linear_prepare_state" json:"linear_prepare_state"`
+	DeletedAt          *time.Time                    `db:"deleted_at" json:"-"`
+	CapabilitySnapshot []AgentCapabilitySnapshotItem `db:"capability_snapshot" json:"capability_snapshot,omitempty"`
 	// GitIdentitySource records which token authority the agent used for
 	// git pushes ("user" — the triggering user's GitHub OAuth token; "app"
 	// — the GitHub App installation token). Stamped at session-start by
@@ -396,7 +432,8 @@ type Session struct {
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	Threads []SessionThread `json:"threads"`
+	RepositoryFullName *string         `json:"repository_full_name,omitempty"`
+	Threads            []SessionThread `json:"threads"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is
@@ -546,6 +583,9 @@ func (s SessionDetail) MarshalJSON() ([]byte, error) {
 	base, err := s.Session.marshalJSONMap()
 	if err != nil {
 		return nil, err
+	}
+	if s.RepositoryFullName != nil {
+		base["repository_full_name"] = *s.RepositoryFullName
 	}
 	base["threads"] = s.Threads
 	return json.Marshal(base)
@@ -730,6 +770,10 @@ type SessionLog struct {
 	Message    string          `db:"message" json:"message"`
 	Metadata   json.RawMessage `db:"metadata" json:"metadata,omitempty"`
 	TurnNumber int             `db:"turn_number" json:"turn_number"`
+
+	MessageBytes     int  `db:"-" json:"message_bytes,omitempty"`
+	MessageChars     int  `db:"-" json:"message_chars,omitempty"`
+	MessageTruncated bool `db:"-" json:"message_truncated,omitempty"`
 }
 
 // SessionMessageSource identifies the originator of a session message.
@@ -924,13 +968,17 @@ type LatestJobError struct {
 
 // Job type constants for async work queue items.
 const (
-	JobTypePMAnalyze          = "pm_analyze"
-	JobTypePMBootstrap        = "pm_bootstrap"
-	JobTypePMContextRefresh   = "pm_context_refresh"
-	JobTypeProjectCycle       = "project_cycle"
-	JobTypeAutomationRun      = "automation_run"
-	JobTypeStartPreview       = "start_preview"
-	JobTypeStartBranchPreview = "start_branch_preview"
+	JobTypePMAnalyze             = "pm_analyze"
+	JobTypePMBootstrap           = "pm_bootstrap"
+	JobTypePMContextRefresh      = "pm_context_refresh"
+	JobTypeProjectCycle          = "project_cycle"
+	JobTypeAutomationRun         = "automation_run"
+	JobTypeStartPreview          = "start_preview"
+	JobTypeStartBranchPreview    = "start_branch_preview"
+	JobTypeAutoPreviewDeferred   = "auto_preview_deferred"
+	JobTypeSyncGitHubOrgRoster   = "sync_github_org_roster"
+	JobTypePreviewCachePrewarm   = "preview_cache_prewarm"
+	JobTypeBackfillPreviewGroups = "backfill_preview_groups"
 )
 
 // Job represents an async work queue item.
