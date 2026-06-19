@@ -5653,20 +5653,6 @@ func sanitizeSlackUserHandle(value string) string {
 	return b.String()
 }
 
-func truncateRunes(value string, maxRunes int) string {
-	if maxRunes <= 0 {
-		return ""
-	}
-	count := 0
-	for idx := range value {
-		if count == maxRunes {
-			return strings.TrimSpace(value[:idx])
-		}
-		count++
-	}
-	return value
-}
-
 func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile) string {
 	return renderSlackPromptWithUserResolver(context.Background(), text, permalink, threadMessages, references, files, nil)
 }
