@@ -132,7 +132,7 @@ export function deriveCreatePRActionState(input: CreatePRActionInput): LabeledLi
     return {
       visible: true,
       disabled: true,
-      disabledReason: "Run Review successfully before creating a PR",
+      disabledReason: "Run readiness checks successfully before creating a PR",
       label: "Create PR",
       spinning: false,
     };
