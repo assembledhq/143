@@ -488,6 +488,10 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').SessionLogDetail>>(`/api/v1/sessions/${sessionId}/logs/${logId}`),
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
+    getReadiness: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/readiness`),
+    runReadiness: (sessionId: string) =>
+      post<import('./types').SingleResponse<import('./types').PRReadinessRun>>(`/api/v1/sessions/${sessionId}/readiness/run`, {}),
     createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
         ...(options.draft !== undefined ? { draft: options.draft } : {}),

@@ -295,6 +295,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		Automations:         db.NewAutomationStore(pool),
 		AutomationRuns:      automationRunStore,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
+		PRReadiness:         db.NewPRReadinessStore(pool),
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        pullRequestStore,

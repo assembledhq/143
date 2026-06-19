@@ -991,6 +991,57 @@ export interface SessionWorkspaceGenerationChangedEvent {
   reason?: string;
 }
 
+export type PRReadinessRunStatus = "queued" | "running" | "passed" | "warnings" | "blocked" | "failed";
+export type PRReadinessCheckStatus = "passed" | "warning" | "failed" | "skipped";
+export type PRReadinessEnforcement = "off" | "advisory" | "blocking";
+export type PRReadinessCheckType =
+  | "freshness"
+  | "agent_review_clean"
+  | "diff_collected"
+  | "test_evidence_present"
+  | "risk_flags"
+  | "dependency_config_risk"
+  | "generated_file_churn"
+  | "context_complete"
+  | "review_packet_draftable";
+
+export interface PRReadinessCheck {
+  id: string;
+  org_id: string;
+  run_id: string;
+  session_id: string;
+  check_type: PRReadinessCheckType;
+  status: PRReadinessCheckStatus;
+  enforcement: PRReadinessEnforcement;
+  title: string;
+  summary: string;
+  details?: unknown;
+  action?: string;
+  created_at: string;
+}
+
+export interface PRReadinessRun {
+  id: string;
+  org_id: string;
+  session_id: string;
+  repository_id?: string;
+  status: PRReadinessRunStatus;
+  evaluated_workspace_revision: number;
+  evaluated_snapshot_key?: string;
+  summary?: string;
+  review_packet?: unknown;
+  triggered_by_user_id?: string;
+  started_at: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+  checks?: PRReadinessCheck[];
+}
+
+export interface PRReadinessResponse {
+  latest?: PRReadinessRun;
+}
+
 export interface SessionThreadFileEvent {
   id: number;
   org_id: string;

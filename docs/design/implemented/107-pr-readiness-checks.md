@@ -1,12 +1,12 @@
 # Design: PR Readiness Checks
 
-> **Status:** Future | **Last reviewed:** 2026-06-19
+> **Status:** Implemented v1 | **Last reviewed:** 2026-06-19
 
 ## Summary
 
 PR Readiness Checks are an automatic pre-PR quality layer for 143 sessions. They answer: "Is this change ready for live review, or will it waste reviewer time?"
 
-The first version should expose a one-click **Run readiness checks** action in session Overview. Builders can be blocked from PR creation when required automatic checks fail or are stale. Engineers and admins see the same checks in advisory mode by default, so the system catches slop without taking over engineering judgment.
+The first version exposes a one-click **Run readiness checks** action in session Overview. Builders can be blocked from PR creation when required automatic checks fail or are stale. Engineers and admins see the same checks in advisory mode by default, so the system catches slop without taking over engineering judgment.
 
 This is not a human approval system. Readiness must come from platform-observed evidence: session snapshots, diffs, agent review-loop results, command output, repository metadata, and GitHub/provider state. A person can click a button to trigger checks, but "a person said this is fine" is not readiness evidence.
 

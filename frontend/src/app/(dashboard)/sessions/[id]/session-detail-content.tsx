@@ -135,7 +135,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, PRReadinessCheck, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -647,6 +647,129 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
   );
 }
 
+function PRReadinessCard({ session }: { session: Session }) {
+  const queryClient = useQueryClient();
+  const readinessQuery = useQuery({
+    queryKey: queryKeys.sessions.readiness(session.id),
+    queryFn: () => api.sessions.getReadiness(session.id),
+    refetchInterval: (query) => {
+      const status = query.state.data?.data.latest?.status;
+      return status === "queued" || status === "running" ? pollMs(3000) : false;
+    },
+  });
+  const readiness = readinessQuery.data?.data.latest;
+  const runMutation = useMutation({
+    mutationFn: () => api.sessions.runReadiness(session.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(session.id) });
+      toast.success("Readiness checks started");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness checks could not be started");
+    },
+  });
+  const status = readiness?.status;
+  const running = status === "queued" || status === "running" || runMutation.isPending;
+  const checks = readiness?.checks ?? [];
+  const passed = checks.filter((check) => check.status === "passed");
+  const warnings = checks.filter((check) => check.status === "warning" || (check.status === "failed" && check.enforcement !== "blocking"));
+  const blocked = checks.filter((check) => check.status === "failed" && check.enforcement === "blocking");
+  const stale = readiness && (
+    readiness.evaluated_workspace_revision !== session.workspace_revision ||
+    (readiness.evaluated_snapshot_key ?? "") !== (session.snapshot_key ?? "")
+  );
+  const title = !readiness
+    ? "Not checked yet"
+    : running
+      ? "Checking..."
+      : stale
+        ? "Stale after latest changes"
+        : readiness.summary || readinessStatusLabel(readiness.status);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="text-xs flex items-center gap-2">
+            {readinessStatusIcon(readiness, stale, running)}
+            PR readiness
+          </CardTitle>
+          <Button
+            size="xs"
+            variant={readiness ? "outline" : "default"}
+            onClick={() => runMutation.mutate()}
+            disabled={runMutation.isPending || session.status === "running"}
+          >
+            {runMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
+            {readiness ? "Re-run" : "Run readiness checks"}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        <div className="font-medium text-foreground">{title}</div>
+        {running && (
+          <div className="space-y-1 text-muted-foreground">
+            <div>Collecting diff</div>
+            <div>Running agent review</div>
+            <div>Checking test evidence</div>
+            <div>Checking risk signals</div>
+          </div>
+        )}
+        {!running && readiness && (
+          <div className="space-y-3">
+            <ReadinessCheckGroup title="Passed" checks={passed} empty="None" />
+            <ReadinessCheckGroup title="Warnings" checks={warnings} empty="None" />
+            <ReadinessCheckGroup title="Blocked" checks={blocked} empty="None" />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReadinessCheckGroup({ title, checks, empty }: { title: string; checks: PRReadinessCheck[]; empty: string }) {
+  return (
+    <div className="space-y-1">
+      <div className="font-medium text-foreground">{title}</div>
+      {checks.length === 0 ? (
+        <div className="text-muted-foreground">{empty}</div>
+      ) : (
+        <div className="space-y-1">
+          {checks.map((check) => (
+            <div key={check.id || check.check_type} className="flex items-start gap-2 text-muted-foreground">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+              <span>{check.title}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function readinessStatusLabel(status: PRReadinessRun["status"]) {
+  switch (status) {
+    case "passed":
+      return "Ready";
+    case "warnings":
+      return "Ready with warnings";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Checks failed";
+    default:
+      return "Checking...";
+  }
+}
+
+function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boolean | undefined, running: boolean) {
+  if (running) return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
+  if (!readiness) return <ClipboardList className="h-3.5 w-3.5 text-muted-foreground" />;
+  if (stale || readiness.status === "blocked" || readiness.status === "failed") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
+  if (readiness.status === "warnings") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
+  return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
+}
+
 function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
@@ -691,6 +814,8 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
   return (
     <div className="space-y-4">
+      <PRReadinessCard session={session} />
+
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
         <Card className="border-l-2 border-l-success bg-success/5">
@@ -4379,6 +4504,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.sessions.listReviewLoops(id),
     enabled: !!session,
   });
+  const { data: readinessData } = useQuery({
+    queryKey: queryKeys.sessions.readiness(id),
+    queryFn: () => api.sessions.getReadiness(id),
+    enabled: !!session,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data.latest?.status;
+      return status === "queued" || status === "running" ? pollMs(3000) : false;
+    },
+  });
   const { data: orgSettingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
@@ -4388,7 +4522,16 @@ export function SessionDetailContent({ id }: { id: string }) {
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
   const hasCleanReviewLoop = hasCleanReviewLoopForSnapshot(reviewLoopsData?.data, session?.snapshot_key);
   const builderRequiresReviewBeforePR = user?.role === "builder" && (orgSettings.builder_permissions?.require_review_before_pr ?? true);
-  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || hasCleanReviewLoop;
+  const latestReadiness = readinessData?.data.latest;
+  const readinessFresh = !!latestReadiness &&
+    latestReadiness.status !== "queued" &&
+    latestReadiness.status !== "running" &&
+    latestReadiness.status !== "blocked" &&
+    latestReadiness.status !== "failed" &&
+    latestReadiness.evaluated_workspace_revision === session?.workspace_revision &&
+    (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
+    !(latestReadiness.checks ?? []).some((check) => check.enforcement === "blocking" && check.status === "failed");
+  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh || hasCleanReviewLoop;
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
