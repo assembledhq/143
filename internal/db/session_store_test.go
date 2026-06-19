@@ -1271,6 +1271,34 @@ func TestSessionStore_SetRepositoryContextScopesToOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "repository context update should be scoped by org_id")
 }
 
+func TestSessionStore_UpdateInputManifestScopesToOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	inputManifest := json.RawMessage(`{"slack":{"routing_mode":"answer_only"}}`)
+	row := newAgentSessionRow(sessionID, uuid.Nil, orgID, now)
+	setSessionTestColumnValue(row, "input_manifest", inputManifest)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET input_manifest = @input_manifest[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
+
+	got, err := store.UpdateInputManifest(context.Background(), orgID, sessionID, inputManifest)
+	require.NoError(t, err, "UpdateInputManifest should update the session input manifest inside the org")
+	require.JSONEq(t, string(inputManifest), string(got.InputManifest), "UpdateInputManifest should return the persisted manifest")
+	require.NoError(t, mock.ExpectationsWereMet(), "input manifest update should be scoped by org_id")
+}
+
 func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
 	t.Parallel()
 

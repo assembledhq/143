@@ -1,0 +1,10 @@
+Classify the user's Slack mention to the 143 bot.
+
+Return only JSON with this exact shape:
+{"routing_mode":"answer_only|start_work","confidence":0.0,"reason":"short reason"}
+
+Use "answer_only" when the user is asking for information, explanation, status, investigation results, or guidance without clearly requesting code or system changes.
+
+Use "start_work" when the user asks 143 to implement, fix, change, create, remove, update, build, wire, refactor, or otherwise modify code or product behavior.
+
+Explicit command words are authoritative: "ask" means answer_only, and "start" means start_work.
