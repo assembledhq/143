@@ -1,10 +1,12 @@
 # Design: Foreign Key Policy and Hot Table Audit
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-12
+> **Status:** Implemented | **Last reviewed:** 2026-06-19
 
 ## Summary
 
-FKs are the default; hot append-only tables need an exception process because parent-row lock fan-in can become a Postgres operational risk. 143 should keep database-backed foreign keys for control-plane and moderate-write product data, while allowing reviewed exceptions for very high-write append-only/event/log/cache/runtime tables. These tables can create Postgres MultiXact pressure because foreign-key checks take shared locks on referenced parent rows. Under normal vacuum health this is usually manageable; under replication-slot horizon pinning, large dead-tuple backlogs, or full-load replication pressure, those shared-lock records can turn into `MultiXactOffsetSLRU` thrash and broad database latency.
+Foreign keys are the default for 143 schema design. Most product, control-plane, lifecycle, settings, billing, and source-of-truth tables should keep DB-backed parent FKs, including `org_id uuid NOT NULL REFERENCES organizations(id)`.
+
+The exception is for reviewed hot tables: very high-write append-only, event, log, cache, telemetry, or runtime-state tables where parent-row lock fan-in can become a Postgres operational risk. These tables may omit selected parent FKs only when the write path validates parent existence and tenant ownership in code, and when orphan retention or cleanup is acceptable.
 
 The desired policy is:
 
@@ -14,7 +16,7 @@ The desired policy is:
 - High-write append-only, event, log, cache, and runtime tables require an explicit exception review before omitting parent-row FKs.
 - If an exception omits a DB FK, the write path must prove parent existence and tenant ownership in code, preferably in the same request/transaction that authorizes the operation.
 
-This is not a proposal to remove all FKs. It is a proposal to keep FKs as the ordinary path and make rare hot-table exceptions explicit, justified, and tested.
+This policy does not make FKs optional by default. It keeps FKs as the ordinary path and makes rare hot-table exceptions explicit, justified, and tested.
 
 ## Implementation Status
 
@@ -26,7 +28,7 @@ Implemented:
 - `SessionLogStore.Create` now validates the parent session/org with a normal read before inserting a log row. `thread_id` is retained as attribution metadata but does not require a `session_threads` lookup on the hot write path.
 - `preview_dependency_cache_locations` no longer has DB FKs to `organizations` or `repositories` as of migration `000210_hot_table_fk_removal`.
 
-Still open:
+Follow-up work:
 
 - Production FK/SLRU/dead-tuple audit once read-only prod access is available.
 - Broader `org_id ... ON DELETE CASCADE` policy drift cleanup.
@@ -74,7 +76,7 @@ Production DB stats were not available during this pass. The findings below are 
 
 `ON DELETE CASCADE` is more operationally dangerous than a simple FK because one parent delete can trigger large child work. Org-level cascades should be treated as suspect unless the table is small, purely owned, and explicitly safe to delete during an org deletion workflow. Prefer soft-delete plus explicit cleanup for high-value parents.
 
-## Proposed Policy
+## Policy
 
 ### Default
 

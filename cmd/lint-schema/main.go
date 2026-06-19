@@ -81,7 +81,7 @@ var (
 	// omit the REFERENCES organizations(id) FK. The reason="..." clause is
 	// required. Use only for high-write append-only tables where the write path
 	// validates parent ownership in code.
-	// See docs/design/96-foreign-key-policy-and-hot-table-audit.md.
+	// See docs/design/implemented/96-foreign-key-policy-and-hot-table-audit.md.
 	hotTableFKMarkerRE = regexp.MustCompile(`--[^\n]*lint:allow-hot-table-no-fk\s+reason="[^"]+"`)
 )
 
