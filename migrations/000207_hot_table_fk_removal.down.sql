@@ -1,5 +1,3 @@
-BEGIN;
-
 -- session_logs: PostgreSQL does not support NOT VALID foreign keys on
 -- partitioned tables, so these constraints are restored with full row
 -- validation. Rolling back on a large session_logs table requires a
@@ -32,5 +30,3 @@ ALTER TABLE preview_dependency_cache_locations
 ALTER TABLE preview_dependency_cache_locations
     ADD CONSTRAINT preview_dependency_cache_locations_repo_id_fkey
     FOREIGN KEY (repo_id) REFERENCES repositories(id) ON DELETE CASCADE NOT VALID;
-
-COMMIT;
