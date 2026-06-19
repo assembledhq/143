@@ -68,6 +68,7 @@ type SlackContextResolveResult struct {
 	PullRequestID              *uuid.UUID
 	PreviewID                  *uuid.UUID
 	RoutingMode                SlackRoutingMode
+	RoutingReason              string
 	ContextSummary             SlackSessionContextSummary
 	Missing                    []MissingSlackContext
 }

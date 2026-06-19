@@ -1254,6 +1254,30 @@ func (s *SessionStore) SetRepositoryContext(ctx context.Context, orgID, sessionI
 	return session, nil
 }
 
+func (s *SessionStore) UpdateInputManifest(ctx context.Context, orgID, sessionID uuid.UUID, inputManifest json.RawMessage) (models.Session, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE sessions
+		SET input_manifest = @input_manifest,
+			last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		RETURNING `+sessionSelectColumns,
+		pgx.NamedArgs{
+			"id":             sessionID,
+			"org_id":         orgID,
+			"input_manifest": inputManifest,
+		})
+	if err != nil {
+		return models.Session{}, fmt.Errorf("update session input manifest: %w", err)
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return models.Session{}, fmt.Errorf("collect session input manifest update: %w", err)
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return session, nil
+}
+
 // UpdatePMPlanID links a session to a PM plan. Bumps last_activity_at so the
 // method is self-contained — callers do not have to remember to pair it with
 // a separate activity bump. Today's sole caller already calls UpdateResult
