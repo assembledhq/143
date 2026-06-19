@@ -1,7 +1,7 @@
 # Frontend production image using Next.js standalone output.
 # See docs/design/36-docker-agents-vps-architecture.md
 
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./frontend/
 COPY frontend/source.config.ts ./frontend/
@@ -13,7 +13,7 @@ ARG BUILD_SHA=dev
 ENV NEXT_PUBLIC_BUILD_SHA=$BUILD_SHA
 RUN npm run build
 
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 COPY --from=builder /app/frontend/.next/standalone ./
 COPY --from=builder /app/frontend/.next/static ./frontend/.next/static
