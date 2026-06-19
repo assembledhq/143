@@ -396,7 +396,7 @@ func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
 func TestSessionPreviewPrewarmEnumsMatchMigrationChecks(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000205_session_preview_prewarm_policy.up.sql")
+	body, err := os.ReadFile("../../migrations/000208_session_preview_prewarm_policy.up.sql")
 	require.NoError(t, err, "session prewarm migration file should be readable")
 
 	tests := []struct {

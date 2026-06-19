@@ -393,6 +393,21 @@ export interface PreviewPolicySummary {
   repository_full_name: string;
   auto_mode: "off" | "warm" | "on";
   session_prewarm_mode: "off" | "cache" | "smart";
+  pr_preview_surfaces_enabled: boolean;
+  github_pr_comment_enabled: boolean;
+  github_commit_status_enabled: boolean;
+  preview_configured: boolean;
+  preview_success_recorded: boolean;
+  preview_config_names?: string[];
+  preview_config_default_name?: string;
+  preview_config_requires_selection?: boolean;
+  preview_ready: boolean;
+  preview_readiness_missing_reason?: string;
+  github_pr_comment_permission_ok: boolean;
+  github_commit_status_permission_ok: boolean;
+  last_surface_sync_sha?: string;
+  last_surface_sync_at?: string;
+  last_surface_sync_error?: string;
   open_pr_count: number;
   updated_at?: string;
 }
