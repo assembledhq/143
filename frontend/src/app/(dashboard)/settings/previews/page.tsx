@@ -168,8 +168,8 @@ export default function PreviewSettingsPage() {
         />
         <Tabs defaultValue="auto-preview" className="space-y-5">
           <TabsList>
-            <TabsTrigger value="auto-preview">Auto-preview</TabsTrigger>
-            <TabsTrigger value="secrets">Secrets</TabsTrigger>
+            <TabsTrigger value="auto-preview">Auto-start policy</TabsTrigger>
+            <TabsTrigger value="secrets">Secret bundles</TabsTrigger>
           </TabsList>
           <TabsContent value="auto-preview" className="space-y-4">
             <AutoPreviewSection />

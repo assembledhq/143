@@ -99,10 +99,11 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     await waitFor(() => {
-      expect(screen.getByText('Organization')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Organization', level: 1 })).toBeInTheDocument();
     });
 
     expect(screen.getByLabelText('Organization name')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'General settings', level: 1 })).not.toBeInTheDocument();
   });
 
   it('displays the organization name from server', async () => {
@@ -253,7 +254,7 @@ describe('SettingsPage', () => {
   it('does not render sandbox runtime controls after they move to Runtime settings', async () => {
     renderWithProviders(<SettingsPage />);
 
-    expect(await screen.findByText('Organization')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Organization', level: 1 })).toBeInTheDocument();
     expect(screen.queryByText('Network access')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Use static egress IP for sessions and previews')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Active previews per user')).not.toBeInTheDocument();

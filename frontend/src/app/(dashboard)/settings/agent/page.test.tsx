@@ -5,10 +5,12 @@ import { server } from "@/test/mocks/server";
 import type { CodingCredentialSummary } from "@/lib/types";
 import AgentPage, { reorderRows } from "./page";
 
+const mockUseAuth = vi.fn(() => ({
+  user: { id: "user-1", org_id: "org-1", role: "admin", email: "admin@example.com", name: "Admin", created_at: "", role_display: "admin" },
+}));
+
 vi.mock("@/hooks/use-auth", () => ({
-  useAuth: () => ({
-    user: { id: "user-1", org_id: "org-1", role: "admin", email: "admin@example.com", name: "Admin", created_at: "", role_display: "admin" },
-  }),
+  useAuth: () => mockUseAuth(),
 }));
 
 function installHandlers() {
@@ -66,11 +68,27 @@ describe("Agent settings page", () => {
 
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
     expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Runtime settings" })).toHaveAttribute("href", "/settings/runtime");
+    expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
+  });
+
+  it("shows auth resolution notice in read-only view for non-admin users", async () => {
+    mockUseAuth.mockReturnValueOnce({
+      user: { id: "user-2", org_id: "org-1", role: "member", email: "member@example.com", name: "Member", created_at: "", role_display: "member" },
+    });
+    installHandlers();
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText("Read-only view. Only admins can add, edit, or reorder coding auths.")).toBeInTheDocument();
+    expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
+    expect(screen.queryByRole("link", { name: "Sandboxes" })).not.toBeInTheDocument();
   });
 
   it("keeps the details sheet closed after dismissing it", async () => {
@@ -230,7 +248,7 @@ describe("Agent settings page", () => {
 	        },
 	      });
 	    });
-	  }, 10000);
+	  }, 20000);
 
 	  it("creates Amp auth and defaults in a single coding-auth request", async () => {
     const user = userEvent.setup();

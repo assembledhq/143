@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { APIClient, APIToken, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse } from '@/lib/types';
+import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -310,6 +310,16 @@ export const mockAPITokens: APIToken[] = [
 ];
 
 export const handlers = [
+  http.get('/api/v1/auth/providers', () => {
+    return HttpResponse.json({
+      data: {
+        github: true,
+        google: true,
+        email: true,
+      },
+    } satisfies SingleResponse<AuthProviders>);
+  }),
+
   http.get('/api/v1/auth/me', () => {
     return HttpResponse.json({
       data: mockMembers[0],
@@ -872,6 +882,13 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 });
   }),
 
+  http.get('/api/v1/auth/cli-tokens', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<CliToken>);
+  }),
+
   http.get('/api/v1/settings', () => {
     return HttpResponse.json({
       data: {
@@ -900,6 +917,21 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/agent-capabilities', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<AgentCapabilityDefinition>);
+  }),
+
+  http.get('/api/v1/automations/:id/capabilities', () => {
+    return HttpResponse.json({
+      data: {
+        capabilities: [],
+      },
+    } satisfies SingleResponse<AgentCapabilityPolicyResponse>);
+  }),
+
   // Default to no pending invites — the org-switcher polls this on mount, so
   // every test rendering the switcher would otherwise hit an unhandled-request
   // warning. Tests that want to exercise the pending-invites surface override
@@ -922,6 +954,13 @@ export const handlers = [
         settings: {},
       },
     });
+  }),
+
+  http.get('/api/v1/evals/release-gates', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<EvalReleaseGate>);
   }),
 
   http.get('/api/v1/settings/codex-auth/status', () => {

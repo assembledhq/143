@@ -27,6 +27,7 @@ import (
 type fakeBranchPreviewGitHub struct {
 	token         string
 	head          string
+	prHead        ghservice.PullRequestHead
 	configContent string
 }
 
@@ -103,7 +104,10 @@ func (f fakeBranchPreviewGitHub) CommitExists(context.Context, string, string, s
 }
 
 func (f fakeBranchPreviewGitHub) GetPullRequestHead(context.Context, string, string, string, int) (ghservice.PullRequestHead, error) {
-	return ghservice.PullRequestHead{}, nil
+	if f.prHead.Number != 0 || f.prHead.Branch != "" || f.prHead.SHA != "" || f.prHead.State != "" || f.prHead.HTMLURL != "" {
+		return f.prHead, nil
+	}
+	return ghservice.PullRequestHead{Number: 7, HTMLURL: "https://github.com/acme/app/pull/7", State: "open", Branch: "feature/previews", SHA: f.head}, nil
 }
 
 func (f fakeBranchPreviewGitHub) GetFileContent(context.Context, string, string, string, string, string) (string, error) {
@@ -536,6 +540,221 @@ func TestBranchPreviewHandler_GetPullRequestRejectsPreviewTokenWithoutReadScope(
 
 	require.Equal(t, http.StatusForbidden, rr.Code, "GetPullRequest should reject preview API tokens without read scope")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_GetPullRequestStatusIntentDoesNotCreateOrStart(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	repoCols := []string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}
+	repoRow := []any{repoID, orgID, integrationID, int64(123), "acme/app", "main", true, nil, nil, "https://github.com/acme/app.git", int64(456), "active", nil, nil, []byte(`{}`), now, now}
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoCols).AddRow(repoRow...))
+	mock.ExpectQuery("SELECT .+ FROM preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewLinkTestCols))
+	mock.ExpectQuery("SELECT .+ FROM preview_targets").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols))
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoCols).AddRow(repoRow...))
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: head},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/github/acme/app/pull/7?intent=status", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("owner", "acme")
+	rctx.URLParams.Add("repo", "app")
+	rctx.URLParams.Add("number", "7")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.GetPullRequest(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "status intent should return a launch decision instead of creating a preview")
+	var resp models.SingleResponse[branchPreviewResponse]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "status intent response should be valid JSON")
+	require.Equal(t, "target_created", resp.Data.Status, "status intent should describe the current target state without creating a target")
+	require.NotNil(t, resp.Data.Launch, "status intent should still return a launch decision")
+	require.Equal(t, models.PreviewLaunchActionStart, resp.Data.Launch.Action, "status intent should describe that opening would start a preview")
+	require.False(t, resp.Data.Launch.AutoOpen, "status intent must not auto-open because it was not a launch gesture")
+	require.NoError(t, mock.ExpectationsWereMet(), "status intent must not create targets, links, or jobs")
+}
+
+func TestBranchPreviewHandler_GetPullRequestUsesStableLinkForNamedConfigTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	targetID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	repoCols := []string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}
+	repoRow := []any{repoID, orgID, integrationID, int64(123), "acme/app", "main", true, nil, nil, "https://github.com/acme/app.git", int64(456), "active", nil, nil, []byte(`{}`), now, now}
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoCols).AddRow(repoRow...))
+	mock.ExpectQuery("SELECT .+ FROM preview_links").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewLinkTestCols).AddRow(
+			linkID, orgID, targetID, string(models.PreviewLinkTypePullRequest), "github/acme/app/pull/7", &repoID, ptrToInt(7), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
+			targetID, orgID, repoID, "feature/previews", head, "web", "", string(models.PreviewSourceTypePullRequest),
+			"acme/app#7@"+head, "https://github.com/acme/app/pull/7", userID, nil, nil, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoCols).AddRow(repoRow...))
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: head},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/github/acme/app/pull/7?intent=status", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("owner", "acme")
+	rctx.URLParams.Add("repo", "app")
+	rctx.URLParams.Add("number", "7")
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.GetPullRequest(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "status intent should resolve the linked PR target")
+	var resp models.SingleResponse[branchPreviewResponse]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "linked target response should be valid JSON")
+	require.Equal(t, targetID, resp.Data.TargetID, "stable PR link should preserve the linked target even when it has a named config")
+	require.Equal(t, "web", resp.Data.PreviewConfigName, "stable PR link should preserve the target preview config name")
+	require.Equal(t, models.PreviewLaunchActionStart, resp.Data.Launch.Action, "linked target without runtime should still describe the start action")
+	require.NoError(t, mock.ExpectationsWereMet(), "linked target lookup must not fall back to creating another target")
+}
+
+func TestBranchPreviewHandler_GetPullRequestReturnsBlockedLaunchForConfigProblems(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		configContent  string
+		expectedReason models.PreviewLaunchReason
+	}{
+		{
+			name: "multiple preview configs require selection",
+			configContent: `{"preview":{"configs":{
+				"api":{"name":"api","command":["go","run","."],"port":8080},
+				"web":{"name":"web","command":["npm","run","dev"],"port":3000}
+			}}}`,
+			expectedReason: models.PreviewLaunchReasonConfigRequired,
+		},
+		{
+			name:           "invalid preview config blocks before launch",
+			configContent:  `{"preview":`,
+			expectedReason: models.PreviewLaunchReasonConfigInvalid,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			userID := uuid.New()
+			repoID := uuid.New()
+			integrationID := uuid.New()
+			now := time.Now()
+			head := "0123456789abcdef0123456789abcdef01234567"
+			repoCols := []string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}
+			repoRow := []any{repoID, orgID, integrationID, int64(123), "acme/app", "main", true, nil, nil, "https://github.com/acme/app.git", int64(456), "active", nil, nil, []byte(`{}`), now, now}
+			mock.ExpectQuery("SELECT .+ FROM repositories").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(repoCols).AddRow(repoRow...))
+			mock.ExpectQuery("SELECT .+ FROM preview_links").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(branchPreviewLinkTestCols))
+			mock.ExpectQuery("SELECT .+ FROM preview_targets").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols))
+			mock.ExpectQuery("SELECT .+ FROM repositories").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(repoCols).AddRow(repoRow...))
+
+			handler := NewBranchPreviewHandler(
+				db.NewPreviewStore(mock),
+				db.NewRepositoryStore(mock),
+				fakeBranchPreviewGitHub{token: "ghs_test", head: head, configContent: tt.configContent},
+				nil,
+				"https://app.143.dev",
+				"https://{id}.preview.143.dev",
+			)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/previews/github/acme/app/pull/7", nil)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("owner", "acme")
+			rctx.URLParams.Add("repo", "app")
+			rctx.URLParams.Add("number", "7")
+			ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+			ctx = middleware.WithOrgID(ctx, orgID)
+			ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "member"})
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			handler.GetPullRequest(rr, req)
+
+			require.Equal(t, http.StatusOK, rr.Code, "config problems should render the stable PR page with blocked launch guidance")
+			var resp models.SingleResponse[branchPreviewResponse]
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "blocked launch response should be valid JSON")
+			require.NotNil(t, resp.Data.Launch, "blocked launch response should include launch decision")
+			require.Equal(t, models.PreviewLaunchActionBlocked, resp.Data.Launch.Action, "config problem should block launch")
+			require.Equal(t, tt.expectedReason, resp.Data.Launch.Reason, "blocked launch should describe the config problem")
+			require.False(t, resp.Data.Launch.AutoOpen, "config-blocked previews must not auto-open")
+			require.NoError(t, mock.ExpectationsWereMet(), "config-blocked launch must not create targets, links, or jobs")
+		})
+	}
 }
 
 func TestBranchPreviewHandler_CreateRejectsAmbiguousPreviewConfig(t *testing.T) {

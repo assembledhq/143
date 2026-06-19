@@ -250,6 +250,7 @@ type OrgSettings struct {
 	PRAuthorship               PRAuthorship           `json:"pr_authorship,omitempty"`
 	PRDraftDefault             bool                   `json:"pr_draft_default,omitempty"`
 	AutoArchiveOnPRClose       bool                   `json:"auto_archive_on_pr_close,omitempty"`
+	DefaultWorkRepositoryID    *uuid.UUID             `json:"default_work_repository_id,omitempty"`
 	BuilderPermissions         BuilderPermissions     `json:"builder_permissions,omitempty"`
 	SandboxNetwork             SandboxNetworkSettings `json:"sandbox_network,omitempty"`
 	// CodingAgentTabToolsEnabled controls whether sandbox agents may use

@@ -26,7 +26,7 @@ const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	icon_type, icon_value,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
-	github_event_triggers,
+	github_event_triggers, github_event_filters,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, external_metadata, created_at, updated_at, deleted_at`
 
@@ -46,7 +46,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 		&a.IconType, &a.IconValue,
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
 		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
-		&githubEventTriggers,
+		&githubEventTriggers, &a.GitHubEventFilters,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
 	)
@@ -97,19 +97,23 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
 			identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
-			github_event_triggers,
+			github_event_triggers, github_event_filters,
 			next_run_at, enabled, created_by, priority, external_metadata
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
 			@identity_scope, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
-			@github_event_triggers,
+			@github_event_triggers, @github_event_filters,
 			@next_run_at, @enabled, @created_by, @priority, @external_metadata
 		) RETURNING id, created_at, updated_at`
 	metadata := a.ExternalMetadata
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)
+	}
+	githubEventFilters := a.GitHubEventFilters
+	if len(githubEventFilters) == 0 {
+		githubEventFilters = json.RawMessage(`{}`)
 	}
 
 	row := s.db.QueryRow(ctx, query, pgx.NamedArgs{
@@ -135,6 +139,7 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"cron_expression":       a.CronExpression,
 		"timezone":              a.Timezone,
 		"github_event_triggers": automationGitHubEventsToStrings(a.GitHubEventTriggers),
+		"github_event_filters":  githubEventFilters,
 		"next_run_at":           a.NextRunAt,
 		"enabled":               a.Enabled,
 		"created_by":            a.CreatedBy,
@@ -255,13 +260,18 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			pre_pr_review_loops = @pre_pr_review_loops,
 			schedule_type = @schedule_type, interval_value = @interval_value,
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
-			timezone = @timezone, github_event_triggers = @github_event_triggers, next_run_at = @next_run_at,
+			timezone = @timezone, github_event_triggers = @github_event_triggers,
+			github_event_filters = @github_event_filters, next_run_at = @next_run_at,
 			enabled = @enabled, paused_by = @paused_by, paused_at = @paused_at,
 			priority = @priority, external_metadata = @external_metadata, updated_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	metadata := a.ExternalMetadata
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)
+	}
+	githubEventFilters := a.GitHubEventFilters
+	if len(githubEventFilters) == 0 {
+		githubEventFilters = json.RawMessage(`{}`)
 	}
 
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
@@ -288,6 +298,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		"cron_expression":       a.CronExpression,
 		"timezone":              a.Timezone,
 		"github_event_triggers": automationGitHubEventsToStrings(a.GitHubEventTriggers),
+		"github_event_filters":  githubEventFilters,
 		"next_run_at":           a.NextRunAt,
 		"enabled":               a.Enabled,
 		"paused_by":             a.PausedBy,
@@ -635,14 +646,14 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 
 const automationRunColumns = `id, automation_id, org_id, triggered_at, triggered_by,
 	triggered_by_user_id, scheduled_time, goal_snapshot, config_snapshot,
-	status, completed_at, result_summary, created_at, updated_at`
+	status, capability_snapshot, completed_at, result_summary, created_at, updated_at`
 
 func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 	var r models.AutomationRun
 	err := row.Scan(
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
 		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot, &r.ConfigSnapshot,
-		&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
+		&r.Status, &r.CapabilitySnapshot, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
 	)
 	return r, err
 }
@@ -658,10 +669,10 @@ type runInserter interface {
 const createAutomationRunSQL = `
 	INSERT INTO automation_runs (
 		automation_id, org_id, triggered_by, triggered_by_user_id, scheduled_time,
-		goal_snapshot, config_snapshot, status
+		goal_snapshot, config_snapshot, status, capability_snapshot
 	) VALUES (
 		@automation_id, @org_id, @triggered_by, @triggered_by_user_id, @scheduled_time,
-		@goal_snapshot, @config_snapshot, @status
+		@goal_snapshot, @config_snapshot, @status, @capability_snapshot
 	)
 	ON CONFLICT (automation_id, scheduled_time) WHERE scheduled_time IS NOT NULL
 	DO NOTHING
@@ -672,6 +683,9 @@ const createAutomationRunSQL = `
 // index only fires when scheduled_time IS NOT NULL (i.e. scheduler-triggered
 // runs), so manual runs always insert successfully.
 func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (bool, error) {
+	if r.CapabilitySnapshot == nil {
+		r.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
+	}
 	configJSON, err := json.Marshal(r.ConfigSnapshot)
 	if err != nil {
 		return false, fmt.Errorf("marshal config snapshot: %w", err)
@@ -686,6 +700,7 @@ func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (boo
 		"goal_snapshot":        r.GoalSnapshot,
 		"config_snapshot":      configJSON,
 		"status":               r.Status,
+		"capability_snapshot":  r.CapabilitySnapshot,
 	})
 	err = row.Scan(&r.ID, &r.TriggeredAt, &r.CreatedAt, &r.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -703,6 +718,34 @@ func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.Automation
 // CreateRunInTx inserts a new automation run inside an existing transaction.
 func (s *AutomationRunStore) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
 	return insertRun(ctx, tx, r)
+}
+
+func (s *AutomationRunStore) ClaimTriggerDedupe(ctx context.Context, orgID, automationID uuid.UUID, dedupeKey string, expiresAt time.Time) (bool, error) {
+	row := s.db.QueryRow(ctx, `
+		WITH cleanup AS (
+			DELETE FROM automation_trigger_dedupes
+			WHERE expires_at <= now()
+		)
+		INSERT INTO automation_trigger_dedupes (org_id, automation_id, dedupe_key, expires_at)
+		VALUES (@org_id, @automation_id, @dedupe_key, @expires_at)
+		ON CONFLICT DO NOTHING
+		RETURNING dedupe_key`,
+		pgx.NamedArgs{
+			"org_id":        orgID,
+			"automation_id": automationID,
+			"dedupe_key":    dedupeKey,
+			"expires_at":    expiresAt,
+		},
+	)
+	var inserted string
+	err := row.Scan(&inserted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("claim automation trigger dedupe: %w", err)
+	}
+	return true, nil
 }
 
 // GetByID returns a single automation run scoped to the given org and parent

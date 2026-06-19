@@ -12,9 +12,13 @@ import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
   PREVIEW_BOOTSTRAP_TOKEN_EVENT,
+  PREVIEW_BOOTSTRAP_TIMEOUT_ERROR,
+  PREVIEW_BOOTSTRAP_TIMEOUT_MS,
+  previewBootstrapTimeoutDetails,
 } from "@/lib/preview-bootstrap";
 
-const BOOTSTRAP_TIMEOUT_MS = 5_000;
+const POPUP_NAVIGATION_POLL_MS = 250;
+const POPUP_NAVIGATION_TIMEOUT_MS = 30_000;
 
 // Document shown in the popup while the preview connects. Once the bootstrap
 // handshake completes we navigate the popup to the preview origin; because that
@@ -33,8 +37,16 @@ type PendingOpen = {
   previewID: string;
   previewURL: string;
   origin: string;
+  returnURL: string;
   popup: Window | null;
+  currentTab: boolean;
   tokenRequested: boolean;
+};
+
+type OpenFailure = {
+  title: string;
+  description: string;
+  message: string;
 };
 
 export type OpenPreviewButtonProps = {
@@ -52,6 +64,7 @@ type LaunchPreviewInput = {
   previewId: string;
   previewUrl: string;
   popup?: Window | null;
+  target?: "new_tab" | "current_tab";
 };
 
 export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Promise<BootstrapToken>): {
@@ -63,6 +76,9 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const pendingRef = useRef<PendingOpen | null>(null);
   const timeoutRef = useRef<number | null>(null);
+  const popupLoadCleanupRef = useRef<(() => void) | null>(null);
+  const popupNavigationPollRef = useRef<number | null>(null);
+  const popupNavigationTimeoutRef = useRef<number | null>(null);
   const [iframeSrc, setIframeSrc] = useState<string | undefined>();
   const [isOpening, setIsOpening] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -76,15 +92,70 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
 
   const resetPendingOpen = useCallback(() => {
     clearTimeoutRef();
+    popupLoadCleanupRef.current?.();
+    popupLoadCleanupRef.current = null;
+    if (popupNavigationPollRef.current !== null) {
+      window.clearInterval(popupNavigationPollRef.current);
+      popupNavigationPollRef.current = null;
+    }
+    if (popupNavigationTimeoutRef.current !== null) {
+      window.clearTimeout(popupNavigationTimeoutRef.current);
+      popupNavigationTimeoutRef.current = null;
+    }
     pendingRef.current = null;
     setIframeSrc(undefined);
     setIsOpening(false);
   }, [clearTimeoutRef]);
 
+  const completeOpenWhenPopupLoads = useCallback(
+    (popup: Window) => {
+      popupLoadCleanupRef.current?.();
+
+      const onLoad = () => {
+        resetPendingOpen();
+      };
+
+      popup.addEventListener("load", onLoad, { once: true });
+      popupLoadCleanupRef.current = () => {
+        popup.removeEventListener("load", onLoad);
+      };
+
+      popupNavigationPollRef.current = window.setInterval(() => {
+        if (popup.closed) {
+          resetPendingOpen();
+          return;
+        }
+
+        try {
+          void popup.document;
+        } catch {
+          resetPendingOpen();
+        }
+      }, POPUP_NAVIGATION_POLL_MS);
+
+      popupNavigationTimeoutRef.current = window.setTimeout(() => {
+        resetPendingOpen();
+      }, POPUP_NAVIGATION_TIMEOUT_MS);
+    },
+    [resetPendingOpen],
+  );
+
   const failOpen = useCallback(
-    (message: string) => {
+    (message: string, failure?: Partial<OpenFailure>) => {
       const pending = pendingRef.current;
-      pending?.popup?.close();
+      if (pending && !pending.currentTab) {
+        writePopupDocument(
+          pending.popup,
+          buildPreviewOpenErrorDocument({
+            title: failure?.title ?? "Preview could not open",
+            description: failure?.description ?? "143 could not finish connecting this browser to the preview.",
+            message,
+            previewID: pending.previewID,
+            previewURL: pending.previewURL,
+            returnURL: pending.returnURL,
+          }),
+        );
+      }
       resetPendingOpen();
       setError(new Error(message));
       toast.error(message);
@@ -115,7 +186,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     },
   });
 
-  const launchPreview = useCallback(async ({ previewId, previewUrl, popup: providedPopup }: LaunchPreviewInput) => {
+  const launchPreview = useCallback(async ({ previewId, previewUrl, popup: providedPopup, target = "new_tab" }: LaunchPreviewInput) => {
     const safePreview = parsePreviewURL(previewUrl);
     if (!previewId || !safePreview) {
       toast.error("Preview link is unavailable.");
@@ -125,7 +196,8 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     const { href: safePreviewURL, origin: previewOrigin } = safePreview;
 
     let popup: Window | null = providedPopup ?? null;
-    if (!popup) {
+    const currentTab = target === "current_tab";
+    if (!popup && !currentTab) {
       try {
         popup = window.open("about:blank", "_blank");
         if (popup) {
@@ -138,7 +210,7 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       }
     }
 
-    if (!popup) {
+    if (!popup && !currentTab) {
       toast.error("Your browser blocked the preview tab. Allow pop-ups and try again.");
       setError(new Error("Your browser blocked the preview tab. Allow pop-ups and try again."));
       return;
@@ -149,7 +221,9 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       previewID: previewId,
       previewURL: safePreviewURL,
       origin: previewOrigin,
+      returnURL: window.location.href,
       popup,
+      currentTab,
       tokenRequested: false,
     };
     pendingRef.current = nextPending;
@@ -157,8 +231,11 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
     setIsOpening(true);
     setIframeSrc(buildPreviewBootstrapSrc(previewOrigin));
     timeoutRef.current = window.setTimeout(() => {
-      failOpen("Preview bootstrap timed out. Try opening it again.");
-    }, BOOTSTRAP_TIMEOUT_MS);
+      failOpen(PREVIEW_BOOTSTRAP_TIMEOUT_ERROR, {
+        title: "Preview connection timed out",
+        description: previewBootstrapTimeoutDetails(),
+      });
+    }, PREVIEW_BOOTSTRAP_TIMEOUT_MS);
   }, [clearTimeoutRef, failOpen]);
 
   useEffect(() => {
@@ -174,21 +251,37 @@ export function usePreviewLauncher(bootstrapPreview?: (previewId: string) => Pro
       }
 
       if (event.data?.type === PREVIEW_BOOTSTRAP_COMPLETE_EVENT) {
-        if (pending.popup) {
+        clearTimeoutRef();
+        setIframeSrc(undefined);
+        if (pending.currentTab) {
+          window.open(pending.previewURL, "_self");
+        } else if (pending.popup) {
+          completeOpenWhenPopupLoads(pending.popup);
           pending.popup.location.href = pending.previewURL;
         }
-        resetPendingOpen();
       }
     };
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [bootstrapMutation, resetPendingOpen]);
+  }, [bootstrapMutation, clearTimeoutRef, completeOpenWhenPopupLoads]);
 
   useEffect(() => {
     return () => {
       clearTimeoutRef();
-      pendingRef.current?.popup?.close();
+      popupLoadCleanupRef.current?.();
+      popupLoadCleanupRef.current = null;
+      if (popupNavigationPollRef.current !== null) {
+        window.clearInterval(popupNavigationPollRef.current);
+        popupNavigationPollRef.current = null;
+      }
+      if (popupNavigationTimeoutRef.current !== null) {
+        window.clearTimeout(popupNavigationTimeoutRef.current);
+        popupNavigationTimeoutRef.current = null;
+      }
+      if (pendingRef.current && !pendingRef.current.currentTab) {
+        pendingRef.current.popup?.close();
+      }
       pendingRef.current = null;
     };
   }, [clearTimeoutRef]);
@@ -269,4 +362,55 @@ function isLocalPreviewHTTP(parsed: URL): boolean {
     parsed.hostname.endsWith(".localhost") ||
     parsed.hostname.endsWith(".test")
   );
+}
+
+function writePopupDocument(popup: Window | null | undefined, html: string) {
+  if (!popup || popup.closed) return;
+  try {
+    popup.document.open();
+    popup.document.write(html);
+    popup.document.close();
+  } catch {
+    // Cross-origin or user-closed popups cannot be rewritten. The opener still
+    // surfaces the toast and resets its button state.
+  }
+}
+
+function buildPreviewOpenErrorDocument({
+  title,
+  description,
+  message,
+  previewID,
+  previewURL,
+  returnURL,
+}: {
+  title: string;
+  description: string;
+  message: string;
+  previewID: string;
+  previewURL: string;
+  returnURL: string;
+}): string {
+  const escapedTitle = escapeHTML(title);
+  const escapedDescription = escapeHTML(description);
+  const escapedMessage = escapeHTML(message);
+  const escapedPreviewID = escapeHTML(previewID);
+  const escapedPreviewURL = escapeHTML(previewURL);
+  const escapedPreviewHref = escapeAttribute(previewURL);
+  const escapedReturnHref = escapeAttribute(returnURL);
+
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapedTitle}</title><style>:root{color-scheme:light dark}html,body{height:100%;margin:0}body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;background:Canvas;color:CanvasText}main{width:min(92vw,520px);padding:24px}.panel{border:1px solid color-mix(in srgb,CanvasText 14%,transparent);border-radius:8px;padding:22px;box-shadow:0 16px 48px color-mix(in srgb,CanvasText 12%,transparent)}.eyebrow{margin:0 0 8px;font-size:12px;color:color-mix(in srgb,CanvasText 56%,transparent)}h1{font-size:20px;line-height:1.2;margin:0}p{font-size:14px;line-height:1.5;margin:10px 0 0;color:color-mix(in srgb,CanvasText 68%,transparent)}dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px 12px;margin:18px 0 0;font-size:12px}dt{color:color-mix(in srgb,CanvasText 56%,transparent)}dd{margin:0;min-width:0;overflow-wrap:anywhere}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}a{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:8px;padding:0 14px;font-size:14px;font-weight:600;text-decoration:none}.primary{background:CanvasText;color:Canvas}.secondary{border:1px solid color-mix(in srgb,CanvasText 16%,transparent);color:CanvasText}</style></head><body><main><section class="panel"><p class="eyebrow">143 preview</p><h1>${escapedTitle}</h1><p>${escapedDescription}</p><dl><dt>Error</dt><dd>${escapedMessage}</dd><dt>Preview ID</dt><dd>${escapedPreviewID}</dd><dt>Preview URL</dt><dd>${escapedPreviewURL}</dd></dl><div class="actions"><a class="primary" href="${escapedReturnHref}">Back to 143</a><a class="secondary" href="${escapedPreviewHref}">Try preview URL</a></div></section></main></body></html>`;
+}
+
+function escapeHTML(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function escapeAttribute(value: string): string {
+  return escapeHTML(value);
 }

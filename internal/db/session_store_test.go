@@ -38,7 +38,7 @@ var sessionTestColumns = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func anyDBArgs(count int) []interface{} {
@@ -47,6 +47,16 @@ func anyDBArgs(count int) []interface{} {
 		args[i] = pgxmock.AnyArg()
 	}
 	return args
+}
+
+func setSessionTestColumnValue(row []interface{}, column string, value interface{}) {
+	for i, col := range sessionTestColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown session test column: " + column)
 }
 
 func sqlFragmentPattern(fragment string) string {
@@ -131,6 +141,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // linear_identifier_hint
 		"none",         // linear_prepare_state
 		nil,            // deleted_at
+		nil,            // capability_snapshot
 		nil,            // git_identity_source
 		nil,            // git_identity_user_id
 		createdAt,
@@ -1225,6 +1236,39 @@ func TestSessionStore_UpdateStatusTerminalClearsStaleFailureDetails(t *testing.T
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionStore_SetRepositoryContextScopesToOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	branch := "main"
+	row := newAgentSessionRow(sessionID, uuid.Nil, orgID, now)
+	setSessionTestColumnValue(row, "repository_id", &repoID)
+	setSessionTestColumnValue(row, "target_branch", &branch)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
+
+	got, err := store.SetRepositoryContext(context.Background(), orgID, sessionID, repoID, &branch)
+	require.NoError(t, err, "SetRepositoryContext should update the session repository inside the org")
+	require.NotNil(t, got.RepositoryID, "SetRepositoryContext should return the selected repository")
+	require.Equal(t, repoID, *got.RepositoryID, "SetRepositoryContext should persist the selected repository")
+	require.NotNil(t, got.TargetBranch, "SetRepositoryContext should return the selected branch")
+	require.Equal(t, branch, *got.TargetBranch, "SetRepositoryContext should persist the selected branch")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository context update should be scoped by org_id")
 }
 
 func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {

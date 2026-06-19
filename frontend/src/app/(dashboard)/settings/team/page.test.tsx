@@ -103,8 +103,10 @@ describe('TeamSettingsPage', () => {
     removeMemberMock.mockClear();
     createInvitationMock.mockClear();
     revokeInvitationMock.mockClear();
-    githubInviteStatusMock.mockClear();
-    searchGitHubUsersMock.mockClear();
+    githubInviteStatusMock.mockReset();
+    githubInviteStatusMock.mockResolvedValue({ data: { connected: false } });
+    searchGitHubUsersMock.mockReset();
+    searchGitHubUsersMock.mockResolvedValue({ data: [], meta: {} });
     auditLogsListMock.mockReset();
     auditLogsListMock.mockResolvedValue({ data: [], meta: {} });
     currentUserMock.id = 'user-1';
@@ -640,10 +642,11 @@ describe('TeamSettingsPage', () => {
     );
     await user.type(commandInput, 'octo');
 
-    const suggestion = await screen.findByText('@octocat');
+    const suggestion = await screen.findByRole('option', { name: '@octocat' });
     await user.click(suggestion);
 
     expect(await screen.findByText('Invite setup')).toBeInTheDocument();
+    expect(await screen.findByText('GitHub invitee added to this invite.')).toBeInTheDocument();
     expect(screen.getByText('@octocat')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
 

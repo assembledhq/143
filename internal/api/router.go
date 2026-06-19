@@ -31,6 +31,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
@@ -132,6 +133,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	apiClientStore := db.NewAPIClientStore(pool)
 	apiTokenStore := db.NewAPITokenStore(pool)
 	apiIdempotencyStore := db.NewAPIIdempotencyStore(pool)
+	agentCapabilityPolicyStore := db.NewAgentCapabilityPolicyStore(pool)
+	sessionHistoryStore := db.NewSessionHistoryStore(pool)
 	externalAPIRateLimiter := middleware.NewExternalAPIRateLimiter(middleware.DefaultExternalAPIRateLimitConfig())
 	nodeStore := db.NewNodeStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
@@ -276,6 +279,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithMembershipStore(membershipStore),
 	)
 	settingsHandler := handlers.NewSettingsHandler(orgStore, cfg.SafeLLMEnv())
+	agentCapabilitySvc := agentcapabilities.NewService(agentCapabilityPolicyStore)
+	agentCapabilitySvc.SetHumanInputRequestWriter(sessionHumanInputStore)
+	agentCapabilitySvc.SetApprovedGrantAppender(agentCapabilityPolicyStore)
+	agentCapabilitiesHandler := handlers.NewAgentCapabilitiesHandler(agentCapabilityPolicyStore, agentCapabilitySvc)
 	settingsHandler.SetStaticEgressStatus(handlers.StaticEgressStatus{
 		Available:         cfg.StaticEgressPublicIP != "",
 		PublicIP:          cfg.StaticEgressPublicIP,
@@ -318,6 +325,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
+	sessionHandler.SetCapabilityService(agentCapabilitySvc)
 	sessionHandler.SetUserStore(userStore)
 	sessionHandler.SetThreadInboxStore(threadInboxStore)
 	sessionHandler.SetSessionSandboxHolderStore(sessionSandboxHolderStore)
@@ -471,7 +479,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// uses the same actor=app token the rest of the writes do. Metrics
 	// recorder is shared with linearService.HandleAgentMilestone so a
 	// single OTel meter sees both inbound dispatches and outbound emits.
-	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+	linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore, Repos: repoStore}
 	linearAgentDispatcher := handlers.NewLinearAgentDispatcher(handlers.LinearAgentDispatcherConfig{
 		Logger:         logger,
 		AgentSessions:  linearService.AgentSessionStore(),
@@ -549,6 +557,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler.SetOrgStore(orgStore)
 	automationHandler.SetCodingCredentialStore(codingCredentialStore)
 	automationHandler.SetPool(pool)
+	automationHandler.SetCapabilityDependencies(agentCapabilityPolicyStore, agentCapabilitySvc)
 	automationHandler.SetLogger(logger)
 
 	prTemplateStore := db.NewPRTemplateStore(pool)
@@ -562,7 +571,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
-		prService.SetAutomationEventTriggerer(automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger))
+		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger)
+		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
+		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)
 		prService.SetSessionThreadStore(sessionThreadStore)
 		prService.SetAppUserAuth(appUserAuthSvc)
@@ -892,6 +903,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalEvalHandler := handlers.NewInternalEvalHandler(evalBootstrapStore, sessionStore, cfg.SessionSecret, logger)
+		internalAgentCapabilitiesHandler := handlers.NewInternalAgentCapabilitiesHandler(agentCapabilitySvc, sessionStore, cfg.SessionSecret)
+		internalSessionHistoryHandler := handlers.NewInternalSessionHistoryHandler(sessionHistoryStore, sessionStore, sessionMessageStore, cfg.SessionSecret)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Post("/issues", internalIssueHandler.Create)
@@ -899,6 +912,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/projects/propose", internalProjectHandler.Propose)
 			r.Post("/eval/candidates", internalEvalHandler.AddCandidate)
 			r.Post("/evals/bootstrap/{bootstrap_run_id}/candidates", internalEvalHandler.AddCandidate)
+			r.Get("/agent-capabilities/effective", internalAgentCapabilitiesHandler.Effective)
+			r.Post("/agent-capabilities/requests", internalAgentCapabilitiesHandler.Request)
+			r.Get("/session-history/search", internalSessionHistoryHandler.Search)
+			r.Get("/session-history/{session_id}", internalSessionHistoryHandler.Get)
+			r.Get("/session-history/{session_id}/threads/{thread_id}/messages", internalSessionHistoryHandler.Messages)
 			r.Get("/session-tabs", internalSessionTabsHandler.List)
 			r.Post("/session-tabs", internalSessionTabsHandler.Create)
 			r.Get("/session-tabs/{thread_id}", internalSessionTabsHandler.Get)
@@ -1129,6 +1147,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/runtime/status", settingsHandler.GetRuntimeStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
+				r.Get("/api/v1/agent-capabilities", agentCapabilitiesHandler.Catalog)
+				r.Get("/api/v1/settings/agent/capabilities", agentCapabilitiesHandler.GetSessionDefault)
 				r.Get("/api/v1/pm/current", pmHandler.Current)
 				r.Get("/api/v1/pm/plans", pmHandler.List)
 				r.Get("/api/v1/pm/plans/{id}", pmHandler.Get)
@@ -1141,6 +1161,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/automations/{id}/runs", automationHandler.ListRuns)
 				r.Get("/api/v1/automations/{id}/runs/{rid}", automationHandler.GetRun)
 				r.Get("/api/v1/automations/{id}/stats", automationHandler.Stats)
+				r.Get("/api/v1/automations/{id}/capabilities", agentCapabilitiesHandler.GetAutomationPolicy)
 
 				r.Get("/api/v1/projects", projectHandler.List)
 				r.Get("/api/v1/projects/proposals/summary", projectHandler.ProposalSummary)
@@ -1326,6 +1347,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Automations (write)
 				r.Post("/api/v1/automations", automationHandler.CreatePublic)
 				r.Patch("/api/v1/automations/{id}", automationHandler.Update)
+				r.Patch("/api/v1/automations/{id}/capabilities", agentCapabilitiesHandler.PatchAutomationPolicy)
 				r.Delete("/api/v1/automations/{id}", automationHandler.Delete)
 				r.Post("/api/v1/automations/{id}/run", automationHandler.RunNow)
 				r.Post("/api/v1/automations/{id}/pause", automationHandler.Pause)
@@ -1385,6 +1407,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/context/{id}/accept", pmHandler.AcceptRefresh)
 				r.Delete("/api/v1/pm/context/{id}/reject", pmHandler.RejectRefresh)
 				r.Patch("/api/v1/settings", settingsHandler.Update)
+				r.Patch("/api/v1/settings/agent/capabilities", agentCapabilitiesHandler.PatchSessionDefault)
 				r.Post("/api/v1/memories", memoryHandler.Create)
 				r.Patch("/api/v1/memories/{id}", memoryHandler.UpdateStatus)
 				r.Put("/api/v1/memories/{id}", memoryHandler.UpdateRule)

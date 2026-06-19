@@ -196,7 +196,7 @@ var sessionTestCols = []string{
 	// identity audit columns. Mocks must include both so SessionStore.GetByID's
 	// row decode finds every selected field.
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func stringPtr(value string) *string {
@@ -276,6 +276,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		"linear_identifier_hint":         (*string)(nil),
 		"linear_prepare_state":           string(models.LinearPrepareStateNone),
 		"deleted_at":                     nil,
+		"capability_snapshot":            nil,
 		"git_identity_source":            nil,
 		"git_identity_user_id":           nil,
 		"created_at":                     now,

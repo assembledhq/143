@@ -45,6 +45,7 @@ type PreviewMetrics struct {
 	ResumeTotal                     otelmetric.Int64Counter
 	AutoBuildsTotal                 otelmetric.Int64Counter
 	AutoPoolSaturation              otelmetric.Int64Counter
+	PRLaunchDecisions               otelmetric.Int64Counter
 	SessionPrewarmDecisions         otelmetric.Int64Counter
 	SessionPrewarmSkipped           otelmetric.Int64Counter
 	SessionPrewarmClassifierLatency otelmetric.Float64Histogram
@@ -86,6 +87,7 @@ func getPreviewMetrics() *PreviewMetrics {
 		resumeTotal, _ := meter.Int64Counter("preview.resume.total", otelmetric.WithUnit("{resume}"))
 		autoBuildsTotal, _ := meter.Int64Counter("preview.auto.builds_total", otelmetric.WithUnit("{build}"))
 		autoPoolSaturation, _ := meter.Int64Counter("preview.auto.pool_saturation", otelmetric.WithUnit("{event}"))
+		prLaunchDecisions, _ := meter.Int64Counter("preview.pr_launch.decisions", otelmetric.WithUnit("{decision}"))
 		sessionPrewarmDecisions, _ := meter.Int64Counter("session_preview_prewarm_decisions_total", otelmetric.WithUnit("{decision}"))
 		sessionPrewarmSkipped, _ := meter.Int64Counter("session_preview_prewarm_skipped_total", otelmetric.WithUnit("{skip}"))
 		sessionPrewarmClassifierLatency, _ := meter.Float64Histogram("session_preview_classifier_latency_seconds", otelmetric.WithUnit("s"))
@@ -123,6 +125,7 @@ func getPreviewMetrics() *PreviewMetrics {
 			ResumeTotal:                     resumeTotal,
 			AutoBuildsTotal:                 autoBuildsTotal,
 			AutoPoolSaturation:              autoPoolSaturation,
+			PRLaunchDecisions:               prLaunchDecisions,
 			SessionPrewarmDecisions:         sessionPrewarmDecisions,
 			SessionPrewarmSkipped:           sessionPrewarmSkipped,
 			SessionPrewarmClassifierLatency: sessionPrewarmClassifierLatency,
@@ -432,6 +435,21 @@ func RecordPreviewAutoPoolSaturation(ctx context.Context, orgID string) {
 		return
 	}
 	m.AutoPoolSaturation.Add(ctx, 1, otelmetric.WithAttributes(attribute.String("org.id", orgID)))
+}
+
+func RecordPRPreviewLaunchDecision(ctx context.Context, orgID, repo, intent, action, reason string, autoOpen bool) {
+	m := getPreviewMetrics()
+	if m == nil || m.PRLaunchDecisions == nil {
+		return
+	}
+	m.PRLaunchDecisions.Add(ctx, 1, otelmetric.WithAttributes(
+		attribute.String("org.id", orgID),
+		attribute.String("repository.full_name", repo),
+		attribute.String("preview.intent", intent),
+		attribute.String("preview.launch_action", action),
+		attribute.String("preview.launch_reason", reason),
+		attribute.Bool("preview.auto_open", autoOpen),
+	))
 }
 
 // RecordSessionPrewarmCost records how long a speculative prewarm job took.

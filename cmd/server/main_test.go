@@ -440,9 +440,8 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 }
 
 // TestMainStartupRunsRehydrateBeforeWorkers guards the sandbox-auth socket
-// sweep invariant: process workers must not be able to call Listen for a new
-// job while the boot-time rehydrate/sweep pass is still deciding which
-// session directories are stale.
+// invariant: process workers must not be able to call Listen for a new job
+// while the boot-time rehydrate pass is still restoring live listeners.
 func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	t.Parallel()
 
@@ -454,7 +453,18 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 	rehydrate := strings.Index(body, "orch.RehydrateSandboxAuthListeners(")
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
 	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
-	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate/sweep must run before process workers can claim jobs")
+	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate must run before process workers can claim jobs")
+}
+
+func TestMainStartupDoesNotSweepSandboxAuthSocketDirs(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err, "main.go should be readable for startup socket-sweep regression test")
+
+	body := string(src)
+	require.NotContains(t, body, "SandboxAuthSweep", "startup must not sweep sandbox auth socket dirs because a new worker generation can unlink sockets owned by an older generation during rolling deploy")
+	require.NotContains(t, body, "SweepStaleSessionDirs", "startup must not call the low-level sandbox auth socket sweep during rolling deploy")
 }
 
 func TestMainRegistersInternalSandboxAuthBrokerBeforeWorkers(t *testing.T) {

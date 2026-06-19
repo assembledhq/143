@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -754,6 +755,7 @@ type ContinueSessionOptions struct {
 	ResultAgentSessionID *string
 	PRRepair             *PRRepairContinueOptions
 	HumanInputRequestID  *uuid.UUID
+	QueuedMessageID      *int64
 
 	// ThreadID, when set, identifies the agent tab this turn belongs to.
 	// The orchestrator passes it to the thread cancel registry so a
@@ -1183,37 +1185,62 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 	}
 }
 
-// installSandboxDependencies reads .143/config.json from the sandbox
-// workspace and installs the tools the repo declared (golangci-lint, etc.)
-// before bootstrap/validation commands run. Best-effort: a missing config,
-// malformed config, unknown dependency name, or install failure is logged
-// but never aborts the session — the agent can still run, just without the
-// linter. See sandboxdeps for the install/check contract.
-func (o *Orchestrator) installSandboxDependencies(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) {
+// prepareSandboxRepository reads .143/config.json from the sandbox workspace,
+// installs supported platform-managed tools, then runs repo-declared bootstrap
+// commands before the agent starts. Missing or malformed config stays
+// best-effort for compatibility. Explicit bootstrap command failures are
+// returned because the workspace is not ready for normal agent work.
+func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
 	if sandbox == nil || workDir == "" {
-		return
+		return nil
 	}
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
 	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
-			return
+			return nil
 		}
 		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
-		return
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
 	}
 	cfg, err := repoconfig.Parse(raw)
 	if err != nil {
 		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
-		return
+		return nil
 	}
-	if len(cfg.Dependencies) == 0 {
-		return
+	if len(cfg.Dependencies) > 0 {
+		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+		}
+		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
-		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+}
+
+func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
+	for _, command := range commands {
+		shellCmd := fmt.Sprintf("cd '%s' && %s", shellEscapeSingleQuote(workDir), command)
+		var stderr bytes.Buffer
+		exitCode, execErr := o.provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
+		stderrText := strings.TrimSpace(stderr.String())
+		if execErr != nil || exitCode != 0 {
+			log.Warn().
+				Err(execErr).
+				Int("exit_code", exitCode).
+				Str("command", command).
+				Str("stderr", stderrText).
+				Msg("repo bootstrap command failed")
+			if execErr != nil {
+				return fmt.Errorf("repo bootstrap command %q failed: exit=%d err=%w stderr=%s", command, exitCode, execErr, stderrText)
+			}
+			return fmt.Errorf("repo bootstrap command %q exited with code %d: %s", command, exitCode, stderrText)
+		}
+		log.Info().Str("command", command).Msg("repo bootstrap command completed")
 	}
-	sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
+	return nil
 }
 
 // RecoverSession resumes an interrupted session from its latest committed
@@ -1326,12 +1353,57 @@ const (
 )
 
 func latestUserMessage(messages []models.SessionMessage) *models.SessionMessage {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == models.MessageRoleUser {
-			return &messages[i]
+	latest := -1
+	for i := range messages {
+		if messages[i].Role != models.MessageRoleUser {
+			continue
+		}
+		if latest == -1 || messageRowIsNewer(messages[i], messages[latest]) {
+			latest = i
 		}
 	}
-	return nil
+	if latest == -1 {
+		return nil
+	}
+	return &messages[latest]
+}
+
+func queuedUserMessageInScope(messages []models.SessionMessage, queuedMessageID int64, threadID *uuid.UUID) (*models.SessionMessage, error) {
+	for i := range messages {
+		m := messages[i]
+		if m.ID != queuedMessageID {
+			continue
+		}
+		if m.Role != models.MessageRoleUser {
+			return nil, fmt.Errorf("queued message %d has role %s, not user", queuedMessageID, m.Role)
+		}
+		if !messageMatchesThreadScope(m, threadID) {
+			return nil, fmt.Errorf("queued message %d is outside the requested thread scope", queuedMessageID)
+		}
+		return &messages[i], nil
+	}
+	return nil, fmt.Errorf("queued user message %d not found", queuedMessageID)
+}
+
+func messageRowIsNewer(candidate, current models.SessionMessage) bool {
+	if candidate.ID != 0 || current.ID != 0 {
+		if candidate.ID != current.ID {
+			return candidate.ID > current.ID
+		}
+	}
+	if !candidate.CreatedAt.IsZero() || !current.CreatedAt.IsZero() {
+		if !candidate.CreatedAt.Equal(current.CreatedAt) {
+			return candidate.CreatedAt.After(current.CreatedAt)
+		}
+	}
+	return true
+}
+
+func messageMatchesThreadScope(message models.SessionMessage, threadID *uuid.UUID) bool {
+	if threadID == nil {
+		return message.ThreadID == nil
+	}
+	return message.ThreadID != nil && *message.ThreadID == *threadID
 }
 
 func derefMessage(msg *models.SessionMessage) models.SessionMessage {
@@ -1534,42 +1606,35 @@ func waitForRetryableSnapshotSave(ctx context.Context, attempt int) error {
 // is that specific thread.
 //
 // The scoped form exists because session_messages.ListBySession orders rows by
-// (turn_number, id) — and per-thread turn counters are independent — so the
-// globally-last user row in the slice is not necessarily the last message the
-// user actually sent. ContinueSession must scope to the thread the worker
-// payload identified, otherwise a sibling thread with a higher turn_number
-// will steal the run.
+// (turn_number, id) — and per-thread turn counters are independent. Some repair
+// paths also write thread-bound messages with the session turn number.
+// The row id is therefore the chronological authority for "latest" inside the
+// requested scope.
 func latestUserMessageInScope(messages []models.SessionMessage, threadID *uuid.UUID) *models.SessionMessage {
-	matchesScope := func(m models.SessionMessage) bool {
-		if threadID == nil {
-			return m.ThreadID == nil
-		}
-		return m.ThreadID != nil && *m.ThreadID == *threadID
-	}
-	for i := len(messages) - 1; i >= 0; i-- {
+	latest := -1
+	for i := range messages {
 		m := messages[i]
 		if m.Role != models.MessageRoleUser {
 			continue
 		}
-		if !matchesScope(m) {
+		if !messageMatchesThreadScope(m, threadID) {
 			continue
 		}
-		return &messages[i]
+		if latest == -1 || messageRowIsNewer(m, messages[latest]) {
+			latest = i
+		}
 	}
-	return nil
+	if latest == -1 {
+		return nil
+	}
+	return &messages[latest]
 }
 
 func messagesInScope(messages []models.SessionMessage, threadID *uuid.UUID) []models.SessionMessage {
 	scoped := make([]models.SessionMessage, 0, len(messages))
 	for _, message := range messages {
-		if threadID == nil {
-			if message.ThreadID != nil {
-				continue
-			}
-		} else {
-			if message.ThreadID == nil || *message.ThreadID != *threadID {
-				continue
-			}
+		if !messageMatchesThreadScope(message, threadID) {
+			continue
 		}
 		scoped = append(scoped, message)
 	}
@@ -1595,19 +1660,45 @@ func unprocessedUserMessages(messages []models.SessionMessage, threadID *uuid.UU
 // rows are inserted before the in-flight turn's assistant row; when the drain
 // job starts, that assistant must not hide the queued users.
 func unprocessedUserMessagesThrough(messages []models.SessionMessage, threadID *uuid.UUID, latestUserMessageID int64) []models.SessionMessage {
-	matchesScope := func(m models.SessionMessage) bool {
-		if threadID == nil {
-			return m.ThreadID == nil
+	hasMessageIDs := false
+	for _, m := range messages {
+		if messageMatchesThreadScope(m, threadID) && m.ID != 0 {
+			hasMessageIDs = true
+			break
 		}
-		return m.ThreadID != nil && *m.ThreadID == *threadID
 	}
+	if hasMessageIDs {
+		var latestAssistantID int64
+		for _, m := range messages {
+			if !messageMatchesThreadScope(m, threadID) || m.ID > latestUserMessageID {
+				continue
+			}
+			if m.Role == models.MessageRoleAssistant && m.ID > latestAssistantID {
+				latestAssistantID = m.ID
+			}
+		}
+		var pending []models.SessionMessage
+		for _, m := range messages {
+			if !messageMatchesThreadScope(m, threadID) || m.ID > latestUserMessageID || m.ID <= latestAssistantID {
+				continue
+			}
+			if m.Role == models.MessageRoleUser {
+				pending = append(pending, m)
+			}
+		}
+		sort.Slice(pending, func(i, j int) bool {
+			return pending[i].ID < pending[j].ID
+		})
+		return pending
+	}
+
 	var pending []models.SessionMessage
 	for i := len(messages) - 1; i >= 0; i-- {
 		m := messages[i]
 		if m.ID > latestUserMessageID {
 			continue
 		}
-		if !matchesScope(m) {
+		if !messageMatchesThreadScope(m, threadID) {
 			continue
 		}
 		if m.Role == models.MessageRoleAssistant {
@@ -2573,7 +2664,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
+			return fmt.Errorf("prepare repository: %w", err)
+		}
 		// 8d. Stamp git identity on the session row for audit. Best-effort —
 		// a failure here only affects post-hoc reporting, not the run.
 		if authState != nil && authState.source != "" {
@@ -3043,7 +3137,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	// without a thread hint) we preserve the legacy global lookup so a
 	// threaded session can still recover its in-flight turn.
 	var latestMsg *models.SessionMessage
-	if opts != nil && opts.ThreadID != nil {
+	if opts != nil && opts.QueuedMessageID != nil {
+		latestMsg, err = queuedUserMessageInScope(messages, *opts.QueuedMessageID, opts.ThreadID)
+		if err != nil {
+			log.Warn().Err(err).Int64("queued_message_id", *opts.QueuedMessageID).Msg("continue_session queued message selection failed")
+			o.failRun(ctx, session, fmt.Sprintf("select queued user message: %s", err))
+			return fmt.Errorf("select queued user message: %w", err)
+		}
+	} else if opts != nil && opts.ThreadID != nil {
 		latestMsg = latestUserMessageInScope(messages, opts.ThreadID)
 	} else {
 		latestMsg = latestUserMessage(messages)
@@ -3825,7 +3926,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-			o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+			if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+				o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
+				return fmt.Errorf("prepare repository: %w", err)
+			}
 		}
 
 		commands := canonicalCommands(latestMsg, session.AgentType)
@@ -3961,7 +4065,10 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		authBillingMode = authMode
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		o.installSandboxDependencies(ctx, sandbox, sandboxCfg.WorkDir, log)
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
+			return fmt.Errorf("prepare repository: %w", err)
+		}
 
 		// Build a full prompt via PreparePrompt so the agent gets the system
 		// prompt with integration skills, memory, and repo conventions.

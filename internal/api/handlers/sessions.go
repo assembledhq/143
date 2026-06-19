@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -66,6 +67,7 @@ type SessionHandler struct {
 	questionStore      *db.SessionQuestionStore
 	humanInputStore    *db.SessionHumanInputRequestStore
 	humanInputService  *humaninputsvc.Service
+	capabilityService  *agentcapabilities.Service
 	pullRequestStore   *db.PullRequestStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
@@ -474,6 +476,30 @@ func (h *SessionHandler) SetHumanInputRequestStore(store *db.SessionHumanInputRe
 		h.threadStore,
 		h.jobStore,
 	)
+	if h.capabilityService != nil {
+		h.humanInputService.SetCapabilityApprover(sessionCapabilityApprover{svc: h.capabilityService})
+	}
+}
+
+func (h *SessionHandler) SetCapabilityService(svc *agentcapabilities.Service) {
+	h.capabilityService = svc
+	if h.humanInputService != nil && svc != nil {
+		h.humanInputService.SetCapabilityApprover(sessionCapabilityApprover{svc: svc})
+	}
+}
+
+type sessionCapabilityApprover struct {
+	svc *agentcapabilities.Service
+}
+
+func (a sessionCapabilityApprover) ApplyApprovedGrant(ctx context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) ([]models.AgentCapabilitySnapshotItem, error) {
+	return a.svc.ApplyApprovedGrant(ctx, agentcapabilities.ApprovedGrantInput{
+		OrgID:               orgID,
+		SessionID:           sessionID,
+		HumanInputRequestID: requestID,
+		Capability:          capability,
+		AccessLevel:         accessLevel,
+	})
 }
 
 func (h *SessionHandler) SetThreadInboxStore(store *db.ThreadInboxStore) {
@@ -3621,6 +3647,18 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 		RepositoryID:            repoID,
 		LinearPrivate:           body.LinearPrivate,
 		LinearStateSyncDisabled: body.LinearStateSyncDisabled,
+	}
+	if h.capabilityService != nil {
+		snapshot, err := h.capabilityService.ResolveForSession(r.Context(), agentcapabilities.ResolveInput{
+			OrgID:         orgID,
+			RepositoryID:  repoID,
+			SessionOrigin: origin,
+		})
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CAPABILITY_RESOLUTION_FAILED", "failed to resolve session capabilities", err)
+			return
+		}
+		session.CapabilitySnapshot = snapshot
 	}
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)

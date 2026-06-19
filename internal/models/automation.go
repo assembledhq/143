@@ -43,6 +43,7 @@ type Automation struct {
 	// timezone='UTC' only when meaningful.
 	Timezone            string                  `db:"timezone"        json:"timezone"`
 	GitHubEventTriggers []AutomationGitHubEvent `db:"github_event_triggers" json:"github_event_triggers,omitempty"`
+	GitHubEventFilters  json.RawMessage         `db:"github_event_filters" json:"github_event_filters,omitempty"`
 	NextRunAt           *time.Time              `db:"next_run_at"     json:"next_run_at,omitempty"`
 	LastRunAt           *time.Time              `db:"last_run_at"     json:"last_run_at,omitempty"`
 	Enabled             bool                    `db:"enabled"         json:"enabled"`
@@ -58,20 +59,21 @@ type Automation struct {
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
 type AutomationRun struct {
-	ID                uuid.UUID             `db:"id"                    json:"id"`
-	AutomationID      uuid.UUID             `db:"automation_id"         json:"automation_id"`
-	OrgID             uuid.UUID             `db:"org_id"                json:"org_id"`
-	TriggeredAt       time.Time             `db:"triggered_at"          json:"triggered_at"`
-	TriggeredBy       AutomationTriggeredBy `db:"triggered_by"          json:"triggered_by"`
-	TriggeredByUserID *uuid.UUID            `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
-	ScheduledTime     *time.Time            `db:"scheduled_time"        json:"scheduled_time,omitempty"`
-	GoalSnapshot      string                `db:"goal_snapshot"         json:"goal_snapshot"`
-	ConfigSnapshot    json.RawMessage       `db:"config_snapshot"       json:"config_snapshot,omitempty"`
-	Status            AutomationRunStatus   `db:"status"                json:"status"`
-	CompletedAt       *time.Time            `db:"completed_at"          json:"completed_at,omitempty"`
-	ResultSummary     *string               `db:"result_summary"        json:"result_summary,omitempty"`
-	CreatedAt         time.Time             `db:"created_at"            json:"created_at"`
-	UpdatedAt         time.Time             `db:"updated_at"            json:"updated_at"`
+	ID                 uuid.UUID                     `db:"id"                    json:"id"`
+	AutomationID       uuid.UUID                     `db:"automation_id"         json:"automation_id"`
+	OrgID              uuid.UUID                     `db:"org_id"                json:"org_id"`
+	TriggeredAt        time.Time                     `db:"triggered_at"          json:"triggered_at"`
+	TriggeredBy        AutomationTriggeredBy         `db:"triggered_by"          json:"triggered_by"`
+	TriggeredByUserID  *uuid.UUID                    `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
+	ScheduledTime      *time.Time                    `db:"scheduled_time"        json:"scheduled_time,omitempty"`
+	GoalSnapshot       string                        `db:"goal_snapshot"         json:"goal_snapshot"`
+	ConfigSnapshot     json.RawMessage               `db:"config_snapshot"       json:"config_snapshot,omitempty"`
+	Status             AutomationRunStatus           `db:"status"                json:"status"`
+	CapabilitySnapshot []AgentCapabilitySnapshotItem `db:"capability_snapshot" json:"capability_snapshot,omitempty"`
+	CompletedAt        *time.Time                    `db:"completed_at"          json:"completed_at,omitempty"`
+	ResultSummary      *string                       `db:"result_summary"        json:"result_summary,omitempty"`
+	CreatedAt          time.Time                     `db:"created_at"            json:"created_at"`
+	UpdatedAt          time.Time                     `db:"updated_at"            json:"updated_at"`
 
 	// Session is a compact view of the session this run spawned, populated
 	// only by list/detail endpoints that join sessions (currently
@@ -156,6 +158,10 @@ type AutomationGitHubEvent string
 
 const (
 	AutomationGitHubEventPullRequestOpened               AutomationGitHubEvent = "github.pull_request.opened"
+	AutomationGitHubEventPullRequestUpdated              AutomationGitHubEvent = "github.pull_request.updated"
+	AutomationGitHubEventPullRequestMerged               AutomationGitHubEvent = "github.pull_request.merged"
+	AutomationGitHubEventCheckSuiteCompleted             AutomationGitHubEvent = "github.check_suite.completed"
+	AutomationGitHubEventCheckRunCompleted               AutomationGitHubEvent = "github.check_run.completed"
 	AutomationGitHubEventIssueCommentCreated             AutomationGitHubEvent = "github.issue_comment.created"
 	AutomationGitHubEventPullRequestReviewSubmitted      AutomationGitHubEvent = "github.pull_request_review.submitted"
 	AutomationGitHubEventPullRequestReviewCommentCreated AutomationGitHubEvent = "github.pull_request_review_comment.created"
@@ -164,6 +170,10 @@ const (
 func (e AutomationGitHubEvent) Validate() error {
 	switch e {
 	case AutomationGitHubEventPullRequestOpened,
+		AutomationGitHubEventPullRequestUpdated,
+		AutomationGitHubEventPullRequestMerged,
+		AutomationGitHubEventCheckSuiteCompleted,
+		AutomationGitHubEventCheckRunCompleted,
 		AutomationGitHubEventIssueCommentCreated,
 		AutomationGitHubEventPullRequestReviewSubmitted,
 		AutomationGitHubEventPullRequestReviewCommentCreated:
@@ -173,11 +183,43 @@ func (e AutomationGitHubEvent) Validate() error {
 	}
 }
 
+type AutomationProductTrigger string
+
+const (
+	AutomationProductTriggerPROpened        AutomationProductTrigger = "github.pr.opened"
+	AutomationProductTriggerPRUpdated       AutomationProductTrigger = "github.pr.updated"
+	AutomationProductTriggerPRFeedback      AutomationProductTrigger = "github.pr.feedback"
+	AutomationProductTriggerChecksCompleted AutomationProductTrigger = "github.checks.completed"
+	AutomationProductTriggerPRMerged        AutomationProductTrigger = "github.pr.merged"
+)
+
+func (t AutomationProductTrigger) Validate() error {
+	switch t {
+	case AutomationProductTriggerPROpened,
+		AutomationProductTriggerPRUpdated,
+		AutomationProductTriggerPRFeedback,
+		AutomationProductTriggerChecksCompleted,
+		AutomationProductTriggerPRMerged:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation trigger: %q", t)
+	}
+}
+
+type AutomationGitHubEventFilters struct {
+	BaseBranches  []string `json:"base_branches,omitempty"`
+	Authors       []string `json:"authors,omitempty"`
+	Paths         []string `json:"paths,omitempty"`
+	FeedbackTypes []string `json:"feedback_types,omitempty"`
+	ReviewStates  []string `json:"review_states,omitempty"`
+}
+
 type AutomationScheduleType string
 
 const (
 	AutomationScheduleInterval AutomationScheduleType = "interval"
 	AutomationScheduleCron     AutomationScheduleType = "cron"
+	AutomationScheduleNone     AutomationScheduleType = "none"
 )
 
 // AutomationIdentityScope controls whose credentials an automation uses when
@@ -263,10 +305,10 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 
 func (t AutomationScheduleType) Validate() error {
 	switch t {
-	case AutomationScheduleInterval, AutomationScheduleCron:
+	case AutomationScheduleInterval, AutomationScheduleCron, AutomationScheduleNone:
 		return nil
 	default:
-		return fmt.Errorf("invalid schedule_type: %q (must be interval or cron)", t)
+		return fmt.Errorf("invalid schedule_type: %q (must be interval, cron, or none)", t)
 	}
 }
 
@@ -354,6 +396,8 @@ func (a *Automation) ComputeNextRunAt(from time.Time) (time.Time, error) {
 			tz = "UTC"
 		}
 		return NextCronRunTime(*a.CronExpression, tz, from)
+	case AutomationScheduleNone:
+		return time.Time{}, nil
 	default:
 		return time.Time{}, fmt.Errorf("unknown schedule_type: %q", a.ScheduleType)
 	}

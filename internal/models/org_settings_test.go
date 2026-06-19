@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -64,6 +65,18 @@ func TestParseOrgSettings_EmptyJSON(t *testing.T) {
 
 	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should default autonomy_level for empty JSON")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs for empty JSON")
+}
+
+func TestParseOrgSettings_DefaultWorkRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+	raw := json.RawMessage(`{"default_work_repository_id":"` + repoID.String() + `"}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should accept the shared default work repository")
+	require.NotNil(t, s.DefaultWorkRepositoryID, "shared default work repository should parse when configured")
+	require.Equal(t, repoID, *s.DefaultWorkRepositoryID, "shared default work repository should round-trip from JSON")
 }
 
 func TestParseOrgSettings_OverrideValues(t *testing.T) {

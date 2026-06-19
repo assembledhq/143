@@ -3,12 +3,25 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, Play, Pause, Loader2, Minus, Plus, Settings2 } from "lucide-react";
+import {
+  ChevronDown,
+  Play,
+  Pause,
+  Loader2,
+  Minus,
+  Plus,
+  Settings2,
+} from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -30,14 +43,34 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { MarkdownContent } from "@/components/markdown";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
+import {
+  AutomationCapabilitiesEditor,
+  capabilitySummary,
+  normalizeCapabilityGrants,
+} from "@/components/automation-capabilities-editor";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
-import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import {
+  automationProductTriggerOptions,
+  githubEventsToAutomationProductTriggers,
+  type AutomationProductTrigger,
+} from "@/lib/automation-triggers";
+import {
+  AUTOMATION_GOAL_MAX_LENGTH,
+  automationGoalLengthState,
+} from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
-import type { Automation, AutomationRun } from "@/lib/types";
+import type {
+  AgentCapabilityDefinition,
+  AgentCapabilityGrant,
+  Automation,
+  AutomationGitHubEventFilters,
+  AutomationRun,
+  ListResponse,
+} from "@/lib/types";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import {
   getCodingAgentReasoningOptions,
@@ -58,10 +91,15 @@ import { AutomationEmojiPicker } from "@/components/automation-emoji-picker";
 
 // Defer recharts (the only dep here that's expensive) into its own chunk.
 const AutomationStatsCard = dynamic(
-  () => import("./automation-stats-card").then((m) => ({ default: m.AutomationStatsCard })),
+  () =>
+    import("./automation-stats-card").then((m) => ({
+      default: m.AutomationStatsCard,
+    })),
   {
     ssr: false,
-    loading: () => <div className="h-48 bg-muted/20 animate-pulse rounded-lg" />,
+    loading: () => (
+      <div className="h-48 bg-muted/20 animate-pulse rounded-lg" />
+    ),
   },
 );
 
@@ -71,7 +109,16 @@ const AutomationStatsCard = dynamic(
 const INTERVAL_UNITS = ["hours", "days", "weeks"] as const;
 type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 const toIntervalUnit = (v: string, fallback: IntervalUnit): IntervalUnit =>
-  (INTERVAL_UNITS as readonly string[]).includes(v) ? (v as IntervalUnit) : fallback;
+  (INTERVAL_UNITS as readonly string[]).includes(v)
+    ? (v as IntervalUnit)
+    : fallback;
+
+function commaList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
 
 function SettingsTab({
   automation,
@@ -85,7 +132,9 @@ function SettingsTab({
   const [goal, setGoal] = useState(automation.goal);
   const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
-  const [intervalValue, setIntervalValue] = useState(String(automation.interval_value ?? 1));
+  const [intervalValue, setIntervalValue] = useState(
+    String(automation.interval_value ?? 1),
+  );
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
@@ -95,43 +144,137 @@ function SettingsTab({
   // below) so a remote change remounts this subtree and reseeds the form.
   const initialRunAt = splitRunAt(automation.interval_run_at ?? "09:00");
   const [intervalRunHour, setIntervalRunHour] = useState(initialRunAt.hour);
-  const [intervalRunMinute, setIntervalRunMinute] = useState(initialRunAt.minute);
-  const [timezone, setTimezone] = useState<string>(automation.timezone || "UTC");
+  const [intervalRunMinute, setIntervalRunMinute] = useState(
+    initialRunAt.minute,
+  );
+  const [timezone, setTimezone] = useState<string>(
+    automation.timezone || "UTC",
+  );
+  const [scheduleEnabled, setScheduleEnabled] = useState(
+    automation.schedule_type !== "none",
+  );
+  const [productTriggers, setProductTriggers] = useState<
+    AutomationProductTrigger[]
+  >(() =>
+    githubEventsToAutomationProductTriggers(
+      automation.github_event_triggers ?? [],
+    ),
+  );
+  const [triggerBaseBranches, setTriggerBaseBranches] = useState(
+    (automation.github_event_filters?.base_branches ?? []).join(", "),
+  );
+  const [triggerAuthors, setTriggerAuthors] = useState(
+    (automation.github_event_filters?.authors ?? []).join(", "),
+  );
+  const [triggerPaths, setTriggerPaths] = useState(
+    (automation.github_event_filters?.paths ?? []).join(", "),
+  );
+  const [triggerFeedbackTypes, setTriggerFeedbackTypes] = useState(
+    (automation.github_event_filters?.feedback_types ?? []).join(", "),
+  );
+  const [triggerReviewStates, setTriggerReviewStates] = useState(
+    (automation.github_event_filters?.review_states ?? []).join(", "),
+  );
   // Memoised per mount: Intl.DateTimeFormat() is cheap but there's no reason
   // to re-evaluate it on every render, and stability prevents the
   // TimezonePicker's `detected` prop from changing identity.
   const detectedTimezone = useMemo(() => browserTimezone(), []);
   const [baseBranch, setBaseBranch] = useState(automation.base_branch);
-  const [model, setModel] = useState<string | undefined>(automation.model_override);
-  const [identityScope, setIdentityScope] = useState<"org" | "personal">(automation.identity_scope ?? "org");
-  const [prePRReviewLoops, setPrePRReviewLoops] = useState(automation.pre_pr_review_loops ?? 0);
-  const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
+  const [model, setModel] = useState<string | undefined>(
+    automation.model_override,
+  );
+  const [identityScope, setIdentityScope] = useState<"org" | "personal">(
+    automation.identity_scope ?? "org",
+  );
+  const [prePRReviewLoops, setPrePRReviewLoops] = useState(
+    automation.pre_pr_review_loops ?? 0,
+  );
+  const [reasoningEffort, setReasoningEffort] =
+    useState<CodingAgentReasoningEffort>(automation.reasoning_effort ?? "");
+  const [capabilityDraft, setCapabilityDraft] = useState<
+    AgentCapabilityGrant[] | null
+  >(null);
 
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
   });
-  const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
+  const settings = (settingsResponse?.data?.settings ?? {}) as {
+    default_agent_type?: string;
+  };
   const defaultAgentType = settings.default_agent_type ?? "codex";
   const effectiveAgentType = model
-    ? agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType
-    : automation.agent_type ?? defaultAgentType;
-  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi", "opencode"].includes(effectiveAgentType);
-  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+    ? (agentTypeForModel(model) ?? automation.agent_type ?? defaultAgentType)
+    : (automation.agent_type ?? defaultAgentType);
+  const supportsNativeReviewLoop = [
+    "codex",
+    "claude_code",
+    "amp",
+    "pi",
+    "opencode",
+  ].includes(effectiveAgentType);
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop
+    ? prePRReviewLoops
+    : 0;
   let prePRReviewDescription = "Off for agents without review-loop support.";
   if (supportsNativeReviewLoop) {
-    prePRReviewDescription = effectivePrePRReviewLoops === 0
-      ? "Off"
-      : "Runs the coding agent's review/fix loop before opening a PR.";
+    prePRReviewDescription =
+      effectivePrePRReviewLoops === 0
+        ? "Off"
+        : "Runs the coding agent's review/fix loop before opening a PR.";
   }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
+  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+    queryKey: ["agent-capabilities"],
+    queryFn: () => api.settings.getAgentCapabilities(),
+  });
+  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+  const { data: automationCapabilityResponse } = useQuery({
+    queryKey: ["automation-capabilities", automation.id],
+    queryFn: () => api.automations.getCapabilities(automation.id),
+  });
+  const savedCapabilityGrants = useMemo(
+    () => normalizeCapabilityGrants(capabilityCatalog, automationCapabilityResponse?.data?.capabilities ?? []),
+    [automationCapabilityResponse?.data?.capabilities, capabilityCatalog],
+  );
+  const capabilityGrants = capabilityDraft ?? savedCapabilityGrants;
   const goalLength = automationGoalLengthState(goal);
   const parsedIntervalValue = Number(intervalValue.trim());
-  const intervalValueIsValid = intervalValue.trim() !== ""
-    && Number.isInteger(parsedIntervalValue)
-    && parsedIntervalValue >= 1
-    && parsedIntervalValue <= 365;
+  const intervalValueIsValid =
+    intervalValue.trim() !== "" &&
+    Number.isInteger(parsedIntervalValue) &&
+    parsedIntervalValue >= 1 &&
+    parsedIntervalValue <= 365;
+  const githubEventFilters: AutomationGitHubEventFilters = useMemo(
+    () => ({
+      base_branches: commaList(triggerBaseBranches),
+      authors: commaList(triggerAuthors),
+      paths: commaList(triggerPaths),
+      feedback_types: commaList(triggerFeedbackTypes),
+      review_states: commaList(triggerReviewStates),
+    }),
+    [
+      triggerAuthors,
+      triggerBaseBranches,
+      triggerFeedbackTypes,
+      triggerPaths,
+      triggerReviewStates,
+    ],
+  );
+  const hasTrigger = scheduleEnabled || productTriggers.length > 0;
+
+  const toggleProductTrigger = (
+    trigger: AutomationProductTrigger,
+    checked: boolean,
+  ) => {
+    setProductTriggers((current) => {
+      if (checked) {
+        return current.includes(trigger) ? current : [...current, trigger];
+      }
+      return current.filter((item) => item !== trigger);
+    });
+  };
 
   const updateMutation = useMutation({
     mutationFn: () =>
@@ -141,18 +284,35 @@ function SettingsTab({
         icon_type: "emoji",
         icon_value: iconValue,
         scope: scope.trim() || undefined,
-        interval_value: parsedIntervalValue,
-        interval_unit: intervalUnit,
-        interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
+        schedule_type: scheduleEnabled ? "interval" : "none",
+        ...(scheduleEnabled
+          ? {
+              interval_value: parsedIntervalValue,
+              interval_unit: intervalUnit,
+              interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
+            }
+          : {}),
         timezone,
+        triggers: productTriggers,
+        github_event_filters: githubEventFilters,
         model: model ?? "",
         identity_scope: identityScope,
         pre_pr_review_loops: effectivePrePRReviewLoops,
-        reasoning_effort: showReasoningSelector && reasoningEffort ? reasoningEffort : "",
+        reasoning_effort:
+          showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["automation", automation.id] });
+      queryClient.invalidateQueries({
+        queryKey: ["automation", automation.id],
+      });
+    },
+  });
+  const capabilityMutation = useMutation({
+    mutationFn: (capabilities: AgentCapabilityGrant[]) => api.automations.updateCapabilities(automation.id, capabilities),
+    onSuccess: () => {
+      setCapabilityDraft(null);
+      queryClient.invalidateQueries({ queryKey: ["automation-capabilities", automation.id] });
     },
   });
 
@@ -172,7 +332,11 @@ function SettingsTab({
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="name">Name</Label>
-          <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
+          <Input
+            id="name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
         </div>
       </div>
       <div className="space-y-1.5">
@@ -181,7 +345,9 @@ function SettingsTab({
           <span
             className={cn(
               "text-xs tabular-nums",
-              goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+              goalLength.isTooLong
+                ? "text-destructive"
+                : "text-muted-foreground",
             )}
           >
             {goalLength.countText}
@@ -197,8 +363,14 @@ function SettingsTab({
           rows={9}
           ariaInvalid={goalLength.isTooLong}
         />
-        <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
-          {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
+        <p
+          className={cn(
+            "text-xs",
+            goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+          )}
+        >
+          {goalLength.message ??
+            `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
         </p>
       </div>
       <div className="space-y-1.5">
@@ -206,11 +378,18 @@ function SettingsTab({
           Scope{" "}
           <span className="text-muted-foreground font-normal">(optional)</span>
         </Label>
-        <Input id="scope" value={scope} onChange={(e) => setScope(e.target.value)} />
+        <Input
+          id="scope"
+          value={scope}
+          onChange={(e) => setScope(e.target.value)}
+        />
       </div>
       <div className="space-y-1.5">
         <Label>Run as</Label>
-        <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+        <Select
+          value={identityScope}
+          onValueChange={(value: "org" | "personal") => setIdentityScope(value)}
+        >
           <SelectTrigger aria-label="Run as">
             <SelectValue />
           </SelectTrigger>
@@ -220,77 +399,136 @@ function SettingsTab({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
-          Organization automations use team credentials and open PRs as 143-bot. Personal automations use the creator&apos;s coding-agent preferences and GitHub identity.
+          Organization automations use team credentials and open PRs as 143-bot.
+          Personal automations use the creator&apos;s coding-agent preferences
+          and GitHub identity.
         </p>
       </div>
-      <div className="space-y-1.5">
-        <Label id="schedule-label">Schedule</Label>
-        <div className="grid gap-3 md:grid-cols-2">
-          <div
-            className="flex items-center gap-2"
-            role="group"
-            aria-labelledby="schedule-label"
-          >
-            <span className="text-xs font-medium leading-none text-muted-foreground">Run every</span>
-            <Input
-              id="interval-value"
-              aria-label="Interval value"
-              type="number"
-              min={1}
-              max={365}
-              value={intervalValue}
-              onChange={(e) => setIntervalValue(e.target.value)}
-              aria-invalid={!intervalValueIsValid}
-              className="w-20"
+      <div className="space-y-2">
+        <Label>Triggers</Label>
+        <div className="space-y-3 rounded-md border border-border p-3">
+          <Label className="flex min-h-7 cursor-pointer items-start gap-2 text-sm font-normal">
+            <Checkbox
+              checked={scheduleEnabled}
+              onCheckedChange={(checked) =>
+                setScheduleEnabled(checked === true)
+              }
+              aria-label="On a schedule"
+              disabled={!canManage}
             />
-            <Select
-              value={intervalUnit}
-              onValueChange={(v) => setIntervalUnit(toIntervalUnit(v, intervalUnit))}
-            >
-              <SelectTrigger className="h-9 w-28" aria-label="Interval unit">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="hours">hours</SelectItem>
-                <SelectItem value="days">days</SelectItem>
-                <SelectItem value="weeks">weeks</SelectItem>
-              </SelectContent>
-            </Select>
+            <span className="pt-0.5">On a schedule</span>
+          </Label>
+          {scheduleEnabled ? (
+            <div className="grid gap-3 pl-6 md:grid-cols-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium leading-none text-muted-foreground">
+                  Run every
+                </span>
+                <Input
+                  id="interval-value"
+                  aria-label="Interval value"
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={intervalValue}
+                  onChange={(e) => setIntervalValue(e.target.value)}
+                  aria-invalid={!intervalValueIsValid}
+                  className="w-20"
+                />
+                <Select
+                  value={intervalUnit}
+                  onValueChange={(v) =>
+                    setIntervalUnit(toIntervalUnit(v, intervalUnit))
+                  }
+                >
+                  <SelectTrigger
+                    className="h-9 w-28"
+                    aria-label="Interval unit"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="hours">hours</SelectItem>
+                    <SelectItem value="days">days</SelectItem>
+                    <SelectItem value="weeks">weeks</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid grid-cols-[auto_5rem_auto_5rem_minmax(0,12.5rem)] items-center gap-2">
+                <span className="text-xs font-medium leading-none text-muted-foreground">
+                  At
+                </span>
+                <Select
+                  value={intervalRunHour}
+                  onValueChange={setIntervalRunHour}
+                >
+                  <SelectTrigger className="h-9 w-20" aria-label="Run at hour">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {hourOptions.map((h) => (
+                      <SelectItem key={h} value={h}>
+                        {h}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-sm text-muted-foreground">:</span>
+                <Select
+                  value={intervalRunMinute}
+                  onValueChange={setIntervalRunMinute}
+                >
+                  <SelectTrigger
+                    className="h-9 w-20"
+                    aria-label="Run at minute"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {minuteOptions.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {m}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <TimezonePicker
+                  value={timezone}
+                  onChange={setTimezone}
+                  detected={detectedTimezone}
+                  className="w-[12.5rem] max-w-full"
+                />
+              </div>
+            </div>
+          ) : null}
+          <div className="space-y-2">
+            <span className="text-xs font-medium leading-none text-muted-foreground">
+              Pull requests
+            </span>
+            <div className="grid gap-2 md:grid-cols-2">
+              {automationProductTriggerOptions.map((option) => (
+                <Label
+                  key={option.value}
+                  className="flex min-h-7 cursor-pointer items-center gap-2 text-sm font-normal"
+                >
+                  <Checkbox
+                    checked={productTriggers.includes(option.value)}
+                    onCheckedChange={(checked) =>
+                      toggleProductTrigger(option.value, checked === true)
+                    }
+                    aria-label={option.label}
+                    disabled={!canManage}
+                  />
+                  <span>{option.label}</span>
+                </Label>
+              ))}
+            </div>
           </div>
-          <div className="grid grid-cols-[auto_5rem_auto_5rem_minmax(0,12.5rem)] items-center gap-2">
-            <span className="text-xs font-medium leading-none text-muted-foreground">At</span>
-            <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
-              <SelectTrigger className="h-9 w-20" aria-label="Run at hour">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {hourOptions.map((h) => (
-                  <SelectItem key={h} value={h}>
-                    {h}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <span className="text-sm text-muted-foreground">:</span>
-            <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
-              <SelectTrigger className="h-9 w-20" aria-label="Run at minute">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {minuteOptions.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {m}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <TimezonePicker
-              value={timezone}
-              onChange={setTimezone}
-              detected={detectedTimezone}
-              className="w-[12.5rem] max-w-full"
-            />
-          </div>
+          {!hasTrigger ? (
+            <p className="text-xs text-destructive">
+              Select at least one trigger.
+            </p>
+          ) : null}
         </div>
       </div>
       <Collapsible className="rounded-md border border-border">
@@ -319,7 +557,13 @@ function SettingsTab({
               <Label htmlFor="automation-reasoning">Reasoning</Label>
               <Select
                 value={reasoningEffort || "__default__"}
-                onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+                onValueChange={(value) =>
+                  setReasoningEffort(
+                    value === "__default__"
+                      ? ""
+                      : toCodingAgentReasoningEffort(value),
+                  )
+                }
               >
                 <SelectTrigger id="automation-reasoning" aria-label="Reasoning">
                   <SelectValue placeholder="Default reasoning" />
@@ -347,6 +591,95 @@ function SettingsTab({
               contentClassName="w-[var(--radix-popover-trigger-width)]"
             />
           </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label>Capabilities</Label>
+              <span className="truncate text-xs text-muted-foreground">
+                {capabilitySummary(capabilityCatalog, capabilityGrants)}
+              </span>
+            </div>
+            <AutomationCapabilitiesEditor
+              catalog={capabilityCatalog}
+              grants={capabilityGrants}
+              onChange={setCapabilityDraft}
+              disabled={!canManage}
+            />
+            {capabilityDraft ? (
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => capabilityMutation.mutate(capabilityDraft)}
+                  disabled={capabilityMutation.isPending}
+                >
+                  {capabilityMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save capabilities
+                </Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => setCapabilityDraft(null)}>
+                  Reset
+                </Button>
+                {capabilityMutation.isError ? (
+                  <span className="text-xs text-destructive">Failed to save capabilities.</span>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <div className="space-y-3 rounded-md border border-border p-3">
+            <div className="space-y-1">
+              <Label>Trigger filters</Label>
+              <p className="text-xs text-muted-foreground">
+                Comma-separated filters applied when GitHub sends matching
+                context.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="trigger-base-branches">Target branches</Label>
+                <Input
+                  id="trigger-base-branches"
+                  value={triggerBaseBranches}
+                  onChange={(e) => setTriggerBaseBranches(e.target.value)}
+                  disabled={!canManage}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="trigger-authors">Authors</Label>
+                <Input
+                  id="trigger-authors"
+                  value={triggerAuthors}
+                  onChange={(e) => setTriggerAuthors(e.target.value)}
+                  disabled={!canManage}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="trigger-paths">Paths</Label>
+                <Input
+                  id="trigger-paths"
+                  value={triggerPaths}
+                  onChange={(e) => setTriggerPaths(e.target.value)}
+                  disabled={!canManage}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="trigger-feedback-types">Feedback types</Label>
+                <Input
+                  id="trigger-feedback-types"
+                  value={triggerFeedbackTypes}
+                  onChange={(e) => setTriggerFeedbackTypes(e.target.value)}
+                  disabled={!canManage}
+                />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="trigger-review-states">Review states</Label>
+                <Input
+                  id="trigger-review-states"
+                  value={triggerReviewStates}
+                  onChange={(e) => setTriggerReviewStates(e.target.value)}
+                  disabled={!canManage}
+                />
+              </div>
+            </div>
+          </div>
           <div className="space-y-1.5">
             <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
             <div className="flex items-center gap-2">
@@ -355,7 +688,9 @@ function SettingsTab({
                 variant="outline"
                 size="icon"
                 aria-label="Decrease review passes"
-                onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+                onClick={() =>
+                  setPrePRReviewLoops((value) => Math.max(0, value - 1))
+                }
                 disabled={!canManage || !supportsNativeReviewLoop}
               >
                 <Minus className="h-4 w-4" />
@@ -369,7 +704,9 @@ function SettingsTab({
                 value={effectivePrePRReviewLoops}
                 onChange={(e) => {
                   const parsed = parseInt(e.target.value, 10);
-                  setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+                  setPrePRReviewLoops(
+                    Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)),
+                  );
                 }}
                 disabled={!canManage || !supportsNativeReviewLoop}
                 className="w-20 text-center"
@@ -379,7 +716,9 @@ function SettingsTab({
                 variant="outline"
                 size="icon"
                 aria-label="Increase review passes"
-                onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+                onClick={() =>
+                  setPrePRReviewLoops((value) => Math.min(5, value + 1))
+                }
                 disabled={!canManage || !supportsNativeReviewLoop}
               >
                 <Plus className="h-4 w-4" />
@@ -395,9 +734,16 @@ function SettingsTab({
         <div className="flex items-center gap-3 pt-2">
           <Button
             onClick={() => updateMutation.mutate()}
-            disabled={updateMutation.isPending || goalLength.isTooLong || !intervalValueIsValid}
+            disabled={
+              updateMutation.isPending ||
+              goalLength.isTooLong ||
+              !hasTrigger ||
+              (scheduleEnabled && !intervalValueIsValid)
+            }
           >
-            {updateMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            {updateMutation.isPending && (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            )}
             Save changes
           </Button>
           {updateMutation.isError && (
@@ -439,12 +785,14 @@ export default function AutomationDetailPage() {
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automationId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
   });
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automationId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
   });
 
   // runNowInFlight guards against rapid double-clicks that can slip through
@@ -455,7 +803,10 @@ export default function AutomationDetailPage() {
   const runNowInFlight = useRef(false);
   const runNowMutation = useMutation({
     mutationFn: () => api.automations.runNow(automationId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automation-runs", automationId] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["automation-runs", automationId],
+      }),
     onSettled: () => {
       runNowInFlight.current = false;
     },
@@ -478,24 +829,35 @@ export default function AutomationDetailPage() {
         icon_value: iconValue,
       }),
     onMutate: async (iconValue: string) => {
-      await queryClient.cancelQueries({ queryKey: ["automation", automationId] });
-      const previous = queryClient.getQueryData<typeof data>(["automation", automationId]);
-      queryClient.setQueryData<typeof data>(["automation", automationId], (current) => {
-        if (!current?.data) return current;
-        return {
-          ...current,
-          data: {
-            ...current.data,
-            icon_type: "emoji",
-            icon_value: iconValue,
-          },
-        };
+      await queryClient.cancelQueries({
+        queryKey: ["automation", automationId],
       });
+      const previous = queryClient.getQueryData<typeof data>([
+        "automation",
+        automationId,
+      ]);
+      queryClient.setQueryData<typeof data>(
+        ["automation", automationId],
+        (current) => {
+          if (!current?.data) return current;
+          return {
+            ...current,
+            data: {
+              ...current.data,
+              icon_type: "emoji",
+              icon_value: iconValue,
+            },
+          };
+        },
+      );
       return { previous };
     },
     onError: (_err, _iconValue, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(["automation", automationId], context.previous);
+        queryClient.setQueryData(
+          ["automation", automationId],
+          context.previous,
+        );
       }
     },
     onSuccess: (updated) => {
@@ -545,13 +907,17 @@ export default function AutomationDetailPage() {
   // user-initiated actions (pause/resume/run now/delete) so silent failure is
   // worse than a potentially stale banner — the user needs to know the click
   // did not take effect before deciding whether to retry.
-  const headerError =
-    pauseMutation.isError ? "Failed to pause automation." :
-    resumeMutation.isError ? "Failed to resume automation." :
-    runNowMutation.isError ? "Failed to trigger run." :
-    iconMutation.isError ? "Failed to update automation emoji." :
-    deleteMutation.isError ? "Failed to delete automation." :
-    null;
+  const headerError = pauseMutation.isError
+    ? "Failed to pause automation."
+    : resumeMutation.isError
+      ? "Failed to resume automation."
+      : runNowMutation.isError
+        ? "Failed to trigger run."
+        : iconMutation.isError
+          ? "Failed to update automation emoji."
+          : deleteMutation.isError
+            ? "Failed to delete automation."
+            : null;
 
   const runActions = canManage ? (
     <div className="flex flex-wrap items-center gap-2">
@@ -584,7 +950,11 @@ export default function AutomationDetailPage() {
           Resume
         </Button>
       )}
-      <Button size="sm" onClick={handleRunNow} disabled={runNowMutation.isPending}>
+      <Button
+        size="sm"
+        onClick={handleRunNow}
+        disabled={runNowMutation.isPending}
+      >
         {runNowMutation.isPending ? (
           <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
         ) : (
@@ -600,16 +970,27 @@ export default function AutomationDetailPage() {
         <Settings2 className="mr-1.5 h-3.5 w-3.5" />
         Edit
       </Button>
-      <Button variant="outline" size="sm" className="lg:hidden" onClick={() => setDetailsOpen(true)}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="lg:hidden"
+        onClick={() => setDetailsOpen(true)}
+      >
         Details
       </Button>
     </div>
   ) : (
-    <Button variant="outline" size="sm" className="lg:hidden" onClick={() => setDetailsOpen(true)}>
+    <Button
+      variant="outline"
+      size="sm"
+      className="lg:hidden"
+      onClick={() => setDetailsOpen(true)}
+    >
       Details
     </Button>
   );
-  const repositoryName = repositoryResponse?.data.full_name ?? automation.repository_id ?? "-";
+  const repositoryName =
+    repositoryResponse?.data.full_name ?? automation.repository_id ?? "-";
 
   return (
     <PageContainer size="wide">
@@ -624,7 +1005,11 @@ export default function AutomationDetailPage() {
               </SheetDescription>
             </SheetHeader>
             <div className="mt-6">
-              <SettingsTab key={automation.updated_at} automation={automation} canManage={canManage} />
+              <SettingsTab
+                key={automation.updated_at}
+                automation={automation}
+                canManage={canManage}
+              />
             </div>
           </SheetContent>
         </Sheet>
@@ -693,7 +1078,9 @@ export default function AutomationDetailPage() {
             <LatestRunSummary automationId={automationId} />
 
             <section className="space-y-3">
-              <h2 className="text-sm font-semibold text-foreground">Run history</h2>
+              <h2 className="text-sm font-semibold text-foreground">
+                Run history
+              </h2>
               <RunsTab automationId={automationId} />
             </section>
           </main>
@@ -724,6 +1111,21 @@ function AutomationDetailRail({
   repositoryName: string;
   runActions?: ReactNode;
 }) {
+  const prTriggerLabels = githubEventsToAutomationProductTriggers(
+    automation.github_event_triggers ?? [],
+  )
+    .map(
+      (trigger) =>
+        automationProductTriggerOptions.find(
+          (option) => option.value === trigger,
+        )?.label,
+    )
+    .filter((label): label is string => Boolean(label));
+  const triggerSummary =
+    [automation.schedule_type === "none" ? null : schedule, ...prTriggerLabels]
+      .filter((value): value is string => Boolean(value))
+      .join(", ") || "-";
+
   return (
     <section className="rounded-lg border border-border bg-card p-4">
       <div className="space-y-4">
@@ -736,12 +1138,30 @@ function AutomationDetailRail({
         {runActions}
         <DetailList
           items={[
-            ["Next run", automation.next_run_at ? new Date(automation.next_run_at).toLocaleString() : "-"],
-            ["Last ran", automation.last_run_at ? new Date(automation.last_run_at).toLocaleString() : "-"],
+            [
+              "Next run",
+              automation.next_run_at
+                ? new Date(automation.next_run_at).toLocaleString()
+                : "-",
+            ],
+            [
+              "Last ran",
+              automation.last_run_at
+                ? new Date(automation.last_run_at).toLocaleString()
+                : "-",
+            ],
             ["Repository", repositoryName],
-            ["Schedule", schedule],
-            ["Runs as", automation.identity_scope === "personal" ? "Personal" : "Organization"],
-            ["Model", automation.model_override || automation.agent_type || "Auto"],
+            ["Triggers", triggerSummary],
+            [
+              "Runs as",
+              automation.identity_scope === "personal"
+                ? "Personal"
+                : "Organization",
+            ],
+            [
+              "Model",
+              automation.model_override || automation.agent_type || "Auto",
+            ],
             ["Reasoning", automation.reasoning_effort || "Default"],
             ["Base branch", automation.base_branch || "-"],
             ["Priority", priorityLabel(automation.priority)],
@@ -757,9 +1177,14 @@ function DetailList({ items }: { items: Array<[string, string]> }) {
   return (
     <dl className="space-y-3 text-sm">
       {items.map(([label, value]) => (
-        <div key={label} className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3">
+        <div
+          key={label}
+          className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3"
+        >
           <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-          <dd className="min-w-0 break-words text-xs text-foreground">{value}</dd>
+          <dd className="min-w-0 break-words text-xs text-foreground">
+            {value}
+          </dd>
         </div>
       ))}
     </dl>
@@ -786,12 +1211,15 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
     <section className="rounded-lg border border-border bg-card p-5">
       <h2 className="text-sm font-semibold text-foreground">Latest run</h2>
       {isLoading ? (
-        <p className="mt-3 text-sm text-muted-foreground">Loading latest run...</p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Loading latest run...
+        </p>
       ) : latest ? (
         <LatestRunBody run={latest} />
       ) : (
         <p className="mt-3 text-sm text-muted-foreground">
-          No runs yet. The first run will appear here after the schedule fires or when you run it manually.
+          No runs yet. The first run will appear here after the schedule fires
+          or when you run it manually.
         </p>
       )}
     </section>
@@ -799,7 +1227,8 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
 }
 
 function LatestRunBody({ run }: { run: AutomationRun }) {
-  const summary = run.result_summary || run.session?.title || statusLabel(run.status);
+  const summary =
+    run.result_summary || run.session?.title || statusLabel(run.status);
   return (
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -808,7 +1237,9 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
         </Badge>
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
-          {run.completed_at ? ` · ${new Date(run.completed_at).toLocaleString()}` : ""}
+          {run.completed_at
+            ? ` · ${new Date(run.completed_at).toLocaleString()}`
+            : ""}
         </span>
       </div>
       <p className="text-sm text-foreground">{summary}</p>

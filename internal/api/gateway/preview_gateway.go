@@ -291,6 +291,11 @@ func newGatewayProxyTransport() *http.Transport {
 // ServeHTTP implements http.Handler. Each request is routed based on the Host
 // header (preview ID) and the request path.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if isGatewayHealthzRequest(r) && !isPreviewHost(r.Host) {
+		g.serveHealthz(w, r)
+		return
+	}
+
 	previewID, err := extractPreviewID(r.Host)
 	if err != nil {
 		http.Error(w, "invalid preview hostname", http.StatusBadRequest)
@@ -309,13 +314,41 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func isGatewayHealthzRequest(r *http.Request) bool {
+	return r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+}
+
+func isPreviewHost(host string) bool {
+	normalized := hostWithoutPort(host)
+	if _, err := extractPreviewID(normalized); err == nil {
+		return true
+	}
+	return strings.Contains(normalized, ".preview.")
+}
+
+func hostWithoutPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func (g *Gateway) serveHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := io.WriteString(w, `{"status":"ok"}`); err != nil {
+		g.logger.Warn().Err(err).Msg("failed to write preview gateway health response")
+	}
+}
+
 // extractPreviewID parses the preview UUID from the first subdomain
 // component of the Host header (e.g., "abc123.preview.143.dev" → abc123).
 func extractPreviewID(host string) (uuid.UUID, error) {
 	// Strip port if present.
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host = hostWithoutPort(host)
 	parts := strings.SplitN(host, ".", 2)
 	if len(parts) == 0 {
 		return uuid.UUID{}, fmt.Errorf("no subdomain in host %q", host)
@@ -632,7 +665,10 @@ func (g *Gateway) accessSessionMatchesTargetHostIDs(r *http.Request, orgID, runt
 
 func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
 	data := g.previewControlOverlayData(r, previewID)
-	controlURL := g.previewControlURL(previewID)
+	controlURL := data.ControlURL
+	if controlURL == "" {
+		controlURL = g.previewControlURL(previewID)
+	}
 	if data.AutoLaunch {
 		http.Redirect(w, r, controlURL, http.StatusFound)
 		return
@@ -698,6 +734,7 @@ type previewControlOverlayData struct {
 	Description string
 	StatusLine  string
 	ActionLabel string
+	ControlURL  string
 	AutoLaunch  bool
 	Restartable bool
 	Status      models.PreviewStatus
@@ -709,6 +746,7 @@ func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID
 		Description: "Start the preview from 143 and it will open here.",
 		StatusLine:  "Not connected",
 		ActionLabel: "Start preview",
+		ControlURL:  g.previewControlURL(previewID),
 	}
 	if g.store == nil {
 		return fallback
@@ -731,18 +769,42 @@ func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID
 			Description: "This preview is running — opening it through 143.",
 			StatusLine:  statusLine,
 			ActionLabel: "Open preview",
+			ControlURL:  fallback.ControlURL,
 			AutoLaunch:  true,
 			Status:      instance.Status,
 		}
+	}
+	controlURL := fallback.ControlURL
+	if instance.PreviewTargetID != nil {
+		controlURL = g.previewControlURLForStoppedTarget(r.Context(), instance.OrgID, *instance.PreviewTargetID, previewID)
 	}
 	return previewControlOverlayData{
 		Title:       "Preview " + strings.ToLower(label),
 		Description: "Restart it to pick up where you left off — this page reconnects automatically.",
 		StatusLine:  statusLine,
 		ActionLabel: "Restart preview",
+		ControlURL:  controlURL,
 		Restartable: true,
 		Status:      instance.Status,
 	}
+}
+
+func (g *Gateway) previewControlURLForStoppedTarget(ctx context.Context, orgID, targetID, fallbackHostID uuid.UUID) string {
+	if g.store == nil {
+		return g.previewControlURL(fallbackHostID)
+	}
+	link, err := g.store.GetPreviewLinkByTarget(ctx, orgID, targetID, models.PreviewLinkTypePullRequest)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			g.logger.Warn().Err(err).Str("preview_target_id", targetID.String()).Msg("failed to load PR preview control link")
+		}
+		return g.previewControlURL(fallbackHostID)
+	}
+	slug := strings.Trim(link.Slug, "/")
+	if slug == "" {
+		return g.previewControlURL(fallbackHostID)
+	}
+	return g.resolvedAppOrigin() + "/previews/" + slug + "?launch=1"
 }
 
 // previewControlStatusResponse is the unauthenticated status payload polled by

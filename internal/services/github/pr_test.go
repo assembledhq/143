@@ -451,24 +451,15 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
 			newPRTestRow(prID, nil, orgID, repoName, time.Now(), nil)...,
 		))
-	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
-		Action: "completed",
-		CheckRun: struct {
-			PullRequests []struct {
-				Number int `json:"number"`
-			} `json:"pull_requests"`
-		}{
-			PullRequests: []struct {
-				Number int `json:"number"`
-			}{{Number: 42}},
-		},
-		Repository: struct {
-			ID       int64  `json:"id"`
-			FullName string `json:"full_name"`
-		}{
-			FullName: repoName,
-		},
-	})
+	checkRunEvent := CheckRunEvent{Action: "completed"}
+	checkRunEvent.CheckRun.PullRequests = append(checkRunEvent.CheckRun.PullRequests, struct {
+		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 42})
+	checkRunEvent.Repository.FullName = repoName
+	err = service.HandleCheckRunEvent(context.Background(), checkRunEvent)
 	require.NoError(t, err, "HandleCheckRunEvent should enqueue state sync for completed check runs")
 
 	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{Action: "created"})
@@ -477,24 +468,15 @@ func TestPRService_SettersAndCheckRunHandler(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE github_repo").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns))
-	err = service.HandleCheckRunEvent(context.Background(), CheckRunEvent{
-		Action: "completed",
-		CheckRun: struct {
-			PullRequests []struct {
-				Number int `json:"number"`
-			} `json:"pull_requests"`
-		}{
-			PullRequests: []struct {
-				Number int `json:"number"`
-			}{{Number: 99}},
-		},
-		Repository: struct {
-			ID       int64  `json:"id"`
-			FullName string `json:"full_name"`
-		}{
-			FullName: repoName,
-		},
-	})
+	checkRunEvent = CheckRunEvent{Action: "completed"}
+	checkRunEvent.CheckRun.PullRequests = append(checkRunEvent.CheckRun.PullRequests, struct {
+		Number int `json:"number"`
+		Base   struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}{Number: 99})
+	checkRunEvent.Repository.FullName = repoName
+	err = service.HandleCheckRunEvent(context.Background(), checkRunEvent)
 	require.NoError(t, err, "HandleCheckRunEvent should ignore check runs for unmanaged pull requests")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check_run expectations should be met")
 }
@@ -2428,8 +2410,60 @@ func TestPRPreviewURLCreatesDurablePreviewOriginTarget(t *testing.T) {
 
 	url := svc.prPreviewURL(context.Background(), run, repo, "owner", "repo", 42, "143/abc123/changes", "abc1234567890abcdef1234567890abcdef12345", "https://github.com/owner/repo/pull/42")
 
-	require.Equal(t, "https://143.dev/previews/github/owner/repo/pull/42", url, "PR preview URL should point at the stable app launch route")
+	require.Equal(t, "https://143.dev/previews/github/owner/repo/pull/42?launch=1", url, "PR preview URL should point at the stable app launch route")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestUpsertPRPreviewFooter(t *testing.T) {
+	t.Parallel()
+
+	stableURL := "https://143.dev/previews/github/owner/repo/pull/42?launch=1"
+	tests := []struct {
+		name     string
+		body     string
+		expected string
+	}{
+		{
+			name:     "appends stable preview footer",
+			body:     "Changes are ready.",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "keeps existing stable preview footer",
+			body:     "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "replaces stable preview footer missing launch intent",
+			body:     "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "replaces legacy preview origin footer",
+			body:     "Changes are ready.\n\nPreview: https://target-1.preview.143.dev",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "preserves non-footer preview template fields",
+			body:     "## Checklist\nPreview: TBD\n\nPreview: https://target-1.preview.143.dev",
+			expected: "## Checklist\nPreview: TBD\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+		{
+			name:     "replaces legacy app subdomain stable route",
+			body:     "Changes are ready.\n\nPreview: https://app.143.dev/previews/github/owner/repo/pull/42",
+			expected: "Changes are ready.\n\nPreview: https://143.dev/previews/github/owner/repo/pull/42?launch=1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := upsertPRPreviewFooter(tt.body, stableURL)
+
+			require.Equal(t, tt.expected, actual, "preview footer should be canonical and idempotent")
+		})
+	}
 }
 
 func TestFormatPRBody_WithIssueContext(t *testing.T) {

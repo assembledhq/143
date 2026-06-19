@@ -44,6 +44,8 @@ When `Start Preview` is requested:
 
 Cold starts reserve a `starting` preview row and enqueue durable startup work to the selected worker. Live-container reuse never retries onto a different worker; if a pinned startup worker is later declared dead before claim, the job target-node fallback allows another worker to claim and reassign the reserved preview.
 
+Before reserving a new session preview, app nodes recover stale live-session ownership when no active preview exists: if `sessions.container_id` points at a worker node whose status is no longer routable, the API CAS-clears the session's `container_id`/`worker_node_id`, refetches the session, and re-runs worker selection. This lets the preview cold-start from the saved snapshot on a healthy worker instead of failing selection on a dead owner.
+
 ## Internal Auth
 
 App-to-worker preview RPC uses a dedicated signed preview token. The signing
@@ -114,7 +116,7 @@ Workers only advertise `preview_capable = true` and `preview_rpc_auth_check = tr
 
 App nodes also treat gateway-to-worker reachability as part of the runtime health contract. The preview gateway marks the current active runtime unavailable with `unavailable_reason = endpoint_unreachable` when proxying to the runtime endpoint fails, and an app-side reachability monitor periodically dials active runtime endpoints to catch ready-but-undialable runtimes before a user opens the preview. Runtime loss is epoch-guarded so stale probes cannot tear down a newer replacement runtime. This keeps the durable preview URL restartable while avoiding stale `ready` rows whose worker heartbeat is fresh but whose endpoint cannot be reached from the app tier.
 
-Startup recovery is worker-scoped. A worker only rehydrates sandbox-auth sockets for preview-held sessions whose active `preview_instances.worker_node_id` matches its own `NODE_ID`; it must not scan or rebind sockets for containers owned by peer workers.
+Startup recovery is worker-scoped. A worker only rehydrates sandbox-auth sockets for preview-held sessions whose active `preview_instances.worker_node_id` matches its own `NODE_ID`; it must not scan or rebind sockets for containers owned by peer workers. Startup recovery is non-destructive for the shared socket root: a new worker generation must not remove UUID-named socket directories because older draining generations on the same host may still own live listeners.
 
 ## Deployment Contract
 

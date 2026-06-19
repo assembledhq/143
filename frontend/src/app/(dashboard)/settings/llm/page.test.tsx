@@ -85,15 +85,16 @@ describe("LLMPage", () => {
     renderWithProviders(<LLMPage />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /LLM/i, level: 1 })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "App LLM", level: 1 })).toBeInTheDocument();
     });
     expect(
       screen.getByText(
-        /Configure app-level LLMs for PR descriptions, session titles, validation, and project generation\. These are separate from coding agents on the Agent page/i,
+        /Configure models for app-generated titles, PR descriptions, validation, prioritization, and project generation\. Coding-agent credentials are managed separately on Coding agents\./i,
       ),
     ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Coding agents" })).toHaveAttribute("href", "/settings/agent");
     expect(
-      screen.queryByText(/These models are separate from the coding agents configured on the Agent page/i),
+      screen.queryByText(/These are separate from coding agents on the Agent page/i),
     ).not.toBeInTheDocument();
   });
 

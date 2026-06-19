@@ -646,7 +646,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
-  let hiddenBatch: SessionLog[] = [];
+  let hiddenBatch: Array<{ entry: Extract<TimelineEntry, { kind: "log" }>; index: number }> = [];
   let lastDay: string | null = null;
 
   function wrapEntry(node: React.ReactNode, entry: TimelineEntry, index: number, key: string) {
@@ -664,8 +664,17 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
 
   function flushHidden() {
     if (hiddenBatch.length > 0) {
+      const first = hiddenBatch[0];
       rendered.push(
-        <HiddenLogsGroup key={`hidden-${hiddenBatch[0].id}`} logs={[...hiddenBatch]} />
+        wrapEntry(
+          <HiddenLogsGroup
+            key={`hidden-${first.entry.data.id}`}
+            logs={hiddenBatch.map((item) => item.entry.data)}
+          />,
+          first.entry,
+          first.index,
+          `hidden-${first.entry.data.id}`,
+        )
       );
       hiddenBatch = [];
     }
@@ -682,7 +691,7 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
 
   for (const [index, entry] of entries.entries()) {
     if (entry.kind === "log") {
-      hiddenBatch.push(entry.data);
+      hiddenBatch.push({ entry, index });
       continue;
     }
 

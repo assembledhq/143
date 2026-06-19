@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -489,6 +490,23 @@ func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run mod
 	return nil
 }
 
+func enqueueRunAgentForSession(ctx context.Context, stores *Stores, session models.Session) error {
+	if stores == nil || stores.Jobs == nil {
+		return errors.New("run_agent enqueue store unavailable")
+	}
+	if session.ID == uuid.Nil {
+		return errors.New("session id is required to enqueue run_agent")
+	}
+	if session.OrgID == uuid.Nil {
+		return errors.New("org id is required to enqueue run_agent")
+	}
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+		return fmt.Errorf("enqueue run_agent: %w", err)
+	}
+	return nil
+}
+
 // MemoryReinforcer retrieves and reinforces memories for a repo.
 type MemoryReinforcer interface {
 	GetContextMemories(ctx context.Context, req agent.MemoryContextRequest) (*agent.MemoryContextResult, error)
@@ -538,7 +556,10 @@ type Services struct {
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
-	FrontendURL     string                        // optional base URL for Slack links
+	// Redis is optional and used for non-authoritative shared caches such as
+	// Slack user display names. Losing it should only increase provider lookups.
+	Redis       *cache.Client
+	FrontendURL string // optional base URL for Slack links
 	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
 	// triggers a 143 session). It is intentionally independent of the
 	// dispatcher kill switch so queued linear_agent_event jobs continue to
@@ -564,12 +585,6 @@ type Services struct {
 	// so listener goroutines and on-disk socket files don't outlive the
 	// process.
 	SandboxAuthShutdown func()
-	// SandboxAuthSweep removes per-session subdirs in the socket dir whose
-	// UUID isn't in the keep set. Called once at startup, after the
-	// rehydrate pass has re-Listen'd for every still-alive container, so
-	// leftover dirs from prior worker generations don't accumulate. nil
-	// when no SandboxAuthSocketDir is configured.
-	SandboxAuthSweep func(keep map[uuid.UUID]struct{})
 	// SandboxAuthBroker is the worker-owned lease manager exposed through
 	// signed internal RPCs for detached session executors.
 	SandboxAuthBroker SandboxAuthBroker
@@ -1625,18 +1640,19 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		}
 
 		session := &models.Session{
-			OrgID:             orgID,
-			AgentType:         agentType,
-			Status:            "pending",
-			AutonomyLevel:     models.DefaultSessionAutonomy,
-			TokenMode:         "low",
-			ModelOverride:     automation.ModelOverride,
-			ReasoningEffort:   automation.ReasoningEffort,
-			TriggeredByUserID: sessionTriggeredByUserID,
-			TargetBranch:      targetBranch,
-			RepositoryID:      automation.RepositoryID,
-			AutomationRunID:   &runID,
-			PMApproach:        goalSeed,
+			OrgID:              orgID,
+			AgentType:          agentType,
+			Status:             "pending",
+			AutonomyLevel:      models.DefaultSessionAutonomy,
+			TokenMode:          "low",
+			ModelOverride:      automation.ModelOverride,
+			ReasoningEffort:    automation.ReasoningEffort,
+			TriggeredByUserID:  sessionTriggeredByUserID,
+			TargetBranch:       targetBranch,
+			RepositoryID:       automation.RepositoryID,
+			AutomationRunID:    &runID,
+			PMApproach:         goalSeed,
+			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			// Session creation failed after we claimed the row — flip
@@ -2033,6 +2049,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		contextFiles := fetchSlackContextFiles(ctx, slackClient, slackCfg.AccessToken, payload.FileIDs, logger)
 		contextRefs := detectSlackContextReferences(payload.Text, threadMessages)
 		resolvedContext := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
+		userResolver := newSlackCachedUserDisplayResolver(slackClient, slackRedisClient(services), slackCfg.AccessToken, payload.TeamID, logger)
 
 		var mappedUserID *uuid.UUID
 		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
@@ -2062,7 +2079,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					UserID:     mappedUserID,
 					TurnNumber: session.CurrentTurn,
 					Role:       models.MessageRoleUser,
-					Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+					Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
 					References: slackContextReferencesForSessionInput(contextRefs),
 				}
 				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
@@ -2089,20 +2106,13 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
 				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, slackbotsvc.SlackRoutingModeAuto)
-				var posted ingestion.SlackPostedMessage
-				var postErr error
-				if len(ackBlocks) > 0 {
-					posted, postErr = slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks)
-				} else {
-					posted, postErr = slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText)
-				}
+				posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, existingLink, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 				if postErr != nil {
 					logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
 				} else {
 					if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
 						logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack continuation status timestamp")
 					}
-					recordSlackOutboundInChannel(ctx, stores, services, logger, existingLink, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 				}
 				return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 			}
@@ -2149,10 +2159,13 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 						return nil
 					}
 				}
+				contextSettings := settings
+				contextSettings.DefaultRepositoryID = nil
 				resolvedContext = slackbotsvc.ResolveSlackContext(slackbotsvc.SlackContextResolveInput{
-					Settings:              settings,
+					Settings:              contextSettings,
 					Text:                  payload.Text,
-					References:            slackContextReferencesForResolver(contextRefs),
+					References:            slackContextReferencesForResolver(ctx, stores, logger, orgID, contextRefs),
+					RepositoryDefaults:    slackRepositoryDefaultsForContext(ctx, stores, logger, orgID, installationID, payload.TeamID, payload.ChannelID),
 					TriggeringSlackUserID: payload.SlackUserID,
 				})
 				session.RepositoryID = resolvedContext.RepositoryID
@@ -2174,7 +2187,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			UserID:     mappedUserID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
-			Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+			Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
 			References: slackContextReferencesForSessionInput(contextRefs),
 		}
 		if err := stores.SessionMessages.Create(ctx, initial); err != nil {
@@ -2207,9 +2220,8 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to persist Slack session attribution")
 			}
 		}
-		if !blockingSlackMissingContext(resolvedContext.Missing) {
-			dedupeKey := db.RunAgentDedupeKey(session.ID)
-			if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
+		if shouldEnqueueSlackStartedRun(session, resolvedContext) {
+			if err := enqueueRunAgentForSession(ctx, stores, *session); err != nil {
 				return fmt.Errorf("enqueue slack-started session: %w", err)
 			}
 		}
@@ -2218,21 +2230,14 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 		}
 		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode)
-		var posted ingestion.SlackPostedMessage
-		var postErr error
 		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
-		if len(ackBlocks) > 0 {
-			posted, postErr = slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks)
-		} else {
-			posted, postErr = slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText)
-		}
+		posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, *link, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 		if postErr != nil {
 			logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack session acknowledgement")
 		} else {
 			if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
 				logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack acknowledgement status timestamp")
 			}
-			recordSlackOutboundInChannel(ctx, stores, services, logger, *link, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 		}
 		return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 	}
@@ -2354,6 +2359,79 @@ func slackDeliveryTarget(ctx context.Context, stores *Stores, slackClient *inges
 	}
 	channelID, threadTS, _ := slackDeliveryTargetFromVisibility(link, replyThreadTS, visibility, dmChannelID)
 	return channelID, threadTS
+}
+
+func slackRepositoryDefaultsForContext(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string) []slackbotsvc.SlackRepositoryDefault {
+	if stores == nil {
+		return nil
+	}
+	defaults := []slackbotsvc.SlackRepositoryDefault{}
+	if stores.SlackChannels != nil && channelID != "" {
+		channelSettings, err := stores.SlackChannels.GetByChannel(ctx, orgID, teamID, channelID)
+		if err == nil && channelSettings.DefaultRepositoryID != nil {
+			defaults = appendSlackRepositoryDefault(ctx, stores, logger, defaults, orgID, *channelSettings.DefaultRepositoryID, channelSettings.DefaultBranch, slackbotsvc.SlackRepositoryResolutionSourceChannelDefault)
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack channel repository default")
+		}
+	}
+	if stores.SlackBotSettings != nil && installationID != uuid.Nil {
+		botSettings, err := stores.SlackBotSettings.GetByInstallation(ctx, orgID, installationID)
+		if err == nil && botSettings.DefaultRepositoryID != nil {
+			defaults = appendSlackRepositoryDefault(ctx, stores, logger, defaults, orgID, *botSettings.DefaultRepositoryID, botSettings.DefaultBranch, slackbotsvc.SlackRepositoryResolutionSourceInstallDefault)
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Msg("failed to load Slack install repository default")
+		}
+	}
+	if stores.Organizations != nil {
+		org, err := stores.Organizations.GetByID(ctx, orgID)
+		if err == nil {
+			settings, parseErr := models.ParseOrgSettings(org.Settings)
+			if parseErr != nil {
+				logger.Warn().Err(parseErr).Str("org_id", orgID.String()).Msg("failed to parse org settings for Slack repository default")
+			} else if settings.DefaultWorkRepositoryID != nil {
+				defaults = appendSlackRepositoryDefault(ctx, stores, logger, defaults, orgID, *settings.DefaultWorkRepositoryID, nil, slackbotsvc.SlackRepositoryResolutionSourceOrgDefault)
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load org settings for Slack repository default")
+		}
+	}
+	if stores.Repositories != nil {
+		repos, err := stores.Repositories.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+		if err == nil && len(repos) == 1 {
+			repo := repos[0]
+			defaults = append(defaults, slackbotsvc.SlackRepositoryDefault{
+				RepositoryID:   repo.ID,
+				RepositoryName: repo.FullName,
+				Branch:         repo.DefaultBranch,
+				Source:         slackbotsvc.SlackRepositoryResolutionSourceSingleRepo,
+			})
+		} else if err != nil {
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list repositories for Slack single-repo fallback")
+		}
+	}
+	return defaults
+}
+
+func appendSlackRepositoryDefault(ctx context.Context, stores *Stores, logger zerolog.Logger, defaults []slackbotsvc.SlackRepositoryDefault, orgID, repoID uuid.UUID, branch *string, source slackbotsvc.SlackRepositoryResolutionSource) []slackbotsvc.SlackRepositoryDefault {
+	candidate := slackbotsvc.SlackRepositoryDefault{
+		RepositoryID: repoID,
+		Source:       source,
+	}
+	if branch != nil {
+		candidate.Branch = strings.TrimSpace(*branch)
+	}
+	if stores != nil && stores.Repositories != nil {
+		repo, err := stores.Repositories.GetByID(ctx, orgID, repoID)
+		if err == nil {
+			candidate.RepositoryName = repo.FullName
+			if candidate.Branch == "" {
+				candidate.Branch = repo.DefaultBranch
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("repository_id", repoID.String()).Msg("failed to load repository default details")
+		}
+	}
+	return append(defaults, candidate)
 }
 
 func slackStartSessionReplyThreadTS(payload models.SlackStartSessionJobPayload) string {
@@ -2742,6 +2820,51 @@ func slackHomeAutomationRunBlock(services *Services, items []db.SlackHomeAutomat
 	}
 }
 
+type slackMessagePoster interface {
+	PostMessage(ctx context.Context, accessToken, channelID, threadTS, text string) (ingestion.SlackPostedMessage, error)
+	PostMessageWithBlocks(ctx context.Context, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock) (ingestion.SlackPostedMessage, error)
+}
+
+func postSlackMessageWithFallback(ctx context.Context, poster slackMessagePoster, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock, kind models.SlackOutboundMessageKind) (ingestion.SlackPostedMessage, error) {
+	if poster == nil {
+		return ingestion.SlackPostedMessage{}, fmt.Errorf("slack message poster is not configured")
+	}
+	if len(blocks) == 0 {
+		posted, err := poster.PostMessage(ctx, accessToken, channelID, threadTS, text)
+		if err != nil {
+			recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed"), kind, "failed", text)
+			return ingestion.SlackPostedMessage{}, err
+		}
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, kind, "sent", text)
+		return posted, nil
+	}
+	posted, err := poster.PostMessageWithBlocks(ctx, accessToken, channelID, threadTS, text, blocks)
+	if err == nil {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, kind, "sent", text)
+		return posted, nil
+	}
+	if !slackIsInvalidBlocksError(err) {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed"), kind, "failed", text)
+		return ingestion.SlackPostedMessage{}, err
+	}
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_invalid_blocks"), kind, "failed_invalid_blocks", text)
+	fallbackPosted, fallbackErr := poster.PostMessage(ctx, accessToken, channelID, threadTS, text)
+	if fallbackErr != nil {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_fallback"), kind, "failed_fallback", text)
+		return ingestion.SlackPostedMessage{}, fallbackErr
+	}
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, fallbackPosted.Timestamp, kind, "sent_fallback", text)
+	return fallbackPosted, nil
+}
+
+func slackIsInvalidBlocksError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "invalid_blocks")
+}
+
+func slackSyntheticMessageTS(kind models.SlackOutboundMessageKind, status string) string {
+	return "attempt:" + string(kind) + ":" + status + ":" + uuid.NewString()
+}
+
 func recordSlackOutboundInChannel(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, channelID, ts string, kind models.SlackOutboundMessageKind, status, text string) {
 	if services != nil && services.SlackbotMetrics != nil {
 		services.SlackbotMetrics.RecordOutboundMessage(ctx, string(kind), status)
@@ -2909,7 +3032,7 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal)
 			}
 		}
-		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
+		posted, err := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, text, blocks, models.SlackOutboundMessageKindFinal)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
@@ -2919,7 +3042,6 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack final message timestamp")
 			}
 		}
-		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindFinal, "sent", text)
 		return nil
 	}
 }
@@ -2970,12 +3092,11 @@ func newSlackDeliverHumanInputHandler(stores *Stores, services *Services, logger
 				Msg("skipping Slack human-input delivery because request is not channel-deliverable")
 			return nil
 		}
-		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
+		_, err = postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, text, blocks, models.SlackOutboundMessageKindHumanInput)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
 		}
-		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindHumanInput, "sent", text)
 		return nil
 	}
 }
@@ -4079,6 +4200,7 @@ func handleSlackSelectRepository(ctx context.Context, stores *Stores, input mode
 		ChannelID      string `json:"channel_id"`
 		RepositoryID   string `json:"repository_id"`
 		DefaultBranch  string `json:"default_branch"`
+		SessionID      string `json:"session_id"`
 	}
 	if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
 		return fmt.Errorf("parse slack repository selection value: %w", err)
@@ -4124,7 +4246,27 @@ func handleSlackSelectRepository(ctx context.Context, stores *Stores, input mode
 		NotificationSubscriptions: json.RawMessage(`{}`),
 		Active:                    true,
 	}
-	return stores.SlackChannels.Upsert(ctx, settings)
+	if err := stores.SlackChannels.Upsert(ctx, settings); err != nil {
+		return err
+	}
+	if strings.TrimSpace(value.SessionID) == "" {
+		return nil
+	}
+	if stores.Sessions == nil || stores.Jobs == nil {
+		return fmt.Errorf("slack repository selection session-start dependencies are not configured")
+	}
+	sessionID, err := uuid.Parse(value.SessionID)
+	if err != nil {
+		return fmt.Errorf("parse session_id: %w", err)
+	}
+	session, err := stores.Sessions.SetRepositoryContext(ctx, orgID, sessionID, repoID, defaultBranchPtr)
+	if err != nil {
+		return fmt.Errorf("set Slack session repository context: %w", err)
+	}
+	if !sessionStatusNeedsRunAgent(session.Status) {
+		return nil
+	}
+	return enqueueRunAgentForSession(ctx, stores, session)
 }
 
 func handleSlackConfigureChannel(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
@@ -5761,8 +5903,182 @@ type slackContextFile struct {
 	Permalink string
 }
 
+const slackUserDisplayCacheTTL = 7 * 24 * time.Hour
+const slackUserPromptLabelMaxRunes = 80
+
+var slackUserMentionPattern = regexp.MustCompile(`<@([UW][A-Z0-9]+)>`)
+
+type slackUserInfoFetcher interface {
+	FetchUserInfo(ctx context.Context, accessToken, userID string) (ingestion.SlackUser, error)
+}
+
+type slackUserDisplayResolver interface {
+	ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool)
+}
+
+type slackUserDisplay struct {
+	SlackID string
+	Handle  string
+}
+
+type slackCachedUserDisplay struct {
+	SlackID     string `json:"slack_id"`
+	Name        string `json:"name,omitempty"`
+	RealName    string `json:"real_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type slackCachedUserDisplayResolver struct {
+	fetcher     slackUserInfoFetcher
+	redis       *cache.Client
+	accessToken string
+	teamID      string
+	logger      zerolog.Logger
+	local       map[string]slackUserDisplay
+}
+
+func newSlackCachedUserDisplayResolver(fetcher slackUserInfoFetcher, redisClient *cache.Client, accessToken, teamID string, logger zerolog.Logger) *slackCachedUserDisplayResolver {
+	return &slackCachedUserDisplayResolver{
+		fetcher:     fetcher,
+		redis:       redisClient,
+		accessToken: accessToken,
+		teamID:      strings.TrimSpace(teamID),
+		logger:      logger,
+		local:       make(map[string]slackUserDisplay),
+	}
+}
+
+func slackRedisClient(services *Services) *cache.Client {
+	if services == nil {
+		return nil
+	}
+	return services.Redis
+}
+
+func slackUserDisplayCacheKey(teamID, userID string) string {
+	return "143:slack:user:" + strings.TrimSpace(teamID) + ":" + strings.TrimSpace(userID)
+}
+
+func (r *slackCachedUserDisplayResolver) ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	userID = strings.TrimSpace(userID)
+	if r == nil || userID == "" {
+		return slackUserDisplay{}, false
+	}
+	if display, ok := r.local[userID]; ok {
+		return display, true
+	}
+	if display, ok := r.getShared(ctx, userID); ok {
+		r.local[userID] = display
+		return display, true
+	}
+	if r.fetcher == nil || strings.TrimSpace(r.accessToken) == "" {
+		return slackUserDisplay{}, false
+	}
+	user, err := r.fetcher.FetchUserInfo(ctx, r.accessToken, userID)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to resolve Slack user display name")
+		return slackUserDisplay{}, false
+	}
+	cached := slackCachedUserDisplay{
+		SlackID:     user.ID,
+		Name:        user.Name,
+		RealName:    firstNonEmpty(user.Profile.RealName, user.RealName),
+		DisplayName: user.Profile.DisplayName,
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	r.local[userID] = display
+	r.putShared(ctx, userID, cached)
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) getShared(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return slackUserDisplay{}, false
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := r.redis.GetBytes(ctx, key)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return slackUserDisplay{}, false
+		}
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to read Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	var cached slackCachedUserDisplay
+	if err := json.Unmarshal(data, &cached); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to decode Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) putShared(ctx context.Context, userID string, cached slackCachedUserDisplay) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := json.Marshal(cached)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to marshal Slack user display cache entry")
+		return
+	}
+	if err := r.redis.SetBytes(ctx, key, data, slackUserDisplayCacheTTL); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to write Slack user display to Redis")
+	}
+}
+
+func (c slackCachedUserDisplay) toDisplay(fallbackID string) slackUserDisplay {
+	return slackUserDisplay{
+		SlackID: firstNonEmpty(c.SlackID, fallbackID),
+		Handle:  sanitizeSlackUserHandle(c.Name),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sanitizeSlackUserHandle(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+		if b.Len() >= slackUserPromptLabelMaxRunes {
+			break
+		}
+	}
+	return b.String()
+}
+
 func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile) string {
+	return renderSlackPromptWithUserResolver(context.Background(), text, permalink, threadMessages, references, files, nil)
+}
+
+func renderSlackPromptWithUserResolver(ctx context.Context, text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile, userResolver slackUserDisplayResolver) string {
 	cleaned := strings.TrimSpace(text)
+	cleaned = humanizeSlackMentions(ctx, cleaned, userResolver)
 	var b strings.Builder
 	b.WriteString(cleaned)
 	if permalink != "" {
@@ -5813,20 +6129,51 @@ func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackM
 			if line == "" {
 				continue
 			}
+			line = humanizeSlackMentions(ctx, line, userResolver)
 			if len(line) > 500 {
 				line = line[:500] + "..."
 			}
 			b.WriteString("- ")
 			if msg.User != "" {
-				b.WriteString("<@")
-				b.WriteString(msg.User)
-				b.WriteString(">: ")
+				b.WriteString(slackUserAuthorLabel(ctx, msg.User, userResolver))
+				b.WriteString(": ")
 			}
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func humanizeSlackMentions(ctx context.Context, text string, userResolver slackUserDisplayResolver) string {
+	if userResolver == nil || text == "" {
+		return text
+	}
+	return slackUserMentionPattern.ReplaceAllStringFunc(text, func(raw string) string {
+		// raw is already the full pattern match "<@UXXX>"; extract the captured ID directly.
+		userID := raw[2 : len(raw)-1]
+		display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+		if !ok || display.Handle == "" {
+			return raw
+		}
+		return "@" + display.Handle
+	})
+}
+
+func slackUserAuthorLabel(ctx context.Context, userID string, userResolver slackUserDisplayResolver) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "Slack user"
+	}
+	if userResolver == nil {
+		return "<@" + userID + ">"
+	}
+	display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+	if !ok || display.Handle == "" {
+		return "<@" + userID + ">"
+	}
+	slackID := firstNonEmpty(display.SlackID, userID)
+	return "@" + display.Handle + " (Slack " + slackID + ")"
 }
 
 func fetchSlackContextFiles(ctx context.Context, client *ingestion.SlackAPIClient, accessToken string, fileIDs []string, logger zerolog.Logger) []slackContextFile {
@@ -5939,16 +6286,58 @@ func detectSlackContextReferences(text string, threadMessages []ingestion.SlackM
 	return refs
 }
 
-func slackContextReferencesForResolver(refs []slackContextReference) []slackbotsvc.SlackContextReference {
+func slackContextReferencesForResolver(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, refs []slackContextReference) []slackbotsvc.SlackContextReference {
 	converted := make([]slackbotsvc.SlackContextReference, 0, len(refs))
 	for _, ref := range refs {
-		converted = append(converted, slackbotsvc.SlackContextReference{
+		resolved := slackbotsvc.SlackContextReference{
 			Kind:   slackbotsvc.SlackContextReferenceKind(ref.Kind),
 			Value:  ref.Value,
 			Source: ref.Source,
-		})
+		}
+		if ref.Kind == slackReferenceKindRepository {
+			resolved.ResolvedID = resolveSlackRepositoryReferenceID(ctx, stores, logger, orgID, ref.Value)
+		}
+		converted = append(converted, resolved)
 	}
 	return converted
+}
+
+func resolveSlackRepositoryReferenceID(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, value string) *uuid.UUID {
+	if stores == nil || stores.Repositories == nil || orgID == uuid.Nil {
+		return nil
+	}
+	fullName := slackRepositoryFullNameFromReference(value)
+	if fullName == "" {
+		return nil
+	}
+	repo, err := stores.Repositories.GetByFullName(ctx, orgID, fullName)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("repository", fullName).Msg("failed to resolve Slack repository reference")
+		}
+		return nil
+	}
+	return &repo.ID
+}
+
+func slackRepositoryFullNameFromReference(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err == nil && strings.EqualFold(parsed.Hostname(), "github.com") {
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0] + "/" + parts[1]
+		}
+		return ""
+	}
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[0], " ") && !strings.Contains(parts[1], " ") {
+		return parts[0] + "/" + parts[1]
+	}
+	return ""
 }
 
 func slackContextReferencesForSessionInput(refs []slackContextReference) models.SessionInputReferences {
@@ -6125,7 +6514,7 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 				"channel_id": channelID,
 			}),
 		})
-		if routingMode != slackbotsvc.SlackRoutingModeStartWork {
+		if routingMode == slackbotsvc.SlackRoutingModeAnswerOnly {
 			actions = append(actions, slackbotsvc.SlackAction{
 				Text:     "Start work",
 				ActionID: "slack_start_work",
@@ -6217,7 +6606,7 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 	}
 	blocks = append(blocks, ingestion.SlackBlock{
 		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "I can keep going, but selecting a default repository will make this Slack thread more precise."},
+		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "Choose a repository before I start durable work for this Slack thread."},
 	}, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	return blocks
 }
@@ -6281,10 +6670,17 @@ func slackSessionAckRoutingMode(ctx context.Context, stores *Stores, logger zero
 	return slackbotsvc.SlackRoutingMode(settings.RoutingMode)
 }
 
+func shouldEnqueueSlackStartedRun(session *models.Session, resolved slackbotsvc.SlackContextResolveResult) bool {
+	if session == nil || session.RepositoryID == nil {
+		return false
+	}
+	return !blockingSlackMissingContext(resolved.Missing)
+}
+
 func blockingSlackMissingContext(missing []slackbotsvc.MissingSlackContext) bool {
 	for _, item := range missing {
 		switch item.Kind {
-		case "preview_target", "pull_request":
+		case "repository", "preview_target", "pull_request":
 			return true
 		}
 	}
@@ -7530,24 +7926,20 @@ func newDeliverThreadInboxHandler(services *Services, logger zerolog.Logger) Job
 	}
 }
 
-func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID string, logger zerolog.Logger) (*uuid.UUID, error) {
+func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID int64, logger zerolog.Logger) (*uuid.UUID, error) {
 	if stores == nil || stores.HumanInputRequests == nil || stores.SessionMessages == nil {
 		return nil, nil
 	}
-	messageID, err := strconv.ParseInt(queuedMessageID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("parse queued message ID: %w", err)
-	}
-	queued, err := stores.SessionMessages.GetByID(ctx, orgID, messageID)
+	queued, err := stores.SessionMessages.GetByID(ctx, orgID, queuedMessageID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch queued message for human input answer: %w", err)
 	}
 	if queued.SessionID != sessionID {
-		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", messageID, queued.SessionID, sessionID)
+		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", queuedMessageID, queued.SessionID, sessionID)
 	}
 	if hasThread {
 		if queued.ThreadID == nil || *queued.ThreadID != threadID {
-			return nil, fmt.Errorf("queued message %d does not belong to thread %s", messageID, threadID)
+			return nil, fmt.Errorf("queued message %d does not belong to thread %s", queuedMessageID, threadID)
 		}
 	}
 	if queued.UserID == nil {
@@ -7567,7 +7959,7 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 		logger.Warn().Err(err).
 			Str("session_id", sessionID.String()).
 			Str("thread_id", threadID.String()).
-			Int64("queued_message_id", messageID).
+			Int64("queued_message_id", queuedMessageID).
 			Msg("failed to answer pending human-input request from queued message")
 		return nil, nil
 	}
@@ -7633,12 +8025,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
 		var humanInputRequestID *uuid.UUID
+		var queuedMessageID *int64
 		if input.HumanInputRequestID != "" {
 			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
 			if parseErr != nil {
 				return fmt.Errorf("parse human input request ID: %w", parseErr)
 			}
 			humanInputRequestID = &parsedHumanInputRequestID
+		}
+		if input.QueuedMessageID != "" {
+			parsedQueuedMessageID, parseErr := strconv.ParseInt(input.QueuedMessageID, 10, 64)
+			if parseErr != nil {
+				return fmt.Errorf("parse queued message ID: %w", parseErr)
+			}
+			queuedMessageID = &parsedQueuedMessageID
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
@@ -7718,6 +8118,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
 					HumanInputRequestID:  humanInputRequestID,
+					QueuedMessageID:      queuedMessageID,
 					ThreadID:             &threadIDLocal,
 					OnTurnComplete: func(result *agent.AgentResult) {
 						lastTurnResult = result
@@ -7733,17 +8134,24 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts = threadOpts
 			}
 		}
-		if humanInputRequestID == nil && input.QueuedMessageID != "" {
-			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, input.QueuedMessageID, logger)
+		isPRRepairContinuation := continueOpts != nil && continueOpts.PRRepair != nil
+		if humanInputRequestID == nil && queuedMessageID != nil && !isPRRepairContinuation {
+			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, *queuedMessageID, logger)
 			if answerErr != nil {
 				return answerErr
 			}
 			humanInputRequestID = answeredID
 		}
-		if continueOpts == nil && humanInputRequestID != nil {
-			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
-		} else if continueOpts != nil && humanInputRequestID != nil {
-			continueOpts.HumanInputRequestID = humanInputRequestID
+		if continueOpts == nil && (humanInputRequestID != nil || queuedMessageID != nil) {
+			continueOpts = &agent.ContinueSessionOptions{
+				HumanInputRequestID: humanInputRequestID,
+				QueuedMessageID:     queuedMessageID,
+			}
+		} else if continueOpts != nil {
+			if humanInputRequestID != nil {
+				continueOpts.HumanInputRequestID = humanInputRequestID
+			}
+			continueOpts.QueuedMessageID = queuedMessageID
 		}
 
 		var dispatchThreadID *uuid.UUID

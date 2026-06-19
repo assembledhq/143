@@ -304,7 +304,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(within(viewPRLink).queryByRole('button')).not.toBeInTheDocument();
   });
 
-  it('only shows the PR action in the session detail header actions', async () => {
+  it('keeps preview access in the tab instead of the session detail header actions', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
         return HttpResponse.json({
@@ -322,8 +322,9 @@ describe('SessionDetailPage PR health and merge', () => {
 
     const actions = await screen.findByLabelText('Session detail actions');
 
-    expect(within(actions).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Preview' })).toBeInTheDocument();
     expect(within(actions).queryByRole('link', { name: 'Preview' })).not.toBeInTheDocument();
+    expect(within(actions).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
     expect(within(actions).queryByRole('button', { name: 'Open preview' })).not.toBeInTheDocument();
   });
 

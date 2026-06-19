@@ -230,6 +230,13 @@ const (
 	prPreviewIntentDiagnose prPreviewIntent = "diagnose"
 )
 
+func recordPRPreviewLaunchDecision(ctx context.Context, orgID uuid.UUID, repoFullName string, intent prPreviewIntent, launch *branchPreviewLaunch) {
+	if launch == nil {
+		return
+	}
+	metrics.RecordPRPreviewLaunchDecision(ctx, orgID.String(), repoFullName, string(intent), string(launch.Action), string(launch.Reason), launch.AutoOpen)
+}
+
 type previewIndexCounts struct {
 	Running   int `json:"running"`
 	Resumable int `json:"resumable"`
@@ -557,7 +564,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		LatestCommitSHA: head.SHA,
 		PRClosed:        head.State != "" && head.State != "open",
 	}
-	target, err := h.previews.GetLatestPreviewTargetForBranch(r.Context(), orgID, repo.ID, head.Branch, "")
+	target, err := h.getPullRequestPreviewTarget(r.Context(), orgID, repo.ID, slug, head.Branch)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_LOOKUP_FAILED", "failed to load PR preview target", err)
 		return
@@ -580,6 +587,7 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		resp.StableURL = h.stableURL(slug)
 		h.decoratePreviewResponse(r.Context(), orgID, &resp)
 		resp.Launch = derivePRPreviewLaunch(resp, launchOpts)
+		recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
 		writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 		return
 	}
@@ -589,10 +597,11 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		resp.LatestCommitSHA = head.SHA
 		h.decoratePreviewResponse(r.Context(), orgID, &resp)
 		resp.Launch = derivePRPreviewLaunch(resp, launchOpts)
+		recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
 		writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 		return
 	}
-	if target != nil && target.CommitSHA == head.SHA && (active == nil || intent != prPreviewIntentOpen || launchOpts.PRClosed) {
+	if target != nil && target.CommitSHA == head.SHA && (intent != prPreviewIntentOpen || launchOpts.PRClosed || (!canCreate && active == nil)) {
 		resp := branchPreviewResponse{
 			TargetID:          target.ID,
 			RepositoryID:      target.RepositoryID,
@@ -609,8 +618,29 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		}
 		h.decoratePreviewResponse(r.Context(), orgID, &resp)
 		resp.Launch = derivePRPreviewLaunch(resp, launchOpts)
+		recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
 		writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 		return
+	}
+	var launchConfig *models.PreviewConfig
+	launchConfigName := ""
+	if intent == prPreviewIntentOpen && !launchOpts.PRClosed && canCreate && (target == nil || active == nil || target.CommitSHA != head.SHA) {
+		configName := ""
+		if target != nil && target.CommitSHA == head.SHA {
+			configName = target.PreviewConfigName
+		}
+		resolvedName, parsed, blockReason, blockMessage, ok := h.resolvePRPreviewLaunchConfig(r.Context(), token, owner, repoName, head.SHA, configName)
+		if !ok {
+			resp := h.blockedPRPreviewResponseForLaunch(r.Context(), orgID, repo, slug, head, target, launchOpts, blockReason, blockMessage)
+			recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
+			writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
+			return
+		}
+		launchConfig = parsed
+		launchConfigName = resolvedName
+		if target != nil && target.CommitSHA == head.SHA {
+			target.PreviewConfigName = resolvedName
+		}
 	}
 	if target == nil || target.CommitSHA != head.SHA {
 		if intent != prPreviewIntentOpen || !canCreate || launchOpts.PRClosed {
@@ -626,18 +656,20 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 			}
 			h.decoratePreviewResponse(r.Context(), orgID, &resp)
 			resp.Launch = derivePRPreviewLaunch(resp, launchOpts)
+			recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
 			writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 			return
 		}
 		target = &models.PreviewTarget{
-			OrgID:           orgID,
-			RepositoryID:    repo.ID,
-			Branch:          head.Branch,
-			CommitSHA:       head.SHA,
-			SourceType:      models.PreviewSourceTypePullRequest,
-			SourceID:        fmt.Sprintf("%s/%s#%d@%s", owner, repoName, number, head.SHA),
-			SourceURL:       head.HTMLURL,
-			CreatedByUserID: userID,
+			OrgID:             orgID,
+			RepositoryID:      repo.ID,
+			Branch:            head.Branch,
+			CommitSHA:         head.SHA,
+			PreviewConfigName: launchConfigName,
+			SourceType:        models.PreviewSourceTypePullRequest,
+			SourceID:          fmt.Sprintf("%s/%s#%d@%s", owner, repoName, number, head.SHA),
+			SourceURL:         head.HTMLURL,
+			CreatedByUserID:   userID,
 		}
 		if err := h.previews.CreatePreviewTarget(r.Context(), target); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "PREVIEW_TARGET_CREATE_FAILED", "failed to create PR preview target", err)
@@ -656,9 +688,10 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_LINK_CREATE_FAILED", "failed to create PR preview link", err)
 		return
 	}
-	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, target, nil, false, nil)
+	resp, startErr := h.startTargetRuntime(r.Context(), orgID, userID, repo, target, nil, false, launchConfig)
 	if startErr != nil {
 		if resp, ok := h.blockedPRPreviewResponseForStartError(r.Context(), orgID, repo, slug, head, launchOpts, startErr); ok {
+			recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
 			writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
 			return
 		}
@@ -670,7 +703,43 @@ func (h *BranchPreviewHandler) GetPullRequest(w http.ResponseWriter, r *http.Req
 	resp.LatestCommitSHA = head.SHA
 	h.decoratePreviewResponse(r.Context(), orgID, &resp)
 	resp.Launch = derivePRPreviewLaunch(resp, launchOpts)
+	recordPRPreviewLaunchDecision(r.Context(), orgID, repo.FullName, intent, resp.Launch)
 	writeJSON(w, http.StatusOK, models.SingleResponse[branchPreviewResponse]{Data: resp})
+}
+
+func (h *BranchPreviewHandler) resolvePRPreviewLaunchConfig(ctx context.Context, token, owner, repoName, sha, configName string) (string, *models.PreviewConfig, models.PreviewLaunchReason, string, bool) {
+	if h.github == nil {
+		return "", nil, models.PreviewLaunchReasonGitHubUnavailable, "GitHub is not configured.", false
+	}
+	content, err := h.github.GetFileContent(ctx, token, owner, repoName, sha, ".143/config.json")
+	if err != nil {
+		return "", nil, models.PreviewLaunchReasonGitHubUnavailable, "143 could not read this pull request's preview config from GitHub.", false
+	}
+	resolvedName, parsed, configErr := validatePreviewConfigContent([]byte(content), strings.TrimSpace(configName))
+	if configErr != nil {
+		reason := models.PreviewLaunchReasonConfigInvalid
+		if configErr.code == "PREVIEW_CONFIG_REQUIRED" {
+			reason = models.PreviewLaunchReasonConfigRequired
+		}
+		return "", nil, reason, configErr.message, false
+	}
+	return resolvedName, parsed, "", "", true
+}
+
+func (h *BranchPreviewHandler) getPullRequestPreviewTarget(ctx context.Context, orgID, repoID uuid.UUID, slug, branch string) (*models.PreviewTarget, error) {
+	link, err := h.previews.GetPreviewLinkBySlug(ctx, orgID, models.PreviewLinkTypePullRequest, slug)
+	if err == nil && link != nil {
+		target, targetErr := h.previews.GetPreviewTarget(ctx, orgID, link.PreviewTargetID)
+		if targetErr == nil {
+			return target, nil
+		}
+		if !errors.Is(targetErr, pgx.ErrNoRows) {
+			return nil, targetErr
+		}
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	return h.previews.GetLatestPreviewTargetForBranch(ctx, orgID, repoID, branch, "")
 }
 
 func parsePRPreviewIntent(r *http.Request) (prPreviewIntent, error) {
@@ -685,6 +754,35 @@ func parsePRPreviewIntent(r *http.Request) (prPreviewIntent, error) {
 	default:
 		return "", fmt.Errorf("invalid preview intent: %s", raw)
 	}
+}
+
+func (h *BranchPreviewHandler) blockedPRPreviewResponseForLaunch(ctx context.Context, orgID uuid.UUID, repo models.Repository, slug string, head ghservice.PullRequestHead, target *models.PreviewTarget, launchOpts prPreviewLaunchOptions, reason models.PreviewLaunchReason, message string) branchPreviewResponse {
+	launchOpts.BlockingReason = reason
+	launchOpts.BlockingMessage = message
+	resp := branchPreviewResponse{
+		RepositoryID:    repo.ID,
+		Branch:          head.Branch,
+		CommitSHA:       head.SHA,
+		SourceType:      models.PreviewSourceTypePullRequest,
+		Status:          "target_created",
+		Error:           message,
+		StableURL:       h.stableURL(slug),
+		PullRequestURL:  head.HTMLURL,
+		LatestCommitSHA: head.SHA,
+	}
+	if target != nil {
+		resp.TargetID = target.ID
+		resp.RepositoryID = target.RepositoryID
+		resp.Branch = target.Branch
+		resp.CommitSHA = target.CommitSHA
+		resp.PreviewConfigName = target.PreviewConfigName
+		resp.SourceType = target.SourceType
+		resp.SourceURL = target.SourceURL
+		resp.RequestID = derefStrPtr(target.RequestID)
+	}
+	h.decoratePreviewResponse(ctx, orgID, &resp)
+	resp.Launch = derivePRPreviewLaunch(resp, launchOpts)
+	return resp
 }
 
 func (h *BranchPreviewHandler) blockedPRPreviewResponseForStartError(ctx context.Context, orgID uuid.UUID, repo models.Repository, slug string, head ghservice.PullRequestHead, launchOpts prPreviewLaunchOptions, startErr *previewHTTPError) (branchPreviewResponse, bool) {

@@ -51,7 +51,9 @@ export interface User {
 
 export interface UserSettings {
   coding_agent_model_default?: string;
-  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">>;
+  coding_agent_reasoning_defaults?: Partial<
+    Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">
+  >;
   diff_viewer_full_screen?: boolean;
 }
 
@@ -62,8 +64,80 @@ export interface UserSettings {
 // edits from other tabs.
 export interface UserSettingsUpdateRequest {
   coding_agent_model_default?: string | null;
-  coding_agent_reasoning_defaults?: Partial<Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max" | null>> | null;
+  coding_agent_reasoning_defaults?: Partial<
+    Record<
+      "codex" | "claude_code",
+      "low" | "medium" | "high" | "xhigh" | "max" | null
+    >
+  > | null;
   diff_viewer_full_screen?: boolean | null;
+}
+
+export type AgentCapabilityID =
+  | 'repo_context'
+  | 'pr_history'
+  | 'session_history'
+  | 'review_feedback'
+  | 'ci_history'
+  | 'issue_sources'
+  | 'team_docs'
+  | 'production_diagnostics'
+  | 'external_comments'
+  | 'project_proposals'
+  | 'eval_authoring'
+  | 'publishing';
+
+export type AgentCapabilityAccessLevel = 'read' | 'write' | 'publish';
+export type AgentCapabilityRisk = 'low' | 'medium' | 'high';
+export type AgentCapabilityScope = 'repository' | 'org' | 'integration';
+
+export interface AgentCapabilityAvailability {
+  available: boolean;
+  reason?: string;
+}
+
+export interface AgentCapabilityDefinition {
+  id: AgentCapabilityID;
+  display_name: string;
+  description: string;
+  category: string;
+  max_access_level: AgentCapabilityAccessLevel;
+  risk: AgentCapabilityRisk;
+  scope: AgentCapabilityScope;
+  requirements?: string[];
+  default_config?: Record<string, unknown>;
+  availability?: AgentCapabilityAvailability;
+}
+
+export interface AgentCapabilityGrant {
+  id?: string;
+  capability_id: AgentCapabilityID;
+  access_level: AgentCapabilityAccessLevel;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+}
+
+export interface AgentCapabilitySnapshotItem {
+  id: AgentCapabilityID;
+  display_name: string;
+  access_level: AgentCapabilityAccessLevel;
+  risk: AgentCapabilityRisk;
+  scope: AgentCapabilityScope;
+  config?: Record<string, unknown>;
+  source: 'session_default' | 'automation' | 'launch_default' | 'user_approved';
+  granted_at: string;
+  human_input_request_id?: string;
+}
+
+export interface AgentCapabilityPolicyResponse {
+  policy?: {
+    id: string;
+    org_id: string;
+    policy_type: 'session_default' | 'automation';
+    automation_id?: string;
+    created_at: string;
+  };
+  capabilities: AgentCapabilityGrant[];
 }
 
 export interface AuthProviders {
@@ -193,7 +267,14 @@ export interface BranchPreviewResponse {
   preview_url?: string;
   expires_at?: string;
   stopped_at?: string;
-  stopped_reason?: "" | "user" | "expired" | "warm_policy" | "pr_closed" | "drain" | "error";
+  stopped_reason?:
+    | ""
+    | "user"
+    | "expired"
+    | "warm_policy"
+    | "pr_closed"
+    | "drain"
+    | "error";
   unavailable_reason?:
     | "owner_lost"
     | "deploy_drain_timeout"
@@ -203,9 +284,9 @@ export interface BranchPreviewResponse {
     | "endpoint_unreachable";
   resumable?: boolean;
   resume_estimate_seconds?: number;
-  services?: import('./preview-types').PreviewService[];
-  infrastructure?: import('./preview-types').PreviewInfrastructure[];
-  logs?: import('./preview-types').PreviewLog[];
+  services?: import("./preview-types").PreviewService[];
+  infrastructure?: import("./preview-types").PreviewInfrastructure[];
+  logs?: import("./preview-types").PreviewLog[];
   launch?: PreviewLaunchDecision;
 }
 
@@ -254,7 +335,12 @@ export interface PreviewLaunchDecision {
 export interface PreviewListMeta {
   next_cursor?: string;
   counts?: { running: number; resumable: number; attention?: number; recent: number };
-  pool?: { auto_active: number; auto_max: number; user_active: number; user_max: number };
+  pool?: {
+    auto_active: number;
+    auto_max: number;
+    user_active: number;
+    user_max: number;
+  };
 }
 
 export type PreviewGroupKind = "pull_request" | "branch" | "source" | "session" | "pinned";
@@ -356,8 +442,16 @@ export interface Integration {
 
 export type SlackRoutingMode = "auto" | "answer_only" | "start_work";
 export type SlackResponseVisibility = "thread" | "dm";
-export type SlackNotificationPreset = "quiet" | "balanced" | "verbose" | "custom";
-export type SlackChannelAction = "session" | "preview" | "pr_request" | "human_input";
+export type SlackNotificationPreset =
+  | "quiet"
+  | "balanced"
+  | "verbose"
+  | "custom";
+export type SlackChannelAction =
+  | "session"
+  | "preview"
+  | "pr_request"
+  | "human_input";
 
 export interface SlackBotSettings {
   id?: string;
@@ -544,27 +638,30 @@ export interface Issue {
 }
 
 export type AutopilotRunState =
-  | 'not_started'
-  | 'queued'
-  | 'running'
-  | 'awaiting_input'
-  | 'needs_review'
-  | 'pr_open'
-  | 'merged'
-  | 'failed'
-  | 'skipped';
+  | "not_started"
+  | "queued"
+  | "running"
+  | "awaiting_input"
+  | "needs_review"
+  | "pr_open"
+  | "merged"
+  | "failed"
+  | "skipped";
 
-export type PullRequestStatus = 'open' | 'closed' | 'merged';
-export type PullRequestReviewStatus = 'pending' | 'approved' | 'changes_requested';
-export type PullRequestCIStatus = '' | 'success' | 'failure' | 'pending';
+export type PullRequestStatus = "open" | "closed" | "merged";
+export type PullRequestReviewStatus =
+  | "pending"
+  | "approved"
+  | "changes_requested";
+export type PullRequestCIStatus = "" | "success" | "failure" | "pending";
 
 export type AutopilotQueueAction =
-  | 'start_run'
-  | 'view_run'
-  | 'review'
-  | 'open_pr'
-  | 'retry'
-  | 'blocked';
+  | "start_run"
+  | "view_run"
+  | "review"
+  | "open_pr"
+  | "retry"
+  | "blocked";
 
 export interface AutopilotQueueRow {
   id: string;
@@ -590,7 +687,7 @@ export interface AutopilotQueueRow {
   latest_agent_run?: {
     id: string;
     status: string;
-    trigger_mode: 'auto' | 'manual';
+    trigger_mode: "auto" | "manual";
     started_at?: string;
   };
   latest_pr?: {
@@ -604,15 +701,15 @@ export interface AutopilotQueueRow {
     target_id: string;
     preview_id?: string;
     status:
-      | 'target_created'
-      | 'starting'
-      | 'ready'
-      | 'partially_ready'
-      | 'unhealthy'
-      | 'stopped'
-      | 'failed'
-      | 'expired'
-      | 'unavailable';
+      | "target_created"
+      | "starting"
+      | "ready"
+      | "partially_ready"
+      | "unhealthy"
+      | "stopped"
+      | "failed"
+      | "expired"
+      | "unavailable";
     commit_sha: string;
     latest_commit_sha?: string;
     new_commits_available: boolean;
@@ -664,14 +761,14 @@ export interface Session {
   pm_reasoning?: string;
   project_task_id?: string;
   model_override?: string;
-  reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
   triggered_by_user_id?: string;
   agent_session_id?: string;
   current_turn: number;
   last_activity_at: string;
   sandbox_state: string;
   snapshot_key?: string;
-  recovery_state?: '' | 'queued' | 'recovering' | 'unavailable';
+  recovery_state?: "" | "queued" | "recovering" | "unavailable";
   recovery_queued_at?: string;
   recovery_started_at?: string;
   recovery_attempt_count?: number;
@@ -715,14 +812,19 @@ export interface Session {
   // missing-context signal; 'pending'/'ready' are not yet rendered (the
   // "Preparing Linear context..." indicator is one diff away when we want
   // it).
-  linear_prepare_state?: 'none' | 'pending' | 'ready' | 'failed';
+  linear_prepare_state?: "none" | "pending" | "ready" | "failed";
   error?: string;
   result_summary?: string;
   runtime_stop_reason?: string;
   runtime_graceful_stop_at?: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
-  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_history?: Array<{
+    pass: number;
+    diff: string;
+    diff_stats: { added: number; removed: number; files_changed: number };
+    created_at: string;
+  }>;
   diff_collected_at?: string;
   latest_diff_snapshot_id?: string;
   workspace_revision?: number;
@@ -731,10 +833,11 @@ export interface Session {
   archived_at?: string;
   archived_by_user_id?: string;
   automation_run_id?: string;
+  capability_snapshot?: AgentCapabilitySnapshotItem[];
   created_at: string;
 }
 
-export type SessionRetryMode = 'checkpoint' | 'start_over';
+export type SessionRetryMode = "checkpoint" | "start_over";
 
 export interface RetrySessionRequest {
   mode?: SessionRetryMode;
@@ -752,9 +855,23 @@ export interface SessionListItem extends Session {
   pr_summary?: PRSummary;
 }
 
-export type ThreadStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'completed' | 'failed' | 'cancelled';
+export type ThreadStatus =
+  | "pending"
+  | "running"
+  | "idle"
+  | "awaiting_input"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
-export type ThreadInboxSummaryState = 'idle' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+export type ThreadInboxSummaryState =
+  | "idle"
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "unknown_delivery"
+  | "acked"
+  | "dead_letter";
 
 export interface ThreadInboxDeliverySummary {
   thread_id: string;
@@ -772,11 +889,21 @@ export interface ThreadInboxDeliverySummary {
   last_error?: string;
 }
 
-export type ThreadInboxEntryType = 'user_message' | 'human_input_answer' | 'control';
+export type ThreadInboxEntryType =
+  | "user_message"
+  | "human_input_answer"
+  | "control";
 // '' is emitted by the API when no inbox entry was created (deployment with the
 // inbox unwired), keeping the SendThreadMessageResponse delivery_state field
 // total without lying about confirmed delivery.
-export type ThreadInboxDeliveryState = '' | 'pending' | 'delivering' | 'delivered' | 'unknown_delivery' | 'acked' | 'dead_letter';
+export type ThreadInboxDeliveryState =
+  | ""
+  | "pending"
+  | "delivering"
+  | "delivered"
+  | "unknown_delivery"
+  | "acked"
+  | "dead_letter";
 
 export interface ThreadInboxEntry {
   id: string;
@@ -827,7 +954,7 @@ export interface SessionThread {
   started_at?: string;
   completed_at?: string;
   created_at: string;
-  created_by_source?: 'user' | 'agent_tool' | 'system';
+  created_by_source?: "user" | "agent_tool" | "system";
   created_by_thread_id?: string;
   archived_at?: string;
   base_snapshot_key?: string;
@@ -872,17 +999,28 @@ export interface SessionThreadFileEvent {
   thread_id?: string;
   turn: number;
   path: string;
-  event_type: 'created' | 'modified' | 'deleted';
+  event_type: "created" | "modified" | "deleted";
   before_hash?: string;
   after_hash?: string;
   observed_at: string;
 }
 
-export type ReviewLoopStatus = 'running' | 'clean' | 'needs_human_decision' | 'failed' | 'cancelled';
-export type ReviewLoopSource = 'manual' | 'automation';
-export type ReviewLoopFixMode = 'minimal' | 'exhaustive';
-export type ReviewLoopPassStatus = 'reviewing' | 'deciding' | 'fixing' | 'clean' | 'needs_fix' | 'failed';
-export type ReviewLoopDecision = 'REVIEW_CLEAN' | 'NEEDS_FIX_PASS';
+export type ReviewLoopStatus =
+  | "running"
+  | "clean"
+  | "needs_human_decision"
+  | "failed"
+  | "cancelled";
+export type ReviewLoopSource = "manual" | "automation";
+export type ReviewLoopFixMode = "minimal" | "exhaustive";
+export type ReviewLoopPassStatus =
+  | "reviewing"
+  | "deciding"
+  | "fixing"
+  | "clean"
+  | "needs_fix"
+  | "failed";
+export type ReviewLoopDecision = "REVIEW_CLEAN" | "NEEDS_FIX_PASS";
 
 export interface SessionReviewLoop {
   id: string;
@@ -940,7 +1078,12 @@ export interface SessionDiff {
   session_id: string;
   diff?: string;
   diff_stats?: { added: number; removed: number; files_changed: number };
-  diff_history?: Array<{ pass: number; diff: string; diff_stats: { added: number; removed: number; files_changed: number }; created_at: string }>;
+  diff_history?: Array<{
+    pass: number;
+    diff: string;
+    diff_stats: { added: number; removed: number; files_changed: number };
+    created_at: string;
+  }>;
   diff_truncated: boolean;
   diff_history_truncated: boolean;
   diff_chars?: number;
@@ -963,14 +1106,25 @@ export interface SessionLog {
   message_truncated: boolean;
 }
 
-export interface SessionLogDetail extends Omit<SessionLog, 'message_truncated'> {
+export interface SessionLogDetail extends Omit<
+  SessionLog,
+  "message_truncated"
+> {
   message: string;
   message_bytes: number;
   message_chars: number;
 }
 
 export interface SessionTimelineEntry {
-  kind: 'message' | 'assistant_output' | 'tool_group' | 'error' | 'log' | 'plan_output' | 'plan_message' | 'human_input';
+  kind:
+    | "message"
+    | "assistant_output"
+    | "tool_group"
+    | "error"
+    | "log"
+    | "plan_output"
+    | "plan_message"
+    | "human_input";
   created_at: string;
   message?: SessionMessage;
   log?: SessionLog;
@@ -987,13 +1141,13 @@ export interface SessionMessage {
   thread_id?: string;
   user_id?: string;
   turn_number: number;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   attachments?: string[];
   references?: SessionInputReference[];
   commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
-  source?: 'agent_tool';
+  source?: "agent_tool";
   created_at: string;
 }
 
@@ -1007,7 +1161,12 @@ export interface SessionInputReference {
   display: string;
 }
 
-export type SessionComposerAgentType = "claude_code" | "codex" | "amp" | "pi" | "opencode";
+export type SessionComposerAgentType =
+  | "claude_code"
+  | "codex"
+  | "amp"
+  | "pi"
+  | "opencode";
 
 export type SessionInputCommandSource = "builtin" | "project";
 
@@ -1051,8 +1210,18 @@ export interface SessionQuestion {
   created_at: string;
 }
 
-export type HumanInputRequestKind = "free_text" | "single_choice" | "multi_choice" | "tool_approval" | "action_choice";
-export type HumanInputRequestStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded";
+export type HumanInputRequestKind =
+  | "free_text"
+  | "single_choice"
+  | "multi_choice"
+  | "tool_approval"
+  | "action_choice";
+export type HumanInputRequestStatus =
+  | "pending"
+  | "answered"
+  | "cancelled"
+  | "expired"
+  | "superseded";
 
 export interface HumanInputChoice {
   id: string;
@@ -1095,13 +1264,13 @@ export interface HumanInputAnswerBody {
 }
 
 export type SessionTranscriptEntryKind =
-  | 'message'
-  | 'tool_use'
-  | 'tool_result'
-  | 'log'
-  | 'human_input'
-  | 'milestone'
-  | 'checkpoint';
+  | "message"
+  | "tool_use"
+  | "tool_result"
+  | "log"
+  | "human_input"
+  | "milestone"
+  | "checkpoint";
 
 export interface SessionTranscriptEntry {
   id: string;
@@ -1110,7 +1279,7 @@ export interface SessionTranscriptEntry {
   message_id?: number;
   log_id?: number;
   request_id?: string;
-  role?: 'user' | 'assistant';
+  role?: "user" | "assistant";
   level?: string;
   content?: string;
   content_truncated?: boolean;
@@ -1132,7 +1301,7 @@ export interface SessionTranscriptTurn {
 }
 
 export interface SessionTranscriptWindowMeta {
-  position: 'latest' | 'older' | 'newer' | 'around';
+  position: "latest" | "older" | "newer" | "around";
   has_older: boolean;
   next_older_cursor?: string;
   has_newer: boolean;
@@ -1218,7 +1387,13 @@ export interface PullRequestHealthResponse {
   head_sha: string;
   base_sha: string;
   health_version: number;
-  merge_state: "unknown" | "mergeability_pending" | "clean" | "conflicted" | "behind" | "blocked";
+  merge_state:
+    | "unknown"
+    | "mergeability_pending"
+    | "clean"
+    | "conflicted"
+    | "behind"
+    | "blocked";
   has_conflicts: boolean;
   failing_test_count: number;
   needs_agent_action: boolean;
@@ -1272,7 +1447,7 @@ export interface SessionReviewComment {
   user_id: string;
   file_path: string;
   line_number: number;
-  diff_side: 'old' | 'new';
+  diff_side: "old" | "new";
   body: string;
   resolved: boolean;
   resolved_at?: string;
@@ -1321,7 +1496,7 @@ export interface Memory {
 }
 
 export interface OrgSettings {
-  autonomy_level?: 'manual' | 'auto_simple' | 'auto_all';
+  autonomy_level?: "manual" | "auto_simple" | "auto_all";
   execution_aggressiveness?: number;
   max_concurrent_runs?: number;
   max_session_duration_seconds?: number;
@@ -1340,10 +1515,10 @@ export interface OrgSettings {
   product_direction?: string;
   product_context?: ProductContext;
   llm_model?: string;
-  llm_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | '';
+  llm_reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | "";
   agent_config?: Record<string, Record<string, string>>;
-  default_agent_type?: 'codex' | 'claude_code' | 'amp' | 'pi' | 'opencode';
-  pr_authorship?: 'user_preferred' | 'app_only' | 'user_required';
+  default_agent_type?: "codex" | "claude_code" | "amp" | "pi" | "opencode";
+  pr_authorship?: "user_preferred" | "app_only" | "user_required";
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
   coding_agent_tab_tools_enabled?: boolean;
@@ -1369,7 +1544,7 @@ export interface OrgSettings {
   };
 }
 
-export type SandboxResourceTier = 'small' | 'standard' | 'large';
+export type SandboxResourceTier = "small" | "standard" | "large";
 
 export interface NetworkSettingsStatus {
   static_egress_available: boolean;
@@ -1385,7 +1560,7 @@ export interface RuntimeSettingsStatus {
     public_ip?: string;
   };
   capacity: {
-    state: 'normal' | 'limited';
+    state: "normal" | "limited";
     active_agent_runs: number;
     max_concurrent_agent_runs: number;
     active_previews: number;
@@ -1460,14 +1635,24 @@ export interface PMPlan {
   completed_at?: string;
 }
 
-export type SessionStatus = 'pending' | 'running' | 'idle' | 'awaiting_input' | 'needs_human_guidance' | 'completed' | 'pr_created' | 'failed' | 'cancelled' | 'skipped';
-export type PMTaskComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
-export type PMTaskConfidence = 'high' | 'medium' | 'low';
-export type PMTaskStatus = 'pending' | 'delegated' | 'skipped_capacity';
+export type SessionStatus =
+  | "pending"
+  | "running"
+  | "idle"
+  | "awaiting_input"
+  | "needs_human_guidance"
+  | "completed"
+  | "pr_created"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+export type PMTaskComplexity = "trivial" | "simple" | "moderate" | "complex";
+export type PMTaskConfidence = "high" | "medium" | "low";
+export type PMTaskStatus = "pending" | "delegated" | "skipped_capacity";
 
 // PM Decision types for the decisions view
-export type PMDecisionType = 'delegate' | 'skip' | 'cluster';
-export type PMDecisionOutcome = 'succeeded' | 'failed' | 'still_open';
+export type PMDecisionType = "delegate" | "skip" | "cluster";
+export type PMDecisionOutcome = "succeeded" | "failed" | "still_open";
 
 export interface PMDecisionView {
   id: string;
@@ -1548,7 +1733,7 @@ export interface SessionCounts {
 }
 
 export interface CodexAuthStatus {
-  status: 'pending' | 'completed' | 'expired' | 'error' | 'none';
+  status: "pending" | "completed" | "expired" | "error" | "none";
   account_type?: string;
   message?: string;
 }
@@ -1559,7 +1744,11 @@ export interface CodexDeviceAuth {
   expires_in: number;
 }
 
-export type CodexSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
+export type CodexSubscriptionStatus =
+  | "active"
+  | "pending_auth"
+  | "invalid"
+  | "disabled";
 
 export interface CodexSubscription {
   id: string;
@@ -1580,7 +1769,11 @@ export interface ClaudeCodeCompleteResponse {
   account_type?: string;
 }
 
-export type ClaudeCodeSubscriptionStatus = 'active' | 'pending_auth' | 'invalid' | 'disabled';
+export type ClaudeCodeSubscriptionStatus =
+  | "active"
+  | "pending_auth"
+  | "invalid"
+  | "disabled";
 
 export interface ClaudeCodeSubscription {
   id: string;
@@ -1596,7 +1789,7 @@ export interface InvitationResponse {
   id: string;
   email?: string | null;
   github_username?: string | null;
-  acceptance_method: 'email' | 'github' | 'either';
+  acceptance_method: "email" | "github" | "either";
   role: string;
   status: string;
   invited_by: {
@@ -1618,7 +1811,7 @@ export interface JoinToken {
   max_uses?: number | null;
   use_count: number;
   expires_at?: string | null;
-  status: 'active' | 'revoked' | 'expired' | 'exhausted';
+  status: "active" | "revoked" | "expired" | "exhausted";
   created_at: string;
 }
 
@@ -1664,7 +1857,7 @@ export interface PendingInvitationForUser {
   created_at: string;
 }
 
-export type OrgDomainStatus = 'pending' | 'verified';
+export type OrgDomainStatus = "pending" | "verified";
 
 // OrganizationDomain is one verified-domain row from /api/v1/team/domains.
 // The server decorates the row with the exact DNS TXT record to publish
@@ -1685,7 +1878,7 @@ export interface OrganizationDomain {
   dns_record_value: string;
 }
 
-export type GitHubOrgMembersPermission = 'granted' | 'missing';
+export type GitHubOrgMembersPermission = "granted" | "missing";
 
 export interface GitHubOrgAutoJoin {
   installation_id: number;
@@ -1757,9 +1950,18 @@ export interface ResolvedCredential {
   masked_key?: string;
 }
 
-export type CodingAuthAgent = "codex" | "claude_code" | "amp" | "pi" | "opencode";
+export type CodingAuthAgent =
+  | "codex"
+  | "claude_code"
+  | "amp"
+  | "pi"
+  | "opencode";
 export type CodingAuthType = "subscription" | "api_key";
-export type CodingAuthStatus = "healthy" | "rate_limited" | "needs_reauth" | "invalid";
+export type CodingAuthStatus =
+  | "healthy"
+  | "rate_limited"
+  | "needs_reauth"
+  | "invalid";
 
 // CodingCredentialScope is the scope dimension of the unified
 // coding-credentials API: "org" rows are visible to every member of the org as
@@ -1849,9 +2051,17 @@ export interface ComplexityEstimate {
 }
 
 // Project types
-export type ProjectStatus = 'draft' | 'active' | 'completed';
-export type ProjectExecMode = 'sequential' | 'parallel' | 'dependency_graph';
-export type ProjectTaskStatus = 'pending' | 'blocked' | 'delegated' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+export type ProjectStatus = "draft" | "active" | "completed";
+export type ProjectExecMode = "sequential" | "parallel" | "dependency_graph";
+export type ProjectTaskStatus =
+  | "pending"
+  | "blocked"
+  | "delegated"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "cancelled";
 
 export interface ApproachRecord {
   task_title: string;
@@ -2012,7 +2222,7 @@ export interface AIImprovementResponse {
   summary: string;
 }
 
-export type APIClientStatus = 'enabled' | 'disabled';
+export type APIClientStatus = "enabled" | "disabled";
 
 export interface APIClient {
   id: string;
@@ -2070,8 +2280,23 @@ export interface CreateAPIKeyResponse {
 }
 
 // Audit log types
-export type AuditActorType = 'user' | 'agent' | 'system' | 'webhook';
-export type AuditResourceType = 'session' | 'project' | 'project_task' | 'automation' | 'issue' | 'pm_plan' | 'pm_decision' | 'settings' | 'team_member' | 'invitation' | 'integration' | 'credential' | 'user' | 'api_client' | 'api_token';
+export type AuditActorType = "user" | "agent" | "system" | "webhook";
+export type AuditResourceType =
+  | "session"
+  | "project"
+  | "project_task"
+  | "automation"
+  | "issue"
+  | "pm_plan"
+  | "pm_decision"
+  | "settings"
+  | "team_member"
+  | "invitation"
+  | "integration"
+  | "credential"
+  | "user"
+  | "api_client"
+  | "api_token";
 
 export interface AuditLog {
   id: number;
@@ -2099,7 +2324,10 @@ export interface ProjectDetail {
   specs: ProjectSpec[];
 }
 
-export const projectStatusConfig: Record<string, { color: string; label: string }> = {
+export const projectStatusConfig: Record<
+  string,
+  { color: string; label: string }
+> = {
   draft: { color: "bg-muted text-muted-foreground", label: "Draft" },
   active: { color: "bg-info/10 text-info", label: "Active" },
   completed: { color: "bg-success/10 text-success", label: "Done" },
@@ -2115,7 +2343,7 @@ export const projectStatusDotColor: Record<string, string> = {
 
 export interface FileEntry {
   path: string;
-  type: 'file' | 'dir';
+  type: "file" | "dir";
   size: number;
 }
 
@@ -2142,13 +2370,26 @@ export interface FileContextResponse {
 
 // --- Eval types ---
 
-export type EvalTaskSource = 'manual' | 'pr_bootstrap' | 'failure_derived';
-export type EvalComplexity = 'trivial' | 'simple' | 'moderate' | 'complex';
-export type GraderType = 'code_check' | 'llm_judge';
-export type EvalRunStatus = 'pending' | 'running' | 'grading' | 'completed' | 'failed';
-export type EvalBatchStatus = 'pending' | 'running' | 'completed' | 'failed';
-export type EvalBootstrapStatus = 'pending' | 'running' | 'completed' | 'failed';
-export type EvalBootstrapCandidateStatus = 'proposed' | 'accepted' | 'rejected' | 'needs_revision';
+export type EvalTaskSource = "manual" | "pr_bootstrap" | "failure_derived";
+export type EvalComplexity = "trivial" | "simple" | "moderate" | "complex";
+export type GraderType = "code_check" | "llm_judge";
+export type EvalRunStatus =
+  | "pending"
+  | "running"
+  | "grading"
+  | "completed"
+  | "failed";
+export type EvalBatchStatus = "pending" | "running" | "completed" | "failed";
+export type EvalBootstrapStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed";
+export type EvalBootstrapCandidateStatus =
+  | "proposed"
+  | "accepted"
+  | "rejected"
+  | "needs_revision";
 
 export interface ScoringCriterion {
   name: string;
@@ -2266,7 +2507,7 @@ export interface EvalBootstrapCandidate {
 
 export interface EvalValidationWarning {
   code: string;
-  severity: 'info' | 'warning' | 'error';
+  severity: "info" | "warning" | "error";
   message: string;
   suggestion?: string;
   blocking: boolean;
@@ -2286,8 +2527,8 @@ export interface EvalBootstrapRun {
   error_message?: string;
 }
 
-export type EvalDatasetType = 'golden' | 'shadow' | 'adversarial';
-export type EvalDatasetStatus = 'active' | 'archived';
+export type EvalDatasetType = "golden" | "shadow" | "adversarial";
+export type EvalDatasetStatus = "active" | "archived";
 
 export interface EvalDataset {
   id: string;
@@ -2335,7 +2576,7 @@ export interface EvalReleaseGateDecision {
   org_id: string;
   batch_id: string;
   gate_id: string;
-  status: 'passed' | 'failed' | 'no_data';
+  status: "passed" | "failed" | "no_data";
   reason: string;
   metrics?: Record<string, unknown>;
   created_at: string;
@@ -2362,17 +2603,35 @@ export interface EvalBootstrapUpdatedEvent {
   updated_at: string;
 }
 
-export const evalComplexityConfig: Record<EvalComplexity, { color: string; label: string }> = {
+export const evalComplexityConfig: Record<
+  EvalComplexity,
+  { color: string; label: string }
+> = {
   trivial: { color: "bg-muted text-muted-foreground", label: "Trivial" },
-  simple: { color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400", label: "Simple" },
-  moderate: { color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400", label: "Moderate" },
-  complex: { color: "bg-red-500/10 text-red-700 dark:text-red-400", label: "Complex" },
+  simple: {
+    color: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+    label: "Simple",
+  },
+  moderate: {
+    color: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
+    label: "Moderate",
+  },
+  complex: {
+    color: "bg-red-500/10 text-red-700 dark:text-red-400",
+    label: "Complex",
+  },
 };
 
-export const evalRunStatusConfig: Record<EvalRunStatus, { color: string; label: string }> = {
+export const evalRunStatusConfig: Record<
+  EvalRunStatus,
+  { color: string; label: string }
+> = {
   pending: { color: "bg-muted text-muted-foreground", label: "Pending" },
   running: { color: "bg-info/10 text-info", label: "Running" },
-  grading: { color: "bg-violet-500/10 text-violet-700 dark:text-violet-400", label: "Grading" },
+  grading: {
+    color: "bg-violet-500/10 text-violet-700 dark:text-violet-400",
+    label: "Grading",
+  },
   completed: { color: "bg-success/10 text-success", label: "Completed" },
   failed: { color: "bg-destructive/10 text-destructive", label: "Failed" },
 };
@@ -2452,14 +2711,32 @@ export interface UsageBreakdownRow {
 }
 
 // Automation types
-export type AutomationScheduleType = 'interval' | 'cron';
-export type AutomationRunStatus = 'pending' | 'running' | 'completed' | 'completed_noop' | 'failed' | 'skipped';
-export type AutomationIdentityScope = 'org' | 'personal';
+export type AutomationScheduleType = "interval" | "cron" | "none";
+export type AutomationRunStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "completed_noop"
+  | "failed"
+  | "skipped";
+export type AutomationIdentityScope = "org" | "personal";
 export type AutomationGitHubEvent =
-  | 'github.pull_request.opened'
-  | 'github.issue_comment.created'
-  | 'github.pull_request_review.submitted'
-  | 'github.pull_request_review_comment.created';
+  | "github.pull_request.opened"
+  | "github.pull_request.updated"
+  | "github.pull_request.merged"
+  | "github.check_suite.completed"
+  | "github.check_run.completed"
+  | "github.issue_comment.created"
+  | "github.pull_request_review.submitted"
+  | "github.pull_request_review_comment.created";
+
+export interface AutomationGitHubEventFilters {
+  base_branches?: string[];
+  authors?: string[];
+  paths?: string[];
+  feedback_types?: string[];
+  review_states?: string[];
+}
 
 export interface Automation {
   id: string;
@@ -2468,7 +2745,7 @@ export interface Automation {
   name: string;
   goal: string;
   scope?: string;
-  icon_type: 'emoji';
+  icon_type: "emoji";
   icon_value: string;
   agent_type?: string;
   model_override?: string;
@@ -2480,10 +2757,11 @@ export interface Automation {
   pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
-  interval_unit?: 'hours' | 'days' | 'weeks';
+  interval_unit?: "hours" | "days" | "weeks";
   interval_run_at?: string;
   cron_expression?: string;
   github_event_triggers?: AutomationGitHubEvent[];
+  github_event_filters?: AutomationGitHubEventFilters;
   timezone: string;
   next_run_at?: string;
   last_run_at?: string;
@@ -2500,7 +2778,7 @@ export interface AutomationRun {
   id: string;
   automation_id: string;
   triggered_at: string;
-  triggered_by: 'schedule' | 'manual' | 'github';
+  triggered_by: "schedule" | "manual" | "github";
   triggered_by_user_id?: string;
   scheduled_time?: string;
   goal_snapshot: string;
@@ -2510,6 +2788,7 @@ export interface AutomationRun {
   result_summary?: string;
   created_at: string;
   updated_at: string;
+  capability_snapshot?: AgentCapabilitySnapshotItem[];
   // Compact view of the session this run spawned. Populated by the list
   // endpoint via a LATERAL join (see internal/db/automations.go); absent
   // when the run hasn't spawned a session yet (pending/skipped, or
@@ -2521,11 +2800,11 @@ export interface AutomationRun {
 // Kept as a literal union so UI branches get exhaustiveness checks while only
 // accepting backend-defined enum values.
 export type SessionPublishState =
-  | 'idle'
-  | 'queued'
-  | 'pushing'
-  | 'succeeded'
-  | 'failed';
+  | "idle"
+  | "queued"
+  | "pushing"
+  | "succeeded"
+  | "failed";
 
 // Mirrors models.PRCreationState.
 export type PRCreationState = SessionPublishState;

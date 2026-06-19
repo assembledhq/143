@@ -32,6 +32,14 @@ vi.mock('next/link', () => ({
 
 let mockPathname = '/sessions';
 let mockSelectedSegment: string | null = null;
+let mockSelectedSegments: string[] = [];
+
+function mockSegmentsFromPathname() {
+  if (mockSelectedSegments.length > 0) return mockSelectedSegments;
+  if (mockSelectedSegment) return [mockSelectedSegment];
+  const [, root, ...segments] = mockPathname.split('/');
+  return root === 'sessions' ? segments.filter(Boolean) : [];
+}
 const mockRouterPush = vi.fn();
 const mockRouterPrefetch = vi.fn();
 const mockAuthState: {
@@ -51,6 +59,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
   useSelectedLayoutSegment: () => mockSelectedSegment,
+  useSelectedLayoutSegments: () => mockSegmentsFromPathname(),
 }));
 
 vi.mock('@/hooks/use-auth', () => ({
@@ -145,6 +154,7 @@ describe('SessionSidebar', () => {
   beforeEach(() => {
     mockPathname = '/sessions';
     mockSelectedSegment = null;
+    mockSelectedSegments = [];
     mockRouterPush.mockReset();
     mockRouterPrefetch.mockReset();
     mockRemoveOptimisticSession.mockReset();
