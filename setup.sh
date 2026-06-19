@@ -19,6 +19,13 @@ node_major_version() {
   node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0
 }
 
+needs_node_install() {
+  if ! command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  [ "$(node_major_version)" -lt "$MIN_NODE_MAJOR" ]
+}
+
 ensure_node_version() {
   command -v node >/dev/null 2>&1 || fail "Node.js installation failed."
 
@@ -27,6 +34,43 @@ ensure_node_version() {
   if [ "$node_major" -lt "$MIN_NODE_MAJOR" ]; then
     fail "Node.js ${MIN_NODE_MAJOR}+ is required (found $(node --version)). Run: nvm install ${MIN_NODE_MAJOR} && nvm use ${MIN_NODE_MAJOR}, or install Node.js ${MIN_NODE_MAJOR}+."
   fi
+}
+
+load_nvm() {
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+  fi
+}
+
+install_node() {
+  load_nvm
+  if command -v nvm >/dev/null 2>&1; then
+    info "Installing Node.js ${MIN_NODE_MAJOR} with nvm..."
+    nvm install "$MIN_NODE_MAJOR"
+    nvm use "$MIN_NODE_MAJOR"
+    nvm alias default "$MIN_NODE_MAJOR" >/dev/null
+    return
+  fi
+
+  if [ "$PLATFORM" = "macos" ]; then
+    command -v brew >/dev/null 2>&1 || fail "Homebrew not found. Install Node.js ${MIN_NODE_MAJOR}+ manually or install Homebrew from https://brew.sh."
+    info "Installing Node.js ${MIN_NODE_MAJOR}..."
+    brew install "node@${MIN_NODE_MAJOR}"
+    brew link --overwrite --force "node@${MIN_NODE_MAJOR}"
+    return
+  fi
+
+  if [ "$PLATFORM" = "linux" ] && command -v apt-get >/dev/null 2>&1; then
+    info "Installing Node.js ${MIN_NODE_MAJOR}..."
+    sudo apt-get install -y ca-certificates curl
+    curl -fsSL "https://deb.nodesource.com/setup_${MIN_NODE_MAJOR}.x" | sudo -E bash -
+    sudo apt-get install -y nodejs
+    return
+  fi
+
+  fail "Unsupported package manager. Install Node.js ${MIN_NODE_MAJOR}+ manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -47,7 +91,7 @@ install_prereqs() {
   local missing=()
 
   command -v go   >/dev/null 2>&1 || missing+=(go)
-  command -v node >/dev/null 2>&1 || missing+=(node)
+  needs_node_install && missing+=(node)
   command -v psql >/dev/null 2>&1 || missing+=(postgresql)
   command -v sops >/dev/null 2>&1 || missing+=(sops)
   command -v age  >/dev/null 2>&1 || missing+=(age)
@@ -57,41 +101,45 @@ install_prereqs() {
     return
   fi
 
-  warn "Missing prerequisites: ${missing[*]}"
+  warn "Missing or outdated prerequisites: ${missing[*]}"
 
   if [ "$PLATFORM" = "macos" ]; then
-    if ! command -v brew >/dev/null 2>&1; then
-      fail "Homebrew not found. Install it from https://brew.sh then re-run this script."
-    fi
     for pkg in "${missing[@]}"; do
       case "$pkg" in
-        go)         info "Installing Go...";         brew install go ;;
-        node)       info "Installing Node.js 24..."; brew install node@24 && brew link --overwrite --force node@24 ;;
-        postgresql) info "Installing PostgreSQL...";  brew install postgresql@17 && brew services start postgresql@17 ;;
-        sops)       info "Installing sops...";        brew install sops ;;
-        age)        info "Installing age...";         brew install age ;;
+        node)       install_node ;;
+        *)
+          command -v brew >/dev/null 2>&1 || fail "Homebrew not found. Install it from https://brew.sh then re-run this script."
+          case "$pkg" in
+            go)         info "Installing Go...";         brew install go ;;
+            postgresql) info "Installing PostgreSQL...";  brew install postgresql@17 && brew services start postgresql@17 ;;
+            sops)       info "Installing sops...";        brew install sops ;;
+            age)        info "Installing age...";         brew install age ;;
+          esac
+          ;;
       esac
     done
   elif [ "$PLATFORM" = "linux" ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update -qq
-      for pkg in "${missing[@]}"; do
-        case "$pkg" in
-          go)         info "Installing Go...";         sudo apt-get install -y golang ;;
-          node)
-            info "Installing Node.js 24..."
-            sudo apt-get install -y ca-certificates curl
-            curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
-            sudo apt-get install -y nodejs
-            ;;
-          postgresql) info "Installing PostgreSQL...";  sudo apt-get install -y postgresql postgresql-client && sudo systemctl start postgresql ;;
-          sops)       info "Installing sops...";        sudo apt-get install -y sops ;;
-          age)        info "Installing age...";         sudo apt-get install -y age ;;
-        esac
-      done
-    else
-      fail "Unsupported package manager. Install these manually: ${missing[*]}"
-    fi
+    apt_updated=false
+    for pkg in "${missing[@]}"; do
+      case "$pkg" in
+        node)
+          install_node
+          ;;
+        *)
+          command -v apt-get >/dev/null 2>&1 || fail "Unsupported package manager. Install these manually: ${missing[*]}"
+          if [ "$apt_updated" = false ]; then
+            sudo apt-get update -qq
+            apt_updated=true
+          fi
+          case "$pkg" in
+            go)         info "Installing Go...";         sudo apt-get install -y golang ;;
+            postgresql) info "Installing PostgreSQL...";  sudo apt-get install -y postgresql postgresql-client && sudo systemctl start postgresql ;;
+            sops)       info "Installing sops...";        sudo apt-get install -y sops ;;
+            age)        info "Installing age...";         sudo apt-get install -y age ;;
+          esac
+          ;;
+      esac
+    done
   fi
 
   # Verify core tools landed (sops/age are optional — warn but don't fail)
