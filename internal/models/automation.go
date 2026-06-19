@@ -109,6 +109,77 @@ type AutomationRunSession struct {
 	PR *PRSummary `json:"pr,omitempty"`
 }
 
+type AutomationGoalImprovementMode string
+
+const (
+	AutomationGoalImprovementModeFast AutomationGoalImprovementMode = "fast"
+	AutomationGoalImprovementModeDeep AutomationGoalImprovementMode = "deep"
+)
+
+func (m AutomationGoalImprovementMode) Validate() error {
+	switch m {
+	case AutomationGoalImprovementModeFast, AutomationGoalImprovementModeDeep:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation goal improvement mode: %q", m)
+	}
+}
+
+type AutomationGoalImprovementStatus string
+
+const (
+	AutomationGoalImprovementStatusPending   AutomationGoalImprovementStatus = "pending"
+	AutomationGoalImprovementStatusRunning   AutomationGoalImprovementStatus = "running"
+	AutomationGoalImprovementStatusCompleted AutomationGoalImprovementStatus = "completed"
+	AutomationGoalImprovementStatusFailed    AutomationGoalImprovementStatus = "failed"
+	AutomationGoalImprovementStatusCanceled  AutomationGoalImprovementStatus = "canceled"
+)
+
+func (s AutomationGoalImprovementStatus) Validate() error {
+	switch s {
+	case AutomationGoalImprovementStatusPending,
+		AutomationGoalImprovementStatusRunning,
+		AutomationGoalImprovementStatusCompleted,
+		AutomationGoalImprovementStatusFailed,
+		AutomationGoalImprovementStatusCanceled:
+		return nil
+	default:
+		return fmt.Errorf("invalid automation goal improvement status: %q", s)
+	}
+}
+
+type AutomationGoalImprovement struct {
+	ID                uuid.UUID                       `db:"id" json:"id"`
+	OrgID             uuid.UUID                       `db:"org_id" json:"org_id"`
+	AutomationID      *uuid.UUID                      `db:"automation_id" json:"automation_id,omitempty"`
+	RepositoryID      *uuid.UUID                      `db:"repository_id" json:"repository_id,omitempty"`
+	Mode              AutomationGoalImprovementMode   `db:"mode" json:"mode"`
+	Status            AutomationGoalImprovementStatus `db:"status" json:"status"`
+	InputName         *string                         `db:"input_name" json:"input_name,omitempty"`
+	InputGoal         string                          `db:"input_goal" json:"input_goal"`
+	InputConfig       json.RawMessage                 `db:"input_config" json:"input_config,omitempty"`
+	BaseGoalHash      string                          `db:"base_goal_hash" json:"base_goal_hash"`
+	EvidenceSnapshot  json.RawMessage                 `db:"evidence_snapshot" json:"evidence_snapshot,omitempty"`
+	ProposedGoal      *string                         `db:"proposed_goal" json:"proposed_goal,omitempty"`
+	Proposal          json.RawMessage                 `db:"proposal" json:"proposal,omitempty"`
+	Confidence        *string                         `db:"confidence" json:"confidence,omitempty"`
+	Warnings          json.RawMessage                 `db:"warnings" json:"warnings,omitempty"`
+	ErrorMessage      *string                         `db:"error_message" json:"error_message,omitempty"`
+	AnalysisSessionID *uuid.UUID                      `db:"analysis_session_id" json:"analysis_session_id,omitempty"`
+	CreatedBy         *uuid.UUID                      `db:"created_by" json:"created_by,omitempty"`
+	AppliedBy         *uuid.UUID                      `db:"applied_by" json:"applied_by,omitempty"`
+	AppliedAt         *time.Time                      `db:"applied_at" json:"applied_at,omitempty"`
+	CreatedAt         time.Time                       `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time                       `db:"updated_at" json:"updated_at"`
+}
+
+type AutomationGoalImprovementProposal struct {
+	Rationale string   `json:"rationale"`
+	Changes   []string `json:"changes"`
+	Evidence  []string `json:"evidence"`
+	Risks     []string `json:"risks"`
+}
+
 type AutomationExecutionMode string
 
 const (
