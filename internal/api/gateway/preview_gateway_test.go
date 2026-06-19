@@ -65,6 +65,16 @@ func previewGatewayLinkRow(id, orgID, targetID, repoID uuid.UUID, slug string, p
 	}
 }
 
+func requireCurrentTabPreviewLaunchOverlay(t *testing.T, body, launchURL, reason string) {
+	t.Helper()
+
+	require.Contains(t, body, launchURL, reason+" should link to the stable app launch flow")
+	require.Contains(t, body, "Opening preview in 143", reason+" should explain the current-tab app handoff")
+	require.Contains(t, body, "window.location.href = cfg.controlUrl", reason+" should navigate the current tab to the launch flow")
+	require.NotContains(t, body, "143-preview-launch", reason+" should not open a restart popup")
+	require.NotContains(t, body, "popup=1", reason+" should not request popup launch mode")
+}
+
 func TestExtractPreviewID(t *testing.T) {
 	t.Parallel()
 	id := uuid.New()
@@ -831,6 +841,7 @@ func TestGateway_ServeHTTP_Proxy_NoCookieStoppedTarget(t *testing.T) {
 	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
 	require.Contains(t, w.Body.String(), "Stopped · May 26, 2026 20:05 UTC", "stopped target overlay should show when the preview stopped")
 	require.Contains(t, w.Body.String(), `"restartable":true`, "stopped target overlay should enable the in-place restart script")
+	requireCurrentTabPreviewLaunchOverlay(t, w.Body.String(), "https://app.143.dev/previews/"+targetID.String()+"?launch=1", "stopped target overlay")
 	require.NotContains(t, w.Body.String(), "%!", "overlay template verbs should match the formatted arguments")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -880,7 +891,7 @@ func TestGateway_ServeHTTP_Proxy_NoCookieStoppedPRTargetLinksToPRLaunchRoute(t *
 	gw.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "stopped PR target visits should render the recovery overlay")
-	require.Contains(t, w.Body.String(), "https://app.143.dev/previews/github/acme/web/pull/42?launch=1", "PR target overlay should link back to the stable PR launch controller")
+	requireCurrentTabPreviewLaunchOverlay(t, w.Body.String(), "https://app.143.dev/previews/github/acme/web/pull/42?launch=1", "stopped PR target overlay")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1061,6 +1072,7 @@ func TestGateway_ServeHTTP_Proxy_StaleStoppedTargetCookieShowsRestart(t *testing
 	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
 	require.Contains(t, w.Body.String(), "Restart preview", "stopped target overlay should expose the restart action")
 	require.Contains(t, w.Body.String(), "Preview stopped", "stopped target overlay should show terminal status")
+	requireCurrentTabPreviewLaunchOverlay(t, w.Body.String(), "https://app.143.dev/previews/"+targetID.String()+"?launch=1", "stale stopped target overlay")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1357,6 +1369,7 @@ func TestGateway_ServeHTTP_Proxy_ExpiredSameInstanceCookieShowsRestart(t *testin
 	require.Contains(t, w.Header().Values("Set-Cookie")[0], "Max-Age=0", "cleared preview cookie should expire immediately")
 	require.Contains(t, w.Body.String(), "Restart preview", "stopped preview overlay should expose the restart action")
 	require.Contains(t, w.Body.String(), "Stopped · "+stoppedAt.Format("Jan 2, 2006 15:04 MST"), "stopped preview overlay should show terminal status")
+	requireCurrentTabPreviewLaunchOverlay(t, w.Body.String(), "https://app.143.dev/previews/"+previewID.String()+"?launch=1", "expired stopped overlay")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
