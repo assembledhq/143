@@ -3080,5 +3080,44 @@ func (s *SessionStore) SoftDelete(ctx context.Context, orgID, sessionID uuid.UUI
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("session not found or already deleted")
 	}
+	if _, err := s.db.Exec(ctx, `
+		WITH target_runs AS (
+			UPDATE session_preview_prewarm_runs
+			SET status = 'failed',
+				error = 'session deleted',
+				completed_at = now(),
+				updated_at = now()
+			WHERE org_id = @org_id
+			  AND session_id = @session_id
+			  AND status IN ('queued', 'running')
+			RETURNING job_id
+		),
+		cancelled_jobs AS (
+			UPDATE jobs
+			SET status = 'cancelled',
+				last_error = 'session deleted',
+				completed_at = now(),
+				locked_by_node_id = NULL,
+				run_owner_id = NULL,
+				owner_kind = 'worker',
+				lock_token = NULL,
+				locked_at = NULL,
+				lease_expires_at = NULL,
+				updated_at = now()
+			WHERE org_id = @org_id
+			  AND id IN (SELECT job_id FROM target_runs WHERE job_id IS NOT NULL)
+			  AND status IN ('pending', 'running')
+			RETURNING id
+		)
+		UPDATE preview_groups
+		SET current_status = 'expired',
+			last_activity_at = now()
+		WHERE org_id = @org_id
+		  AND group_kind = 'session'
+		  AND source_id = @session_id::text`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	); err != nil {
+		return fmt.Errorf("cleanup session preview prewarm state: %w", err)
+	}
 	return nil
 }

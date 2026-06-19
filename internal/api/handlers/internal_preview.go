@@ -245,9 +245,20 @@ func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	if previewErr := h.preview.recyclePreviewByID(r.Context(), orgID, previewID, startPreviewRequest{Config: body.Config}); previewErr != nil {
-		writePreviewHTTPError(w, r, previewErr)
-		return
+	if body.ResumeWarm {
+		if h.manager == nil {
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "preview manager is not configured")
+			return
+		}
+		if err := h.manager.ResumeStoppedWarmPreview(r.Context(), orgID, previewID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
+			return
+		}
+	} else {
+		if previewErr := h.preview.recyclePreviewByID(r.Context(), orgID, previewID, startPreviewRequest{Config: body.Config}); previewErr != nil {
+			writePreviewHTTPError(w, r, previewErr)
+			return
+		}
 	}
 	h.evictPreviewTransport(previewID)
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})

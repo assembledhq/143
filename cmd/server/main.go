@@ -565,6 +565,7 @@ func main() {
 					services.SlackPreviewControl = handlers.NewSlackPreviewControl(slackPreviewHandler, slackBranchPreviewHandler, pullRequestStore, repoStore, cfg.FrontendURL)
 					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
 					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
+					services.PreviewCachePrewarmTimeout = cfg.PreviewCachePrewarmTimeout
 				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without

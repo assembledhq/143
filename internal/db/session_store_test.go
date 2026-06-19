@@ -1666,6 +1666,9 @@ func TestSessionStore_SoftDelete(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions SET deleted_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("WITH target_runs AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err, "SoftDelete should not return an error")

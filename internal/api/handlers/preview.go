@@ -883,6 +883,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 }
 
 func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, userID, sessionID uuid.UUID, body startPreviewRequest) (*models.PreviewInstance, int, *previewHTTPError) {
+	h.supersedeSessionPrewarmForUserStart(ctx, orgID, sessionID)
 	if !h.workerRoutingEnabled() {
 		instance, localErr := h.startPreviewLocal(ctx, orgID, userID, sessionID, body)
 		if localErr != nil {
@@ -960,6 +961,20 @@ func (h *PreviewHandler) startPreviewFromRequest(ctx context.Context, orgID, use
 		return nil, 0, asyncErr
 	}
 	return instance, http.StatusAccepted, nil
+}
+
+func (h *PreviewHandler) supersedeSessionPrewarmForUserStart(ctx context.Context, orgID, sessionID uuid.UUID) {
+	if h == nil || h.store == nil {
+		return
+	}
+	rows, err := h.store.SupersedeActiveSessionPreviewPrewarmRuns(ctx, orgID, sessionID, "skipped_user_started", "user explicitly started preview")
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to supersede active session preview prewarm runs")
+		return
+	}
+	if rows > 0 {
+		metrics.RecordSessionPreviewPrewarmSkipped(ctx, orgID.String(), "user_started")
+	}
 }
 
 func previewNoWorkersMessage(reqs preview.WorkerSelectionRequirements) string {
@@ -1052,6 +1067,13 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		instance, err = h.store.GetLatestTerminalPreviewForSession(r.Context(), orgID, sessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
+				if prewarm := h.sessionPreviewPrewarmStatus(r.Context(), orgID, sessionID); prewarm != nil {
+					writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewStatusResponse]{Data: &models.PreviewStatusResponse{
+						Services: []models.PreviewService{},
+						Prewarm:  prewarm,
+					}})
+					return
+				}
 				writeError(w, r, http.StatusNotFound, "NO_ACTIVE_PREVIEW", "no active preview for this session")
 			} else {
 				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
@@ -1066,8 +1088,138 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status.Freshness = h.previewFreshness(r.Context(), orgID, sessionID, status.Instance)
+	status.Prewarm = h.sessionPreviewPrewarmStatus(r.Context(), orgID, sessionID)
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewStatusResponse]{Data: status})
+}
+
+func (h *PreviewHandler) sessionPreviewPrewarmStatus(ctx context.Context, orgID, sessionID uuid.UUID) *models.PreviewPrewarmStatus {
+	if h == nil || h.store == nil || h.sessionStore == nil {
+		return nil
+	}
+	run, err := h.store.GetLatestSessionPreviewPrewarmRun(ctx, orgID, sessionID, models.PreviewSpeculativeDecisionWarmCandidate)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session preview prewarm state")
+		}
+		return nil
+	}
+	session, err := h.sessionStore.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for preview prewarm state")
+		return nil
+	}
+	state := ""
+	switch run.Status {
+	case "queued", "running":
+		state = "warming"
+	case "succeeded":
+		if run.WorkspaceRevision == session.WorkspaceRevision {
+			state = "warm"
+		} else {
+			state = "stale"
+		}
+	case "failed":
+		// Only surface failures after the user has opened the Preview panel so we
+		// don't alarm them about speculative work they never triggered.
+		if run.WorkspaceRevision == session.WorkspaceRevision && run.PanelOpenedAt != nil {
+			state = "failed"
+		}
+	}
+	if state == "" {
+		return nil
+	}
+	// Record that the user has seen the prewarm panel so future failed states
+	// become visible.
+	if markErr := h.store.MarkSessionPreviewPrewarmPanelOpened(ctx, orgID, sessionID); markErr != nil {
+		h.logger.Warn().Err(markErr).Str("session_id", sessionID.String()).Msg("failed to mark session preview prewarm panel opened")
+	}
+	var estimate *int
+	if state == "warm" {
+		seconds := 30
+		estimate = &seconds
+	}
+	return &models.PreviewPrewarmStatus{
+		State:                 state,
+		WorkspaceRevision:     run.WorkspaceRevision,
+		ResumeEstimateSeconds: estimate,
+	}
+}
+
+func (h *PreviewHandler) warmSessionPreviewForResume(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, *previewHTTPError) {
+	if h == nil || h.store == nil || h.sessionStore == nil {
+		return nil, nil
+	}
+	run, err := h.store.GetLatestSessionPreviewPrewarmRun(ctx, orgID, sessionID, models.PreviewSpeculativeDecisionWarmCandidate)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load session preview prewarm run", err)
+	}
+	if run.Status != "succeeded" || run.PreviewID == nil {
+		return nil, nil
+	}
+	session, err := h.sessionStore.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
+		}
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load session for warm preview resume", err)
+	}
+	if run.WorkspaceRevision != session.WorkspaceRevision {
+		return nil, nil
+	}
+	instance, err := h.store.GetPreviewInstance(ctx, orgID, *run.PreviewID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load warm preview instance", err)
+	}
+	if instance.SessionID != sessionID {
+		return nil, nil
+	}
+	if !instance.Status.IsTerminal() {
+		return nil, nil
+	}
+	reason, err := h.store.GetPreviewStoppedReason(ctx, orgID, instance.ID)
+	if err != nil {
+		return nil, newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load warm preview stop reason", err)
+	}
+	if reason != models.PreviewStoppedReasonSessionPrewarmPolicy {
+		return nil, nil
+	}
+	if instance.SourceWorkspaceRevision == nil || *instance.SourceWorkspaceRevision != session.WorkspaceRevision {
+		return nil, nil
+	}
+	return instance, nil
+}
+
+func (h *PreviewHandler) resumeWarmSessionPreview(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance) *previewHTTPError {
+	if instance == nil {
+		return nil
+	}
+	if h.workerRoutingEnabled() {
+		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
+		if err != nil {
+			return newPreviewHTTPError(http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", err)
+		}
+		if h.isLocalWorker(worker) {
+			if err := h.manager.ResumeStoppedWarmPreview(ctx, orgID, instance.ID); err != nil {
+				return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
+			}
+			return nil
+		}
+		if err := h.workerClient.ResumeWarmPreview(ctx, worker, orgID, instance.ID); err != nil {
+			return workerClientHTTPError(err)
+		}
+		return nil
+	}
+	if err := h.manager.ResumeStoppedWarmPreview(ctx, orgID, instance.ID); err != nil {
+		return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_WARM_RESUME_FAILED", "failed to resume warm preview", err)
+	}
+	return nil
 }
 
 func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID uuid.UUID, instance *models.PreviewInstance) *models.PreviewFreshness {
@@ -1325,6 +1477,25 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if instance == nil {
+		warmInstance, warmErr := h.warmSessionPreviewForResume(r.Context(), orgID, sessionID)
+		if warmErr != nil {
+			writePreviewHTTPError(w, r, warmErr)
+			return
+		}
+		if warmInstance != nil {
+			if resumeErr := h.resumeWarmSessionPreview(r.Context(), orgID, warmInstance); resumeErr != nil {
+				writePreviewHTTPError(w, r, resumeErr)
+				return
+			}
+			refreshed, err := h.store.GetPreviewInstance(r.Context(), orgID, warmInstance.ID)
+			if err != nil {
+				refreshed = warmInstance
+			}
+			writeJSON(w, http.StatusOK, models.SingleResponse[ensurePreviewResponse]{
+				Data: ensurePreviewResponse{Action: "resumed", Instance: refreshed},
+			})
+			return
+		}
 		started, _, startErr := h.startPreviewFromRequest(r.Context(), orgID, user.ID, sessionID, body)
 		if startErr != nil {
 			writePreviewHTTPError(w, r, startErr)

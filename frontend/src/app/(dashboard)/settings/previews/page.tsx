@@ -78,8 +78,11 @@ import { pollMs } from "@/lib/poll-intervals";
 import { queryKeys } from "@/lib/query-keys";
 import {
   DEFAULT_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+  DEFAULT_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
   MAX_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+  MAX_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
   MIN_PREVIEW_AUTO_POOL_MAX_ACTIVE,
+  MIN_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
   clampNumber,
 } from "@/lib/settings-constants";
 import type {
@@ -195,15 +198,24 @@ function AutoPreviewSection() {
   const poolValue =
     settings.preview_auto_pool_max_active ??
     DEFAULT_PREVIEW_AUTO_POOL_MAX_ACTIVE;
+  const sessionPrewarmPoolValue =
+    settings.preview_session_prewarm_max_active ??
+    DEFAULT_PREVIEW_SESSION_PREWARM_MAX_ACTIVE;
+  const sessionPrewarmEnabled = sessionPrewarmPoolValue > 0;
 
   const policyMutation = useMutation({
     mutationFn: ({
       repositoryId,
-      mode,
+      body,
     }: {
       repositoryId: string;
-      mode: PreviewPolicySummary["auto_mode"];
-    }) => api.previews.policies.update(repositoryId, { auto_mode: mode }),
+      body: Partial<
+        Pick<
+          PreviewPolicySummary,
+          "auto_mode" | "session_prewarm_mode"
+        >
+      >;
+    }) => api.previews.policies.update(repositoryId, body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["preview-policies"] });
     },
@@ -239,6 +251,7 @@ function AutoPreviewSection() {
             <TableRow>
               <TableHead>Repository</TableHead>
               <TableHead>Mode</TableHead>
+              <TableHead>Session Prewarm</TableHead>
               <TableHead>Open PRs</TableHead>
               <TableHead>Updated</TableHead>
             </TableRow>
@@ -247,7 +260,7 @@ function AutoPreviewSection() {
             {policiesQuery.isLoading ? (
               <TableRow>
                 <TableCell
-                  colSpan={4}
+                  colSpan={5}
                   className="py-6 text-sm text-muted-foreground"
                 >
                   Loading preview policies...
@@ -273,7 +286,9 @@ function AutoPreviewSection() {
                         if (!value || value === policy.auto_mode) return;
                         policyMutation.mutate({
                           repositoryId: policy.repository_id,
-                          mode: value as PreviewPolicySummary["auto_mode"],
+                          body: {
+                            auto_mode: value as PreviewPolicySummary["auto_mode"],
+                          },
                         });
                       }}
                       className="justify-start"
@@ -298,6 +313,55 @@ function AutoPreviewSection() {
                       </ToggleGroupItem>
                     </ToggleGroup>
                   </TableCell>
+                  <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
+                    <ToggleGroup
+                      type="single"
+                      value={policy.session_prewarm_mode}
+                      onValueChange={(value) => {
+                        if (
+                          !value ||
+                          value === policy.session_prewarm_mode ||
+                          !sessionPrewarmEnabled
+                        ) {
+                          return;
+                        }
+                        policyMutation.mutate({
+                          repositoryId: policy.repository_id,
+                          body: {
+                            session_prewarm_mode:
+                              value as PreviewPolicySummary["session_prewarm_mode"],
+                          },
+                        });
+                      }}
+                      className="justify-start"
+                      disabled={!sessionPrewarmEnabled}
+                    >
+                      <ToggleGroupItem
+                        value="off"
+                        aria-label={`Turn off session prewarm for ${policy.repository_full_name}`}
+                      >
+                        Off
+                      </ToggleGroupItem>
+                      <ToggleGroupItem
+                        value="cache"
+                        aria-label={`Use cache-only session prewarm for ${policy.repository_full_name}`}
+                      >
+                        Cache only
+                      </ToggleGroupItem>
+                      <ToggleGroupItem
+                        value="smart"
+                        aria-label={`Use smart session prewarm for ${policy.repository_full_name}`}
+                      >
+                        Smart
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                    {!sessionPrewarmEnabled ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Set speculative preview slots above 0 to enable session
+                        prewarm.
+                      </p>
+                    ) : null}
+                  </TableCell>
                   <TableCell className="block px-0 py-1 text-sm md:table-cell md:px-4 md:py-3">
                     <span className="mr-2 font-medium md:hidden">Open PRs</span>
                     {policy.open_pr_count}
@@ -314,7 +378,7 @@ function AutoPreviewSection() {
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={4} className="py-6">
+                <TableCell colSpan={5} className="py-6">
                   <EmptyState
                     icon={MonitorPlay}
                     title="No connected repositories"
@@ -359,6 +423,37 @@ function AutoPreviewSection() {
               });
             }}
           />
+        </div>
+        <div className="max-w-xs space-y-2">
+          <Label htmlFor="preview-session-prewarm-pool">
+            Speculative preview slots
+          </Label>
+          <Input
+            id="preview-session-prewarm-pool"
+            inputMode="numeric"
+            value={sessionPrewarmPoolValue}
+            onChange={(event) => {
+              const nextValue = clampNumber(
+                Number(
+                  event.target.value ||
+                    DEFAULT_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
+                ),
+                MIN_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
+                MAX_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
+              );
+              autosave.save({
+                settings: {
+                  preview_session_prewarm_max_active: nextValue,
+                },
+              });
+            }}
+          />
+          <p className="text-xs text-muted-foreground">
+            Cache only warms dependencies before the user clicks Preview. Smart
+            mode may also prepare a full preview when a session looks likely to
+            need one. Speculative work yields to active sessions and
+            user-started previews.
+          </p>
         </div>
       </div>
     </section>

@@ -209,10 +209,10 @@ func TestPreviewCachePrewarmScopeKey_SessionAllowsDeferredConfigDigest(t *testin
 		WorkspaceRevision: 7,
 	}
 
-	require.Equal(t, "preview_cache_prewarm:session:"+sessionID.String()+":7", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should be computable before config digest is known")
+	require.Equal(t, "session_preview_cache_prewarm:"+sessionID.String()+":7", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should be computable before config digest is known")
 
 	payload.ConfigDigest = "digest"
-	require.Equal(t, "preview_cache_prewarm:session:"+sessionID.String()+":7:digest", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should include digest when enqueue already knows it")
+	require.Equal(t, "session_preview_cache_prewarm:"+sessionID.String()+":7:digest", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should include digest when enqueue already knows it")
 }
 
 type prewarmLiveSandboxProvider struct {

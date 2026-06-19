@@ -267,7 +267,8 @@ type restartBranchPreviewRequest struct {
 }
 
 type updatePreviewPolicyRequest struct {
-	AutoMode models.PreviewAutoMode `json:"auto_mode"`
+	AutoMode           *models.PreviewAutoMode           `json:"auto_mode"`
+	SessionPrewarmMode *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
 }
 
 func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -2008,9 +2009,21 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
-	if err := req.AutoMode.Validate(); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_AUTO_MODE", "auto_mode must be off, warm, or on")
+	if req.AutoMode == nil && req.SessionPrewarmMode == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_POLICY", "at least one preview policy field is required")
 		return
+	}
+	if req.AutoMode != nil {
+		if err := req.AutoMode.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_AUTO_MODE", "auto_mode must be off, warm, or on")
+			return
+		}
+	}
+	if req.SessionPrewarmMode != nil {
+		if err := req.SessionPrewarmMode.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_SESSION_PREWARM_MODE", "session_prewarm_mode must be off, cache, or smart")
+			return
+		}
 	}
 	if h.repos != nil {
 		if _, err := h.repos.GetByID(r.Context(), orgID, repoID); err != nil {
@@ -2023,23 +2036,30 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	beforeMode := models.PreviewAutoModeOff
+	beforeSessionPrewarmMode := models.PreviewSessionPrewarmModeOff
 	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
 		beforeMode = existing.AutoMode
+		beforeSessionPrewarmMode = existing.SessionPrewarmMode
 	} else if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_LOOKUP_FAILED", "failed to load preview policy", existingErr)
 		return
 	}
-	policy, err := h.previews.UpsertRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, req.AutoMode)
+	policy, err := h.previews.UpdateRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, req.AutoMode, req.SessionPrewarmMode)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_UPDATE_FAILED", "failed to update preview policy", err)
 		return
 	}
 	if h.audit != nil {
+		changes := map[string]any{}
+		if req.AutoMode != nil {
+			changes["auto_mode"] = map[string]any{"before": beforeMode, "after": policy.AutoMode}
+		}
+		if req.SessionPrewarmMode != nil {
+			changes["session_prewarm_mode"] = map[string]any{"before": beforeSessionPrewarmMode, "after": policy.SessionPrewarmMode}
+		}
 		details, marshalErr := json.Marshal(map[string]any{
 			"repository_id": repoID.String(),
-			"changes": map[string]any{
-				"auto_mode": map[string]any{"before": beforeMode, "after": policy.AutoMode},
-			},
+			"changes":       changes,
 		})
 		if marshalErr == nil {
 			resourceID := repoID.String()

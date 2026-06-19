@@ -306,6 +306,7 @@ export interface PreviewPolicySummary {
   repository_id: string;
   repository_full_name: string;
   auto_mode: "off" | "warm" | "on";
+  session_prewarm_mode: "off" | "cache" | "smart";
   open_pr_count: number;
   updated_at?: string;
 }
@@ -1326,6 +1327,7 @@ export interface OrgSettings {
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
   preview_auto_pool_max_active?: number;
+  preview_session_prewarm_max_active?: number;
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {

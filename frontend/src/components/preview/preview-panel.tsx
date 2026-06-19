@@ -532,6 +532,9 @@ export function PreviewPanel({
         throw err;
       }),
     refetchInterval: (query) => {
+      if (query.state.data?.prewarm?.state === "warming") {
+        return pollMs(12000);
+      }
       const st = query.state.data?.instance?.status;
       if (
         !st ||
@@ -553,6 +556,7 @@ export function PreviewPanel({
   });
 
   const instance = previewStatus?.instance;
+  const prewarm = previewStatus?.prewarm;
   const rawServices = previewStatus?.services;
   const rawInfrastructure = previewStatus?.infrastructure;
   const runtimePreviewOrigin = previewStatus?.preview_origin;
@@ -950,6 +954,9 @@ export function PreviewPanel({
     status !== "expired" &&
     status !== "unavailable";
   const statusMetadata = previewStatusMetadata(status);
+  const isPrewarmWarming = prewarm?.state === "warming";
+  const isPrewarmWarm = prewarm?.state === "warm";
+  const isPrewarmFailed = prewarm?.state === "failed";
   useEffect(() => {
     const rail = startupPhaseRailRef.current;
     if (!rail) {
@@ -1491,9 +1498,21 @@ export function PreviewPanel({
               <Monitor className="size-5 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">{idleRecoveryCopy.title}</p>
+              <p className="text-sm font-medium">
+                {isPrewarmWarm
+                  ? "Warmed and ready"
+                  : isPrewarmWarming
+                    ? "Warming preview"
+                    : idleRecoveryCopy.title}
+              </p>
               <p className="text-xs text-muted-foreground">
-                {idleRecoveryCopy.description}
+                {isPrewarmWarm
+                  ? "A prepared preview is available for the latest session snapshot."
+                  : isPrewarmWarming
+                    ? "A prepared preview is being built in the background."
+                    : isPrewarmFailed
+                      ? "The last background preview warm-up failed. Starting preview will show the latest diagnostics."
+                      : idleRecoveryCopy.description}
               </p>
               {instance?.created_at && lastPreviewStoppedAt && (
                 <div className="flex flex-wrap items-center justify-center gap-2">
@@ -1517,7 +1536,7 @@ export function PreviewPanel({
               loading={startMutation.isPending}
             >
               {!startMutation.isPending && <Play className="size-3.5" />}
-              Start Preview
+              {isPrewarmWarm ? "Resume Preview" : "Start Preview"}
             </Button>
             <p className="text-xs text-muted-foreground"></p>
           </div>

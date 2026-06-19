@@ -191,23 +191,25 @@ type PreviewTargetHistory struct {
 
 // RepositoryPreviewPolicy stores the per-repository auto-preview mode.
 type RepositoryPreviewPolicy struct {
-	ID              uuid.UUID       `db:"id" json:"id"`
-	OrgID           uuid.UUID       `db:"org_id" json:"org_id"`
-	RepositoryID    uuid.UUID       `db:"repository_id" json:"repository_id"`
-	AutoMode        PreviewAutoMode `db:"auto_mode" json:"auto_mode"`
-	UpdatedByUserID uuid.UUID       `db:"updated_by_user_id" json:"updated_by_user_id"`
-	CreatedAt       time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time       `db:"updated_at" json:"updated_at"`
+	ID                 uuid.UUID                 `db:"id" json:"id"`
+	OrgID              uuid.UUID                 `db:"org_id" json:"org_id"`
+	RepositoryID       uuid.UUID                 `db:"repository_id" json:"repository_id"`
+	AutoMode           PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
+	SessionPrewarmMode PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
+	UpdatedByUserID    uuid.UUID                 `db:"updated_by_user_id" json:"updated_by_user_id"`
+	CreatedAt          time.Time                 `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time                 `db:"updated_at" json:"updated_at"`
 }
 
 // RepositoryPreviewPolicySummary is the settings-page view of repository
 // policy with repository identity and PR volume.
 type RepositoryPreviewPolicySummary struct {
-	RepositoryID       uuid.UUID       `db:"repository_id" json:"repository_id"`
-	RepositoryFullName string          `db:"repository_full_name" json:"repository_full_name"`
-	AutoMode           PreviewAutoMode `db:"auto_mode" json:"auto_mode"`
-	OpenPRCount        int             `db:"open_pr_count" json:"open_pr_count"`
-	UpdatedAt          *time.Time      `db:"updated_at" json:"updated_at,omitempty"`
+	RepositoryID       uuid.UUID                 `db:"repository_id" json:"repository_id"`
+	RepositoryFullName string                    `db:"repository_full_name" json:"repository_full_name"`
+	AutoMode           PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
+	SessionPrewarmMode PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
+	OpenPRCount        int                       `db:"open_pr_count" json:"open_pr_count"`
+	UpdatedAt          *time.Time                `db:"updated_at" json:"updated_at,omitempty"`
 }
 
 // PreviewLink is a stable app-owned URL mapping to a branch preview target.
@@ -576,6 +578,31 @@ type PreviewCachePrewarmRun struct {
 	UpdatedAt              time.Time  `db:"updated_at" json:"updated_at"`
 }
 
+type SessionPreviewPrewarmRun struct {
+	ID                uuid.UUID                  `db:"id" json:"id"`
+	OrgID             uuid.UUID                  `db:"org_id" json:"org_id"`
+	RepositoryID      uuid.UUID                  `db:"repository_id" json:"repository_id"`
+	SessionID         uuid.UUID                  `db:"session_id" json:"session_id"`
+	WorkspaceRevision int64                      `db:"workspace_revision" json:"workspace_revision"`
+	ConfigDigest      string                     `db:"config_digest" json:"config_digest"`
+	Mode              PreviewSessionPrewarmMode  `db:"mode" json:"mode"`
+	Decision          PreviewSpeculativeDecision `db:"decision" json:"decision"`
+	Confidence        float64                    `db:"confidence" json:"confidence"`
+	Reason            string                     `db:"reason" json:"reason"`
+	Explanation       string                     `db:"explanation" json:"explanation"`
+	Status            string                     `db:"status" json:"status"`
+	JobID             *uuid.UUID                 `db:"job_id" json:"job_id,omitempty"`
+	PreviewID         *uuid.UUID                 `db:"preview_id" json:"preview_id,omitempty"`
+	PreviewGroupID    *uuid.UUID                 `db:"preview_group_id" json:"preview_group_id,omitempty"`
+	CapacitySnapshot  json.RawMessage            `db:"capacity_snapshot" json:"capacity_snapshot,omitempty"`
+	Error             string                     `db:"error" json:"error"`
+	CreatedAt         time.Time                  `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time                  `db:"updated_at" json:"updated_at"`
+	StartedAt         *time.Time                 `db:"started_at" json:"started_at,omitempty"`
+	CompletedAt       *time.Time                 `db:"completed_at" json:"completed_at,omitempty"`
+	PanelOpenedAt     *time.Time                 `db:"panel_opened_at" json:"panel_opened_at,omitempty"`
+}
+
 // ServiceConfig defines a single service within a preview.
 type ServiceConfig struct {
 	Command []string          `json:"command"`
@@ -840,6 +867,13 @@ type PreviewStatusResponse struct {
 	PreviewOrigin   string                  `json:"preview_origin,omitempty"`
 	Freshness       *PreviewFreshness       `json:"freshness,omitempty"`
 	StartupEstimate *PreviewStartupEstimate `json:"startup_estimate,omitempty"`
+	Prewarm         *PreviewPrewarmStatus   `json:"prewarm,omitempty"`
+}
+
+type PreviewPrewarmStatus struct {
+	State                 string `json:"state"`
+	WorkspaceRevision     int64  `json:"workspace_revision"`
+	ResumeEstimateSeconds *int   `json:"resume_estimate_seconds,omitempty"`
 }
 
 type PreviewFreshness struct {

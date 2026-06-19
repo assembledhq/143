@@ -118,6 +118,26 @@ type PreviewCachePrewarmJobPayload struct {
 	Reason            string                    `json:"reason,omitempty"`
 }
 
+type SessionPreviewPrewarmClassifyJobPayload struct {
+	JobID             uuid.UUID `json:"job_id,omitempty"`
+	OrgID             uuid.UUID `json:"org_id"`
+	SessionID         uuid.UUID `json:"session_id"`
+	RepositoryID      uuid.UUID `json:"repository_id"`
+	WorkspaceRevision int64     `json:"workspace_revision"`
+	Phase             string    `json:"phase,omitempty"`
+}
+
+type SessionPreviewWarmBuildJobPayload struct {
+	JobID             uuid.UUID `json:"job_id,omitempty"`
+	OrgID             uuid.UUID `json:"org_id"`
+	UserID            uuid.UUID `json:"user_id,omitempty"`
+	SessionID         uuid.UUID `json:"session_id"`
+	RepositoryID      uuid.UUID `json:"repository_id"`
+	WorkspaceRevision int64     `json:"workspace_revision"`
+	ConfigDigest      string    `json:"config_digest,omitempty"`
+	Reason            string    `json:"reason,omitempty"`
+}
+
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.
 type RemoteStopActivePreviewForSessionRequest struct {
 	OrgID     uuid.UUID `json:"org_id"`
@@ -125,7 +145,8 @@ type RemoteStopActivePreviewForSessionRequest struct {
 }
 
 type RemoteRecyclePreviewRequest struct {
-	Config *models.PreviewConfig `json:"config,omitempty"`
+	Config     *models.PreviewConfig `json:"config,omitempty"`
+	ResumeWarm bool                  `json:"resume_warm,omitempty"`
 }
 
 type RemoteCancelSessionRequest struct {
@@ -314,13 +335,21 @@ func (c *WorkerPreviewClient) StopPreview(ctx context.Context, worker WorkerNode
 }
 
 func (c *WorkerPreviewClient) RecyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, cfg *models.PreviewConfig) error {
+	return c.recyclePreview(ctx, worker, orgID, previewID, RemoteRecyclePreviewRequest{Config: cfg})
+}
+
+func (c *WorkerPreviewClient) ResumeWarmPreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID) error {
+	return c.recyclePreview(ctx, worker, orgID, previewID, RemoteRecyclePreviewRequest{ResumeWarm: true})
+}
+
+func (c *WorkerPreviewClient) recyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, body RemoteRecyclePreviewRequest) error {
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/recycle", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
 		PreviewID:    &previewID,
 		Action:       "recycle",
 		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
-	}, RemoteRecyclePreviewRequest{Config: cfg})
+	}, body)
 	if err != nil {
 		return err
 	}
