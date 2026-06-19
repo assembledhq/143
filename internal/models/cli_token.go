@@ -57,19 +57,20 @@ type CLIAuthCode struct {
 // with their own user row and their own CLI token, preserving per-user
 // audit and surgical offboarding.
 type OrgJoinToken struct {
-	ID              uuid.UUID  `db:"id" json:"id"`
-	OrgID           uuid.UUID  `db:"org_id" json:"org_id"`
-	TokenHash       string     `db:"token_hash" json:"-"`
-	TokenPrefix     string     `db:"token_prefix" json:"token_prefix"`
-	Role            Role       `db:"role" json:"role"`
-	Name            string     `db:"name" json:"name"`
-	CreatedByUserID uuid.UUID  `db:"created_by_user_id" json:"created_by_user_id"`
-	MaxUses         *int       `db:"max_uses" json:"max_uses,omitempty"`
-	UseCount        int        `db:"use_count" json:"use_count"`
-	ExpiresAt       *time.Time `db:"expires_at" json:"expires_at,omitempty"`
-	RevokedAt       *time.Time `db:"revoked_at" json:"revoked_at,omitempty"`
-	RevokedByUserID *uuid.UUID `db:"revoked_by_user_id" json:"revoked_by_user_id,omitempty"`
-	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
+	ID                uuid.UUID  `db:"id" json:"id"`
+	OrgID             uuid.UUID  `db:"org_id" json:"org_id"`
+	TokenHash         string     `db:"token_hash" json:"-"`
+	TokenPrefix       string     `db:"token_prefix" json:"token_prefix"`
+	RawTokenEncrypted []byte     `db:"raw_token_encrypted" json:"-"`
+	Role              Role       `db:"role" json:"role"`
+	Name              string     `db:"name" json:"name"`
+	CreatedByUserID   uuid.UUID  `db:"created_by_user_id" json:"created_by_user_id"`
+	MaxUses           *int       `db:"max_uses" json:"max_uses,omitempty"`
+	UseCount          int        `db:"use_count" json:"use_count"`
+	ExpiresAt         *time.Time `db:"expires_at" json:"expires_at,omitempty"`
+	RevokedAt         *time.Time `db:"revoked_at" json:"revoked_at,omitempty"`
+	RevokedByUserID   *uuid.UUID `db:"revoked_by_user_id" json:"revoked_by_user_id,omitempty"`
+	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
 }
 
 // JoinTokenStatus summarizes a join token's lifecycle for list UIs.

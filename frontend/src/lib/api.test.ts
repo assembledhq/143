@@ -666,6 +666,30 @@ describe('api client', () => {
     });
   });
 
+  describe('cli', () => {
+    it('fetches an existing join token install command', async () => {
+      let requestedID = '';
+
+      server.use(
+        http.get('/api/v1/org/join-tokens/:id/link', ({ params }) => {
+          requestedID = String(params.id);
+          return HttpResponse.json({
+            data: {
+              id: 'token-1',
+              token_prefix: '143j_jD74XFTt',
+              install_command: 'curl -fsSL https://143.example/install/143j_jD74XFTtabcdefghijkl | sh',
+            },
+          });
+        }),
+      );
+
+      const result = await api.cli.getJoinTokenLink('token-1');
+
+      expect(requestedID).toBe('token-1');
+      expect(result.data.install_command).toBe('curl -fsSL https://143.example/install/143j_jD74XFTtabcdefghijkl | sh');
+    });
+  });
+
   describe('auth', () => {
     it('logout calls POST', async () => {
       let logoutCalled = false;

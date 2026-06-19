@@ -2,13 +2,15 @@ package db
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	appcrypto "github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -25,8 +27,10 @@ const joinTokenRandomLength = 24
 
 const joinTokenAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
+var ErrOrgJoinTokenNotRecoverable = errors.New("org join token raw value is not recoverable")
+
 const orgJoinTokenColumns = `id, org_id, token_hash, token_prefix, role, name,
-	created_by_user_id, max_uses, use_count, expires_at, revoked_at,
+	raw_token_encrypted, created_by_user_id, max_uses, use_count, expires_at, revoked_at,
 	revoked_by_user_id, created_at` // #nosec G101 -- SQL column list, not a credential
 
 // GenerateOrgJoinToken returns a fresh "143j_..." join token whose random
@@ -36,7 +40,7 @@ func GenerateOrgJoinToken() (string, error) {
 	out := make([]byte, joinTokenRandomLength)
 	max := big.NewInt(int64(len(joinTokenAlphabet)))
 	for i := range out {
-		n, err := rand.Int(rand.Reader, max)
+		n, err := crand.Int(crand.Reader, max)
 		if err != nil {
 			return "", fmt.Errorf("generate org join token: %w", err)
 		}
@@ -56,28 +60,41 @@ func OrgJoinTokenDisplayPrefix(token string) string {
 
 // OrgJoinTokenStore persists multi-use org join links.
 type OrgJoinTokenStore struct {
-	db DBTX
+	db     DBTX
+	crypto *appcrypto.Service
 }
 
-func NewOrgJoinTokenStore(db DBTX) *OrgJoinTokenStore {
-	return &OrgJoinTokenStore{db: db}
+func NewOrgJoinTokenStore(db DBTX, cryptoSvc ...*appcrypto.Service) *OrgJoinTokenStore {
+	var svc *appcrypto.Service
+	if len(cryptoSvc) > 0 {
+		svc = cryptoSvc[0]
+	}
+	return &OrgJoinTokenStore{db: db, crypto: svc}
 }
 
-func (s *OrgJoinTokenStore) Create(ctx context.Context, token *models.OrgJoinToken) error {
+func (s *OrgJoinTokenStore) Create(ctx context.Context, token *models.OrgJoinToken, rawToken string) error {
+	if rawToken == "" {
+		return ErrOrgJoinTokenNotRecoverable
+	}
+	encrypted, err := s.encryptRawToken(rawToken)
+	if err != nil {
+		return fmt.Errorf("encrypt org join token: %w", err)
+	}
 	query := fmt.Sprintf(`INSERT INTO org_join_tokens (
-		org_id, token_hash, token_prefix, role, name, created_by_user_id, max_uses, expires_at
+		org_id, token_hash, token_prefix, raw_token_encrypted, role, name, created_by_user_id, max_uses, expires_at
 	) VALUES (
-		@org_id, @token_hash, @token_prefix, @role, @name, @created_by_user_id, @max_uses, @expires_at
+		@org_id, @token_hash, @token_prefix, @raw_token_encrypted, @role, @name, @created_by_user_id, @max_uses, @expires_at
 	) RETURNING %s`, orgJoinTokenColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":             token.OrgID,
-		"token_hash":         token.TokenHash,
-		"token_prefix":       token.TokenPrefix,
-		"role":               token.Role,
-		"name":               token.Name,
-		"created_by_user_id": token.CreatedByUserID,
-		"max_uses":           token.MaxUses,
-		"expires_at":         token.ExpiresAt,
+		"org_id":              token.OrgID,
+		"token_hash":          token.TokenHash,
+		"token_prefix":        token.TokenPrefix,
+		"raw_token_encrypted": encrypted,
+		"role":                token.Role,
+		"name":                token.Name,
+		"created_by_user_id":  token.CreatedByUserID,
+		"max_uses":            token.MaxUses,
+		"expires_at":          token.ExpiresAt,
 	})
 	if err != nil {
 		return fmt.Errorf("create org join token: %w", err)
@@ -88,6 +105,28 @@ func (s *OrgJoinTokenStore) Create(ctx context.Context, token *models.OrgJoinTok
 	}
 	*token = row
 	return nil
+}
+
+func (s *OrgJoinTokenStore) GetActiveRecoverableToken(ctx context.Context, orgID, id uuid.UUID) (models.OrgJoinToken, string, error) {
+	query := fmt.Sprintf(`SELECT %s FROM org_join_tokens
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND revoked_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > now())
+		  AND (max_uses IS NULL OR use_count < max_uses)`, orgJoinTokenColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"id": id, "org_id": orgID})
+	if err != nil {
+		return models.OrgJoinToken{}, "", fmt.Errorf("get recoverable org join token: %w", err)
+	}
+	token, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgJoinToken])
+	if err != nil {
+		return models.OrgJoinToken{}, "", err
+	}
+	rawToken, err := s.decryptRawToken(token.RawTokenEncrypted)
+	if err != nil {
+		return models.OrgJoinToken{}, "", err
+	}
+	return token, rawToken, nil
 }
 
 func (s *OrgJoinTokenStore) List(ctx context.Context, orgID uuid.UUID) ([]models.OrgJoinToken, error) {
@@ -112,6 +151,31 @@ func (s *OrgJoinTokenStore) Revoke(ctx context.Context, orgID, id, revokedBy uui
 		return models.OrgJoinToken{}, fmt.Errorf("revoke org join token: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.OrgJoinToken])
+}
+
+func (s *OrgJoinTokenStore) encryptRawToken(rawToken string) ([]byte, error) {
+	if s.crypto != nil {
+		return s.crypto.Encrypt([]byte(rawToken))
+	}
+	return appcrypto.DevEncrypt([]byte(rawToken)), nil
+}
+
+func (s *OrgJoinTokenStore) decryptRawToken(encrypted []byte) (string, error) {
+	if len(encrypted) == 0 {
+		return "", ErrOrgJoinTokenNotRecoverable
+	}
+	if s.crypto != nil {
+		plaintext, err := s.crypto.Decrypt(encrypted)
+		if err != nil {
+			return "", fmt.Errorf("decrypt org join token: %w", err)
+		}
+		return string(plaintext), nil
+	}
+	plaintext, err := appcrypto.DevDecrypt(encrypted)
+	if err != nil {
+		return "", fmt.Errorf("decrypt org join token: %w", err)
+	}
+	return string(plaintext), nil
 }
 
 // ConsumeByToken atomically validates a raw join token and increments its
