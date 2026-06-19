@@ -16,6 +16,14 @@ vi.mock('next/link', () => ({
 
 let mockPathname = '/sessions';
 let mockSelectedSegment: string | null = null;
+let mockSelectedSegments: string[] = [];
+
+function mockSegmentsFromPathname() {
+  if (mockSelectedSegments.length > 0) return mockSelectedSegments;
+  if (mockSelectedSegment) return [mockSelectedSegment];
+  const [, root, ...segments] = mockPathname.split('/');
+  return root === 'sessions' ? segments.filter(Boolean) : [];
+}
 
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
@@ -23,12 +31,14 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => mockPathname,
   useSelectedLayoutSegment: () => mockSelectedSegment,
+  useSelectedLayoutSegments: () => mockSegmentsFromPathname(),
 }));
 
 describe('SessionSidebar', () => {
   beforeEach(() => {
     mockPathname = '/sessions';
     mockSelectedSegment = null;
+    mockSelectedSegments = [];
   });
 
   it('shows loading state initially', () => {
@@ -110,6 +120,7 @@ describe('SessionSidebar', () => {
   it('shows ghost New session entry when on /sessions/new', async () => {
     mockPathname = '/sessions/new';
     mockSelectedSegment = 'new';
+    mockSelectedSegments = ['new'];
 
     renderWithProviders(<SessionSidebar />);
 
@@ -127,9 +138,9 @@ vi.mock('./new/manual-session-create-page-content', () => ({
 }));
 
 describe('SessionsPage', () => {
-  it('renders the same manual session composer entry point as /sessions/new', () => {
-    renderWithProviders(<SessionsPage />);
+  it('leaves content ownership to the persistent sessions layout', () => {
+    const { container } = renderWithProviders(<SessionsPage />);
 
-    expect(screen.getByTestId('manual-session-create-page')).toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
   });
 });

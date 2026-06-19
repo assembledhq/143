@@ -646,6 +646,35 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 	require.Contains(t, slackBlocksActionValue(blocks, "slack_start_work"), orgID.String(), "start-work action should carry org scope")
 }
 
+func TestSlackSessionAckBlocksSuppressStartWorkForAutoRouting(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	session := &models.Session{ID: sessionID, OrgID: orgID}
+
+	blocks := slackSessionAckBlocks(
+		context.Background(),
+		nil,
+		&Services{FrontendURL: "https://143.test"},
+		zerolog.Nop(),
+		orgID,
+		uuid.New(),
+		"T123",
+		"C123",
+		session,
+		"Starting a 143 session",
+		slackbotsvc.SlackSessionContextSummary{
+			RepositoryName: "acme/api",
+			Branch:         "main",
+		},
+		slackbotsvc.SlackRoutingModeAuto,
+	)
+
+	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "auto-routed Slack acks should not show a Start work escalation while the session is already running")
+	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "auto-routed Slack acks should still let users correct repository defaults")
+}
+
 func TestSlackMissingContextHelpers(t *testing.T) {
 	t.Parallel()
 
