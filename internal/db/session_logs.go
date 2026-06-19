@@ -51,16 +51,6 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 		FROM sessions s
 		WHERE s.id = @session_id
 		  AND s.org_id = @org_id
-		  AND (
-		      @thread_id::uuid IS NULL
-		      OR EXISTS (
-		          SELECT 1
-		          FROM session_threads st
-		          WHERE st.id = @thread_id
-		            AND st.session_id = s.id
-		            AND st.org_id = s.org_id
-		      )
-		  )
 		RETURNING id, timestamp`
 
 	args := pgx.NamedArgs{
@@ -77,8 +67,8 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 	if err := row.Scan(&log.ID, &log.Timestamp); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Distinguish an org_id mismatch (tenant isolation violation) from a
-			// genuinely missing session or thread, so callers and logs can treat
-			// them differently.
+			// genuinely missing session, so callers and logs can treat them
+			// differently.
 			var sessionExists bool
 			if checkErr := s.db.QueryRow(ctx,
 				`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = @id)`,
@@ -90,7 +80,7 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 					Msg("create session log: session exists but org_id did not match")
 				return fmt.Errorf("create session log: session %s does not belong to org %s", log.SessionID, log.OrgID)
 			}
-			return fmt.Errorf("create session log: session or thread not found: %w", err)
+			return fmt.Errorf("create session log: session not found: %w", err)
 		}
 		return err
 	}

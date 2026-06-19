@@ -1,10 +1,12 @@
 -- FKs are the default; this migration applies reviewed hot append-only/cache
 -- exceptions where parent-row lock fan-in can become a Postgres operational risk.
 -- Keep org_id/parent-id columns and indexes.
--- session_logs: SessionLogStore.Create now validates session/thread ownership via
---   SELECT before insert. ON DELETE CASCADE (session) and ON DELETE SET NULL (thread)
---   are no longer DB-enforced; sessions/threads are soft-deleted so this is safe.
---   Orphan retention handled by delete_expired_session_logs.
+-- session_logs: SessionLogStore.Create now validates session ownership via
+--   SELECT before insert. Thread IDs remain attribution metadata and are not
+--   required to exist in session_threads on the hot log write path.
+--   ON DELETE CASCADE (session) and ON DELETE SET NULL (thread) are no longer
+--   DB-enforced; sessions/threads are soft-deleted so this is safe. Orphan
+--   retention is handled by delete_expired_session_logs.
 -- preview_dependency_cache_locations: ephemeral worker hints; stale rows acceptable;
 --   cleanup handled by TTL-based DeleteExpiredDependencyCacheLocations.
 

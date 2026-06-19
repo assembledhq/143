@@ -19,7 +19,7 @@ var logColumns = []string{
 	"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number",
 }
 
-const sessionLogValidatedInsertPattern = `(?s)INSERT INTO session_logs[\s\S]+FROM sessions s[\s\S]+s\.id = @session_id[\s\S]+s\.org_id = @org_id[\s\S]+RETURNING id, timestamp`
+const sessionLogValidatedInsertPattern = `(?s)INSERT INTO session_logs[\s\S]+FROM sessions s\s+WHERE s\.id = @session_id\s+AND s\.org_id = @org_id\s+RETURNING id, timestamp`
 
 func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
@@ -54,6 +54,32 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 	require.NoError(t, err, "should create agent run log without error")
 	require.Equal(t, int64(1), log.ID, "should set the generated ID on the log")
 	require.Equal(t, now, log.Timestamp, "should set the timestamp on the log")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_AllowsThreadAttributionWithoutThreadLookup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	now := time.Now()
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		ThreadID:  uuidPtr(uuid.New()),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(11), now))
+
+	require.NoError(t, store.Create(context.Background(), log), "Create should keep thread attribution without requiring a session_threads lookup")
+	require.Equal(t, int64(11), log.ID, "Create should set the generated ID on the attributed log")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -177,7 +203,7 @@ func TestSessionLogStore_Create_InvalidParent(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 
 	err = store.Create(context.Background(), log)
-	require.Error(t, err, "Create should fail when the session or thread parent is invalid")
+	require.Error(t, err, "Create should fail when the parent session is invalid")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
