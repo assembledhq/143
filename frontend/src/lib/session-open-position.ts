@@ -32,11 +32,23 @@ interface StoredSessionAnchorPosition {
   scroll_top_fallback: number;
 }
 
+interface StoredSessionEntryAnchorPosition {
+  version: 3;
+  anchor_entry_id: string;
+  offset_px: number;
+  scroll_top_fallback: number;
+}
+
 export interface SessionAnchorPosition {
-  anchor: {
-    kind: "message";
-    id: number;
-  };
+  anchor:
+    | {
+        kind: "message";
+        id: number;
+      }
+    | {
+        kind: "entry";
+        id: string;
+      };
   offsetPx: number;
   scrollTopFallback: number;
 }
@@ -88,8 +100,8 @@ export function readStoredSessionScrollPosition(
 
   if (rawValue.startsWith("{")) {
     try {
-      const parsed = JSON.parse(rawValue) as Partial<StoredSessionScrollPosition | StoredSessionAnchorPosition>;
-      if (parsed.version === 2) {
+      const parsed = JSON.parse(rawValue) as Partial<StoredSessionScrollPosition | StoredSessionAnchorPosition | StoredSessionEntryAnchorPosition>;
+      if (parsed.version === 2 || parsed.version === 3) {
         if (!Number.isFinite(parsed.scroll_top_fallback) || parsed.scroll_top_fallback! < 0) {
           return null;
         }
@@ -125,19 +137,37 @@ export function readStoredSessionAnchorPosition(
   if (!rawValue || !rawValue.startsWith("{")) return null;
 
   try {
-    const parsed = JSON.parse(rawValue) as Partial<StoredSessionAnchorPosition>;
+    const parsed = JSON.parse(rawValue) as Partial<StoredSessionAnchorPosition | StoredSessionEntryAnchorPosition>;
+    if (!Number.isFinite(parsed.offset_px) || parsed.offset_px! < 0) {
+      return null;
+    }
+    if (!Number.isFinite(parsed.scroll_top_fallback) || parsed.scroll_top_fallback! < 0) {
+      return null;
+    }
+
+    if (parsed.version === 3) {
+      if (
+        typeof parsed.anchor_entry_id !== "string" ||
+        parsed.anchor_entry_id.trim().length === 0
+      ) {
+        return null;
+      }
+      return {
+        anchor: { kind: "entry", id: parsed.anchor_entry_id.trim() },
+        offsetPx: parsed.offset_px!,
+        scrollTopFallback: parsed.scroll_top_fallback!,
+      };
+    }
+
     if (
       parsed.version !== 2 ||
       parsed.anchor?.kind !== "message" ||
       !Number.isInteger(parsed.anchor.id) ||
-      parsed.anchor.id <= 0 ||
-      !Number.isFinite(parsed.offset_px) ||
-      parsed.offset_px! < 0 ||
-      !Number.isFinite(parsed.scroll_top_fallback) ||
-      parsed.scroll_top_fallback! < 0
+      parsed.anchor.id <= 0
     ) {
       return null;
     }
+
     return {
       anchor: { kind: "message", id: parsed.anchor.id },
       offsetPx: parsed.offset_px!,
@@ -181,9 +211,6 @@ export function writeStoredSessionAnchorPosition(
   threadId?: string | null,
 ): void {
   if (
-    position.anchor.kind !== "message" ||
-    !Number.isInteger(position.anchor.id) ||
-    position.anchor.id <= 0 ||
     !Number.isFinite(position.offsetPx) ||
     position.offsetPx < 0 ||
     !Number.isFinite(position.scrollTopFallback) ||
@@ -191,17 +218,36 @@ export function writeStoredSessionAnchorPosition(
   ) {
     return;
   }
+  if (
+    position.anchor.kind === "message" &&
+    (!Number.isInteger(position.anchor.id) || position.anchor.id <= 0)
+  ) {
+    return;
+  }
+  if (
+    position.anchor.kind === "entry" &&
+    position.anchor.id.trim().length === 0
+  ) {
+    return;
+  }
 
   const key = getSessionScrollStorageKey(sessionId, viewerScope, threadId);
-  const normalizedValue = JSON.stringify({
-    version: 2,
-    anchor: {
-      kind: "message",
-      id: position.anchor.id,
-    },
-    offset_px: Math.round(position.offsetPx),
-    scroll_top_fallback: Math.round(position.scrollTopFallback),
-  } satisfies StoredSessionAnchorPosition);
+  const normalizedValue = position.anchor.kind === "entry"
+    ? JSON.stringify({
+      version: 3,
+      anchor_entry_id: position.anchor.id.trim(),
+      offset_px: Math.round(position.offsetPx),
+      scroll_top_fallback: Math.round(position.scrollTopFallback),
+    } satisfies StoredSessionEntryAnchorPosition)
+    : JSON.stringify({
+      version: 2,
+      anchor: {
+        kind: "message",
+        id: position.anchor.id,
+      },
+      offset_px: Math.round(position.offsetPx),
+      scroll_top_fallback: Math.round(position.scrollTopFallback),
+    } satisfies StoredSessionAnchorPosition);
 
   if ("setItem" in storage) {
     storage.setItem(key, normalizedValue);
