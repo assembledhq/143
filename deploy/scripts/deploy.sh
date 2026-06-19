@@ -1460,13 +1460,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       return 0
     fi
 
-    query="SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now();"
+    query="WITH endpoint_blockers AS (
+  SELECT 1 FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now()
+  UNION ALL
+  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining')
+)
+SELECT COUNT(*) FROM endpoint_blockers;"
     if ! count="$(printf '%s\n' "$query" | docker run -i --rm --network host -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \
       psql -h "$DB_HOST" -U onefortythree -d onefortythree \
       -v ON_ERROR_STOP=1 \
       -v endpoint="$endpoint" \
       -tA)"; then
-      echo "ERROR: could not verify preview runtime endpoint reuse safety for ${endpoint}; refusing to reuse it." >&2
+      echo "ERROR: could not verify preview runtime/node endpoint reuse safety for ${endpoint}; refusing to reuse it." >&2
       return 0
     fi
 
