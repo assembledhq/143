@@ -698,7 +698,7 @@ function PRReadinessCard({ session }: { session: Session }) {
             size="xs"
             variant={readiness ? "outline" : "default"}
             onClick={() => runMutation.mutate()}
-            disabled={runMutation.isPending || session.status === "running"}
+            disabled={running || session.status === "running"}
           >
             {runMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
             {readiness ? "Re-run" : "Run readiness checks"}
@@ -4531,7 +4531,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness.evaluated_workspace_revision === session?.workspace_revision &&
     (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
     !(latestReadiness.checks ?? []).some((check) => check.enforcement === "blocking" && check.status === "failed");
-  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh || hasCleanReviewLoop;
+  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");

@@ -127,3 +127,31 @@ func TestEvaluatorEvaluate(t *testing.T) {
 		})
 	}
 }
+
+func TestRiskFlagsNoDuplicates(t *testing.T) {
+	t.Parallel()
+
+	e := NewEvaluator(models.DefaultPRReadinessPolicy())
+	input := EvaluationInput{
+		Session:                    models.Session{WorkspaceGeneration: 1},
+		EvaluatedWorkspaceRevision: 1,
+		ChangedFiles: []string{
+			"migrations/000001_init.up.sql",
+			"migrations/000002_users.up.sql",
+			"internal/auth/middleware.go",
+			"internal/billing/handler.go",
+		},
+	}
+	check := e.riskFlagsCheck(input)
+
+	var details struct {
+		Flags []string `json:"flags"`
+	}
+	require.NoError(t, json.Unmarshal(check.Details, &details))
+	seen := map[string]bool{}
+	for _, f := range details.Flags {
+		require.False(t, seen[f], "flag %q appears more than once in risk flags details", f)
+		seen[f] = true
+	}
+	require.Equal(t, models.PRReadinessCheckStatusWarning, check.Status)
+}

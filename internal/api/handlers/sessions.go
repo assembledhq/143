@@ -2026,6 +2026,13 @@ func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSnapshotQuiescent(w, r, orgID, session, "running readiness checks") {
 		return
 	}
+	// Return the existing run if one is already queued or running for this session
+	// to avoid creating orphaned runs that no worker will ever process.
+	existing, err := h.readinessStore.GetLatestBySession(r.Context(), orgID, sessionID)
+	if err == nil && existing != nil && (existing.Status == models.PRReadinessRunStatusQueued || existing.Status == models.PRReadinessRunStatusRunning) {
+		writeJSON(w, http.StatusAccepted, models.SingleResponse[models.PRReadinessRun]{Data: *existing})
+		return
+	}
 	snapshotKey := stringPtrValue(session.SnapshotKey)
 	run := &models.PRReadinessRun{
 		OrgID:                      orgID,

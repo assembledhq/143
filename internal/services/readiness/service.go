@@ -117,14 +117,21 @@ func (e *Evaluator) testEvidenceCheck(input EvaluationInput) models.PRReadinessC
 }
 
 func (e *Evaluator) riskFlagsCheck(input EvaluationInput) models.PRReadinessCheck {
+	seen := map[string]struct{}{}
 	flags := make([]string, 0)
+	addFlag := func(f string) {
+		if _, ok := seen[f]; !ok {
+			seen[f] = struct{}{}
+			flags = append(flags, f)
+		}
+	}
 	for _, file := range input.ChangedFiles {
 		lower := strings.ToLower(file)
 		switch {
 		case strings.Contains(lower, "auth"), strings.Contains(lower, "security"), strings.Contains(lower, "billing"):
-			flags = append(flags, "sensitive_path")
+			addFlag("sensitive_path")
 		case strings.Contains(lower, "migration") || strings.HasPrefix(lower, "migrations/"):
-			flags = append(flags, "migration")
+			addFlag("migration")
 		}
 	}
 	if len(flags) == 0 {
