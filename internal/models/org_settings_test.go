@@ -559,6 +559,47 @@ func TestParseOrgSettings_PreviewAutoPoolMaxActive(t *testing.T) {
 	}
 }
 
+func TestParseOrgSettings_PreviewSessionPrewarmMaxActive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected int
+	}{
+		{
+			name:     "zero stays disabled",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":0}`),
+			expected: DefaultPreviewSessionPrewarmMaxActive,
+		},
+		{
+			name:     "custom value passes through",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":10}`),
+			expected: 10,
+		},
+		{
+			name:     "below minimum clamps up",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":-1}`),
+			expected: MinPreviewSessionPrewarmMaxActive,
+		},
+		{
+			name:     "above maximum clamps down",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":999}`),
+			expected: MaxPreviewSessionPrewarmMaxActive,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept session prewarm capacity settings")
+			require.Equal(t, tt.expected, s.PreviewSessionPrewarmMaxActive, "session prewarm capacity should be normalized")
+		})
+	}
+}
+
 func TestParseOrgSettings_SandboxLifecycleDefaultsAndOverrides(t *testing.T) {
 	t.Parallel()
 

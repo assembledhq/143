@@ -392,6 +392,7 @@ export interface PreviewPolicySummary {
   repository_id: string;
   repository_full_name: string;
   auto_mode: "off" | "warm" | "on";
+  session_prewarm_mode: "off" | "cache" | "smart";
   pr_preview_surfaces_enabled: boolean;
   github_pr_comment_enabled: boolean;
   github_commit_status_enabled: boolean;
@@ -1516,6 +1517,7 @@ export interface OrgSettings {
   max_session_duration_seconds?: number;
   preview_max_previews_per_user?: number;
   preview_auto_pool_max_active?: number;
+  preview_session_prewarm_max_active?: number;
   pm_schedule_hours?: number;
   pm_model?: string;
   priority_weights?: {
@@ -2783,6 +2785,44 @@ export interface Automation {
   paused_by?: string;
   paused_at?: string;
   priority: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AutomationGoalImprovementMode = "fast" | "deep";
+export type AutomationGoalImprovementStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export interface AutomationGoalImprovementProposal {
+  rationale?: string;
+  changes?: string[];
+  evidence?: string[];
+  risks?: string[];
+}
+
+export interface AutomationGoalImprovement {
+  id: string;
+  org_id: string;
+  automation_id?: string;
+  repository_id?: string;
+  mode: AutomationGoalImprovementMode;
+  status: AutomationGoalImprovementStatus;
+  input_name?: string;
+  input_goal: string;
+  input_config?: Record<string, unknown>;
+  base_goal_hash: string;
+  evidence_snapshot?: Record<string, unknown>;
+  proposed_goal?: string;
+  proposal?: AutomationGoalImprovementProposal;
+  confidence?: string;
+  warnings?: string[];
+  error_message?: string;
+  analysis_session_id?: string;
+  applied_at?: string;
   created_at: string;
   updated_at: string;
 }

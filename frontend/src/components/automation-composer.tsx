@@ -5,7 +5,10 @@ import { AutomationGoalEditor } from "@/components/automation-goal-editor";
 import { AutomationEmojiPicker } from "@/components/automation-emoji-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { AUTOMATION_GOAL_MAX_LENGTH, automationGoalLengthState } from "@/lib/automation-validation";
+import {
+  AUTOMATION_GOAL_MAX_LENGTH,
+  automationGoalLengthState,
+} from "@/lib/automation-validation";
 import { cn } from "@/lib/utils";
 
 interface AutomationComposerProps {
@@ -21,6 +24,7 @@ interface AutomationComposerProps {
   footerControls: ReactNode;
   secondaryControls: ReactNode;
   submitArea: ReactNode;
+  goalImprovementControls?: ReactNode;
   goalEditorContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -37,6 +41,7 @@ export function AutomationComposer({
   footerControls,
   secondaryControls,
   submitArea,
+  goalImprovementControls,
   goalEditorContainerRef,
 }: AutomationComposerProps) {
   const goalLength = automationGoalLengthState(goal);
@@ -65,8 +70,18 @@ export function AutomationComposer({
         />
       </div>
 
-      <div ref={goalEditorContainerRef} className="space-y-2 px-4 pb-4 pt-1 sm:px-6">
-        <Label htmlFor="goal" className="sr-only">Goal</Label>
+      <div
+        ref={goalEditorContainerRef}
+        className="space-y-2 px-4 pb-4 pt-1 sm:px-6"
+      >
+        <div className="flex min-h-8 items-center justify-between gap-3">
+          <Label htmlFor="goal" className="sr-only">
+            Goal
+          </Label>
+          <div className="ml-auto flex flex-col items-end gap-1">
+            {goalImprovementControls}
+          </div>
+        </div>
         <AutomationGoalEditor
           id="goal"
           value={goal}
@@ -80,13 +95,23 @@ export function AutomationComposer({
           className="min-h-[260px] resize-y border-0 bg-transparent px-0 py-1 text-sm shadow-none focus-visible:ring-0"
         />
         <div className="flex min-h-5 items-center justify-between gap-3">
-          <p className={cn("text-xs", goalLength.isTooLong ? "text-destructive" : "text-muted-foreground")}>
-            {goalLength.message ?? `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
+          <p
+            className={cn(
+              "text-xs",
+              goalLength.isTooLong
+                ? "text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
+            {goalLength.message ??
+              `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
           </p>
           <span
             className={cn(
               "text-xs tabular-nums",
-              goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
+              goalLength.isTooLong
+                ? "text-destructive"
+                : "text-muted-foreground",
             )}
           >
             {goalLength.countText}

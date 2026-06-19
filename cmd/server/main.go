@@ -569,6 +569,7 @@ func main() {
 					services.SlackPreviewControl = handlers.NewSlackPreviewControl(slackPreviewHandler, slackBranchPreviewHandler, pullRequestStore, repoStore, cfg.FrontendURL)
 					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
 					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
+					services.PreviewCachePrewarmTimeout = cfg.PreviewCachePrewarmTimeout
 				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
@@ -1367,7 +1368,11 @@ func buildServices(
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
+	automationStore := db.NewAutomationStore(pool)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
+	automationGoalImprovementStore := db.NewAutomationGoalImprovementStore(pool)
+	automationGoalImprovementUpdater := automations.NewGoalImprovementService(automationGoalImprovementStore, automationStore, automationRunStore, sessionStore, jobStore, pool, llmClient)
+	automationGoalImprovementUpdater.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(pool), logger))
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 
@@ -1441,50 +1446,51 @@ func buildServices(
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:           sandboxProvider,
-		Adapters:           agentAdapters,
-		Env:                agentEnv,
-		Sessions:           sessionStore,
-		SessionLogs:        sessionLogStore,
-		SessionQuestions:   sessionQuestionStore,
-		HumanInputRequests: sessionHumanInputStore,
-		SessionMessages:    sessionMessageStore,
-		SessionThreads:     sessionThreadStore,
-		SessionIssueLinks:  db.NewSessionIssueLinkStore(pool),
-		IssueSnapshots:     db.NewSessionTurnIssueSnapshotStore(pool),
-		DecisionLog:        pmDecisionLogStore,
-		ProjectTasks:       projectTaskUpdater,
-		AutomationRuns:     automationRunUpdater,
-		Issues:             issueStore,
-		Repositories:       repoStore,
-		Orgs:               orgStore,
-		Jobs:               jobStore,
-		GitHub:             ghSvc,
-		CodexAuth:          codexAuthSvc,
-		ClaudeCodeAuth:     claudeCodeAuthSvc,
-		Credentials:        credentialStore,
-		CodingCredentials:  codingCredentialStore,
-		Snapshots:          snapshotStore,
-		Uploads:            uploadStore,
-		FileReader:         fileReader,
-		MentionIndexes:     mentionIndexCache,
-		UsageTracker:       usageTracker,
-		SandboxCapacity:    sandboxCapacity,
-		StaticEgress:       agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
-		ThreadRuntimes:     threadRuntimeStore,
-		ThreadInbox:        threadInboxStore,
-		SandboxHolders:     sessionSandboxHolderStore,
-		Cancels:            cancelRegistry,
-		ThreadCancels:      threadCancelRegistry,
-		OrgSettingsCache:   orgSettingsCache,
-		IdentityResolver:   identityResolver,
-		SandboxAuth:        orchestratorSandboxAuth,
-		Users:              userStore,
-		EvalBootstraps:     evalBootstrapStore,
-		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
-		InternalAPISecret:  cfg.SessionSecret,
-		NodeID:             cfg.NodeID,
-		Logger:             logger,
+		Provider:                   sandboxProvider,
+		Adapters:                   agentAdapters,
+		Env:                        agentEnv,
+		Sessions:                   sessionStore,
+		SessionLogs:                sessionLogStore,
+		SessionQuestions:           sessionQuestionStore,
+		HumanInputRequests:         sessionHumanInputStore,
+		SessionMessages:            sessionMessageStore,
+		SessionThreads:             sessionThreadStore,
+		SessionIssueLinks:          db.NewSessionIssueLinkStore(pool),
+		IssueSnapshots:             db.NewSessionTurnIssueSnapshotStore(pool),
+		DecisionLog:                pmDecisionLogStore,
+		ProjectTasks:               projectTaskUpdater,
+		AutomationRuns:             automationRunUpdater,
+		AutomationGoalImprovements: automationGoalImprovementUpdater,
+		Issues:                     issueStore,
+		Repositories:               repoStore,
+		Orgs:                       orgStore,
+		Jobs:                       jobStore,
+		GitHub:                     ghSvc,
+		CodexAuth:                  codexAuthSvc,
+		ClaudeCodeAuth:             claudeCodeAuthSvc,
+		Credentials:                credentialStore,
+		CodingCredentials:          codingCredentialStore,
+		Snapshots:                  snapshotStore,
+		Uploads:                    uploadStore,
+		FileReader:                 fileReader,
+		MentionIndexes:             mentionIndexCache,
+		UsageTracker:               usageTracker,
+		SandboxCapacity:            sandboxCapacity,
+		StaticEgress:               agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
+		ThreadRuntimes:             threadRuntimeStore,
+		ThreadInbox:                threadInboxStore,
+		SandboxHolders:             sessionSandboxHolderStore,
+		Cancels:                    cancelRegistry,
+		ThreadCancels:              threadCancelRegistry,
+		OrgSettingsCache:           orgSettingsCache,
+		IdentityResolver:           identityResolver,
+		SandboxAuth:                orchestratorSandboxAuth,
+		Users:                      userStore,
+		EvalBootstraps:             evalBootstrapStore,
+		InternalAPIURL:             cfg.BaseURL + "/api/v1/internal",
+		InternalAPISecret:          cfg.SessionSecret,
+		NodeID:                     cfg.NodeID,
+		Logger:                     logger,
 	})
 
 	// PR service.
@@ -1678,6 +1684,7 @@ func buildServices(
 		TitleService:      titleService,
 		Linear:            linearService,
 		SlackbotMetrics:   workerSlackbotMetrics,
+		Redis:             redisClient,
 		FrontendURL:       cfg.FrontendURL,
 		ReviewLoops:       reviewLoopSvc,
 		RuntimeSampler:    runtimeSampler,

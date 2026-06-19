@@ -43,6 +43,7 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { MarkdownContent } from "@/components/markdown";
 import { AutomationGoalEditor } from "@/components/automation-goal-editor";
+import { AutomationGoalImprovementControl } from "@/components/automation-goal-improvement";
 import {
   AutomationCapabilitiesEditor,
   capabilitySummary,
@@ -225,17 +226,26 @@ function SettingsTab({
   }
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
-  const { data: capabilityCatalogResponse } = useQuery<ListResponse<AgentCapabilityDefinition>>({
+  const { data: capabilityCatalogResponse } = useQuery<
+    ListResponse<AgentCapabilityDefinition>
+  >({
     queryKey: ["agent-capabilities"],
     queryFn: () => api.settings.getAgentCapabilities(),
   });
-  const capabilityCatalog = useMemo(() => capabilityCatalogResponse?.data ?? [], [capabilityCatalogResponse?.data]);
+  const capabilityCatalog = useMemo(
+    () => capabilityCatalogResponse?.data ?? [],
+    [capabilityCatalogResponse?.data],
+  );
   const { data: automationCapabilityResponse } = useQuery({
     queryKey: ["automation-capabilities", automation.id],
     queryFn: () => api.automations.getCapabilities(automation.id),
   });
   const savedCapabilityGrants = useMemo(
-    () => normalizeCapabilityGrants(capabilityCatalog, automationCapabilityResponse?.data?.capabilities ?? []),
+    () =>
+      normalizeCapabilityGrants(
+        capabilityCatalog,
+        automationCapabilityResponse?.data?.capabilities ?? [],
+      ),
     [automationCapabilityResponse?.data?.capabilities, capabilityCatalog],
   );
   const capabilityGrants = capabilityDraft ?? savedCapabilityGrants;
@@ -309,10 +319,13 @@ function SettingsTab({
     },
   });
   const capabilityMutation = useMutation({
-    mutationFn: (capabilities: AgentCapabilityGrant[]) => api.automations.updateCapabilities(automation.id, capabilities),
+    mutationFn: (capabilities: AgentCapabilityGrant[]) =>
+      api.automations.updateCapabilities(automation.id, capabilities),
     onSuccess: () => {
       setCapabilityDraft(null);
-      queryClient.invalidateQueries({ queryKey: ["automation-capabilities", automation.id] });
+      queryClient.invalidateQueries({
+        queryKey: ["automation-capabilities", automation.id],
+      });
     },
   });
 
@@ -342,16 +355,34 @@ function SettingsTab({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between gap-3">
           <Label htmlFor="goal">Goal</Label>
-          <span
-            className={cn(
-              "text-xs tabular-nums",
-              goalLength.isTooLong
-                ? "text-destructive"
-                : "text-muted-foreground",
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {canManage && (
+              <AutomationGoalImprovementControl
+                automationId={automation.id}
+                name={name}
+                goal={goal}
+                repositoryId={automation.repository_id ?? undefined}
+                scope={scope.trim() || undefined}
+                disabled={updateMutation.isPending}
+                onSavedApply={(updated) => {
+                  setGoal(updated.goal);
+                  queryClient.invalidateQueries({
+                    queryKey: ["automation", automation.id],
+                  });
+                }}
+              />
             )}
-          >
-            {goalLength.countText}
-          </span>
+            <span
+              className={cn(
+                "text-xs tabular-nums",
+                goalLength.isTooLong
+                  ? "text-destructive"
+                  : "text-muted-foreground",
+              )}
+            >
+              {goalLength.countText}
+            </span>
+          </div>
         </div>
         <AutomationGoalEditor
           id="goal"
@@ -612,14 +643,23 @@ function SettingsTab({
                   onClick={() => capabilityMutation.mutate(capabilityDraft)}
                   disabled={capabilityMutation.isPending}
                 >
-                  {capabilityMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {capabilityMutation.isPending && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
                   Save capabilities
                 </Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => setCapabilityDraft(null)}>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setCapabilityDraft(null)}
+                >
                   Reset
                 </Button>
                 {capabilityMutation.isError ? (
-                  <span className="text-xs text-destructive">Failed to save capabilities.</span>
+                  <span className="text-xs text-destructive">
+                    Failed to save capabilities.
+                  </span>
                 ) : null}
               </div>
             ) : null}

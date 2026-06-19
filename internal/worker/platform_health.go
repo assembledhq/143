@@ -105,6 +105,10 @@ func emitPreviewHealthSample(ctx context.Context, store previewHealthStore, logg
 		Int64("previews_failed_unavailable", sample.PreviewsFailedOrUnavailable).
 		Float64("startup_p50_seconds", sample.StartupP50Seconds).
 		Float64("startup_p95_seconds", sample.StartupP95Seconds).
+		Int64("session_prewarm_queued", sample.SessionPrewarmQueued).
+		Int64("session_prewarm_running", sample.SessionPrewarmRunning).
+		Int64("session_prewarm_skipped", sample.SessionPrewarmSkipped).
+		Int64("session_prewarm_failed", sample.SessionPrewarmFailed).
 		Msg("preview health: lifecycle sample")
 }
 

@@ -279,10 +279,11 @@ type restartBranchPreviewRequest struct {
 }
 
 type updatePreviewPolicyRequest struct {
-	AutoMode                  *models.PreviewAutoMode `json:"auto_mode"`
-	PRPreviewSurfacesEnabled  *bool                   `json:"pr_preview_surfaces_enabled"`
-	GitHubPRCommentEnabled    *bool                   `json:"github_pr_comment_enabled"`
-	GitHubCommitStatusEnabled *bool                   `json:"github_commit_status_enabled"`
+	AutoMode                  *models.PreviewAutoMode           `json:"auto_mode"`
+	SessionPrewarmMode        *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
+	PRPreviewSurfacesEnabled  *bool                             `json:"pr_preview_surfaces_enabled"`
+	GitHubPRCommentEnabled    *bool                             `json:"github_pr_comment_enabled"`
+	GitHubCommitStatusEnabled *bool                             `json:"github_commit_status_enabled"`
 }
 
 type testPreviewPolicyRequest struct {
@@ -2223,9 +2224,19 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
+	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.PRPreviewSurfacesEnabled == nil && req.GitHubPRCommentEnabled == nil && req.GitHubCommitStatusEnabled == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_POLICY", "at least one preview policy field is required")
+		return
+	}
 	if req.AutoMode != nil {
 		if err := req.AutoMode.Validate(); err != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_AUTO_MODE", "auto_mode must be off, warm, or on")
+			return
+		}
+	}
+	if req.SessionPrewarmMode != nil {
+		if err := req.SessionPrewarmMode.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_SESSION_PREWARM_MODE", "session_prewarm_mode must be off, cache, or smart")
 			return
 		}
 	}
@@ -2249,11 +2260,13 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	beforeMode := models.PreviewAutoModeOff
+	beforeSessionPrewarmMode := models.PreviewSessionPrewarmModeOff
 	beforeSurfaces := false
 	beforeComment := true
 	beforeStatus := true
 	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
 		beforeMode = existing.AutoMode
+		beforeSessionPrewarmMode = existing.SessionPrewarmMode
 		beforeSurfaces = existing.PRPreviewSurfacesEnabled
 		beforeComment = existing.GitHubPRCommentEnabled
 		beforeStatus = existing.GitHubCommitStatusEnabled
@@ -2292,6 +2305,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 	}
 	policy, err := h.previews.UpsertRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, db.RepositoryPreviewPolicyPatch{
 		AutoMode:                  req.AutoMode,
+		SessionPrewarmMode:        req.SessionPrewarmMode,
 		PRPreviewSurfacesEnabled:  req.PRPreviewSurfacesEnabled,
 		GitHubPRCommentEnabled:    req.GitHubPRCommentEnabled,
 		GitHubCommitStatusEnabled: req.GitHubCommitStatusEnabled,
@@ -2305,14 +2319,25 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if h.audit != nil {
+		changes := map[string]any{}
+		if req.AutoMode != nil {
+			changes["auto_mode"] = map[string]any{"before": beforeMode, "after": policy.AutoMode}
+		}
+		if req.SessionPrewarmMode != nil {
+			changes["session_prewarm_mode"] = map[string]any{"before": beforeSessionPrewarmMode, "after": policy.SessionPrewarmMode}
+		}
+		if req.PRPreviewSurfacesEnabled != nil {
+			changes["pr_preview_surfaces_enabled"] = map[string]any{"before": beforeSurfaces, "after": policy.PRPreviewSurfacesEnabled}
+		}
+		if req.GitHubPRCommentEnabled != nil {
+			changes["github_pr_comment_enabled"] = map[string]any{"before": beforeComment, "after": policy.GitHubPRCommentEnabled}
+		}
+		if req.GitHubCommitStatusEnabled != nil {
+			changes["github_commit_status_enabled"] = map[string]any{"before": beforeStatus, "after": policy.GitHubCommitStatusEnabled}
+		}
 		details, marshalErr := json.Marshal(map[string]any{
 			"repository_id": repoID.String(),
-			"changes": map[string]any{
-				"auto_mode":                    map[string]any{"before": beforeMode, "after": policy.AutoMode},
-				"pr_preview_surfaces_enabled":  map[string]any{"before": beforeSurfaces, "after": policy.PRPreviewSurfacesEnabled},
-				"github_pr_comment_enabled":    map[string]any{"before": beforeComment, "after": policy.GitHubPRCommentEnabled},
-				"github_commit_status_enabled": map[string]any{"before": beforeStatus, "after": policy.GitHubCommitStatusEnabled},
-			},
+			"changes":       changes,
 		})
 		if marshalErr == nil {
 			resourceID := repoID.String()

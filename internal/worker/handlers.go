@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -40,6 +41,7 @@ import (
 const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
 
 var sandboxCapacityDetailPattern = regexp.MustCompile(`sandbox capacity reached:\s*(\d+)/(\d+)\s+sandboxes active or reserved`)
@@ -346,6 +348,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 			w.Register(models.JobTypeAutoPreviewDeferred, newAutoPreviewDeferredHandler(stores, services, logger))
 		}
 		w.Register(models.JobTypePreviewCachePrewarm, newPreviewCachePrewarmHandler(services, logger))
+		w.Register(models.JobTypeSessionPreviewWarmBuild, newSessionPreviewWarmBuildHandler(services, logger))
+	}
+	if stores != nil && stores.Sessions != nil && stores.Repositories != nil && stores.Previews != nil && stores.Jobs != nil && services != nil && (services.SessionPrewarmClassifier != nil || services.LLM != nil) {
+		w.Register(models.JobTypeSessionPreviewPrewarmClassify, newSessionPreviewPrewarmClassifyHandler(stores, services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -552,7 +558,10 @@ type Services struct {
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
-	FrontendURL     string                        // optional base URL for Slack links
+	// Redis is optional and used for non-authoritative shared caches such as
+	// Slack user display names. Losing it should only increase provider lookups.
+	Redis       *cache.Client
+	FrontendURL string // optional base URL for Slack links
 	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
 	// triggers a 143 session). It is intentionally independent of the
 	// dispatcher kill switch so queued linear_agent_event jobs continue to
@@ -603,6 +612,12 @@ type Services struct {
 	// PreviewCachePrewarmPriority is the job priority for opportunistic prewarm
 	// work; production defaults it below foreground preview starts.
 	PreviewCachePrewarmPriority int
+	// PreviewCachePrewarmTimeout bounds speculative prewarm reservations before
+	// they are swept as failed.
+	PreviewCachePrewarmTimeout time.Duration
+	// SessionPrewarmClassifier optionally overrides the default platform-LLM
+	// classifier used by smart session preview prewarm jobs.
+	SessionPrewarmClassifier sessionPrewarmClassifier
 	// PreviewController handles control-plane actions for already-created
 	// previews. nil when preview control is unavailable on this process.
 	PreviewController previewController
@@ -631,6 +646,7 @@ type previewStarter interface {
 	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
 	StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error
 	PrewarmPreviewCaches(ctx context.Context, payload previewsvc.PreviewCachePrewarmJobPayload) error
+	WarmSessionPreview(ctx context.Context, payload previewsvc.SessionPreviewWarmBuildJobPayload) error
 }
 
 type previewController interface {
@@ -660,6 +676,10 @@ type orchestratorService interface {
 // llmClient is the interface for LLM completion calls used by eval graders.
 type llmClient interface {
 	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+}
+
+type sessionPrewarmClassifier interface {
+	Classify(ctx context.Context, input previewsvc.SessionPrewarmClassifierInput) previewsvc.SessionPrewarmClassifierResult
 }
 
 type pmService interface {
@@ -919,6 +939,409 @@ func newPreviewCachePrewarmHandler(services *Services, logger zerolog.Logger) Jo
 		}
 		return nil
 	}
+}
+
+func newSessionPreviewWarmBuildHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.SessionPreviewWarmBuildJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal session_preview_warm_build payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.SessionID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("session_preview_warm_build payload missing required ids")}
+		}
+		logger.Info().
+			Str("org_id", input.OrgID.String()).
+			Str("repository_id", input.RepositoryID.String()).
+			Str("session_id", input.SessionID.String()).
+			Int64("workspace_revision", input.WorkspaceRevision).
+			Msg("processing session preview warm build job")
+		if err := services.PreviewStarter.WarmSessionPreview(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				logger.Info().Err(err).Msg("session preview warm build skipped due to capacity")
+				return nil
+			}
+			return &FatalError{Err: err}
+		}
+		return nil
+	}
+}
+
+func newSessionPreviewPrewarmClassifyHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if stores == nil || stores.Sessions == nil || stores.Repositories == nil || stores.Previews == nil || stores.Jobs == nil {
+			return &FatalError{Err: fmt.Errorf("session preview prewarm classifier dependencies are not configured")}
+		}
+		var input previewsvc.SessionPreviewPrewarmClassifyJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal session preview prewarm classifier payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("session preview prewarm classifier payload missing required ids")}
+		}
+		session, err := stores.Sessions.GetByID(ctx, input.OrgID, input.SessionID)
+		if err != nil {
+			return fmt.Errorf("load session for prewarm classifier: %w", err)
+		}
+		if session.RepositoryID == nil || *session.RepositoryID != input.RepositoryID || session.WorkspaceRevision != input.WorkspaceRevision {
+			status := "skipped_superseded"
+			if session.RepositoryID == nil || *session.RepositoryID != input.RepositoryID {
+				status = "failed"
+			}
+			return recordSessionPreviewPrewarmDecision(ctx, stores, session, input.JobID, input.RepositoryID, models.PreviewSessionPrewarmModeSmart, models.PreviewSpeculativeDecisionNone, 0, "superseded", "Session moved before classifier completed.", status)
+		}
+		repo, err := stores.Repositories.GetByID(ctx, input.OrgID, input.RepositoryID)
+		if err != nil {
+			return fmt.Errorf("load repository for prewarm classifier: %w", err)
+		}
+		classifier := sessionPrewarmClassifierForServices(services)
+		if classifier == nil {
+			return recordSessionPreviewPrewarmDecision(ctx, stores, session, input.JobID, input.RepositoryID, models.PreviewSessionPrewarmModeSmart, models.PreviewSpeculativeDecisionNone, 0, "classifier_error", "Classifier is not configured.", "decided")
+		}
+		classifierStarted := time.Now()
+		historicalOpenCount := sessionPrewarmHistoricalOpenCount(ctx, stores, logger, session)
+		result := classifier.Classify(ctx, previewsvc.SessionPrewarmClassifierInput{
+			RepositoryFullName:         repo.FullName,
+			RepositoryLanguage:         stringPtrValue(repo.Language),
+			SessionSource:              sessionPrewarmSource(session),
+			UserPrompt:                 sessionPrewarmPromptSeed(ctx, stores, logger, session),
+			IssueLabels:                sessionPrewarmIssueLabels(ctx, stores, logger, session),
+			IssueType:                  sessionPrewarmIssueType(ctx, stores, logger, session),
+			PreviewHistory:             sessionPrewarmPreviewHistory(ctx, stores, logger, session),
+			HistoricalPreviewOpenCount: historicalOpenCount,
+			CapacitySummary:            sessionPrewarmCapacitySummary(ctx, stores, logger, session.OrgID),
+			ChangedFileKinds:           sessionPrewarmChangedFileKinds(session),
+			Phase:                      input.Phase,
+		})
+		metrics.RecordSessionPreviewClassifierLatency(ctx, input.OrgID.String(), input.Phase, time.Since(classifierStarted))
+		if result.Status == "" {
+			result.Status = "decided"
+		}
+		if err := recordSessionPreviewPrewarmDecision(ctx, stores, session, input.JobID, input.RepositoryID, models.PreviewSessionPrewarmModeSmart, result.Decision, result.Confidence, result.Reason, result.Explanation, result.Status); err != nil {
+			return err
+		}
+		if result.Decision == models.PreviewSpeculativeDecisionCache {
+			enqueueSessionPreviewCachePrewarmForDecision(ctx, stores, services, logger, session, models.PreviewSessionPrewarmModeSmart, result.Decision, result.Confidence, result.Reason, result.Explanation, nil)
+		} else if result.Decision == models.PreviewSpeculativeDecisionWarmCandidate && strings.EqualFold(input.Phase, "post_turn") {
+			enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, input.OrgID, input.SessionID, "post_turn_classifier")
+		}
+		return nil
+	}
+}
+
+func sessionPrewarmClassifierForServices(services *Services) sessionPrewarmClassifier {
+	if services == nil {
+		return nil
+	}
+	if services.SessionPrewarmClassifier != nil {
+		return services.SessionPrewarmClassifier
+	}
+	if services.LLM == nil {
+		return nil
+	}
+	return previewsvc.NewSessionPrewarmClassifier(services.LLM, 5*time.Second)
+}
+
+func recordSessionPreviewPrewarmDecision(ctx context.Context, stores *Stores, session models.Session, jobID, repositoryID uuid.UUID, mode models.PreviewSessionPrewarmMode, decision models.PreviewSpeculativeDecision, confidence float64, reason, explanation, status string) error {
+	if stores == nil || stores.Previews == nil {
+		return nil
+	}
+	var jobIDPtr *uuid.UUID
+	if jobID != uuid.Nil {
+		jobIDCopy := jobID
+		jobIDPtr = &jobIDCopy
+	}
+	_, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      repositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Mode:              mode,
+		Decision:          decision,
+		Confidence:        confidence,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            status,
+		JobID:             jobIDPtr,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	})
+	if err != nil {
+		return fmt.Errorf("record session preview prewarm classifier decision: %w", err)
+	}
+	metrics.RecordSessionPreviewPrewarmDecision(ctx, session.OrgID.String(), string(mode), string(decision), sessionPrewarmSource(session), reason)
+	return nil
+}
+
+func sessionPrewarmSource(session models.Session) string {
+	if session.AutomationRunID != nil {
+		return "automation"
+	}
+	if session.ProjectTaskID != nil {
+		return "project"
+	}
+	if session.LinearIdentifierHint != nil && strings.TrimSpace(*session.LinearIdentifierHint) != "" {
+		return "linear"
+	}
+	if session.Origin != "" {
+		return string(session.Origin)
+	}
+	return "manual"
+}
+
+func sessionPrewarmQueuedTimeout(services *Services) time.Duration {
+	if services != nil && services.PreviewCachePrewarmTimeout > 0 {
+		return services.PreviewCachePrewarmTimeout
+	}
+	return defaultSessionPrewarmQueuedTimeout
+}
+
+func expireStaleSessionPreviewPrewarmRuns(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID uuid.UUID) {
+	if stores == nil || stores.Previews == nil || orgID == uuid.Nil {
+		return
+	}
+	timeout := sessionPrewarmQueuedTimeout(services)
+	rows, err := stores.Previews.ExpireStaleQueuedSessionPreviewPrewarmRuns(ctx, orgID, time.Now().Add(-timeout))
+	if err != nil {
+		logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to expire stale queued session preview prewarm runs")
+		return
+	}
+	if rows > 0 {
+		logger.Info().Int64("count", rows).Str("org_id", orgID.String()).Msg("expired stale queued session preview prewarm runs")
+	}
+}
+
+func sessionPrewarmCapacitySummary(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID) string {
+	if stores == nil || stores.Previews == nil || orgID == uuid.Nil {
+		return "unknown"
+	}
+	active, err := stores.Previews.CountActiveSessionPreviewPrewarmRuns(ctx, orgID)
+	if err != nil {
+		logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to count active session preview prewarm runs for classifier")
+		return "unknown"
+	}
+	maxActive := 0
+	if stores.Organizations != nil {
+		org, orgErr := stores.Organizations.GetByID(ctx, orgID)
+		if orgErr != nil {
+			logger.Warn().Err(orgErr).Str("org_id", orgID.String()).Msg("failed to load org settings for classifier capacity summary")
+		} else if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr != nil {
+			logger.Warn().Err(parseErr).Str("org_id", orgID.String()).Msg("failed to parse org settings for classifier capacity summary")
+		} else {
+			maxActive = settings.PreviewSessionPrewarmMaxActive
+		}
+	}
+	if maxActive <= 0 {
+		return fmt.Sprintf("active=%d max=unknown", active)
+	}
+	return fmt.Sprintf("active=%d max=%d remaining=%d", active, maxActive, max(0, maxActive-active))
+}
+
+func sessionPrewarmHistoricalOpenCount(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) int {
+	if stores == nil || stores.Previews == nil || session.OrgID == uuid.Nil || session.RepositoryID == nil {
+		return 0
+	}
+	count, err := stores.Previews.CountSessionsWithPanelOpened(ctx, session.OrgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to count sessions with panel opened for classifier")
+		return 0
+	}
+	return count
+}
+
+func sessionPrewarmPreviewHistory(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
+	if stores == nil || stores.Previews == nil || session.OrgID == uuid.Nil || session.ID == uuid.Nil {
+		return "unknown"
+	}
+	parts := make([]string, 0, 2)
+	for _, decision := range []models.PreviewSpeculativeDecision{
+		models.PreviewSpeculativeDecisionCache,
+		models.PreviewSpeculativeDecisionWarmCandidate,
+	} {
+		run, err := stores.Previews.GetLatestSessionPreviewPrewarmRun(ctx, session.OrgID, session.ID, decision)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				logger.Warn().Err(err).Str("session_id", session.ID.String()).Str("decision", string(decision)).Msg("failed to load session preview prewarm history")
+			}
+			continue
+		}
+		staleness := "current"
+		if run.WorkspaceRevision != session.WorkspaceRevision {
+			staleness = "stale"
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s:%s", decision, run.Status, staleness))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sessionPrewarmPromptSeed(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
+	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
+		return *session.PMApproach
+	}
+	if stores == nil || stores.SessionMessages == nil {
+		return ""
+	}
+	messages, err := stores.SessionMessages.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load messages for session preview prewarm classifier")
+		return ""
+	}
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleUser && strings.TrimSpace(msg.Content) != "" {
+			return msg.Content
+		}
+	}
+	return ""
+}
+
+func sessionPrewarmIssueLabels(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) []string {
+	if stores == nil || stores.SessionIssueLinks == nil || stores.Issues == nil {
+		return nil
+	}
+	links, err := stores.SessionIssueLinks.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load issue links for session preview prewarm classifier")
+		return nil
+	}
+	if len(links) == 0 {
+		return nil
+	}
+	issueIDs := make([]uuid.UUID, 0, len(links))
+	for _, link := range links {
+		if link.IssueID != uuid.Nil {
+			issueIDs = append(issueIDs, link.IssueID)
+		}
+	}
+	issues, err := stores.Issues.ListByIDs(ctx, session.OrgID, issueIDs)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load issue labels for session preview prewarm classifier")
+		return nil
+	}
+	seen := map[string]struct{}{}
+	labels := make([]string, 0)
+	for _, issue := range issues {
+		for _, tag := range issue.Tags {
+			label := strings.TrimSpace(tag)
+			if label == "" {
+				continue
+			}
+			key := strings.ToLower(label)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+func sessionPrewarmIssueType(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
+	if stores == nil || stores.ComplexityEstimates == nil || session.PrimaryIssueID == nil || *session.PrimaryIssueID == uuid.Nil {
+		return ""
+	}
+	estimate, err := stores.ComplexityEstimates.GetByIssueID(ctx, session.OrgID, *session.PrimaryIssueID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load issue type for session preview prewarm classifier")
+		}
+		return ""
+	}
+	if estimate.IssueType == nil {
+		return ""
+	}
+	return strings.TrimSpace(*estimate.IssueType)
+}
+
+func sessionPrewarmChangedFileKinds(session models.Session) []string {
+	if session.Diff == nil || strings.TrimSpace(*session.Diff) == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, event := range parseDiffFileEvents(*session.Diff) {
+		kind := sessionPrewarmFileKind(event.Path)
+		if kind != "" {
+			seen[kind] = struct{}{}
+		}
+	}
+	order := []string{"frontend", "backend", "config", "test", "docs"}
+	kinds := make([]string, 0, len(seen))
+	for _, kind := range order {
+		if _, ok := seen[kind]; ok {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds
+}
+
+func sessionPrewarmFileKind(path string) string {
+	p := strings.ToLower(strings.TrimSpace(path))
+	if p == "" {
+		return ""
+	}
+	base := p
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	switch {
+	case strings.Contains(p, "/test/") || strings.Contains(p, "/tests/") || strings.Contains(p, "__tests__/") ||
+		strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.tsx") ||
+		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.tsx"):
+		return "test"
+	case strings.HasPrefix(p, "docs/") || strings.HasSuffix(base, ".md") || strings.HasSuffix(base, ".mdx"):
+		return "docs"
+	case strings.HasSuffix(base, ".tsx") || strings.HasSuffix(base, ".jsx") || strings.HasSuffix(base, ".css") ||
+		strings.HasSuffix(base, ".scss") || strings.HasSuffix(base, ".vue") || strings.HasSuffix(base, ".svelte") ||
+		strings.Contains(p, "frontend/") || strings.Contains(p, "src/app/") || strings.Contains(p, "src/components/"):
+		return "frontend"
+	case strings.HasSuffix(base, ".json") || strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml") ||
+		strings.HasSuffix(base, ".toml") || strings.HasSuffix(base, ".lock") || strings.HasPrefix(base, "dockerfile") ||
+		base == "package.json" || base == "go.mod":
+		return "config"
+	case strings.HasSuffix(base, ".go") || strings.HasSuffix(base, ".rs") || strings.HasSuffix(base, ".py") ||
+		strings.HasSuffix(base, ".rb") || strings.HasSuffix(base, ".java") || strings.HasSuffix(base, ".kt") ||
+		strings.HasSuffix(base, ".php") || strings.Contains(p, "backend/") || strings.Contains(p, "internal/"):
+		return "backend"
+	default:
+		return ""
+	}
+}
+
+func sessionPreviewPrewarmUntrustedFork(session models.Session) bool {
+	if len(session.InputManifest) == 0 {
+		return false
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(session.InputManifest, &manifest); err != nil {
+		return false
+	}
+	return boolAtPath(manifest, "pull_request", "head", "repo", "fork") ||
+		boolAtPath(manifest, "pull_request", "head_repo", "fork") ||
+		boolAtPath(manifest, "pull_request", "head_repo_fork") ||
+		boolAtPath(manifest, "github", "pull_request", "head", "repo", "fork") ||
+		boolAtPath(manifest, "github", "pull_request", "head_repo_fork") ||
+		boolAtPath(manifest, "untrusted_fork")
+}
+
+func boolAtPath(root map[string]any, path ...string) bool {
+	var current any = root
+	for _, part := range path {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return false
+		}
+		current, ok = obj[part]
+		if !ok {
+			return false
+		}
+	}
+	value, ok := current.(bool)
+	return ok && value
 }
 
 // prioritize handler recomputes priority scores for an issue.
@@ -1628,6 +2051,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		contextFiles := fetchSlackContextFiles(ctx, slackClient, slackCfg.AccessToken, payload.FileIDs, logger)
 		contextRefs := detectSlackContextReferences(payload.Text, threadMessages)
 		resolvedContext := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
+		userResolver := newSlackCachedUserDisplayResolver(slackClient, slackRedisClient(services), slackCfg.AccessToken, payload.TeamID, logger)
 
 		var mappedUserID *uuid.UUID
 		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
@@ -1657,7 +2081,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					UserID:     mappedUserID,
 					TurnNumber: session.CurrentTurn,
 					Role:       models.MessageRoleUser,
-					Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+					Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
 					References: slackContextReferencesForSessionInput(contextRefs),
 				}
 				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
@@ -1765,7 +2189,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			UserID:     mappedUserID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
-			Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+			Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
 			References: slackContextReferencesForSessionInput(contextRefs),
 		}
 		if err := stores.SessionMessages.Create(ctx, initial); err != nil {
@@ -5481,8 +5905,182 @@ type slackContextFile struct {
 	Permalink string
 }
 
+const slackUserDisplayCacheTTL = 7 * 24 * time.Hour
+const slackUserPromptLabelMaxRunes = 80
+
+var slackUserMentionPattern = regexp.MustCompile(`<@([UW][A-Z0-9]+)>`)
+
+type slackUserInfoFetcher interface {
+	FetchUserInfo(ctx context.Context, accessToken, userID string) (ingestion.SlackUser, error)
+}
+
+type slackUserDisplayResolver interface {
+	ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool)
+}
+
+type slackUserDisplay struct {
+	SlackID string
+	Handle  string
+}
+
+type slackCachedUserDisplay struct {
+	SlackID     string `json:"slack_id"`
+	Name        string `json:"name,omitempty"`
+	RealName    string `json:"real_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type slackCachedUserDisplayResolver struct {
+	fetcher     slackUserInfoFetcher
+	redis       *cache.Client
+	accessToken string
+	teamID      string
+	logger      zerolog.Logger
+	local       map[string]slackUserDisplay
+}
+
+func newSlackCachedUserDisplayResolver(fetcher slackUserInfoFetcher, redisClient *cache.Client, accessToken, teamID string, logger zerolog.Logger) *slackCachedUserDisplayResolver {
+	return &slackCachedUserDisplayResolver{
+		fetcher:     fetcher,
+		redis:       redisClient,
+		accessToken: accessToken,
+		teamID:      strings.TrimSpace(teamID),
+		logger:      logger,
+		local:       make(map[string]slackUserDisplay),
+	}
+}
+
+func slackRedisClient(services *Services) *cache.Client {
+	if services == nil {
+		return nil
+	}
+	return services.Redis
+}
+
+func slackUserDisplayCacheKey(teamID, userID string) string {
+	return "143:slack:user:" + strings.TrimSpace(teamID) + ":" + strings.TrimSpace(userID)
+}
+
+func (r *slackCachedUserDisplayResolver) ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	userID = strings.TrimSpace(userID)
+	if r == nil || userID == "" {
+		return slackUserDisplay{}, false
+	}
+	if display, ok := r.local[userID]; ok {
+		return display, true
+	}
+	if display, ok := r.getShared(ctx, userID); ok {
+		r.local[userID] = display
+		return display, true
+	}
+	if r.fetcher == nil || strings.TrimSpace(r.accessToken) == "" {
+		return slackUserDisplay{}, false
+	}
+	user, err := r.fetcher.FetchUserInfo(ctx, r.accessToken, userID)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to resolve Slack user display name")
+		return slackUserDisplay{}, false
+	}
+	cached := slackCachedUserDisplay{
+		SlackID:     user.ID,
+		Name:        user.Name,
+		RealName:    firstNonEmpty(user.Profile.RealName, user.RealName),
+		DisplayName: user.Profile.DisplayName,
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	r.local[userID] = display
+	r.putShared(ctx, userID, cached)
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) getShared(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return slackUserDisplay{}, false
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := r.redis.GetBytes(ctx, key)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return slackUserDisplay{}, false
+		}
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to read Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	var cached slackCachedUserDisplay
+	if err := json.Unmarshal(data, &cached); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to decode Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) putShared(ctx context.Context, userID string, cached slackCachedUserDisplay) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := json.Marshal(cached)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to marshal Slack user display cache entry")
+		return
+	}
+	if err := r.redis.SetBytes(ctx, key, data, slackUserDisplayCacheTTL); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to write Slack user display to Redis")
+	}
+}
+
+func (c slackCachedUserDisplay) toDisplay(fallbackID string) slackUserDisplay {
+	return slackUserDisplay{
+		SlackID: firstNonEmpty(c.SlackID, fallbackID),
+		Handle:  sanitizeSlackUserHandle(c.Name),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sanitizeSlackUserHandle(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+		if b.Len() >= slackUserPromptLabelMaxRunes {
+			break
+		}
+	}
+	return b.String()
+}
+
 func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile) string {
+	return renderSlackPromptWithUserResolver(context.Background(), text, permalink, threadMessages, references, files, nil)
+}
+
+func renderSlackPromptWithUserResolver(ctx context.Context, text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile, userResolver slackUserDisplayResolver) string {
 	cleaned := strings.TrimSpace(text)
+	cleaned = humanizeSlackMentions(ctx, cleaned, userResolver)
 	var b strings.Builder
 	b.WriteString(cleaned)
 	if permalink != "" {
@@ -5533,20 +6131,51 @@ func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackM
 			if line == "" {
 				continue
 			}
+			line = humanizeSlackMentions(ctx, line, userResolver)
 			if len(line) > 500 {
 				line = line[:500] + "..."
 			}
 			b.WriteString("- ")
 			if msg.User != "" {
-				b.WriteString("<@")
-				b.WriteString(msg.User)
-				b.WriteString(">: ")
+				b.WriteString(slackUserAuthorLabel(ctx, msg.User, userResolver))
+				b.WriteString(": ")
 			}
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func humanizeSlackMentions(ctx context.Context, text string, userResolver slackUserDisplayResolver) string {
+	if userResolver == nil || text == "" {
+		return text
+	}
+	return slackUserMentionPattern.ReplaceAllStringFunc(text, func(raw string) string {
+		// raw is already the full pattern match "<@UXXX>"; extract the captured ID directly.
+		userID := raw[2 : len(raw)-1]
+		display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+		if !ok || display.Handle == "" {
+			return raw
+		}
+		return "@" + display.Handle
+	})
+}
+
+func slackUserAuthorLabel(ctx context.Context, userID string, userResolver slackUserDisplayResolver) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "Slack user"
+	}
+	if userResolver == nil {
+		return "<@" + userID + ">"
+	}
+	display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+	if !ok || display.Handle == "" {
+		return "<@" + userID + ">"
+	}
+	slackID := firstNonEmpty(display.SlackID, userID)
+	return "@" + display.Handle + " (Slack " + slackID + ")"
 }
 
 func fetchSlackContextFiles(ctx context.Context, client *ingestion.SlackAPIClient, accessToken string, fileIDs []string, logger zerolog.Logger) []slackContextFile {
@@ -6197,6 +6826,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Msg("starting run_agent job")
 		markSessionBackedEvalRunning(ctx, stores, services, logger, run)
 		enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "running", "143 is working on this", "I will post the result back in this thread.", false)
+		enqueueSessionPreviewPrewarmOnStart(ctx, stores, services, logger, run)
 
 		var runErr error
 		switch models.SessionStatus(run.Status) {
@@ -6332,6 +6962,8 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionCompleted), "143 session completed", "The session finished successfully.")
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
 		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
+		enqueueSessionPreviewPostTurnClassifier(ctx, stores, services, logger, orgID, runID)
+		enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
 		return nil
 	}
 }
@@ -7749,6 +8381,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
+		enqueueSessionPreviewPostTurnClassifier(ctx, stores, services, logger, orgID, sessionID)
+		enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
 }
@@ -7763,6 +8397,12 @@ func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, serv
 		return
 	}
 	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if sessionPreviewPrewarmUntrustedFork(session) {
+		if stores.Previews != nil {
+			recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeCache, "skipped_untrusted_fork", "untrusted_fork", "Session came from forked PR content; speculative previews are disabled.")
+		}
 		return
 	}
 	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
@@ -7816,6 +8456,421 @@ func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, serv
 		if runErr != nil {
 			logger.Warn().Err(runErr).Str("session_id", session.ID.String()).Msg("failed to upsert session preview cache prewarm run")
 		}
+	}
+}
+
+func enqueueSessionPreviewWarmBuildIfCandidate(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
+	if stores == nil || services == nil || stores.Sessions == nil || stores.Jobs == nil || stores.Previews == nil || stores.Organizations == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for preview warm enqueue")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil || session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	if sessionPreviewPrewarmUntrustedFork(session) {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeSmart, "skipped_untrusted_fork", "untrusted_fork", "Session came from forked PR content; speculative previews are disabled.")
+		return
+	}
+	policy, err := stores.Previews.GetRepositoryPreviewPolicy(ctx, orgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load repository preview policy for warm enqueue")
+		return
+	}
+	if policy.SessionPrewarmMode != models.PreviewSessionPrewarmModeSmart {
+		return
+	}
+	decision, err := stores.Previews.GetLatestSessionPreviewPrewarmRun(ctx, orgID, sessionID, models.PreviewSpeculativeDecisionWarmCandidate)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session preview warm candidate")
+		}
+		return
+	}
+	if decision.WorkspaceRevision != session.WorkspaceRevision || decision.Status != "decided" {
+		return
+	}
+	org, err := stores.Organizations.GetByID(ctx, orgID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load org settings for preview warm enqueue")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil || settings.PreviewSessionPrewarmMaxActive <= 0 {
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to parse org settings for preview warm enqueue")
+		}
+		return
+	}
+	expireStaleSessionPreviewPrewarmRuns(ctx, stores, services, logger, orgID)
+	active, err := stores.Previews.CountActiveSessionPreviewPrewarmRuns(ctx, orgID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to count session preview warm capacity")
+		return
+	}
+	if active >= settings.PreviewSessionPrewarmMaxActive {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeSmart, "skipped_capacity", "capacity_tight", fmt.Sprintf("Speculative preview pool is full (%d/%d).", active, settings.PreviewSessionPrewarmMaxActive))
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.SessionPreviewWarmBuildJobPayload{
+		OrgID:             orgID,
+		UserID:            userID,
+		SessionID:         sessionID,
+		RepositoryID:      *session.RepositoryID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      decision.ConfigDigest,
+		Reason:            reason,
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         sessionID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      decision.ConfigDigest,
+		Mode:              models.PreviewSessionPrewarmModeSmart,
+		Decision:          models.PreviewSpeculativeDecisionWarmCandidate,
+		Confidence:        decision.Confidence,
+		Reason:            decision.Reason,
+		Explanation:       decision.Explanation,
+		Status:            "queued",
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to reserve session preview warm build")
+		return
+	}
+	dedupeKey := fmt.Sprintf("session_preview_warm:%s:%d:%s", sessionID, session.WorkspaceRevision, decision.ConfigDigest)
+	priority := -49
+	if services.PreviewCachePrewarmPriority != 0 {
+		priority = services.PreviewCachePrewarmPriority + 1
+	}
+	targetNodeID := models.SessionWorkerTarget(&session)
+	var jobID uuid.UUID
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, orgID, "preview", models.JobTypeSessionPreviewWarmBuild, payload, priority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, orgID, "preview", models.JobTypeSessionPreviewWarmBuild, payload, priority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to enqueue session preview warm build")
+		if _, updateErr := stores.Previews.UpdateSessionPreviewPrewarmRunStatus(ctx, orgID, *session.RepositoryID, sessionID, session.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, decision.ConfigDigest, "failed", err.Error(), true); updateErr != nil {
+			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to mark session preview warm enqueue failure")
+		}
+		return
+	}
+	jobIDPtr := &jobID
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         sessionID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      decision.ConfigDigest,
+		Mode:              models.PreviewSessionPrewarmModeSmart,
+		Decision:          models.PreviewSpeculativeDecisionWarmCandidate,
+		Confidence:        decision.Confidence,
+		Reason:            decision.Reason,
+		Explanation:       decision.Explanation,
+		Status:            "queued",
+		JobID:             jobIDPtr,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to record session preview warm job id")
+	}
+	metrics.RecordSessionPreviewPrewarmSkipped(ctx, session.OrgID.String(), reason)
+}
+
+func enqueueSessionPreviewPrewarmOnStart(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	if stores == nil || services == nil || !services.PreviewCachePrewarmEnabled || stores.Jobs == nil || stores.Previews == nil || stores.Organizations == nil {
+		return
+	}
+	if session.OrgID == uuid.Nil || session.ID == uuid.Nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if sessionPreviewPrewarmUntrustedFork(session) {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeOff, "skipped_untrusted_fork", "untrusted_fork", "Session came from forked PR content; speculative previews are disabled.")
+		return
+	}
+	org, err := stores.Organizations.GetByID(ctx, session.OrgID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to load org settings for session preview prewarm")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to parse org settings for session preview prewarm")
+		return
+	}
+	if settings.PreviewSessionPrewarmMaxActive <= 0 {
+		return
+	}
+	expireStaleSessionPreviewPrewarmRuns(ctx, stores, services, logger, session.OrgID)
+	policy, err := stores.Previews.GetRepositoryPreviewPolicy(ctx, session.OrgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to load repository preview policy for session prewarm")
+		return
+	}
+	active, countErr := stores.Previews.CountActiveSessionPreviewPrewarmRuns(ctx, session.OrgID)
+	if countErr != nil {
+		logger.Warn().Err(countErr).
+			Str("org_id", session.OrgID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to count active session preview prewarm runs")
+		return
+	}
+	if active >= settings.PreviewSessionPrewarmMaxActive {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, policy.SessionPrewarmMode, "skipped_capacity", "capacity_tight", fmt.Sprintf("Speculative preview pool is full (%d/%d).", active, settings.PreviewSessionPrewarmMaxActive))
+		return
+	}
+	cooling, cooldownErr := stores.Previews.HasRecentSessionPreviewPrewarmCooldown(ctx, session.OrgID, *session.RepositoryID, time.Now().Add(-5*time.Minute))
+	if cooldownErr != nil {
+		logger.Warn().Err(cooldownErr).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to check session preview prewarm cooldown")
+		return
+	}
+	if cooling {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, policy.SessionPrewarmMode, "skipped_cooldown", "capacity_tight", "Repository is in speculative preview cooldown.")
+		return
+	}
+	concurrentRepo, concurrentErr := stores.Previews.HasRecentRepoSessionCachePrewarm(ctx, session.OrgID, *session.RepositoryID, session.ID, time.Now().Add(-5*time.Minute))
+	if concurrentErr != nil {
+		logger.Warn().Err(concurrentErr).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to check concurrent repo session cache prewarm")
+		return
+	}
+	if concurrentRepo {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, policy.SessionPrewarmMode, "skipped_cooldown", "concurrent_session", "Another session for this repository recently had a cache prewarm.")
+		return
+	}
+	switch policy.SessionPrewarmMode {
+	case models.PreviewSessionPrewarmModeCache:
+		enqueueSessionPreviewCachePrewarmForDecision(ctx, stores, services, logger, session, models.PreviewSessionPrewarmModeCache, models.PreviewSpeculativeDecisionCache, 1, "policy_cache", "Repository policy is cache-only.", nil)
+	case models.PreviewSessionPrewarmModeSmart:
+		enqueueSessionPreviewPrewarmClassifier(ctx, stores, services, logger, session, "session_start")
+	default:
+		return
+	}
+}
+
+func enqueueSessionPreviewPostTurnClassifier(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	if stores == nil || services == nil || stores.Sessions == nil || stores.Previews == nil || stores.Jobs == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for post-turn preview classifier")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil || session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	policy, err := stores.Previews.GetRepositoryPreviewPolicy(ctx, orgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load preview policy for post-turn classifier")
+		return
+	}
+	if policy.SessionPrewarmMode != models.PreviewSessionPrewarmModeSmart {
+		return
+	}
+	enqueueSessionPreviewPrewarmClassifier(ctx, stores, services, logger, session, "post_turn")
+}
+
+func recordSkippedSessionPreviewPrewarm(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, mode models.PreviewSessionPrewarmMode, status, reason, explanation string) {
+	if stores == nil || stores.Previews == nil || session.RepositoryID == nil {
+		return
+	}
+	decision := models.PreviewSpeculativeDecisionNone
+	if mode == models.PreviewSessionPrewarmModeCache {
+		decision = models.PreviewSpeculativeDecisionCache
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Mode:              mode,
+		Decision:          decision,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            status,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to record skipped session preview prewarm")
+	}
+}
+
+func enqueueSessionPreviewCachePrewarmForDecision(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, mode models.PreviewSessionPrewarmMode, decision models.PreviewSpeculativeDecision, confidence float64, reason, explanation string, priorJobID *uuid.UUID) {
+	if stores == nil || services == nil || stores.Jobs == nil || stores.Previews == nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		UserID:            userID,
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Reason:            "session_started",
+	}
+	dedupeKey := previewsvc.PreviewCachePrewarmScopeKey(payload)
+	if dedupeKey == "" {
+		return
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      payload.ConfigDigest,
+		Mode:              mode,
+		Decision:          decision,
+		Confidence:        confidence,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            "queued",
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("config_digest", payload.ConfigDigest).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to reserve session preview prewarm decision")
+		return
+	}
+
+	targetNodeID := models.SessionWorkerTarget(&session)
+	if targetNodeID == nil {
+		if workerNodeID, ok := jobctx.WorkerNodeIDFromContext(ctx); ok && strings.TrimSpace(workerNodeID) != "" {
+			workerNodeID = strings.TrimSpace(workerNodeID)
+			targetNodeID = &workerNodeID
+		}
+	}
+	var jobID uuid.UUID
+	var err error
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, session.OrgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, session.OrgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("config_digest", payload.ConfigDigest).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to enqueue session preview cache prewarm")
+		if _, updateErr := stores.Previews.UpdateSessionPreviewPrewarmRunStatus(ctx, session.OrgID, *session.RepositoryID, session.ID, session.WorkspaceRevision, decision, payload.ConfigDigest, "failed", err.Error(), true); updateErr != nil {
+			logger.Warn().Err(updateErr).
+				Str("org_id", session.OrgID.String()).
+				Str("repository_id", session.RepositoryID.String()).
+				Str("session_id", session.ID.String()).
+				Str("decision", string(decision)).
+				Str("reason", reason).
+				Msg("failed to mark session preview prewarm enqueue failure")
+		}
+		return
+	}
+
+	var jobIDPtr *uuid.UUID
+	if jobID != uuid.Nil {
+		jobIDCopy := jobID
+		jobIDPtr = &jobIDCopy
+	} else if priorJobID != nil && *priorJobID != uuid.Nil {
+		jobIDPtr = priorJobID
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      payload.ConfigDigest,
+		Mode:              mode,
+		Decision:          decision,
+		Confidence:        confidence,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            "queued",
+		JobID:             jobIDPtr,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("config_digest", payload.ConfigDigest).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to record session preview prewarm decision")
+	}
+}
+
+func enqueueSessionPreviewPrewarmClassifier(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, phase string) {
+	if stores == nil || stores.Jobs == nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if strings.TrimSpace(phase) == "" {
+		phase = "session_start"
+	}
+	payload := previewsvc.SessionPreviewPrewarmClassifyJobPayload{
+		OrgID:             session.OrgID,
+		SessionID:         session.ID,
+		RepositoryID:      *session.RepositoryID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Phase:             phase,
+	}
+	dedupeKey := fmt.Sprintf("session_preview_prewarm_classify:%s:%d:%s", session.ID, session.WorkspaceRevision, phase)
+	priority := -51
+	if services != nil && services.PreviewCachePrewarmPriority != 0 {
+		priority = services.PreviewCachePrewarmPriority - 1
+	}
+	if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "preview", models.JobTypeSessionPreviewPrewarmClassify, payload, priority, &dedupeKey); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("decision", string(models.PreviewSpeculativeDecisionNone)).
+			Str("reason", "classifier_enqueue_failed").
+			Msg("failed to enqueue session preview prewarm classifier")
 	}
 }
 

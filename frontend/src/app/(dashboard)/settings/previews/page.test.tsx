@@ -27,7 +27,7 @@ describe("PreviewSettingsPage", () => {
         data: {
           id: "org-1",
           name: "Assembled",
-          settings: { preview_auto_pool_max_active: 4 },
+          settings: { preview_auto_pool_max_active: 4, preview_session_prewarm_max_active: 0 },
           created_at: "2026-01-01T00:00:00Z",
           updated_at: "2026-01-01T00:00:00Z",
         },
@@ -38,7 +38,10 @@ describe("PreviewSettingsPage", () => {
           data: {
             id: "org-1",
             name: "Assembled",
-            settings: { preview_auto_pool_max_active: body.settings?.preview_auto_pool_max_active ?? 4 },
+            settings: {
+              preview_auto_pool_max_active: body.settings?.preview_auto_pool_max_active ?? 4,
+              preview_session_prewarm_max_active: body.settings?.preview_session_prewarm_max_active ?? 0,
+            },
             created_at: "2026-01-01T00:00:00Z",
             updated_at: "2026-01-01T00:00:00Z",
           },
@@ -59,6 +62,7 @@ describe("PreviewSettingsPage", () => {
             repository_id: "repo-1",
             repository_full_name: "assembledhq/143",
             auto_mode: "off",
+            session_prewarm_mode: "off",
             open_pr_count: 12,
             updated_at: null,
           },
@@ -66,6 +70,7 @@ describe("PreviewSettingsPage", () => {
             repository_id: "repo-2",
             repository_full_name: "assembledhq/docs",
             auto_mode: "warm",
+            session_prewarm_mode: "cache",
             open_pr_count: 3,
             updated_at: "2026-06-08T12:00:00Z",
           },
@@ -108,6 +113,67 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
+  it("enables session prewarm policies only when speculative slots are configured", async () => {
+    let savedPolicy: unknown;
+    let savedSettings: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Assembled",
+          settings: { preview_auto_pool_max_active: 4, preview_session_prewarm_max_active: 0 },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "off",
+            open_pr_count: 5,
+            updated_at: "2026-06-08T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.put("*/api/v1/repositories/repo-1/preview-policy", async ({ request }) => {
+        savedPolicy = await request.json();
+        return HttpResponse.json({ data: { id: "policy-1", session_prewarm_mode: "cache" } });
+      }),
+      http.patch("*/api/v1/settings", async ({ request }) => {
+        savedSettings = await request.json();
+        return HttpResponse.json({
+          data: {
+            id: "org-1",
+            name: "Assembled",
+            settings: { preview_auto_pool_max_active: 4, preview_session_prewarm_max_active: 2 },
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(await screen.findByText("Set speculative preview slots above 0 to enable session prewarm.")).toBeInTheDocument();
+    const slotsInput = screen.getByLabelText("Speculative preview slots");
+    changeFieldValue(slotsInput, "2");
+    await waitFor(() => {
+      expect(savedSettings).toEqual({ settings: { preview_session_prewarm_max_active: 2 } });
+    });
+
+    await userEvent.click(screen.getByRole("radio", { name: /use cache-only session prewarm for assembledhq\/143/i }));
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({ session_prewarm_mode: "cache" });
+    });
+  });
+
   it("keeps auto-preview rows usable in the mobile stacked layout", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -118,6 +184,7 @@ describe("PreviewSettingsPage", () => {
             repository_id: "repo-1",
             repository_full_name: "assembledhq/143",
             auto_mode: "warm",
+            session_prewarm_mode: "off",
             open_pr_count: 5,
             updated_at: "2026-06-08T12:00:00Z",
           },
