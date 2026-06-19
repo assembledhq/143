@@ -166,6 +166,13 @@ The backend already provides the first interactive Slackbot surface:
   notification fanout have backend paths.
 - Shared Slack authorization checks channel capabilities, mapped-user roles, and
   originating team-session allowances.
+- Slack-started session prompts now resolve Slack authors and inline `<@U...>`
+  mentions into readable handles before writing the canonical 143 transcript.
+  Resolved display metadata is cached in Redis for seven days per Slack
+  team/user and falls back to Slack `users.info` on cache miss. Profile names
+  are sanitized into bounded single-line labels, but agent prompts render only
+  sanitized handles plus Slack IDs so arbitrary profile names cannot introduce
+  prompt instructions. Redis remains non-authoritative and optional.
 
 Phases 1-8 of this plan are implemented: Slack lifecycle rendering is
 centralized, progress updates are normalized and de-duplicated, settings expose

@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -550,7 +551,10 @@ type Services struct {
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
-	FrontendURL     string                        // optional base URL for Slack links
+	// Redis is optional and used for non-authoritative shared caches such as
+	// Slack user display names. Losing it should only increase provider lookups.
+	Redis       *cache.Client
+	FrontendURL string // optional base URL for Slack links
 	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
 	// triggers a 143 session). It is intentionally independent of the
 	// dispatcher kill switch so queued linear_agent_event jobs continue to
@@ -1626,6 +1630,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		contextFiles := fetchSlackContextFiles(ctx, slackClient, slackCfg.AccessToken, payload.FileIDs, logger)
 		contextRefs := detectSlackContextReferences(payload.Text, threadMessages)
 		resolvedContext := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
+		userResolver := newSlackCachedUserDisplayResolver(slackClient, slackRedisClient(services), slackCfg.AccessToken, payload.TeamID, logger)
 
 		var mappedUserID *uuid.UUID
 		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
@@ -1655,7 +1660,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					UserID:     mappedUserID,
 					TurnNumber: session.CurrentTurn,
 					Role:       models.MessageRoleUser,
-					Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+					Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
 					References: slackContextReferencesForSessionInput(contextRefs),
 				}
 				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
@@ -1763,7 +1768,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			UserID:     mappedUserID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
-			Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+			Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
 			References: slackContextReferencesForSessionInput(contextRefs),
 		}
 		if err := stores.SessionMessages.Create(ctx, initial); err != nil {
@@ -5479,8 +5484,196 @@ type slackContextFile struct {
 	Permalink string
 }
 
+const slackUserDisplayCacheTTL = 7 * 24 * time.Hour
+const slackUserPromptLabelMaxRunes = 80
+
+var slackUserMentionPattern = regexp.MustCompile(`<@([UW][A-Z0-9]+)>`)
+
+type slackUserInfoFetcher interface {
+	FetchUserInfo(ctx context.Context, accessToken, userID string) (ingestion.SlackUser, error)
+}
+
+type slackUserDisplayResolver interface {
+	ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool)
+}
+
+type slackUserDisplay struct {
+	SlackID string
+	Handle  string
+}
+
+type slackCachedUserDisplay struct {
+	SlackID     string `json:"slack_id"`
+	Name        string `json:"name,omitempty"`
+	RealName    string `json:"real_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type slackCachedUserDisplayResolver struct {
+	fetcher     slackUserInfoFetcher
+	redis       *cache.Client
+	accessToken string
+	teamID      string
+	logger      zerolog.Logger
+	local       map[string]slackUserDisplay
+}
+
+func newSlackCachedUserDisplayResolver(fetcher slackUserInfoFetcher, redisClient *cache.Client, accessToken, teamID string, logger zerolog.Logger) *slackCachedUserDisplayResolver {
+	return &slackCachedUserDisplayResolver{
+		fetcher:     fetcher,
+		redis:       redisClient,
+		accessToken: accessToken,
+		teamID:      strings.TrimSpace(teamID),
+		logger:      logger,
+		local:       make(map[string]slackUserDisplay),
+	}
+}
+
+func slackRedisClient(services *Services) *cache.Client {
+	if services == nil {
+		return nil
+	}
+	return services.Redis
+}
+
+func slackUserDisplayCacheKey(teamID, userID string) string {
+	return "143:slack:user:" + strings.TrimSpace(teamID) + ":" + strings.TrimSpace(userID)
+}
+
+func (r *slackCachedUserDisplayResolver) ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	userID = strings.TrimSpace(userID)
+	if r == nil || userID == "" {
+		return slackUserDisplay{}, false
+	}
+	if display, ok := r.local[userID]; ok {
+		return display, true
+	}
+	if display, ok := r.getShared(ctx, userID); ok {
+		r.local[userID] = display
+		return display, true
+	}
+	if r.fetcher == nil || strings.TrimSpace(r.accessToken) == "" {
+		return slackUserDisplay{}, false
+	}
+	user, err := r.fetcher.FetchUserInfo(ctx, r.accessToken, userID)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to resolve Slack user display name")
+		return slackUserDisplay{}, false
+	}
+	cached := slackCachedUserDisplay{
+		SlackID:     user.ID,
+		Name:        user.Name,
+		RealName:    firstNonEmpty(user.Profile.RealName, user.RealName),
+		DisplayName: user.Profile.DisplayName,
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	r.local[userID] = display
+	r.putShared(ctx, userID, cached)
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) getShared(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return slackUserDisplay{}, false
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := r.redis.GetBytes(ctx, key)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return slackUserDisplay{}, false
+		}
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to read Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	var cached slackCachedUserDisplay
+	if err := json.Unmarshal(data, &cached); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to decode Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) putShared(ctx context.Context, userID string, cached slackCachedUserDisplay) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := json.Marshal(cached)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to marshal Slack user display cache entry")
+		return
+	}
+	if err := r.redis.SetBytes(ctx, key, data, slackUserDisplayCacheTTL); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to write Slack user display to Redis")
+	}
+}
+
+func (c slackCachedUserDisplay) toDisplay(fallbackID string) slackUserDisplay {
+	return slackUserDisplay{
+		SlackID: firstNonEmpty(c.SlackID, fallbackID),
+		Handle:  sanitizeSlackUserHandle(c.Name),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sanitizeSlackUserHandle(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+		if b.Len() >= slackUserPromptLabelMaxRunes {
+			break
+		}
+	}
+	return b.String()
+}
+
+func truncateRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	count := 0
+	for idx := range value {
+		if count == maxRunes {
+			return strings.TrimSpace(value[:idx])
+		}
+		count++
+	}
+	return value
+}
+
 func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile) string {
+	return renderSlackPromptWithUserResolver(context.Background(), text, permalink, threadMessages, references, files, nil)
+}
+
+func renderSlackPromptWithUserResolver(ctx context.Context, text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile, userResolver slackUserDisplayResolver) string {
 	cleaned := strings.TrimSpace(text)
+	cleaned = humanizeSlackMentions(ctx, cleaned, userResolver)
 	var b strings.Builder
 	b.WriteString(cleaned)
 	if permalink != "" {
@@ -5531,20 +5724,51 @@ func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackM
 			if line == "" {
 				continue
 			}
+			line = humanizeSlackMentions(ctx, line, userResolver)
 			if len(line) > 500 {
 				line = line[:500] + "..."
 			}
 			b.WriteString("- ")
 			if msg.User != "" {
-				b.WriteString("<@")
-				b.WriteString(msg.User)
-				b.WriteString(">: ")
+				b.WriteString(slackUserAuthorLabel(ctx, msg.User, userResolver))
+				b.WriteString(": ")
 			}
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func humanizeSlackMentions(ctx context.Context, text string, userResolver slackUserDisplayResolver) string {
+	if userResolver == nil || text == "" {
+		return text
+	}
+	return slackUserMentionPattern.ReplaceAllStringFunc(text, func(raw string) string {
+		// raw is already the full pattern match "<@UXXX>"; extract the captured ID directly.
+		userID := raw[2 : len(raw)-1]
+		display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+		if !ok || display.Handle == "" {
+			return raw
+		}
+		return "@" + display.Handle
+	})
+}
+
+func slackUserAuthorLabel(ctx context.Context, userID string, userResolver slackUserDisplayResolver) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "Slack user"
+	}
+	if userResolver == nil {
+		return "<@" + userID + ">"
+	}
+	display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+	if !ok || display.Handle == "" {
+		return "<@" + userID + ">"
+	}
+	slackID := firstNonEmpty(display.SlackID, userID)
+	return "@" + display.Handle + " (Slack " + slackID + ")"
 }
 
 func fetchSlackContextFiles(ctx context.Context, client *ingestion.SlackAPIClient, accessToken string, fileIDs []string, logger zerolog.Logger) []slackContextFile {
