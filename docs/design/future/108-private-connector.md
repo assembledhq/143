@@ -3,7 +3,7 @@
 > **Status:** Future
 > **Last reviewed:** 2026-06-06
 
-143 needs to help coding agents work with production-adjacent systems that live inside customer private networks: logs and databases. The product problem is that those systems are intentionally behind firewalls, private VPCs, VPNs, or office networks, and customers should not have to expose them broadly to the public internet just so 143 can debug issues or run realistic queries.
+143 needs to help coding agents and previews work with production-adjacent systems that live inside customer private networks: logs, databases, and preview dependencies. The product problem is that those systems are intentionally behind firewalls, private VPCs, VPNs, or office networks, and customers should not have to expose them broadly to the public internet just so 143 can debug issues or run realistic previews.
 
 The 143 Private Connector is a customer-installed, outbound-only bridge from a customer's private network to 143. It should make private infrastructure available to 143 through explicit, narrowly scoped capabilities rather than broad network access.
 
@@ -11,6 +11,7 @@ The first supported capabilities are:
 
 1. VictoriaLogs querying for coding agents and operators.
 2. Read-only database inspection/querying for coding agents.
+3. Preview database access for running preview applications, including write-capable access to preview-safe databases.
 
 ## Product Problem
 
@@ -18,6 +19,7 @@ High-value 143 workflows depend on operational context that is usually private:
 
 - A coding agent needs production logs to understand a Sentry error, failed job, or customer-impacting regression.
 - A coding agent needs to inspect database schema or run a read-only query to understand current state.
+- A preview needs a real database connection so the application can boot, run migrations where appropriate, and exercise realistic flows.
 
 The current alternatives are not productized enough:
 
@@ -28,7 +30,7 @@ The current alternatives are not productized enough:
 
 Those options are workable for expert operators, but they are not close to one-click and they create support and security problems. The desired product shape is:
 
-> Install a lightweight 143 connector inside your private network. It opens an outbound connection to 143, so your logs and databases stay private. 143 can then request specific approved actions, with local policy enforcement and full audit logging.
+> Install a lightweight 143 connector inside your private network. It opens an outbound connection to 143, so your logs and databases stay private. 143 can then request specific approved actions or temporary preview resource leases, with local policy enforcement and full audit logging.
 
 ## Goals
 
@@ -36,14 +38,16 @@ Those options are workable for expert operators, but they are not close to one-c
 - Keep customer infrastructure private by default.
 - Make setup as close to one command as possible with a native shell-script installer.
 - Give agents access to useful private context without giving them raw network access.
+- Support write-capable preview database connections without allowing agent-driven writes to production.
 - Enforce policy both in 143 and locally inside the connector.
 - Provide clear health, diagnostics, audit trails, token rotation, and disable controls in the product UI.
-- Design the connector as a reusable private-infrastructure bridge, even though the first release only supports VictoriaLogs and read-only DB.
+- Design the connector as a reusable private-infrastructure bridge, even though the first release only supports VictoriaLogs, read-only DB, and preview DB.
 
 ## Non-Goals
 
 - Do not build a general-purpose VPN into customer networks.
 - Do not expose arbitrary TCP connectivity from sandboxes into private networks.
+- Do not make production database writes a normal preview path.
 - Do not give coding agents direct database credentials.
 - Do not support every observability/database provider in the first release.
 - Do not replace customer-managed direct HTTPS endpoint integrations for teams that already want to expose a secure gateway.
@@ -56,6 +60,7 @@ The connector is the top-level installed component. Individual private resources
 
 - Logs -> VictoriaLogs
 - Databases -> Read-only Postgres
+- Preview Resources -> Preview Postgres
 
 The customer-facing copy should avoid "expose your logs/database to 143" and instead say:
 
@@ -191,12 +196,27 @@ For read-only DB:
 - Query timeout.
 - Whether sensitive-table access requires approval.
 
+For preview DB:
+
+- Display name.
+- Database type. First release: Postgres.
+- Access strategy:
+  - Shared writable preview database.
+  - Per-preview schema.
+  - Per-preview database.
+- Migration/bootstrap command policy.
+- Cleanup policy.
+- Allowed repositories.
+- Max active preview leases.
+- Max lease duration.
+
 ### 5. Test Connection
 
 The UI should provide a first-class test for each resource:
 
 - VictoriaLogs: run a bounded field discovery query.
 - Read-only DB: connect, verify read-only transaction, inspect schemas.
+- Preview DB: create a dry-run lease, optionally create and drop a test schema/database.
 
 The test result should explain failures in operator language:
 
@@ -206,6 +226,8 @@ The test result should explain failures in operator language:
 - TLS failed.
 - Permission denied.
 - Read-only role is not actually read-only.
+- Cannot create preview schema/database.
+- Cleanup failed.
 
 ### 6. Done State
 
@@ -231,7 +253,7 @@ Customer private network                         143 production
 
 VictoriaLogs                                     143 app/API
 Postgres                         outbound        connector gateway
-                    <---->  143 Private Connector <----> agents/jobs
+Preview DB targets  <---->  143 Private Connector <----> jobs/agents/previews
 ```
 
 The connector initiates and maintains an outbound connection to a 143 connector gateway over **WebSocket over port 443**. WebSocket over 443 is the default because it traverses corporate HTTP proxies and standard firewalls without special configuration. 143 never opens inbound connections to customer networks.
@@ -240,10 +262,112 @@ The multiplexed WebSocket session carries:
 
 - A heartbeat stream (connector → gateway, default 5-second interval).
 - Action request/response channels (gateway → connector, one per in-flight request).
+- Scoped runtime data channels for preview database leases.
 
 A secondary gRPC-over-443 path is available for connectors whose network infrastructure handles gRPC well, selectable via connector config. The shell installer detects which protocol succeeds during bootstrap and records it in the connector identity.
 
-The connector exposes one class of capability: **action capabilities** for agents and tools. Agent access is constrained and read-only.
+The connector exposes two classes of capability:
+
+1. **Action capabilities** for agents and tools. Agent access is constrained and usually read-only.
+2. **Runtime resource leases** for previews. Preview runtime access may need write capability, but only to preview-safe resources and only for a specific preview lease.
+
+## Connector Modularity
+
+As the number of supported providers grows (VictoriaLogs, Postgres, future databases, future log systems), a monolithic connector binary compounds security and correctness problems:
+
+- A bug in any provider ships to every customer, including those who never configured that provider.
+- The connector process holds credentials for all configured resources, so a memory-safety flaw in any provider exposes credentials for all of them.
+- Security audits must cover the entire binary rather than individual providers.
+- Every provider update requires redistributing and restarting the full binary.
+
+The connector architecture addresses this with a **two-tier subprocess model**: a thin core host and independently distributed provider processes.
+
+### Architecture
+
+```
+143 gateway
+    ↕ WebSocket/443
+[connector-core]        manages session, identity, request signing, heartbeat, audit
+    ↕ gRPC / Unix socket
+[provider-victorialogs]    [provider-postgres]    (future providers)
+```
+
+The **connector core** handles all protocol-level concerns:
+
+- Gateway session management and reconnection.
+- Connector identity (Ed25519 key, mTLS session).
+- Incoming request signature validation, nonce cache, and expiry checks.
+- Org, connector, and resource ID authorization.
+- Audit event emission.
+- Config management and push authorization.
+- Heartbeat and health reporting.
+
+The core never directly touches private resources. It knows nothing about VictoriaLogs query syntax or Postgres connection handling.
+
+Each **provider process** handles one integration type:
+
+- Connects to the core over a local Unix domain socket at startup.
+- Declares the capability names it handles (e.g., `victorialogs.query`, `victorialogs.fields`).
+- Receives pre-validated, pre-authorized action requests from the core.
+- Executes the action against its configured private resource.
+- Returns capped and redacted results to the core.
+
+Providers trust the core implicitly. By the time a request reaches a provider, the core has already validated the signature, expiry, nonce, org ID, connector ID, and resource ID. Providers enforce only resource-level policy (row caps, timeouts, field redaction).
+
+### Provider IPC Contract
+
+The core exposes a gRPC service on a Unix domain socket. Providers connect outbound to this socket and register on startup.
+
+The registration message declares:
+
+- Provider name and version.
+- The list of capability names the provider handles.
+- A readiness signal (provider confirms it can reach its configured resource).
+
+Once registered, the core forwards matching action requests to the provider via a streaming RPC channel. Each forwarded request includes:
+
+- The validated org ID, resource ID, and capability name.
+- The capability-specific parameters (query string, time range, table name, etc.).
+- The request ID for correlation in audit events.
+
+The provider returns:
+
+- Result payload (already capped to configured limits).
+- Result metadata (row count, field count, duration).
+- An error code and message if execution failed.
+
+The core never exposes raw gateway traffic to providers. Providers cannot initiate requests to the gateway, to other providers, or to anything outside their configured resource target.
+
+### Security Isolation Properties
+
+Because providers are separate processes:
+
+- A memory-safety bug in the Postgres provider cannot read credentials or session keys held by the core.
+- A compromised provider cannot forge audit events — audit emission is core-only.
+- Each provider can be launched by the core with reduced OS privileges using seccomp filters and dropped Linux capabilities. For example: the VictoriaLogs provider may be allowed only outbound TCP to the configured VictoriaLogs host and port, with all other network access blocked.
+- Providers crash and restart independently. A provider process failure surfaces as "resource unavailable" for that provider's capabilities without affecting other providers or the gateway session.
+
+### Installation and Distribution
+
+The install script downloads only the provider binaries that match the resource types in the connector's configuration. A deployment with only VictoriaLogs configured downloads `connector-core` and `provider-victorialogs` — it never receives the Postgres provider binary.
+
+Each provider binary is independently versioned and signed. The install script verifies each binary against the same inline Sigstore cosign key used for the core. Provider updates can be delivered without updating the core.
+
+The systemd service model runs one unit for the core and one unit per installed provider. The core unit is the dependency anchor; provider units declare `After=connector-core.service`.
+
+### Future: Third-Party Providers
+
+The provider IPC contract is a stable, versioned gRPC interface. In the future, third parties (customers, integration partners) could implement a provider for any private resource type that follows the contract. This is the same model used by Terraform providers and Vault secrets engines. First-party providers maintain the security and audit guarantees; third-party providers would be explicitly labeled and require customer opt-in.
+
+This is a long-term roadmap consideration, not a Phase 1 or Phase 2 requirement.
+
+### Phase 1 → Phase 2 Transition
+
+Building the full subprocess architecture in Phase 1 adds implementation complexity before there is a second provider to validate the IPC contract against. The recommended path:
+
+**Phase 1:** Build the connector as a modular monolith with a clean internal Go interface boundary between the core and providers. Each provider is a separate Go package with a defined `Provider` interface (register capabilities, handle action requests, return results). The install script still distributes a single binary. The internal interface is designed to match the IPC contract so the split is mechanical, not a redesign.
+
+**Phase 2 (when Postgres is added):** Extract providers into separate processes using the IPC contract. At this point there are two providers to validate the contract, and the value of process isolation becomes real. The install script is updated to download per-provider binaries. Existing Phase 1 deployments get a connector-core + provider-victorialogs pair as a transparent upgrade.
 
 ## Reconnection Behavior
 
@@ -309,6 +433,39 @@ Flow:
 
 Action capabilities must never become arbitrary shell commands or arbitrary network requests.
 
+## Runtime Resource Leases
+
+Runtime resource leases are temporary network/data-plane grants for preview runtimes.
+
+The first runtime resource is a preview database. A preview app may need a normal writable `DATABASE_URL` so it can boot and perform realistic user flows. The connector should support that without making production writes a normal path.
+
+Flow:
+
+1. A preview starts for a repository that requires a private preview DB resource.
+2. 143 resolves the preview resource policy for that repository.
+3. 143 asks the connector to create a lease for `preview_runtime_id`.
+4. The connector validates policy and prepares the target:
+   - select shared preview DB,
+   - create per-preview schema, or
+   - create per-preview database.
+5. 143 exposes a preview-scoped database URL to the preview runtime.
+6. Preview traffic is carried through a scoped connector data channel.
+7. When the preview stops/expires, 143 revokes the lease.
+8. The connector cleans up per-preview resources according to policy.
+
+Runtime leases must be scoped by:
+
+- org ID,
+- repository ID,
+- preview runtime ID,
+- connector ID,
+- resource ID,
+- lease expiry,
+- allowed target host/port/database,
+- access mode.
+
+Runtime access is not a general tunnel. The preview runtime should only reach the specific configured resource for the active lease.
+
 ## First Release Capabilities
 
 ### VictoriaLogs Connector
@@ -373,6 +530,44 @@ Required database protections:
 
 The connector does not use a SQL parser for validation. Writing a parser that correctly handles all of Postgres's syntax (CTEs, dollar-quoting, multi-statement, server-side functions, `SELECT INTO`) is a source of ongoing bypass reports and not worth the complexity relative to what the database role and transaction mode already enforce. The enforcement stack above is auditable and sufficient for v1.
 
+### Preview DB
+
+Purpose: let preview applications connect to a database behind a firewall and perform writes safely.
+
+First provider: Postgres.
+
+Supported strategies:
+
+1. **Shared writable preview database**
+   - Fastest to configure.
+   - Connector returns credentials for an existing preview-only database.
+   - Recommended for early adopters and simple apps.
+   - Risk: previews can interfere with each other unless the app is tenant-aware or cleanup is strong.
+
+2. **Per-preview schema**
+   - Connector creates a schema for each preview.
+   - 143 injects a DB URL or schema setting for that preview.
+   - Better isolation with lower operational overhead than full databases.
+   - Requires apps/migrations to respect schema configuration.
+
+3. **Per-preview database**
+   - Connector creates a database for each preview.
+   - Best isolation.
+   - Higher startup and cleanup complexity.
+   - Preferred long-term default for teams whose database server supports it efficiently.
+
+Production database writes should not be a normal supported mode. If ever supported, it should be hidden behind explicit organization policy, admin approval, warnings, and audit events. The default product path is write access to preview-safe databases only.
+
+Preview DB leases should support:
+
+- repository allowlists,
+- max active leases,
+- max lease duration,
+- bootstrap/migration command policy,
+- cleanup on preview stop/expiry,
+- cleanup retry and dead-letter visibility,
+- optional approval before creating a write-capable lease.
+
 ## Security Model
 
 Security should be enforced at multiple layers.
@@ -381,10 +576,10 @@ Security should be enforced at multiple layers.
 
 - Actor authorization.
 - Org and repository scoping.
-- Session scoping.
+- Session/preview scoping.
 - Resource capability checks.
 - Short-lived signed requests.
-- Audit events for every action.
+- Audit events for every action and preview lease.
 - Result caps before returning to agents.
 
 Connector-side enforcement:
@@ -405,6 +600,7 @@ Connector-side enforcement:
 Provider-side enforcement:
 
 - Read-only DB role for agent DB access.
+- Database permissions for preview DB creation/use.
 - VictoriaLogs endpoint reachable only from connector network.
 - Optional internal firewall rules limiting connector egress to configured targets.
 
@@ -438,7 +634,7 @@ Audit events should record:
 
 - actor,
 - org,
-- repository/session when available,
+- repository/session/preview when available,
 - connector ID,
 - resource ID,
 - capability,
@@ -511,7 +707,46 @@ resources:
       timeout: 5s
       max_requests_per_minute: 30
 
+  postgres_preview:
+    type: postgres
+    mode: preview_runtime
+    admin_dsn_env: PREVIEW_DB_ADMIN_URL
+    strategy: per_preview_database
+    allowed_repositories:
+      - github.com/acme/app
+    limits:
+      max_active_leases: 10
+      max_lease_duration: 8h
+    cleanup:
+      on_expiry: drop_database
+      retry_for: 24h
+
 ```
+
+## Data Plane For Preview DB
+
+Preview database traffic is different from action requests because the preview app expects a normal database connection.
+
+The implementation should provide a scoped database proxy path:
+
+- 143 creates a preview DB lease.
+- 143 injects a lease-specific database URL into the preview runtime.
+- The host in that URL points to a 143-controlled preview DB proxy endpoint.
+- The proxy routes only that lease's traffic over the connector session.
+- The connector forwards traffic only to the configured target for that lease.
+
+The proxy should enforce:
+
+- lease ID,
+- preview runtime ID,
+- expiry,
+- target resource,
+- max connection count,
+- idle timeout,
+- byte limits if needed,
+- revocation on preview stop.
+
+The preview DB proxy may be protocol-aware for Postgres in the long term, but the first version can be a scoped TCP relay if the lease and target restrictions are strong. This is acceptable for preview DB runtime traffic because the application needs protocol-native behavior. It is not acceptable as a general-purpose sandbox-to-private-network tunnel.
 
 ## Failure Modes
 
@@ -528,6 +763,16 @@ Common states:
 - Resource policy denied request.
 - Query exceeded time/range/row limits.
 - Request failed mid-flight due to session drop (retriable).
+- Preview DB lease creation failed.
+- Preview DB cleanup failed.
+- Data channel disconnected.
+
+Preview UX should surface private resource failures as startup diagnostics:
+
+- "Preview database lease could not be created."
+- "Connector is offline."
+- "Connector denied this repository for the configured preview database."
+- "Database bootstrap failed."
 
 Agent tool failures should be concise and actionable:
 
@@ -594,9 +839,11 @@ The UI should present these as advanced options. The default recommended setup f
 
 ### Phase 1: Connector Foundation + VictoriaLogs
 
+Connector is a modular monolith with a clean internal `Provider` interface. Single binary distribution. VictoriaLogs provider is the first implementation against the interface.
+
 - Connector records and deployment tokens.
 - Deployment tokens for infrastructure automation.
-- Connector instance identities after bootstrap token exchange.
+- Connector instance identities (Ed25519) after bootstrap token exchange.
 - Connector groups with defined HA semantics (stateless action routing, health-weighted failover).
 - Outbound connector gateway over WebSocket/443.
 - Shell-script installer and systemd service flow.
@@ -604,20 +851,35 @@ The UI should present these as advanced options. The default recommended setup f
 - Connector version display and UI-triggered upgrade flow.
 - UI-pushed resource configuration over established connector session.
 - Health alert webhooks: connector offline, connector back online, version unsupported.
-- VictoriaLogs resource configuration.
+- Internal `Provider` interface (register capabilities, handle action requests, return results). Interface is designed to match the Phase 2 IPC contract.
+- VictoriaLogs provider implementing the internal interface.
 - `victorialogs.query`, `context`, `fields`, and `stats`.
 - Audit events.
 - Agent `143-tools log_*` path through connector-backed provider.
 
-### Phase 2: Read-Only Postgres For Agents
+### Phase 2: Read-Only Postgres For Agents + Process Isolation
 
-- Postgres read-only resource configuration.
-- Schema inspection.
-- Bounded read-only SQL.
-- Explain query.
-- Table/schema allow and deny policy.
-- PII column redaction.
+Phase 2 introduces the Postgres provider and uses it as the forcing function to extract the subprocess architecture. Both providers ship as separate binaries; the install script downloads only what the config requires.
+
+- Extract providers into separate processes using the gRPC/Unix-socket IPC contract.
+- Per-provider systemd units; core unit is the dependency anchor.
+- Per-provider binary download in the install script based on configured resource types.
+- Per-provider seccomp profiles (network access scoped to configured resource host/port only).
+- Postgres read-only provider: schema inspection, bounded read-only SQL, explain, table/schema allow and deny policy, PII column redaction.
 - Audit events with SQL fingerprints.
+- Independent provider versioning and update path.
+
+### Phase 3: Preview Postgres Runtime Resource
+
+- Preview DB resource configuration.
+- Shared writable preview DB strategy.
+- Per-preview schema strategy.
+- Per-preview database strategy.
+- Preview DB lease lifecycle.
+- Scoped DB proxy/data channel.
+- Preview env injection.
+- Cleanup retries and dead-letter visibility.
+- Preview startup diagnostics.
 
 ## Decisions
 
@@ -637,4 +899,4 @@ Previously open questions, now resolved:
 
 143 should build the Private Connector as the default productized way to access firewalled customer logs and databases. The connector should not be a broad private-network tunnel. It should expose explicit action capabilities for agents.
 
-The first release covers VictoriaLogs and read-only Postgres for coding agents. This keeps the product story narrow while establishing the reusable architecture for future private infrastructure integrations.
+The first release covers VictoriaLogs, read-only Postgres for coding agents, and Postgres preview databases. This keeps the product story narrow while establishing the reusable architecture for future private infrastructure integrations.
