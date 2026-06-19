@@ -467,58 +467,58 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     }, [highlighted, visibleHunkSections]);
 
     return (
-      <div ref={ref} className="border border-border rounded-lg">
+      <div ref={ref} className="min-w-0 max-w-full rounded-lg border border-border">
         <FileDiffHeader
           filePath={file.newPath}
           added={file.stats.added}
           removed={file.stats.removed}
           onBrowseFile={onBrowseFile}
         />
-        <div className="overflow-x-auto [container-type:inline-size]">
-        <div className="min-w-fit">
-        {visibleSections.map((section) => {
-          if (section.type === "gap") {
-            return renderGap(section.gap);
-          }
+        <div className="min-w-0 max-w-full overflow-x-auto overscroll-x-contain [container-type:inline-size]">
+          <div className="min-w-fit">
+            {visibleSections.map((section) => {
+              if (section.type === "gap") {
+                return renderGap(section.gap);
+              }
 
-          const hunkEl =
-            viewMode === "split" ? (
-              <SplitDiffHunk
-                key={section.index}
-                hunk={section.hunk}
-                highlightedLines={hunkHighlightMaps?.get(section.index)}
-                {...commonHunkProps}
-              />
-            ) : (
-              <DiffHunk
-                key={section.index}
-                hunk={section.hunk}
-                highlightedLines={hunkHighlightMaps?.get(section.index)}
-                {...commonHunkProps}
-              />
-            );
-          return <div key={section.index}>{hunkEl}</div>;
-        })}
-        {hasMoreDiffLines ? (
-          <div className="sticky bottom-0 border-t border-border bg-background/95 px-3 py-3 text-center backdrop-blur">
-            <p className="mb-2 text-xs text-muted-foreground">
-              Showing first {renderedLineCount} of {totalRenderableLines} diff lines in this file
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              onClick={() => setVisibleLineState((state) => ({
-                file,
-                count: state.count + RENDERED_DIFF_LINE_INCREMENT,
-              }))}
-            >
-              Show more diff lines
-            </Button>
+              const hunkEl =
+                viewMode === "split" ? (
+                  <SplitDiffHunk
+                    key={section.index}
+                    hunk={section.hunk}
+                    highlightedLines={hunkHighlightMaps?.get(section.index)}
+                    {...commonHunkProps}
+                  />
+                ) : (
+                  <DiffHunk
+                    key={section.index}
+                    hunk={section.hunk}
+                    highlightedLines={hunkHighlightMaps?.get(section.index)}
+                    {...commonHunkProps}
+                  />
+                );
+              return <div key={section.index}>{hunkEl}</div>;
+            })}
+            {hasMoreDiffLines ? (
+              <div className="sticky bottom-0 border-t border-border bg-background/95 px-3 py-3 text-center backdrop-blur">
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Showing first {renderedLineCount} of {totalRenderableLines} diff lines in this file
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => setVisibleLineState((state) => ({
+                    file,
+                    count: state.count + RENDERED_DIFF_LINE_INCREMENT,
+                  }))}
+                >
+                  Show more diff lines
+                </Button>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-        </div>
         </div>
       </div>
     );
