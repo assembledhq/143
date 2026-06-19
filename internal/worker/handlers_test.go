@@ -987,6 +987,90 @@ func TestSlackRoutingManifestRoundTrip(t *testing.T) {
 	require.JSONEq(t, `{"slack":{"routing_mode":"answer_only","routing_reason":"question asking for information"}}`, string(inputManifest), "input manifest should store Slack routing metadata under the Slack namespace")
 }
 
+func TestRefreshSlackLinkedSessionRoutingPersistsExplicitStartOverride(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	previousManifest := json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"initial question"}}`)
+	updatedManifest := slackRoutingInputManifest(previousManifest, slackbotsvc.SlackRoutingModeStartWork, "explicit Slack routing command")
+	row := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumnValue(row, "input_manifest", updatedManifest)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET input_manifest = @input_manifest[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	classifier := &fakeSlackRoutingLLM{response: `{"routing_mode":"answer_only","confidence":0.99,"reason":"should not be used"}`}
+	session := models.Session{ID: sessionID, OrgID: orgID, InputManifest: previousManifest}
+	refreshed, routingMode, err := refreshSlackLinkedSessionRouting(
+		context.Background(),
+		&Stores{Sessions: db.NewSessionStore(mock)},
+		classifier,
+		zerolog.Nop(),
+		orgID,
+		"T123",
+		"C123",
+		"<@U143> start fix the Slack final response notification",
+		session,
+	)
+
+	require.NoError(t, err, "linked Slack routing refresh should persist explicit start overrides")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, routingMode, "linked Slack replies should switch from answer-only to start-work on explicit start")
+	require.Equal(t, 0, classifier.calls, "explicit start override should not call the classifier")
+	mode, ok := slackRoutingModeFromInputManifest(refreshed.InputManifest)
+	require.True(t, ok, "refreshed session manifest should include Slack routing metadata")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, mode, "refreshed session manifest should persist start-work routing")
+	require.NoError(t, mock.ExpectationsWereMet(), "linked Slack routing refresh should update the session manifest")
+}
+
+func TestRefreshSlackLinkedSessionRoutingPersistsClassifierStartWork(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	previousManifest := json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"initial question"}}`)
+	updatedManifest := slackRoutingInputManifest(previousManifest, slackbotsvc.SlackRoutingModeStartWork, "request to modify behavior")
+	row := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumnValue(row, "input_manifest", updatedManifest)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET input_manifest = @input_manifest[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	classifier := &fakeSlackRoutingLLM{response: `{"routing_mode":"start_work","confidence":0.91,"reason":"request to modify behavior"}`}
+	session := models.Session{ID: sessionID, OrgID: orgID, InputManifest: previousManifest}
+	refreshed, routingMode, err := refreshSlackLinkedSessionRouting(
+		context.Background(),
+		&Stores{Sessions: db.NewSessionStore(mock)},
+		classifier,
+		zerolog.Nop(),
+		orgID,
+		"T123",
+		"C123",
+		"<@U143> fix the Slack final response notification",
+		session,
+	)
+
+	require.NoError(t, err, "linked Slack routing refresh should persist classifier decisions")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, routingMode, "linked Slack replies should switch to start-work when auto-classified as work")
+	require.Equal(t, 1, classifier.calls, "auto-routed linked Slack replies should call the classifier")
+	mode, ok := slackRoutingModeFromInputManifest(refreshed.InputManifest)
+	require.True(t, ok, "refreshed session manifest should include Slack routing metadata")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, mode, "refreshed session manifest should persist classifier start-work routing")
+	require.NoError(t, mock.ExpectationsWereMet(), "linked Slack classifier refresh should update the session manifest")
+}
+
 func TestPostSlackMessageWithFallback_InvalidBlocksRetriesPlainTextAndRecordsFallback(t *testing.T) {
 	t.Parallel()
 

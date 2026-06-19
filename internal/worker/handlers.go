@@ -1654,6 +1654,15 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				return fmt.Errorf("get linked slack session: %w", getErr)
 			}
 			if slackShouldContinueLinkedSession(session.Status) {
+				var llm llmClient
+				if services != nil {
+					llm = services.LLM
+				}
+				refreshedSession, routingMode, routeErr := refreshSlackLinkedSessionRouting(ctx, stores, llm, logger, orgID, payload.TeamID, payload.ChannelID, payload.Text, session)
+				if routeErr != nil {
+					return fmt.Errorf("refresh linked Slack session routing: %w", routeErr)
+				}
+				session = refreshedSession
 				msg := &models.SessionMessage{
 					SessionID:  session.ID,
 					OrgID:      orgID,
@@ -1687,10 +1696,6 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
-				routingMode := slackbotsvc.SlackRoutingModeAuto
-				if mode, ok := slackRoutingModeFromInputManifest(session.InputManifest); ok {
-					routingMode = mode
-				}
 				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, routingMode, routingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
 				posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, existingLink, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 				if postErr != nil {
@@ -6271,6 +6276,24 @@ func slackSessionAckRoutingMode(ctx context.Context, stores *Stores, logger zero
 		return slackbotsvc.SlackRoutingModeAuto
 	}
 	return slackbotsvc.SlackRoutingMode(settings.RoutingMode)
+}
+
+func refreshSlackLinkedSessionRouting(ctx context.Context, stores *Stores, llm llmClient, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID, text string, session models.Session) (models.Session, slackbotsvc.SlackRoutingMode, error) {
+	baseMode := slackSessionAckRoutingMode(ctx, stores, logger, orgID, teamID, channelID)
+	resolved := resolveSlackAutoRouting(ctx, llm, logger, text, slackbotsvc.SlackContextResolveResult{RoutingMode: baseMode})
+	manifest := slackRoutingInputManifest(session.InputManifest, resolved.RoutingMode, resolved.RoutingReason)
+	if string(manifest) == string(session.InputManifest) {
+		session.InputManifest = manifest
+		return session, resolved.RoutingMode, nil
+	}
+	if stores == nil || stores.Sessions == nil {
+		return session, resolved.RoutingMode, fmt.Errorf("Slack session store is not configured")
+	}
+	updated, err := stores.Sessions.UpdateInputManifest(ctx, orgID, session.ID, manifest)
+	if err != nil {
+		return session, resolved.RoutingMode, fmt.Errorf("update Slack routing input manifest: %w", err)
+	}
+	return updated, resolved.RoutingMode, nil
 }
 
 func resolveSlackAutoRouting(ctx context.Context, llm llmClient, logger zerolog.Logger, text string, resolved slackbotsvc.SlackContextResolveResult) slackbotsvc.SlackContextResolveResult {
