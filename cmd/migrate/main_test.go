@@ -123,7 +123,7 @@ func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
 func TestHotTableFKRemovalDownMigrationIsExplicitNoop(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000207_hot_table_fk_removal.down.sql"))
+	body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000210_hot_table_fk_removal.down.sql"))
 	require.NoError(t, err, "hot table FK removal down migration should be readable")
 
 	sql := strings.ToUpper(stripSQLLineComments(string(body)))
