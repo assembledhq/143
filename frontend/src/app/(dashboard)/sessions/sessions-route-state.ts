@@ -26,9 +26,9 @@ export function deriveSessionsRouteState(selectedSegments: readonly string[]): S
   }
 
   if (nestedSegments.length > 0) {
-    // Nested session routes (e.g. /sessions/:id/diff) are not yet modeled.
-    // selectedSessionId is intentionally null here — the sidebar shows no selection
-    // until sub-routes are explicitly supported and can map back to a session id.
+    // Nested session routes (e.g. /sessions/:id/diff) are intentionally not modeled:
+    // the layout renders an "unsupported" fallback rather than guessing which session
+    // id to highlight in the sidebar.
     return {
       mode: "unsupported",
       selectedSessionId: null,
