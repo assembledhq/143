@@ -4443,7 +4443,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       ? diffError.message
       : "Changes could not be loaded. Retry to fetch the diff again."
     : undefined;
-  const diffTruncationText = useMemo(() => {
+  const diffTruncationNotice = useMemo(() => {
     if (!sessionDiffPayload?.diff_truncated && !sessionDiffPayload?.diff_history_truncated) return undefined;
     if (sessionDiffPayload.diff_truncated) {
       const originalCharCount = sessionDiffPayload.diff_chars;
@@ -4454,12 +4454,21 @@ export function SessionDetailContent({ id }: { id: string }) {
         && typeof maxCharCount === "number"
         && originalCharCount > maxCharCount
       ) {
-        return `This diff is very large, so the viewer is showing the first ${maxCharCount.toLocaleString()} of ${originalCharCount.toLocaleString()} characters.${historyText}`;
+        return {
+          title: "Large diff truncated",
+          text: `This diff is very large, so the viewer is showing the first ${maxCharCount.toLocaleString()} of ${originalCharCount.toLocaleString()} characters.${historyText}`,
+        };
       }
-      return `This diff is very large, so the viewer is showing a bounded preview.${historyText}`;
+      return {
+        title: "Large diff truncated",
+        text: `This diff is very large, so the viewer is showing a bounded preview.${historyText}`,
+      };
     }
     if (sessionDiffPayload.diff_history_truncated) {
-      return "Diff pass history is too large to load for this view, so only the current diff is shown.";
+      return {
+        title: "Diff pass history truncated",
+        text: "Diff pass history is too large to load for this view, so only the current diff is shown.",
+      };
     }
     return undefined;
   }, [sessionDiffPayload?.diff_chars, sessionDiffPayload?.diff_history_truncated, sessionDiffPayload?.diff_max_chars, sessionDiffPayload?.diff_truncated]);
@@ -5718,7 +5727,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           }
           isMobile={isMobileReviewViewport}
           diffLoadErrorText={diffLoadErrorText}
-          diffTruncationText={diffTruncationText}
+          diffTruncationNotice={diffTruncationNotice}
           onRetryDiffLoad={retryDiffLoad}
         />
       </TabsContent>

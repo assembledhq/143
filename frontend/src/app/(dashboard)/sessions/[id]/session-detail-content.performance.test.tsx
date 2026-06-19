@@ -589,8 +589,9 @@ describe("SessionDetailContent performance", () => {
     await screen.findByPlaceholderText("Send a follow-up message...");
     await user.click(screen.getByRole("tab", { name: /Changes/i }));
 
-    expect(await screen.findByText("Large diff truncated")).toBeInTheDocument();
+    expect(await screen.findByText("Diff pass history truncated")).toBeInTheDocument();
     expect(screen.getByText("Diff pass history is too large to load for this view, so only the current diff is shown.")).toBeInTheDocument();
+    expect(screen.queryByText("Large diff truncated")).not.toBeInTheDocument();
     expect(screen.queryByText(/showing the first 2,097,152 of 259,664 characters/)).not.toBeInTheDocument();
   });
 });
