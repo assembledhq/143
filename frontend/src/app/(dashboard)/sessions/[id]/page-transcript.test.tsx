@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
+import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockIssues } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
+import { queryKeys } from '@/lib/query-keys';
 import type {
   Session,
+  SessionLog,
   SessionMessage,
   SessionThread,
   SessionTimelineEntry,
@@ -13,7 +15,7 @@ import type {
   SingleResponse,
   ListResponse,
 } from '@/lib/types';
-import { installSessionDetailPageTestHooks, getChatScroller, makeTranscriptWindow } from './session-detail-test-kit';
+import { installSessionDetailPageTestHooks, getChatScroller, makeTranscriptWindow, renderSessionDetailWithQueryClient } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -1169,6 +1171,286 @@ describe('SessionDetailPage transcript and scroll', () => {
 
     expect(await screen.findByText('Newer anchored reply')).toBeInTheDocument();
     expect(requestedUrls.some((rawUrl) => new URL(rawUrl).searchParams.get('after') === '23')).toBe(true);
+  });
+
+  it('opens a thread around a saved non-message transcript entry anchor', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-entry-anchor-restore',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-entry-anchor',
+          session_id: 'session-thread-entry-anchor-restore',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 2,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+    const requestedUrls: string[] = [];
+
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
+    window.localStorage.setItem(
+      `session-scroll-position:org-1:user-1:${threadSession.id}:thread-entry-anchor`,
+      JSON.stringify({
+        version: 3,
+        anchor_entry_id: 'tuse_31',
+        offset_px: 14,
+        scroll_top_fallback: 640,
+      }),
+    );
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ request, params }) => {
+        requestedUrls.push(request.url);
+        const toolUse: SessionLog = {
+          id: 31,
+          session_id: threadSession.id,
+          thread_id: params.threadId as string,
+          level: 'tool_use',
+          message: 'using tool: Bash',
+          metadata: { tool: 'Bash', call_id: 'call-31' },
+          turn_number: 2,
+          created_at: '2026-02-17T07:02:00Z',
+          message_bytes: 16,
+          message_chars: 16,
+          message_truncated: false,
+        };
+        const toolResult: SessionLog = {
+          id: 32,
+          session_id: threadSession.id,
+          thread_id: params.threadId as string,
+          level: 'output',
+          message: 'tool output',
+          metadata: { type: 'tool_result', call_id: 'call-31' },
+          turn_number: 2,
+          created_at: '2026-02-17T07:02:01Z',
+          message_bytes: 11,
+          message_chars: 11,
+          message_truncated: false,
+        };
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [],
+            [toolUse, toolResult],
+            {
+              position: 'around',
+              has_older: true,
+              has_newer: false,
+              anchor_entry_id: 'tuse_31',
+              anchor_found: true,
+              latest_assistant_entry_id: 'tuse_31',
+              live_edge_entry_id: 'tres_32',
+              thread_status: 'idle',
+            },
+          ),
+        );
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+
+    await waitFor(() => {
+      const aroundUrl = requestedUrls.find((rawUrl) => new URL(rawUrl).searchParams.get('position') === 'around');
+      expect(aroundUrl).toBeDefined();
+      expect(new URL(aroundUrl!).searchParams.get('anchor_entry_id')).toBe('tuse_31');
+      expect(new URL(aroundUrl!).searchParams.get('anchor_message_id')).toBeNull();
+      expect(getChatScroller(container).scrollTop).toBe(14);
+    });
+  });
+
+  it('fetches an around window for a saved entry anchor even when latest is cached', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-anchor-cache-split',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-cache-split',
+          session_id: 'session-thread-anchor-cache-split',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 2,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryData(
+      queryKeys.sessions.threadTranscript(threadSession.id, 'thread-cache-split'),
+      {
+        pages: [
+          makeTranscriptWindow(
+            [
+              {
+                id: 90,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: 'thread-cache-split',
+                turn_number: 9,
+                role: 'assistant',
+                content: 'Cached latest reply',
+                created_at: '2026-02-17T09:00:00Z',
+              },
+            ] as SessionMessage[],
+            [],
+          ),
+        ],
+        pageParams: [{ position: 'latest' }],
+      },
+    );
+    const requestedUrls: string[] = [];
+    window.localStorage.setItem(
+      `session-scroll-position:org-1:user-1:${threadSession.id}:thread-cache-split`,
+      JSON.stringify({
+        version: 3,
+        anchor_entry_id: 'msg_22',
+        offset_px: 0,
+        scroll_top_fallback: 100,
+      }),
+    );
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ request, params }) => {
+        requestedUrls.push(request.url);
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: 22,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: params.threadId as string,
+                turn_number: 2,
+                role: 'assistant',
+                content: 'Fetched anchored reply',
+                created_at: '2026-02-17T07:02:00Z',
+              },
+            ] as SessionMessage[],
+            [],
+            {
+              position: 'around',
+              anchor_entry_id: 'msg_22',
+              anchor_found: true,
+              thread_status: 'idle',
+            },
+          ),
+        );
+      }),
+    );
+
+    renderSessionDetailWithQueryClient(threadSession.id, queryClient);
+
+    expect(await screen.findByText('Fetched anchored reply')).toBeInTheDocument();
+    expect(screen.queryByText('Cached latest reply')).toBeNull();
+    expect(requestedUrls.some((rawUrl) => new URL(rawUrl).searchParams.get('anchor_entry_id') === 'msg_22')).toBe(true);
+  });
+
+  it('uses latest assistant entry metadata as the default inactive-thread anchor', async () => {
+    const threadSession: Session = {
+      ...mockSessions[0],
+      id: 'session-thread-default-entry-anchor',
+      status: 'idle',
+      completed_at: undefined,
+      sandbox_state: 'snapshotted',
+      threads: [
+        {
+          id: 'thread-default-entry-anchor',
+          session_id: 'session-thread-default-entry-anchor',
+          org_id: 'org-1',
+          agent_type: 'codex',
+          label: 'Main',
+          status: 'idle',
+          current_turn: 2,
+          created_at: '2026-02-17T07:00:00Z',
+          cost_cents: 0,
+          pending_message_count: 0,
+        },
+      ],
+    };
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1200);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
+    Object.defineProperty(HTMLElement.prototype, 'offsetTop', {
+      configurable: true,
+      get() {
+        return (this as HTMLElement).getAttribute('data-session-entry-id') === 'tuse_31' ? 250 : 0;
+      },
+    });
+    const toolUse: SessionLog = {
+      id: 31,
+      session_id: threadSession.id,
+      thread_id: 'thread-default-entry-anchor',
+      level: 'tool_use',
+      message: 'using tool: Bash',
+      metadata: { tool: 'Bash', call_id: 'call-31' },
+      turn_number: 2,
+      created_at: '2026-02-17T07:02:00Z',
+      message_bytes: 16,
+      message_chars: 16,
+      message_truncated: false,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: threadSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(
+          makeTranscriptWindow(
+            [
+              {
+                id: 21,
+                session_id: threadSession.id,
+                org_id: 'org-1',
+                thread_id: 'thread-default-entry-anchor',
+                turn_number: 2,
+                role: 'assistant',
+                content: 'Assistant message before tool entry',
+                created_at: '2026-02-17T07:01:00Z',
+              },
+            ] as SessionMessage[],
+            [toolUse],
+            {
+              position: 'latest',
+              latest_assistant_entry_id: 'tuse_31',
+              live_edge_entry_id: 'tuse_31',
+              thread_status: 'idle',
+            },
+          ),
+        );
+      }),
+    );
+
+    const { container } = renderWithProviders(<SessionDetailContent id={threadSession.id} />);
+
+    await screen.findByText('Assistant message before tool entry');
+    await waitFor(() => {
+      const target = container.querySelector<HTMLElement>('[data-session-entry-id="tuse_31"]');
+      expect(target).toBeInTheDocument();
+      expect(target?.offsetTop).toBe(250);
+      expect(getChatScroller(container).scrollTop).toBe(250);
+    });
   });
 
   it('does not apply a delayed saved scroll restore after jumping to the latest message', async () => {
