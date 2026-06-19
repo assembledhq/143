@@ -893,3 +893,32 @@ func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testi
 	require.False(t, cache.restoreCalled, "secret-file configs should not restore cached workspace files")
 	require.Equal(t, StartupSnapshotSkippedSecretFiles, result, "secret-file configs should report the secret-file skip reason")
 }
+
+func TestSessionPreviewPrewarmStatusForCacheStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		cacheStatus    string
+		errMsg         string
+		expectedStatus string
+	}{
+		{cacheStatus: "running", expectedStatus: "running"},
+		{cacheStatus: "succeeded", expectedStatus: "succeeded"},
+		{cacheStatus: "skipped_warm", expectedStatus: "succeeded"},
+		{cacheStatus: "skipped_capacity", expectedStatus: "skipped_capacity"},
+		{cacheStatus: "failed", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_install", expectedStatus: "failed"},
+		{cacheStatus: "skipped_disabled", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_lockfiles", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_paths", expectedStatus: "failed"},
+		{cacheStatus: "unknown_status_with_error", errMsg: "something went wrong", expectedStatus: "failed"},
+		{cacheStatus: "unknown_status_no_error", expectedStatus: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cacheStatus, func(t *testing.T) {
+			t.Parallel()
+			got := sessionPreviewPrewarmStatusForCacheStatus(tt.cacheStatus, tt.errMsg)
+			require.Equal(t, tt.expectedStatus, got, "unexpected status for cache status %q", tt.cacheStatus)
+		})
+	}
+}
