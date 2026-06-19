@@ -1680,20 +1680,20 @@ function SessionComposer({
           )}
         >
           {openComments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
+            <div className="flex min-w-0 flex-wrap gap-1.5 px-3 pt-2.5 pb-1">
               {openComments.map((c) => {
                 const fileName = c.file_path.split("/").pop() ?? c.file_path;
                 return (
                   <div
                     key={c.id}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    className="inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs"
                   >
                     <MessageSquare className="h-3 w-3 text-muted-foreground shrink-0" />
-                    <span className="font-mono text-muted-foreground">
+                    <span className="min-w-0 truncate font-mono text-muted-foreground">
                       {fileName}:{c.line_number}
                     </span>
                     <span className="text-muted-foreground/40">-</span>
-                    <span className="truncate max-w-[200px]">
+                    <span className="min-w-0 max-w-[200px] truncate">
                       {c.body.length > 60 ? `${c.body.slice(0, 60)}...` : c.body}
                     </span>
                   </div>
@@ -4775,14 +4775,34 @@ export function SessionDetailContent({ id }: { id: string }) {
       ? diffError.message
       : "Changes could not be loaded. Retry to fetch the diff again."
     : undefined;
-  const diffTruncationText = useMemo(() => {
+  const diffTruncationNotice = useMemo(() => {
     if (!sessionDiffPayload?.diff_truncated && !sessionDiffPayload?.diff_history_truncated) return undefined;
-    const originalChars = sessionDiffPayload.diff_chars?.toLocaleString();
-    const maxChars = sessionDiffPayload.diff_max_chars?.toLocaleString();
-    if (originalChars && maxChars) {
-      return `This diff is very large, so the viewer is showing the first ${maxChars} of ${originalChars} characters. Diff pass history may be omitted.`;
+    if (sessionDiffPayload.diff_truncated) {
+      const originalCharCount = sessionDiffPayload.diff_chars;
+      const maxCharCount = sessionDiffPayload.diff_max_chars;
+      const historyText = sessionDiffPayload.diff_history_truncated ? " Diff pass history may be omitted." : "";
+      if (
+        typeof originalCharCount === "number"
+        && typeof maxCharCount === "number"
+        && originalCharCount > maxCharCount
+      ) {
+        return {
+          title: "Large diff truncated",
+          text: `This diff is very large, so the viewer is showing the first ${maxCharCount.toLocaleString()} of ${originalCharCount.toLocaleString()} characters.${historyText}`,
+        };
+      }
+      return {
+        title: "Large diff truncated",
+        text: `This diff is very large, so the viewer is showing a bounded preview.${historyText}`,
+      };
     }
-    return "This diff is very large, so the viewer is showing a bounded preview. Diff pass history may be omitted.";
+    if (sessionDiffPayload.diff_history_truncated) {
+      return {
+        title: "Diff pass history truncated",
+        text: "Diff pass history is too large to load for this view, so only the current diff is shown.",
+      };
+    }
+    return undefined;
   }, [sessionDiffPayload?.diff_chars, sessionDiffPayload?.diff_history_truncated, sessionDiffPayload?.diff_max_chars, sessionDiffPayload?.diff_truncated]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
@@ -6039,7 +6059,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           }
           isMobile={isMobileReviewViewport}
           diffLoadErrorText={diffLoadErrorText}
-          diffTruncationText={diffTruncationText}
+          diffTruncationNotice={diffTruncationNotice}
           onRetryDiffLoad={retryDiffLoad}
         />
       </TabsContent>

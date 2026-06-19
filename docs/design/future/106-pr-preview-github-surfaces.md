@@ -1,7 +1,7 @@
 # Design: PR Preview GitHub Surfaces
 
-> **Status:** Future
-> **Last reviewed:** 2026-06-18
+> **Status:** Implemented
+> **Last reviewed:** 2026-06-19
 
 ## Summary
 
@@ -30,6 +30,29 @@ Opening the link should use the implemented PR preview launch controller, which 
 - 143-created PRs: already append/replace a `Preview:` footer.
 - `repository_preview_policies`: currently stores `auto_mode`.
 - `pr_preview_state`: already stores `github_comment_id` and preview lifecycle state.
+
+## Current Implementation
+
+Implemented as of 2026-06-19:
+
+- `repository_preview_policies` stores `pr_preview_surfaces_enabled`, `github_pr_comment_enabled`, and `github_commit_status_enabled`.
+- `pr_preview_state` stores `last_surface_sync_sha`, `last_surface_sync_at`, and `last_surface_sync_error`.
+- Pull request webhooks for `opened`, `reopened`, `ready_for_review`, and `synchronize` enqueue `sync_pr_preview_surfaces` when repository policy enables PR preview surfaces.
+- `PR_PREVIEW_SURFACES_ENABLED` gates PR preview surface job enqueue and job execution globally.
+- Surface enqueue is independent from `auto_mode`; runtime auto-preview still applies its stricter draft, fork, and default-branch rules.
+- The worker sync job loads policy, validates the PR head commit's `.143/config.json` from the PR head repository, checks readiness for the selected preview config, derives the stable launch URL, syncs the marker PR comment, publishes the `preview/143` commit status, and records success or partial failure diagnostics.
+- Sync jobs re-check live GitHub App installation permissions before publishing comments or commit statuses.
+- Comment and status publishing are independent; one can fail without blocking the other attempt.
+- Sticky comment sync searches for the marker when the stored `github_comment_id` is missing or stale, and reuses the marker comment instead of creating another.
+- Sticky comment creation is serialized per repository/PR with an advisory transaction lock to prevent duplicate comments from concurrent sync jobs.
+- `/settings/previews` shows PR preview links separately from Auto-preview, with the parent toggle, child comment/status toggles, live permission messages, live default-branch config detection, preview config selection for test previews, readiness messages, recent sync errors, and a `Test preview` action when committed config exists but no successful preview has been recorded.
+
+Repository preview readiness is derived from existing preview records and live config detection: the repository must be active, have a valid committed preview config, have at least one preview instance that reached `ready` or `partially_ready` for the relevant config, and the latest configured attempt for that config must not be `failed` or `unavailable`.
+
+Operational follow-up:
+
+- There is no bulk/backfill action, matching the v1 non-backfill decision.
+- Rollout still needs real repository enablement, GitHub API error monitoring, duplicate-comment monitoring, stable PR route open monitoring, and auto-preview pool monitoring for repositories using `warm` or `on`.
 
 ## Product Decisions
 

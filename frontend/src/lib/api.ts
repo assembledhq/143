@@ -338,11 +338,22 @@ export const api = {
       post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
     policies: {
       list: () => get<import('./types').ListResponse<import('./types').PreviewPolicySummary>>('/api/v1/previews/policies'),
-      update: (repositoryId: string, body: Partial<Pick<import('./types').PreviewPolicySummary, 'auto_mode' | 'session_prewarm_mode'>>) =>
+      update: (repositoryId: string, body: {
+        auto_mode?: 'off' | 'warm' | 'on';
+        session_prewarm_mode?: 'off' | 'cache' | 'smart';
+        pr_preview_surfaces_enabled?: boolean;
+        github_pr_comment_enabled?: boolean;
+        github_commit_status_enabled?: boolean;
+      }) =>
         request<import('./types').SingleResponse<unknown>>(`/api/v1/repositories/${repositoryId}/preview-policy`, {
           method: 'PUT',
           body: JSON.stringify(body),
         }),
+      testPreview: (repositoryId: string, body?: { preview_config_name?: string }) =>
+        post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(
+          `/api/v1/repositories/${repositoryId}/preview-policy/test-preview`,
+          body ?? {},
+        ),
     },
   },
   apiKeys: {
