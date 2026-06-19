@@ -5,3 +5,4 @@
 -- fan-in risk and can require full validation on the partitioned session_logs
 -- table. If a production rollback must restore DB-backed FKs, do it as an
 -- explicit follow-up migration with a maintenance window and orphan cleanup.
+SELECT 1;
