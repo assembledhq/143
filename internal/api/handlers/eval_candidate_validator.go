@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -94,6 +95,9 @@ func (v *EvalCandidateValidator) ValidateEvalCandidate(ctx context.Context, orgI
 	}
 	if err := v.checkoutCommit(ctx, sandbox, solutionSHA); err != nil {
 		return err
+	}
+	if err := agent.PrepareSandboxRepository(ctx, v.provider, sandbox, sandbox.WorkDir, zerolog.Nop()); err != nil {
+		return fmt.Errorf("prepare repository: %w", err)
 	}
 	for _, check := range codeChecks {
 		if err := v.runCodeCheck(ctx, sandbox, check); err != nil {
