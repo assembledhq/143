@@ -94,33 +94,24 @@ PR readiness has warnings
 
 Do not show this repeatedly for unchanged results. If the warning set and workspace revision are unchanged, one acknowledgement is enough.
 
-## UI Options
+## Readiness Card UI
 
-### Option 1: Overview Readiness Card
+Use the Overview Readiness Card for v1. Do not add a dedicated Readiness tab or alternate primary UI.
 
-Recommended for v1. It is visible before shipping, works for builders and engineers, and leaves room for evidence and next actions.
+The card should live near the session Overview PR actions and use the same component family, density, borders, status treatment, and action hierarchy as the existing PR details/PR health card. It should feel like a sibling status surface: compact header, concise state line, grouped checks, and one clear primary action.
 
-Tradeoff: if the card grows too detailed, evidence needs a secondary view.
+The two cards should mesh without competing:
 
-### Option 2: Create PR Preflight Dialog
+- Before a PR exists, Readiness is the pre-PR status surface and should sit where PR details will later become relevant.
+- After a PR exists, PR details/health becomes the primary shipping status, while Readiness becomes historical context or a collapsed summary.
+- Do not stack two loud cards with competing warning treatments. If both cards are visible, use one shared visual language: status icon, muted metadata, compact action buttons, and quiet secondary links.
+- Keep detailed evidence behind per-check expansion or a secondary detail view so the Overview stays scannable.
 
-Use as a companion, not the primary surface. It is ideal for engineer advisory warnings and stale checks when someone clicks `Create PR`.
+Design recommendation:
 
-Tradeoff: checks that take time feel worse when they start only after the user tries to publish.
-
-### Option 3: Dedicated Readiness Tab
-
-Defer. It is useful only if evidence becomes too large for Overview.
-
-Tradeoff: lower discoverability for the exact moment the user needs readiness.
-
-### Option 4: Automatic Background Checks
-
-Add later as a setting. Background checks after session completion or diff changes are the right end state, but the first release should be button-driven so users understand cost, latency, and meaning.
-
-Tradeoff: automatic checks can create token/worker spend and noisy stale states while work is still changing.
-
-Recommendation: ship Option 1 first, add Option 2 next, and defer Options 3/4 until the check set is trusted.
+- Ship a button-driven Overview card first.
+- If someone clicks `Create PR` with missing/stale/advisory readiness, use a lightweight confirmation that points back to the card; do not make preflight the primary readiness surface.
+- Defer background auto-runs until the card is trusted and check cost is understood.
 
 ## Enforcement Model
 
@@ -131,6 +122,23 @@ Each check produces a factual result. Policy maps that result to role-specific e
 | `off` | Not evaluated. |
 | `advisory` | Shows a warning, does not block PR creation. |
 | `blocking` | Blocks PR creation for roles where the rule is blocking. |
+
+## Bypass / Escape Hatch
+
+Blocking checks will be imperfect, especially while custom checks and repo policies are new. The product should include a controlled break-glass bypass rather than forcing users into worse workarounds.
+
+Recommendation:
+
+- Bypass is enabled by default for builders, but always requires a reason and audit record.
+- Admins can configure bypass scope for any role: disabled, admins only, admins plus engineers, builders only, or all PR-capable roles.
+- Builders can bypass their own blockers when the builder bypass setting is enabled.
+- Some checks can be marked non-bypassable by policy, especially future security/secret checks.
+- Bypass requires a short reason and shows the exact blockers being bypassed.
+- Bypass creates an audit event, increments org/repo/user bypass counters, and is attached to the readiness run and PR record.
+- The PR footer/session review packet should state that readiness was bypassed and include the reason summary.
+- Settings should expose bypass counts by repo and user so repeated bypassing becomes visible.
+
+This is a good idea if the product treats bypasses as operational debt, not as a normal workflow. It is a bad idea if bypass becomes the easiest path; then checks lose trust. The UI should make `Run checks` / `Fix with agent` / `Re-run` easier than bypass, and bypass should sit behind a secondary action such as `More -> Bypass readiness`.
 
 Defaults:
 
@@ -152,6 +160,8 @@ Every built-in check should be independently configurable by an admin as `off`, 
 | Agent review clean | 143's first-party Review loop result, or a captured native `/review` result from an existing agent that supports it | Catches obvious agent mistakes before live review while accepting both 143's built-in review loop and agent-native review workflows. |
 | Test evidence present | Captured command output after latest revision | Avoids "I forgot to run tests" review waste. |
 | Risk flags | Diff stats, sensitive paths, migrations, auth/billing/security path rules | Makes risky changes visible without needing human approval gates. |
+| Dependency/config risk | Changed lockfiles, package manifests, infra config, runtime config, or generated files | Makes "why did this PR change dependencies?" visible early. |
+| Generated-file churn | Changed generated/build artifacts outside allowed paths | Prevents noisy diffs that waste review time. |
 | Context complete | Linked issue/attribution or explicit issue-less marker | Helps reviewers understand why the PR exists. |
 | Review packet draftable | Session summary, diff summary, linked context, risk flags, and readiness results generated before PR creation | Makes the future PR description and reviewer handoff possible before the PR exists. |
 
@@ -174,10 +184,8 @@ These should not all ship in v1, but they are high-value candidates because they
 | Scope alignment | Agent review or prompt check compares diff against linked issue/session goal | Catches PRs that solve a different problem than requested. |
 | Debug artifact scan | Static scan of changed files for obvious `console.log`, debug flags, temporary comments, broad TODOs, or local-only code | Reduces sloppy cleanup comments in review. |
 | Secret and credential scan | Existing secret scanner or lightweight changed-file scan | Prevents high-severity mistakes before a PR exists. |
-| Dependency/config risk | Changed lockfiles, package manifests, infra config, runtime config, or generated files | Makes "why did this PR change dependencies?" visible early. |
 | Migration pairing | Migration files plus model/store/API changes, or schema changes without expected code updates | Catches incomplete backend changes. |
 | Test relevance | Test files changed or captured test command output appears related to touched package/path | Better than only knowing that some command ran. |
-| Generated-file churn | Changed generated/build artifacts outside allowed paths | Prevents noisy diffs that waste review time. |
 | Error-handling/logging scan | Agent review or prompt check over changed backend code | Catches swallowed errors, noisy logs, missing context, or user-visible failure gaps. |
 
 The highest-leverage additions after v1 are `scope_alignment`, `debug_artifact_scan`, and `secret_and_credential_scan`. They catch visible slop without requiring teams to configure much.
@@ -221,6 +229,8 @@ Keep v1 settings narrow:
 - Enable advisory checks for engineers.
 - Configure every built-in check as `off`, `advisory`, or `blocking`.
 - Configure separate builder and engineer enforcement per check.
+- Configure whether bypass is disabled, limited to specific roles, or enabled for all PR-capable roles.
+- View bypass counts by repository, user, and check type.
 - Require clean agent review for builders by default.
 - Treat stale readiness as blocking for builders through backend enforcement.
 - Configure test/sensitive-path/migration/large-diff checks without editing code.
@@ -332,6 +342,11 @@ pr_readiness_custom_checks
 - id, org_id, repository_id nullable, active
 - source, check_key, name, prompt, path_filters jsonb, enforcement jsonb
 - created_by_user_id nullable, created_at
+
+pr_readiness_bypasses
+- id, org_id, readiness_run_id, session_id, repository_id
+- bypassed_by_user_id, reason, bypassed_checks jsonb
+- created_at
 ```
 
 Suggested API:
@@ -339,6 +354,7 @@ Suggested API:
 ```text
 POST /api/v1/sessions/{id}/pr-readiness-runs
 GET  /api/v1/sessions/{id}/pr-readiness-runs/latest
+POST /api/v1/sessions/{id}/pr-readiness-bypasses
 GET  /api/v1/pr-readiness-policies
 PUT  /api/v1/pr-readiness-policies
 GET  /api/v1/pr-readiness-custom-checks
