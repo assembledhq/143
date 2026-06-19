@@ -77,14 +77,19 @@ worker_port_in_use() {
 worker_runtime_endpoint_in_use() {
   local port="$1" endpoint query count
   endpoint="http://${WORKER_PRIVATE_IP}:${port}"
-  query="SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now();"
+  query="WITH endpoint_blockers AS (
+  SELECT 1 FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now()
+  UNION ALL
+  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining') AND last_heartbeat_at >= now() - interval '2 minutes'
+)
+SELECT COUNT(*) FROM endpoint_blockers;"
 
   if ! count="$(printf '%s\n' "$query" | docker run -i --rm --network host -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \
     psql -h "$DB_HOST" -U onefortythree -d onefortythree \
     -v ON_ERROR_STOP=1 \
     -v endpoint="$endpoint" \
     -tA)"; then
-    echo "ERROR: could not verify preview runtime endpoint reuse safety for ${endpoint}; refusing routine deploy." >&2
+    echo "ERROR: could not verify preview runtime/node endpoint reuse safety for ${endpoint}; refusing routine deploy." >&2
     exit 1
   fi
 
@@ -99,7 +104,7 @@ for port in $(seq "$start" "$end"); do
     continue
   fi
   if worker_runtime_endpoint_in_use "$port"; then
-    echo "port $port: active preview_runtimes still lease http://${WORKER_PRIVATE_IP}:${port}"
+    echo "port $port: active preview_runtimes or fresh node registry rows still own http://${WORKER_PRIVATE_IP}:${port}"
     continue
   fi
   echo "worker deploy preflight ok: safe worker blue/green port $port is available"
