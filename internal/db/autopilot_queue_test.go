@@ -274,10 +274,11 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 	orgID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 
 	tests := []struct {
-		name             string
-		filters          AutopilotQueueFilters
-		expectedSnippets []string
-		expectedArgs     pgx.NamedArgs
+		name               string
+		filters            AutopilotQueueFilters
+		expectedSnippets   []string
+		unexpectedSnippets []string
+		expectedArgs       pgx.NamedArgs
 	}{
 		{
 			name: "projects rank in scan order",
@@ -287,6 +288,9 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 				"i.raw_data#>>'{data,url}'",
 				"preview_target_id",
 				"preview_instances pi",
+			},
+			unexpectedSnippets: []string{
+				"i.preview_url",
 			},
 			expectedArgs: pgx.NamedArgs{
 				"org_id":        orgID,
@@ -340,6 +344,9 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 
 			for _, snippet := range tt.expectedSnippets {
 				require.Contains(t, query, snippet, "query should include expected SQL fragment")
+			}
+			for _, snippet := range tt.unexpectedSnippets {
+				require.NotContains(t, query, snippet, "query should not select undefined SQL fragments")
 			}
 			require.Equal(t, tt.expectedArgs, args, "query should include expected named args")
 		})

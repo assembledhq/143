@@ -69,6 +69,7 @@ type PromptStyle string
 const (
 	PromptStyleIssueContext PromptStyle = "issue_context"
 	PromptStyleRawTask      PromptStyle = "raw_task"
+	PromptStyleAnswerOnly   PromptStyle = "answer_only"
 )
 
 // AgentInput contains everything the agent needs to understand and fix an issue.

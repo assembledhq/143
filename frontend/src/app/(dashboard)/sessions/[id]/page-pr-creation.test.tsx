@@ -259,7 +259,10 @@ describe('SessionDetailPage PR creation', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
     const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
     expect(createPRButton).toBeDisabled();
-    expect(createPRButton).toHaveAttribute('title', expect.stringContaining('Run Review successfully before creating a PR'));
+    expect(createPRButton).toHaveAttribute(
+      'title',
+      expect.stringContaining('Run readiness checks successfully before creating a PR'),
+    );
     expect(teamRequestCount).toBe(0);
   });
 

@@ -155,9 +155,9 @@ export function CLIJoinTokensCard() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="member">Member</SelectItem>
-                  <SelectItem value="builder">Builder</SelectItem>
-                  <SelectItem value="viewer">Viewer</SelectItem>
+                  <SelectItem value="member">{roleLabel("member")}</SelectItem>
+                  <SelectItem value="builder">{roleLabel("builder")}</SelectItem>
+                  <SelectItem value="viewer">{roleLabel("viewer")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -224,7 +224,7 @@ export function CLIJoinTokensCard() {
       </Card>
 
       <AlertDialog open={created !== null} onOpenChange={(open) => !open && setCreated(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Install link created</AlertDialogTitle>
             <AlertDialogDescription>
@@ -232,11 +232,19 @@ export function CLIJoinTokensCard() {
               copy active links again later from this list.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="flex items-center gap-2">
-            <code className="block flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-muted px-3 py-2 text-xs">
-              {created?.install_command}
-            </code>
-            <Button variant="outline" size="sm" onClick={copyInstallCommand}>
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="min-w-0 flex-1 rounded-md bg-muted px-3 py-2">
+              <code className="block break-all font-mono text-xs leading-relaxed">
+                {created?.install_command}
+              </code>
+            </div>
+            <Button
+              aria-label="Copy install command"
+              variant="outline"
+              size="icon"
+              className="size-9 shrink-0"
+              onClick={copyInstallCommand}
+            >
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             </Button>
           </div>

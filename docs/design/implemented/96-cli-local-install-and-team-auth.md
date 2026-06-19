@@ -23,13 +23,13 @@ All four phases shipped. Deltas from the text below:
 - **Secret scanning**: the repo runs no secret scanner today; the `143u_`/
   `143j_` patterns are documented in `docs/guides/cli-install.md` for teams
   that do, and the sandbox log-redaction layer strips both shapes.
-- **Recoverable join links**: as of migration `000209`, newly created
+- **Recoverable join links**: as of migration `000210`, newly created
   `org_join_tokens` rows keep `token_hash` as the validation key and also store
   `raw_token_encrypted` with the same AES-GCM application encryption used for
   credentials. Admins can fetch the install command again for active,
   unexpired, unexhausted links through a separate endpoint. Successful reveals
   emit `org.join_token_revealed` without the raw token in audit details. Rows
-  created before `000209` remain unrecoverable because only the hash and
+  created before `000210` remain unrecoverable because only the hash and
   display prefix were retained.
 - **Key files**: distribution `internal/api/handlers/cli_distribution.go`
   (+ `assets/install.sh.tmpl`); login flow `internal/api/handlers/auth_cli.go`;
@@ -377,7 +377,7 @@ revocation — not expiry — is the real control here.
 |---|---|---|---|
 | `/api/v1/org/join-tokens` | POST | session, admin | Body: `{"name", "role", "max_uses?", "expires_in_days?"}`. Returns the plaintext token and ready install command on creation: `{"data": {"id", "token": "143j_...", "install_command": "curl -fsSL .../install/143j_... \| sh"}}`; new rows also store an encrypted raw token for later admin re-copy. |
 | `/api/v1/org/join-tokens` | GET | session, admin | List (prefix, name, role, use_count, status, `can_reveal`). Does not include plaintext links. |
-| `/api/v1/org/join-tokens/{id}/link` | GET | session, admin | Returns `{"data": {"id", "token_prefix", "install_command"}}` for active recoverable links. Returns `409 JOIN_TOKEN_NOT_RECOVERABLE` for pre-`000209` legacy rows. |
+| `/api/v1/org/join-tokens/{id}/link` | GET | session, admin | Returns `{"data": {"id", "token_prefix", "install_command"}}` for active recoverable links. Returns `409 JOIN_TOKEN_NOT_RECOVERABLE` for pre-`000210` legacy rows. |
 | `/api/v1/org/join-tokens/{id}` | DELETE | session, admin | Revoke. |
 | `/api/v1/auth/cli-tokens` | GET | any auth | List the caller's own CLI tokens (device, prefix, last_used). |
 | `/api/v1/auth/cli-tokens/{id}` | DELETE | any auth | Revoke own token. `logout` calls this. |
