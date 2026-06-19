@@ -5396,10 +5396,13 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
 			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":2}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, true, true, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -5488,10 +5491,13 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
 			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":1}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, true, true, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
@@ -5534,10 +5540,13 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
 			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":2}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, true, true, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -5735,7 +5744,7 @@ func workerOrganizationColumns() []string {
 }
 
 func workerRepositoryPreviewPolicyColumns() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func workerRepositoryColumns() []string {
