@@ -546,4 +546,51 @@ describe("SessionDetailContent performance", () => {
     expect(await screen.findByText("Large diff truncated")).toBeInTheDocument();
     expect(screen.getByText(/showing the first/)).toBeInTheDocument();
   });
+
+  it("does not describe raw diff truncation when only diff pass history is capped", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/sessions/:id", () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            sandbox_state: "ready",
+            diff: undefined,
+            diff_stats: { added: 4607, removed: 314, files_changed: 51 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", () => {
+        return HttpResponse.json({
+          data: {
+            session_id: "session-abcdef12-3456-7890",
+            diff: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new\n",
+            diff_stats: { added: 4607, removed: 314, files_changed: 51 },
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: true,
+            diff_chars: 259664,
+            diff_history_bytes: 4194304,
+            diff_max_chars: 2097152,
+            diff_history_max_bytes: 2097152,
+          },
+        } satisfies SingleResponse<import("@/lib/types").SessionDiff>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByPlaceholderText("Send a follow-up message...");
+    await user.click(screen.getByRole("tab", { name: /Changes/i }));
+
+    expect(await screen.findByText("Large diff truncated")).toBeInTheDocument();
+    expect(screen.getByText("Diff pass history is too large to load for this view, so only the current diff is shown.")).toBeInTheDocument();
+    expect(screen.queryByText(/showing the first 2,097,152 of 259,664 characters/)).not.toBeInTheDocument();
+  });
 });

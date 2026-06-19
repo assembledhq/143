@@ -4445,12 +4445,23 @@ export function SessionDetailContent({ id }: { id: string }) {
     : undefined;
   const diffTruncationText = useMemo(() => {
     if (!sessionDiffPayload?.diff_truncated && !sessionDiffPayload?.diff_history_truncated) return undefined;
-    const originalChars = sessionDiffPayload.diff_chars?.toLocaleString();
-    const maxChars = sessionDiffPayload.diff_max_chars?.toLocaleString();
-    if (originalChars && maxChars) {
-      return `This diff is very large, so the viewer is showing the first ${maxChars} of ${originalChars} characters. Diff pass history may be omitted.`;
+    if (sessionDiffPayload.diff_truncated) {
+      const originalCharCount = sessionDiffPayload.diff_chars;
+      const maxCharCount = sessionDiffPayload.diff_max_chars;
+      const historyText = sessionDiffPayload.diff_history_truncated ? " Diff pass history may be omitted." : "";
+      if (
+        typeof originalCharCount === "number"
+        && typeof maxCharCount === "number"
+        && originalCharCount > maxCharCount
+      ) {
+        return `This diff is very large, so the viewer is showing the first ${maxCharCount.toLocaleString()} of ${originalCharCount.toLocaleString()} characters.${historyText}`;
+      }
+      return `This diff is very large, so the viewer is showing a bounded preview.${historyText}`;
     }
-    return "This diff is very large, so the viewer is showing a bounded preview. Diff pass history may be omitted.";
+    if (sessionDiffPayload.diff_history_truncated) {
+      return "Diff pass history is too large to load for this view, so only the current diff is shown.";
+    }
+    return undefined;
   }, [sessionDiffPayload?.diff_chars, sessionDiffPayload?.diff_history_truncated, sessionDiffPayload?.diff_max_chars, sessionDiffPayload?.diff_truncated]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
