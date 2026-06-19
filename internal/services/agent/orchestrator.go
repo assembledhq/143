@@ -1204,11 +1204,21 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 // best-effort for compatibility. Explicit bootstrap command failures are
 // returned because the workspace is not ready for normal agent work.
 func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
-	if sandbox == nil || workDir == "" {
+	return PrepareSandboxRepository(ctx, o.provider, sandbox, workDir, log)
+}
+
+// PrepareSandboxRepository reads .143/config.json from the sandbox workspace,
+// installs supported platform-managed tools, then runs repo-declared bootstrap
+// commands before lint/test-style commands or agent work starts. Missing or
+// malformed config stays best-effort for compatibility. Explicit bootstrap
+// command failures are returned because the workspace is not ready for normal
+// sandbox work.
+func PrepareSandboxRepository(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
+	if provider == nil || sandbox == nil || workDir == "" {
 		return nil
 	}
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
-	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
+	raw, err := provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
 			return nil
@@ -1226,18 +1236,18 @@ func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sa
 	}
 	if len(cfg.Dependencies) > 0 {
 		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
-			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+			return provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
 		}
 		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+	return runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
 }
 
-func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
+func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
 	for _, command := range commands {
 		shellCmd := fmt.Sprintf("cd '%s' && %s", shellEscapeSingleQuote(workDir), command)
 		var stderr bytes.Buffer
-		exitCode, execErr := o.provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
+		exitCode, execErr := provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
 		stderrText := strings.TrimSpace(stderr.String())
 		if execErr != nil || exitCode != 0 {
 			log.Warn().
