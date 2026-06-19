@@ -2195,7 +2195,7 @@ function useDefaultEntryAnchor({
     syncScrollState(el);
     initialAnchorAppliedRef.current = true;
     appliedRef.current = true;
-  }, [isEligible, latestAssistantEntryID, syncScrollState, timelineEntries]);
+  }, [initialAnchorAppliedRef, isEligible, latestAssistantEntryID, scrollRef, syncScrollState, timelineEntries]);
 
   return useCallback((el: HTMLDivElement): boolean => {
     if (!isEligible || !latestAssistantEntryID) return false;
@@ -2249,9 +2249,12 @@ function useDefaultEntryAnchor({
   }, [
     activeThreadId,
     activeThreadTranscriptQueryKey,
+    initialAnchorAppliedRef,
+    initialAnchorCancelledRef,
     isEligible,
     latestAssistantEntryID,
     queryClient,
+    scrollRef,
     scrollToLiveEdgePosition,
     sessionId,
     syncScrollState,
