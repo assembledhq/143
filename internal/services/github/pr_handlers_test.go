@@ -199,7 +199,7 @@ func TestHandleAutoPreviewEvent_StartsForPolicyEnabledPullRequest(t *testing.T) 
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), false, true, true, userID, now, now))
 
 	event := autoPreviewPullRequestEvent(orgID)
 	err := svc.handleAutoPreviewEvent(context.Background(), event)
@@ -249,7 +249,7 @@ func TestHandleAutoPreviewEvent_StartsForReopenedAndSynchronizePullRequests(t *t
 			previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), userID, now, now))
+					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), false, true, true, userID, now, now))
 
 			event := autoPreviewPullRequestEvent(orgID)
 			event.Action = tt.action
@@ -279,14 +279,29 @@ func TestHandleAutoPreviewEvent_SkipsDraftAndForkPullRequests(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			repoMock := newMockPool(t)
+			previewMock := newMockPool(t)
+			orgID := uuid.New()
+			repoID := uuid.New()
+			now := time.Now()
 			starter := &recordingAutoPreviewStarter{}
+
 			svc := &PRService{
-				repos:              db.NewRepositoryStore(newMockPool(t)),
-				previews:           db.NewPreviewStore(newMockPool(t)),
+				repos:              db.NewRepositoryStore(repoMock),
+				previews:           db.NewPreviewStore(previewMock),
 				autoPreviewStarter: starter,
 				logger:             zerolog.Nop(),
 			}
-			orgID := uuid.New()
+
+			repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+					AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+			previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), false, true, true, uuid.New(), now, now))
+
 			event := autoPreviewPullRequestEvent(orgID)
 			tt.mutate(&event)
 
@@ -294,8 +309,55 @@ func TestHandleAutoPreviewEvent_SkipsDraftAndForkPullRequests(t *testing.T) {
 
 			require.NoError(t, err, "unsafe auto preview webhook should be skipped without error")
 			require.False(t, starter.called, "auto preview starter should not be invoked for skipped PRs")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+			require.NoError(t, previewMock.ExpectationsWereMet(), "policy expectations should be met")
 		})
 	}
+}
+
+func TestHandleAutoPreviewEvent_EnqueuesSurfaceSyncForForkPullRequestHeadRepo(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	starter := &recordingAutoPreviewStarter{}
+
+	svc := &PRService{
+		repos:                    db.NewRepositoryStore(repoMock),
+		previews:                 db.NewPreviewStore(previewMock),
+		jobs:                     db.NewJobStore(jobMock),
+		autoPreviewStarter:       starter,
+		logger:                   zerolog.Nop(),
+		prPreviewSurfacesEnabled: true,
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), true, true, true, uuid.New(), now, now))
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), "preview", models.JobTypeSyncPRPreviewSurfaces, prPreviewSurfacePayloadArg{wantHeadOwner: "fork", wantHeadRepo: "app"}, 0, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	event := autoPreviewPullRequestEvent(orgID)
+	event.PR.Head.Repo.Fork = true
+	event.PR.Head.Repo.FullName = "fork/app"
+
+	err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+	require.NoError(t, err, "fork PR surface enqueue should not fail")
+	require.False(t, starter.called, "fork PR should still skip runtime auto-preview")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "preview expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "surface sync job should be enqueued with the fork head repository")
 }
 
 func TestHandleAutoPreviewEvent_SkipsDisabledPolicyAndNonDefaultBranch(t *testing.T) {
@@ -320,7 +382,7 @@ func TestHandleAutoPreviewEvent_SkipsDisabledPolicyAndNonDefaultBranch(t *testin
 				previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-						AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOff), uuid.New(), now, now))
+						AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOff), false, true, true, uuid.New(), now, now))
 			},
 		},
 		{
@@ -391,7 +453,29 @@ func autoPreviewPullRequestEvent(orgID uuid.UUID) PullRequestEvent {
 }
 
 func githubRepositoryPreviewPolicyTestCols() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
+}
+
+type prPreviewSurfacePayloadArg struct {
+	wantHeadOwner string
+	wantHeadRepo  string
+}
+
+func (a prPreviewSurfacePayloadArg) Match(value any) bool {
+	var payloadBytes []byte
+	switch v := value.(type) {
+	case []byte:
+		payloadBytes = v
+	case string:
+		payloadBytes = []byte(v)
+	default:
+		return false
+	}
+	var payload SyncPRPreviewSurfacesPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return false
+	}
+	return payload.HeadOwner == a.wantHeadOwner && payload.HeadRepo == a.wantHeadRepo
 }
 
 func githubRepositoryTestCols() []string {
@@ -2503,10 +2587,11 @@ func TestHandlePullRequestEvent_ClosedStopsPreview(t *testing.T) {
 				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 				"last_preview_instance_id", "last_screenshot_blob_path",
 				"last_visual_diff_blob_path", "base_snapshot_key", "status",
+				"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 				"created_at", "updated_at",
 			}).AddRow(
 				prPreviewStateID, orgID, repoID, 42, nil,
-				&previewInstanceID, "", "", "", "running", now, now,
+				&previewInstanceID, "", "", "", "running", "", nil, "", now, now,
 			),
 		)
 
@@ -2620,10 +2705,11 @@ func TestHandlePullRequestEvent_MergedStopsPreview(t *testing.T) {
 				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 				"last_preview_instance_id", "last_screenshot_blob_path",
 				"last_visual_diff_blob_path", "base_snapshot_key", "status",
+				"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 				"created_at", "updated_at",
 			}).AddRow(
 				prPreviewStateID, orgID, repoID, 42, nil,
-				&previewInstanceID, "", "", "", "running", now, now,
+				&previewInstanceID, "", "", "", "running", "", nil, "", now, now,
 			),
 		)
 
@@ -2714,10 +2800,11 @@ func TestTeardownPRPreview(t *testing.T) {
 						"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 						"last_preview_instance_id", "last_screenshot_blob_path",
 						"last_visual_diff_blob_path", "base_snapshot_key", "status",
+						"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 						"created_at", "updated_at",
 					}).AddRow(
 						prPreviewStateID, orgID, repoID, 42, nil,
-						&previewInstanceID, "", "", "", "running", now, now,
+						&previewInstanceID, "", "", "", "running", "", nil, "", now, now,
 					),
 				)
 
@@ -2892,6 +2979,7 @@ func TestTeardownPRPreview_NoPreviewState(t *testing.T) {
 			"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 			"last_preview_instance_id", "last_screenshot_blob_path",
 			"last_visual_diff_blob_path", "base_snapshot_key", "status",
+			"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 			"created_at", "updated_at",
 		}))
 
@@ -3011,10 +3099,11 @@ func TestTeardownPRPreview_NilPreviewInstanceID(t *testing.T) {
 				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 				"last_preview_instance_id", "last_screenshot_blob_path",
 				"last_visual_diff_blob_path", "base_snapshot_key", "status",
+				"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 				"created_at", "updated_at",
 			}).AddRow(
 				prPreviewStateID, orgID, repoID, 42, nil,
-				(*uuid.UUID)(nil), "", "", "", "running", now, now,
+				(*uuid.UUID)(nil), "", "", "", "running", "", nil, "", now, now,
 			),
 		)
 
@@ -3080,10 +3169,11 @@ func TestTeardownPRPreview_SwallowsErrors(t *testing.T) {
 				"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 				"last_preview_instance_id", "last_screenshot_blob_path",
 				"last_visual_diff_blob_path", "base_snapshot_key", "status",
+				"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 				"created_at", "updated_at",
 			}).AddRow(
 				prPreviewStateID, orgID, repoID, 42, nil,
-				&previewInstanceID, "", "", "", "running", now, now,
+				&previewInstanceID, "", "", "", "running", "", nil, "", now, now,
 			),
 		)
 
@@ -3157,7 +3247,7 @@ func TestHandlePullRequestEvent_OpenedWith143GeneratedPRTriggersAutoPreview(t *t
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), false, true, true, userID, now, now))
 
 	event := autoPreviewPullRequestEvent(orgID)
 	err := svc.HandlePullRequestEvent(context.Background(), event)
@@ -3165,6 +3255,71 @@ func TestHandlePullRequestEvent_OpenedWith143GeneratedPRTriggersAutoPreview(t *t
 	require.NoError(t, err, "HandlePullRequestEvent for 143-generated PR should not fail")
 	require.True(t, starter.called, "auto preview starter should be invoked even for 143-generated PRs")
 	require.Equal(t, models.PreviewAutoModeWarm, starter.mode, "auto preview should receive the configured mode")
+	require.NoError(t, prMock.ExpectationsWereMet(), "all PR expectations should be met")
+	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "all repo expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "all preview expectations should be met")
+}
+
+// TestHandlePullRequestEvent_ReadyForReviewWith143GeneratedPRTriggersAutoPreview confirms
+// that ready_for_review events on tracked 143 PRs reach handleAutoPreviewEvent and trigger
+// auto-preview. The HandlePullRequestEvent dispatch switch must include ready_for_review.
+func TestHandlePullRequestEvent_ReadyForReviewWith143GeneratedPRTriggersAutoPreview(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	prMock := newMockPool(t)
+	jobMock := newMockPool(t)
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	starter := &recordingAutoPreviewStarter{}
+
+	svc := &PRService{
+		pullRequests:       db.NewPullRequestStore(prMock),
+		jobs:               db.NewJobStore(jobMock),
+		repos:              db.NewRepositoryStore(repoMock),
+		previews:           db.NewPreviewStore(previewMock),
+		autoPreviewStarter: starter,
+		logger:             zerolog.Nop(),
+	}
+
+	// 1. getWebhookPullRequest returns the tracked 143 PR.
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, &sessionID, orgID, "acme/app", now)...),
+		)
+
+	// 2. enqueuePullRequestStateSync inserts a job.
+	jobMock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	// 3. handleAutoPreviewEvent: repo lookup.
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+
+	// 4. handleAutoPreviewEvent: policy lookup returns warm mode.
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), false, true, true, userID, now, now))
+
+	event := autoPreviewPullRequestEvent(orgID)
+	event.Action = "ready_for_review"
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+
+	require.NoError(t, err, "HandlePullRequestEvent for ready_for_review on tracked PR should not fail")
+	require.True(t, starter.called, "auto preview starter should be invoked for ready_for_review on tracked 143 PRs")
 	require.NoError(t, prMock.ExpectationsWereMet(), "all PR expectations should be met")
 	require.NoError(t, jobMock.ExpectationsWereMet(), "all job expectations should be met")
 	require.NoError(t, repoMock.ExpectationsWereMet(), "all repo expectations should be met")
@@ -3230,8 +3385,9 @@ func TestHandlePullRequestEvent_ClosedWith143GeneratedPRTeardownAutoPreview(t *t
 			"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 			"last_preview_instance_id", "last_screenshot_blob_path",
 			"last_visual_diff_blob_path", "base_snapshot_key", "status",
+			"last_surface_sync_sha", "last_surface_sync_at", "last_surface_sync_error",
 			"created_at", "updated_at",
-		}).AddRow(prPreviewStateID, orgID, repoID, 42, nil, nil, "", "", "", "running", now, now))
+		}).AddRow(prPreviewStateID, orgID, repoID, 42, nil, nil, "", "", "", "running", "", nil, "", now, now))
 
 	// 6. teardownAutoPreview: UpdatePRPreviewStatus to closed.
 	previewMock.ExpectExec("UPDATE pr_preview_state SET status").
@@ -3349,7 +3505,7 @@ func TestHandleAutoPreviewEvent_SynchronizeUpdatesPRPreviewGroupSHA(t *testing.T
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), false, true, true, userID, now, now))
 	previewMock.ExpectExec("UPDATE preview_groups").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -3364,4 +3520,156 @@ func TestHandleAutoPreviewEvent_SynchronizeUpdatesPRPreviewGroupSHA(t *testing.T
 	require.True(t, starter.called, "auto preview starter should still be invoked on synchronize")
 	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
 	require.NoError(t, previewMock.ExpectationsWereMet(), "preview group SHA update should be called on synchronize")
+}
+
+func TestHandleAutoPreviewEvent_ReadyForReviewUpdatesPRPreviewGroupSHA(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	starter := &recordingAutoPreviewStarter{}
+
+	svc := &PRService{
+		repos:              db.NewRepositoryStore(repoMock),
+		previews:           db.NewPreviewStore(previewMock),
+		autoPreviewStarter: starter,
+		logger:             zerolog.Nop(),
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), false, true, true, userID, now, now))
+	previewMock.ExpectExec("UPDATE preview_groups").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := autoPreviewPullRequestEvent(orgID)
+	event.Action = "ready_for_review"
+	event.PR.Head.SHA = "newheadsha"
+
+	err := svc.handleAutoPreviewEvent(context.Background(), event)
+
+	require.NoError(t, err, "handleAutoPreviewEvent for ready_for_review should not fail")
+	require.True(t, starter.called, "auto preview starter should be invoked on ready_for_review")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository expectations should be met")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "preview group SHA update should be called on ready_for_review")
+}
+
+func TestSyncPRPreviewSurfaces_RespectsServiceLevelFlag(t *testing.T) {
+	t.Parallel()
+
+	svc := &PRService{
+		repos:                    db.NewRepositoryStore(newMockPool(t)),
+		previews:                 db.NewPreviewStore(newMockPool(t)),
+		tokenProvider:            &Service{},
+		logger:                   zerolog.Nop(),
+		prPreviewSurfacesEnabled: false,
+	}
+
+	payload := SyncPRPreviewSurfacesPayload{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		Owner:        "acme",
+		Repo:         "app",
+		PRNumber:     42,
+		HeadSHA:      "abc123",
+	}
+
+	err := svc.SyncPRPreviewSurfaces(context.Background(), payload)
+
+	require.NoError(t, err, "SyncPRPreviewSurfaces should be a no-op when the service flag is disabled")
+}
+
+func TestSyncPRPreviewSurfaces_SkipsWhenPolicySurfacesDisabled(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	svc := &PRService{
+		repos:                    db.NewRepositoryStore(repoMock),
+		previews:                 db.NewPreviewStore(previewMock),
+		tokenProvider:            &Service{},
+		logger:                   zerolog.Nop(),
+		prPreviewSurfacesEnabled: true,
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), false, true, true, uuid.New(), now, now))
+
+	payload := SyncPRPreviewSurfacesPayload{
+		OrgID:        orgID,
+		RepositoryID: repoID,
+		Owner:        "acme",
+		Repo:         "app",
+		PRNumber:     42,
+		HeadSHA:      "abc123",
+	}
+
+	err := svc.SyncPRPreviewSurfaces(context.Background(), payload)
+
+	require.NoError(t, err, "SyncPRPreviewSurfaces should be a no-op when the policy has PR surfaces disabled")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository lookup should be called")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "policy lookup should be called")
+}
+
+func TestSyncPRPreviewSurfaces_SkipsDraftPullRequests(t *testing.T) {
+	t.Parallel()
+
+	repoMock := newMockPool(t)
+	previewMock := newMockPool(t)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+
+	svc := &PRService{
+		repos:                    db.NewRepositoryStore(repoMock),
+		previews:                 db.NewPreviewStore(previewMock),
+		tokenProvider:            &Service{},
+		logger:                   zerolog.Nop(),
+		prPreviewSurfacesEnabled: true,
+	}
+
+	repoMock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, strPtr("go"), strPtr(""), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), true, true, true, uuid.New(), now, now))
+
+	payload := SyncPRPreviewSurfacesPayload{
+		OrgID:        orgID,
+		RepositoryID: repoID,
+		Owner:        "acme",
+		Repo:         "app",
+		PRNumber:     42,
+		HeadSHA:      "abc123",
+		Draft:        true,
+	}
+
+	err := svc.SyncPRPreviewSurfaces(context.Background(), payload)
+
+	require.NoError(t, err, "SyncPRPreviewSurfaces should return nil for draft PRs without error")
+	require.NoError(t, repoMock.ExpectationsWereMet(), "repository lookup should be called")
+	require.NoError(t, previewMock.ExpectationsWereMet(), "policy lookup should be called")
 }

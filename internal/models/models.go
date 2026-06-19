@@ -979,6 +979,7 @@ const (
 	JobTypeSyncGitHubOrgRoster   = "sync_github_org_roster"
 	JobTypePreviewCachePrewarm   = "preview_cache_prewarm"
 	JobTypeBackfillPreviewGroups = "backfill_preview_groups"
+	JobTypeSyncPRPreviewSurfaces = "sync_pr_preview_surfaces"
 )
 
 // Job represents an async work queue item.

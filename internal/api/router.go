@@ -178,6 +178,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				deployStore, repoStore, jobStore, logger,
 			)
 			prService.SetAppBaseURL(cfg.FrontendURL)
+			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 			prService.SetReviewCommentStore(reviewCommentStore)
 			prService.SetIntegrationStore(integrationStore)
 			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
@@ -1394,6 +1395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
+				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
 				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
 				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)

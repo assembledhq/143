@@ -26,7 +26,10 @@ type Service struct {
 }
 
 type InstallationPermissions struct {
-	Members string `json:"members"`
+	Members      string `json:"members"`
+	Issues       string `json:"issues"`
+	PullRequests string `json:"pull_requests"`
+	Statuses     string `json:"statuses"`
 }
 
 type InstallationDetails struct {

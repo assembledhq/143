@@ -21,6 +21,10 @@ import (
 // PreviewStore
 // =============================================================================
 
+// ErrPreviewNotReady is returned when an operation requires a proven preview
+// run but the repository has no successful preview recorded yet.
+var ErrPreviewNotReady = errors.New("repository preview is not ready")
+
 // PreviewStore manages preview_instances and related tables.
 // It uses TxStarter because stop operations need transactional consistency
 // (stop preview + revoke all access sessions atomically).
@@ -122,6 +126,7 @@ const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, base_key,
 	size_bytes, worker_node_id, last_used_at, created_at`
 
 const repositoryPreviewPolicyColumns = `id, org_id, repository_id, auto_mode,
+	pr_preview_surfaces_enabled, github_pr_comment_enabled, github_commit_status_enabled,
 	updated_by_user_id, created_at, updated_at`
 
 const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
@@ -136,7 +141,8 @@ const previewCachePrewarmRunColumns = `id, org_id, repo_id, source, source_id, c
 
 const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id,
 	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
-	base_snapshot_key, status, created_at, updated_at`
+	base_snapshot_key, status, last_surface_sync_sha, last_surface_sync_at,
+	last_surface_sync_error, created_at, updated_at`
 
 const branchPreviewSummaryColumns = `target.id AS target_id, latest.id AS preview_id,
 	target.repository_id, repo.full_name AS repository_full_name, target.branch, target.commit_sha, target.preview_config_name,
@@ -611,28 +617,58 @@ func (s *PreviewStore) GetLatestPreviewTargetForBranch(ctx context.Context, orgI
 	return &row, nil
 }
 
-// UpsertRepositoryPreviewPolicy stores the auto-preview mode for one repository.
-func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, mode models.PreviewAutoMode) (*models.RepositoryPreviewPolicy, error) {
-	if err := mode.Validate(); err != nil {
-		return nil, err
+type RepositoryPreviewPolicyPatch struct {
+	AutoMode                  *models.PreviewAutoMode
+	PRPreviewSurfacesEnabled  *bool
+	GitHubPRCommentEnabled    *bool
+	GitHubCommitStatusEnabled *bool
+}
+
+// UpsertRepositoryPreviewPolicy stores preview policy for one repository.
+func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, patch RepositoryPreviewPolicyPatch) (*models.RepositoryPreviewPolicy, error) {
+	if patch.AutoMode != nil {
+		if err := patch.AutoMode.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if patch.PRPreviewSurfacesEnabled != nil && *patch.PRPreviewSurfacesEnabled {
+		ready, err := s.RepositoryPreviewReady(ctx, orgID, repositoryID)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			return nil, ErrPreviewNotReady
+		}
 	}
 	query := fmt.Sprintf(`
 		INSERT INTO repository_preview_policies (
-			org_id, repository_id, auto_mode, updated_by_user_id
+			org_id, repository_id, auto_mode, pr_preview_surfaces_enabled,
+			github_pr_comment_enabled, github_commit_status_enabled, updated_by_user_id
 		) VALUES (
-			@org_id, @repository_id, @auto_mode, @updated_by_user_id
+			@org_id, @repository_id,
+			COALESCE(@auto_mode, 'off'),
+			COALESCE(@pr_preview_surfaces_enabled, false),
+			COALESCE(@github_pr_comment_enabled, true),
+			COALESCE(@github_commit_status_enabled, true),
+			@updated_by_user_id
 		)
 		ON CONFLICT (org_id, repository_id)
 		DO UPDATE SET
-			auto_mode = EXCLUDED.auto_mode,
+			auto_mode = COALESCE(@auto_mode, repository_preview_policies.auto_mode),
+			pr_preview_surfaces_enabled = COALESCE(@pr_preview_surfaces_enabled, repository_preview_policies.pr_preview_surfaces_enabled),
+			github_pr_comment_enabled = COALESCE(@github_pr_comment_enabled, repository_preview_policies.github_pr_comment_enabled),
+			github_commit_status_enabled = COALESCE(@github_commit_status_enabled, repository_preview_policies.github_commit_status_enabled),
 			updated_by_user_id = EXCLUDED.updated_by_user_id,
 			updated_at = now()
 		RETURNING %s`, repositoryPreviewPolicyColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":             orgID,
-		"repository_id":      repositoryID,
-		"auto_mode":          mode,
-		"updated_by_user_id": userID,
+		"org_id":                       orgID,
+		"repository_id":                repositoryID,
+		"auto_mode":                    patch.AutoMode,
+		"pr_preview_surfaces_enabled":  patch.PRPreviewSurfacesEnabled,
+		"github_pr_comment_enabled":    patch.GitHubPRCommentEnabled,
+		"github_commit_status_enabled": patch.GitHubCommitStatusEnabled,
+		"updated_by_user_id":           userID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upsert repository preview policy: %w", err)
@@ -656,9 +692,11 @@ func (s *PreviewStore) GetRepositoryPreviewPolicy(ctx context.Context, orgID, re
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicy])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &models.RepositoryPreviewPolicy{
-			OrgID:        orgID,
-			RepositoryID: repositoryID,
-			AutoMode:     models.PreviewAutoModeOff,
+			OrgID:                     orgID,
+			RepositoryID:              repositoryID,
+			AutoMode:                  models.PreviewAutoModeOff,
+			GitHubPRCommentEnabled:    true,
+			GitHubCommitStatusEnabled: true,
 		}, nil
 	}
 	if err != nil {
@@ -674,11 +712,79 @@ func (s *PreviewStore) ListRepositoryPreviewPolicies(ctx context.Context, orgID 
 			repo.id AS repository_id,
 			repo.full_name AS repository_full_name,
 			COALESCE(policy.auto_mode, 'off') AS auto_mode,
+			COALESCE(policy.pr_preview_surfaces_enabled, false) AS pr_preview_surfaces_enabled,
+			COALESCE(policy.github_pr_comment_enabled, true) AS github_pr_comment_enabled,
+			COALESCE(policy.github_commit_status_enabled, true) AS github_commit_status_enabled,
+			COALESCE(readiness.has_config, false) AS preview_configured,
+			COALESCE(readiness.has_success, false) AS preview_success_recorded,
+			COALESCE(readiness.preview_ready, false) AS preview_ready,
+			CASE
+				WHEN COALESCE(readiness.preview_ready, false) THEN ''
+				WHEN NOT COALESCE(readiness.has_config, false) THEN 'Add .143/config.json first'
+				WHEN NOT COALESCE(readiness.has_success, false) THEN 'Run a successful test preview before enabling GitHub PR links'
+				WHEN COALESCE(readiness.latest_status, '') IN ('failed', 'unavailable') THEN 'Fix the latest failed preview before enabling GitHub PR links'
+				ELSE 'Preview readiness is not proven'
+			END AS preview_readiness_missing_reason,
+			false AS github_pr_comment_permission_ok,
+			false AS github_commit_status_permission_ok,
+			COALESCE(surface_state.last_surface_sync_sha, '') AS last_surface_sync_sha,
+			surface_state.last_surface_sync_at,
+			COALESCE(surface_state.last_surface_sync_error, '') AS last_surface_sync_error,
 			COALESCE(open_prs.open_pr_count, 0)::int AS open_pr_count,
 			policy.updated_at
 		FROM repositories repo
 		LEFT JOIN repository_preview_policies policy
 		  ON policy.org_id = repo.org_id AND policy.repository_id = repo.id
+		LEFT JOIN LATERAL (
+			SELECT
+				EXISTS (
+					SELECT 1
+					FROM preview_targets target
+					WHERE target.org_id = repo.org_id
+					  AND target.repository_id = repo.id
+					  AND target.resolved_config_digest <> ''
+				) AS has_config,
+				EXISTS (
+					SELECT 1
+					FROM preview_instances instance
+					JOIN preview_targets target
+					  ON target.id = instance.preview_target_id
+					 AND target.org_id = instance.org_id
+					WHERE instance.org_id = repo.org_id
+					  AND target.repository_id = repo.id
+					  AND target.resolved_config_digest <> ''
+					  AND instance.status IN ('ready', 'partially_ready')
+				) AS has_success,
+				(
+					SELECT instance.status
+					FROM preview_instances instance
+					JOIN preview_targets target
+					  ON target.id = instance.preview_target_id
+					 AND target.org_id = instance.org_id
+					WHERE instance.org_id = repo.org_id
+					  AND target.repository_id = repo.id
+					  AND target.resolved_config_digest <> ''
+					ORDER BY instance.created_at DESC
+					LIMIT 1
+				) AS latest_status
+		) readiness_raw ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT readiness_raw.has_config,
+			       readiness_raw.has_success,
+			       readiness_raw.latest_status,
+			       readiness_raw.has_config
+			         AND readiness_raw.has_success
+			         AND COALESCE(readiness_raw.latest_status, '') NOT IN ('failed', 'unavailable') AS preview_ready
+		) readiness ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT last_surface_sync_sha, last_surface_sync_at, last_surface_sync_error
+			FROM pr_preview_state state
+			WHERE state.org_id = repo.org_id
+			  AND state.repo_id = repo.id
+			  AND state.last_surface_sync_at IS NOT NULL
+			ORDER BY state.last_surface_sync_at DESC
+			LIMIT 1
+		) surface_state ON TRUE
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) AS open_pr_count
 			FROM pull_requests pr
@@ -693,6 +799,120 @@ func (s *PreviewStore) ListRepositoryPreviewPolicies(ctx context.Context, orgID 
 		return nil, fmt.Errorf("list repository preview policies: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicySummary])
+}
+
+func (s *PreviewStore) RepositoryPreviewReady(ctx context.Context, orgID, repositoryID uuid.UUID) (bool, error) {
+	var ready bool
+	err := s.db.QueryRow(ctx, `
+		WITH readiness AS (
+			SELECT
+				EXISTS (
+					SELECT 1
+					FROM preview_targets target
+					WHERE target.org_id = @org_id
+					  AND target.repository_id = @repository_id
+					  AND target.resolved_config_digest <> ''
+				) AS has_config,
+				EXISTS (
+					SELECT 1
+					FROM preview_instances instance
+					JOIN preview_targets target
+					  ON target.id = instance.preview_target_id
+					 AND target.org_id = instance.org_id
+					WHERE instance.org_id = @org_id
+					  AND target.repository_id = @repository_id
+					  AND target.resolved_config_digest <> ''
+					  AND instance.status IN ('ready', 'partially_ready')
+				) AS has_success,
+				(
+					SELECT instance.status
+					FROM preview_instances instance
+					JOIN preview_targets target
+					  ON target.id = instance.preview_target_id
+					 AND target.org_id = instance.org_id
+					WHERE instance.org_id = @org_id
+					  AND target.repository_id = @repository_id
+					  AND target.resolved_config_digest <> ''
+					ORDER BY instance.created_at DESC
+					LIMIT 1
+				) AS latest_status
+		)
+		SELECT has_config
+		  AND has_success
+		  AND COALESCE(latest_status, '') NOT IN ('failed', 'unavailable')
+		FROM readiness`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).Scan(&ready)
+	if err != nil {
+		return false, fmt.Errorf("check repository preview readiness: %w", err)
+	}
+	return ready, nil
+}
+
+func (s *PreviewStore) RepositoryPreviewConfigReady(ctx context.Context, orgID, repositoryID uuid.UUID, previewConfigName string) (bool, error) {
+	var ready bool
+	err := s.db.QueryRow(ctx, `
+		WITH readiness AS (
+			SELECT
+				EXISTS (
+					SELECT 1
+					FROM preview_targets target
+					WHERE target.org_id = @org_id
+					  AND target.repository_id = @repository_id
+					  AND target.preview_config_name = @preview_config_name
+					  AND target.resolved_config_digest <> ''
+				) AS has_config,
+				EXISTS (
+					SELECT 1
+					FROM preview_instances instance
+					JOIN preview_targets target
+					  ON target.id = instance.preview_target_id
+					 AND target.org_id = instance.org_id
+					WHERE instance.org_id = @org_id
+					  AND target.repository_id = @repository_id
+					  AND target.preview_config_name = @preview_config_name
+					  AND target.resolved_config_digest <> ''
+					  AND instance.status IN ('ready', 'partially_ready')
+				) AS has_success,
+				(
+					SELECT instance.status
+					FROM preview_instances instance
+					JOIN preview_targets target
+					  ON target.id = instance.preview_target_id
+					 AND target.org_id = instance.org_id
+					WHERE instance.org_id = @org_id
+					  AND target.repository_id = @repository_id
+					  AND target.preview_config_name = @preview_config_name
+					  AND target.resolved_config_digest <> ''
+					ORDER BY instance.created_at DESC
+					LIMIT 1
+				) AS latest_status
+		)
+		SELECT has_config
+		  AND has_success
+		  AND COALESCE(latest_status, '') NOT IN ('failed', 'unavailable')
+		FROM readiness`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID, "preview_config_name": previewConfigName}).Scan(&ready)
+	if err != nil {
+		return false, fmt.Errorf("check repository preview config readiness: %w", err)
+	}
+	return ready, nil
+}
+
+func (s *PreviewStore) RunWithPRPreviewSurfaceLock(ctx context.Context, orgID, repositoryID uuid.UUID, prNumber int, fn func(context.Context) error) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin pr preview surface lock: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	lockKey := fmt.Sprintf("pr_preview_surface:%s:%s:%d", orgID, repositoryID, prNumber)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey}); err != nil {
+		return fmt.Errorf("acquire pr preview surface lock: %w", err)
+	}
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit pr preview surface lock: %w", err)
+	}
+	return nil
 }
 
 // GetActivePreviewForTarget returns the currently active runtime for a branch
@@ -3565,11 +3785,13 @@ func (s *PreviewStore) UpsertPRPreviewState(ctx context.Context, state *models.P
 		INSERT INTO pr_preview_state (
 			org_id, repo_id, pr_number, github_comment_id,
 			last_preview_instance_id, last_screenshot_blob_path,
-			last_visual_diff_blob_path, base_snapshot_key, status
+			last_visual_diff_blob_path, base_snapshot_key, status,
+			last_surface_sync_sha, last_surface_sync_at, last_surface_sync_error
 		) VALUES (
 			@org_id, @repo_id, @pr_number, @github_comment_id,
 			@last_preview_instance_id, @last_screenshot_blob_path,
-			@last_visual_diff_blob_path, @base_snapshot_key, @status
+			@last_visual_diff_blob_path, @base_snapshot_key, @status,
+			@last_surface_sync_sha, @last_surface_sync_at, @last_surface_sync_error
 		)
 		ON CONFLICT (org_id, repo_id, pr_number) DO UPDATE SET
 			github_comment_id = COALESCE(EXCLUDED.github_comment_id, pr_preview_state.github_comment_id),
@@ -3578,6 +3800,9 @@ func (s *PreviewStore) UpsertPRPreviewState(ctx context.Context, state *models.P
 			last_visual_diff_blob_path = EXCLUDED.last_visual_diff_blob_path,
 			base_snapshot_key = EXCLUDED.base_snapshot_key,
 			status = EXCLUDED.status,
+			last_surface_sync_sha = CASE WHEN EXCLUDED.last_surface_sync_sha <> '' THEN EXCLUDED.last_surface_sync_sha ELSE pr_preview_state.last_surface_sync_sha END,
+			last_surface_sync_at = COALESCE(EXCLUDED.last_surface_sync_at, pr_preview_state.last_surface_sync_at),
+			last_surface_sync_error = CASE WHEN EXCLUDED.last_surface_sync_error <> '' THEN EXCLUDED.last_surface_sync_error ELSE pr_preview_state.last_surface_sync_error END,
 			updated_at = now()
 		RETURNING %s`, prPreviewStateColumns)
 
@@ -3591,6 +3816,9 @@ func (s *PreviewStore) UpsertPRPreviewState(ctx context.Context, state *models.P
 		"last_visual_diff_blob_path": state.LastVisualDiffBlobPath,
 		"base_snapshot_key":          state.BaseSnapshotKey,
 		"status":                     state.Status,
+		"last_surface_sync_sha":      state.LastSurfaceSyncSHA,
+		"last_surface_sync_at":       state.LastSurfaceSyncAt,
+		"last_surface_sync_error":    state.LastSurfaceSyncError,
 	})
 	if err != nil {
 		return fmt.Errorf("upsert pr preview state: %w", err)
@@ -3600,6 +3828,40 @@ func (s *PreviewStore) UpsertPRPreviewState(ctx context.Context, state *models.P
 		return fmt.Errorf("scan pr preview state: %w", err)
 	}
 	*state = row
+	return nil
+}
+
+func (s *PreviewStore) RecordPRPreviewSurfaceSync(ctx context.Context, orgID, repoID uuid.UUID, prNumber int, headSHA string, commentID *int64, syncErr string) error {
+	query := fmt.Sprintf(`
+		INSERT INTO pr_preview_state (
+			org_id, repo_id, pr_number, github_comment_id, status,
+			last_surface_sync_sha, last_surface_sync_at, last_surface_sync_error
+		) VALUES (
+			@org_id, @repo_id, @pr_number, @github_comment_id, 'never_started',
+			@head_sha, now(), @sync_error
+		)
+		ON CONFLICT (org_id, repo_id, pr_number) DO UPDATE SET
+			github_comment_id = COALESCE(EXCLUDED.github_comment_id, pr_preview_state.github_comment_id),
+			last_surface_sync_sha = EXCLUDED.last_surface_sync_sha,
+			last_surface_sync_at = now(),
+			last_surface_sync_error = EXCLUDED.last_surface_sync_error,
+			updated_at = now()
+		RETURNING %s`, prPreviewStateColumns)
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":            orgID,
+		"repo_id":           repoID,
+		"pr_number":         prNumber,
+		"github_comment_id": commentID,
+		"head_sha":          headSHA,
+		"sync_error":        syncErr,
+	})
+	if err != nil {
+		return fmt.Errorf("record pr preview surface sync: %w", err)
+	}
+	_, err = pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PRPreviewState])
+	if err != nil {
+		return fmt.Errorf("scan pr preview surface sync: %w", err)
+	}
 	return nil
 }
 
