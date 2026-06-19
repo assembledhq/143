@@ -29,6 +29,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	automationevents "github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
 )
@@ -61,6 +62,19 @@ type AutoPreviewStarter interface {
 	StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error
 }
 
+type SyncPRPreviewSurfacesPayload struct {
+	OrgID        uuid.UUID `json:"org_id"`
+	RepositoryID uuid.UUID `json:"repository_id"`
+	Owner        string    `json:"owner"`
+	Repo         string    `json:"repo"`
+	HeadOwner    string    `json:"head_owner,omitempty"`
+	HeadRepo     string    `json:"head_repo,omitempty"`
+	PRNumber     int       `json:"pr_number"`
+	HeadSHA      string    `json:"head_sha"`
+	Fork         bool      `json:"fork"`
+	Draft        bool      `json:"draft"`
+}
+
 type sessionThreadLister interface {
 	ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error)
 }
@@ -82,28 +96,29 @@ type PRService struct {
 	appUserAuth     interface {
 		GetValidCredential(ctx context.Context, orgID, userID uuid.UUID) (*models.GitHubAppUserConfig, error)
 	}
-	users                   *db.UserStore
-	orgs                    *db.OrganizationStore
-	prTemplates             *db.PRTemplateStore
-	previews                *db.PreviewStore
-	previewStopper          PreviewStopper
-	autoPreviewStarter      AutoPreviewStarter
-	automationEventTriggers AutomationEventTriggerer
-	redisClient             *cache.Client
-	prHealthStreams         *cache.PullRequestStreams
-	llmClient               llm.Client
-	audit                   *db.AuditEmitter
-	sandboxProvider         agent.SandboxProvider   // used by the push-based PR flow
-	snapshots               storage.SnapshotStore   // used by the push-based PR flow
-	sandboxAuth             agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
-	logger                  zerolog.Logger
-	baseURL                 string
-	appBaseURL              string
-	previewOriginTemplate   string
-	httpClient              *http.Client
-	mergeabilityRetryDelays []time.Duration
-	mergeabilityRetryWait   func(context.Context, time.Duration) error
-	linearMilestones        LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
+	users                    *db.UserStore
+	orgs                     *db.OrganizationStore
+	prTemplates              *db.PRTemplateStore
+	previews                 *db.PreviewStore
+	previewStopper           PreviewStopper
+	autoPreviewStarter       AutoPreviewStarter
+	automationEventTriggers  AutomationEventTriggerer
+	redisClient              *cache.Client
+	prHealthStreams          *cache.PullRequestStreams
+	llmClient                llm.Client
+	audit                    *db.AuditEmitter
+	sandboxProvider          agent.SandboxProvider   // used by the push-based PR flow
+	snapshots                storage.SnapshotStore   // used by the push-based PR flow
+	sandboxAuth              agent.SandboxAuthServer // per-push GitHub credential socket; required for the push-based PR flow
+	logger                   zerolog.Logger
+	baseURL                  string
+	appBaseURL               string
+	previewOriginTemplate    string
+	httpClient               *http.Client
+	mergeabilityRetryDelays  []time.Duration
+	mergeabilityRetryWait    func(context.Context, time.Duration) error
+	linearMilestones         LinearMilestoneEnqueuer // nil-safe: Linear writes disabled if nil
+	prPreviewSurfacesEnabled bool
 
 	// cachedResolverMu guards lazy construction of cachedResolver. The
 	// resolver is built from the currently-wired dependencies on first use
@@ -152,17 +167,18 @@ func NewPRService(
 	logger zerolog.Logger,
 ) *PRService {
 	return &PRService{
-		tokenProvider: tokenProvider,
-		pullRequests:  pullRequests,
-		sessions:      sessions,
-		issues:        issues,
-		deploys:       deploys,
-		repos:         repos,
-		jobs:          jobs,
-		logger:        logger,
-		baseURL:       defaultGitHubAPI,
-		appBaseURL:    defaultAppBaseURL,
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		tokenProvider:            tokenProvider,
+		pullRequests:             pullRequests,
+		sessions:                 sessions,
+		issues:                   issues,
+		deploys:                  deploys,
+		repos:                    repos,
+		jobs:                     jobs,
+		logger:                   logger,
+		baseURL:                  defaultGitHubAPI,
+		appBaseURL:               defaultAppBaseURL,
+		httpClient:               &http.Client{Timeout: 30 * time.Second},
+		prPreviewSurfacesEnabled: true,
 	}
 }
 
@@ -474,6 +490,10 @@ func (s *PRService) SetAppBaseURL(url string) {
 // generated PR preview links.
 func (s *PRService) SetPreviewOriginTemplate(template string) {
 	s.previewOriginTemplate = template
+}
+
+func (s *PRService) SetPRPreviewSurfacesEnabled(enabled bool) {
+	s.prPreviewSurfacesEnabled = enabled
 }
 
 func (s *PRService) sessionURL(sessionID uuid.UUID) string {
@@ -1556,7 +1576,7 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	}
 
 	switch event.Action {
-	case "opened", "reopened", "synchronize":
+	case "opened", "reopened", "ready_for_review", "synchronize":
 		s.enqueuePullRequestStateSync(ctx, pr)
 		return s.handleAutoPreviewEvent(ctx, event)
 	case "closed":
@@ -1571,6 +1591,43 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
+}
+
+
+func (s *PRService) enqueuePRPreviewSurfaceSyncForRepo(ctx context.Context, repo models.Repository, event PullRequestEvent) {
+	if s == nil || s.jobs == nil {
+		return
+	}
+	if !s.prPreviewSurfacesEnabled {
+		return
+	}
+	if event.PR.Draft {
+		return
+	}
+	owner, repoName := splitRepo(repo.FullName)
+	if owner == "" || repoName == "" || event.PR.Head.SHA == "" || event.Number == 0 {
+		return
+	}
+	headOwner, headRepo := splitRepo(event.PR.Head.Repo.FullName)
+	payload := SyncPRPreviewSurfacesPayload{
+		OrgID:        repo.OrgID,
+		RepositoryID: repo.ID,
+		Owner:        owner,
+		Repo:         repoName,
+		HeadOwner:    headOwner,
+		HeadRepo:     headRepo,
+		PRNumber:     event.Number,
+		HeadSHA:      event.PR.Head.SHA,
+		Fork:         event.PR.Head.Repo.Fork,
+		Draft:        event.PR.Draft,
+	}
+	dedupeKey := fmt.Sprintf("pr_preview_surface:%s:%s:%d:%s", repo.OrgID, repo.ID, event.Number, event.PR.Head.SHA)
+	if _, err := s.jobs.Enqueue(ctx, repo.OrgID, "preview", models.JobTypeSyncPRPreviewSurfaces, payload, 0, &dedupeKey); err != nil {
+		s.logger.Warn().Err(err).
+			Str("repo", repo.FullName).
+			Int("pr_number", event.Number).
+			Msg("failed to enqueue PR preview surface sync")
+	}
 }
 
 func automationGitHubEventForPullRequest(event PullRequestEvent) (models.AutomationGitHubEvent, bool) {
@@ -1595,31 +1652,20 @@ func (s *PRService) getWebhookPullRequest(ctx context.Context, ownerOrgID *uuid.
 }
 
 func (s *PRService) handleAutoPreviewEvent(ctx context.Context, event PullRequestEvent) error {
-	if s == nil || s.previews == nil || s.repos == nil || s.autoPreviewStarter == nil {
+	if s == nil || s.previews == nil || s.repos == nil {
 		return nil
 	}
 	switch event.Action {
-	case "opened", "reopened", "synchronize":
+	case "opened", "reopened", "ready_for_review", "synchronize":
 		// handled below
 	case "closed":
 		return s.teardownAutoPreview(ctx, event)
 	default:
 		return nil
 	}
-	if event.PR.Draft || event.PR.Head.Repo.Fork {
+	if event.PR.Head.SHA == "" {
 		return nil
 	}
-	defaultBranch := strings.TrimSpace(event.Repository.DefaultBranch)
-	if defaultBranch != "" && strings.TrimSpace(event.PR.Base.Ref) != "" && event.PR.Base.Ref != defaultBranch {
-		return nil
-	}
-	if event.PR.Head.SHA == "" || event.PR.Head.Ref == "" {
-		return nil
-	}
-	if event.PR.Head.Repo.FullName != "" && event.PR.Head.Repo.FullName != event.Repository.FullName {
-		return nil
-	}
-
 	repo, err := s.repositoryFromPullRequestEvent(ctx, event)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -1637,15 +1683,32 @@ func (s *PRService) handleAutoPreviewEvent(ctx context.Context, event PullReques
 		}
 		return nil
 	}
-	if policy.AutoMode == models.PreviewAutoModeOff {
+	if policy.PRPreviewSurfacesEnabled {
+		s.enqueuePRPreviewSurfaceSyncForRepo(ctx, repo, event)
+	}
+	if event.PR.Draft || event.PR.Head.Repo.Fork {
 		return nil
 	}
-	if event.Action == "synchronize" && event.PR.Head.SHA != "" {
+	defaultBranch := strings.TrimSpace(event.Repository.DefaultBranch)
+	if defaultBranch != "" && strings.TrimSpace(event.PR.Base.Ref) != "" && event.PR.Base.Ref != defaultBranch {
+		return nil
+	}
+	if event.PR.Head.Ref == "" {
+		return nil
+	}
+	if event.PR.Head.Repo.FullName != "" && event.PR.Head.Repo.FullName != event.Repository.FullName {
+		return nil
+	}
+	if policy.AutoMode == models.PreviewAutoModeOff || s.autoPreviewStarter == nil {
+		return nil
+	}
+	if (event.Action == "synchronize" || event.Action == "ready_for_review") && event.PR.Head.SHA != "" {
 		if _, err := s.previews.UpdatePreviewGroupsLatestSHAForPR(ctx, repo.OrgID, repo.ID, event.Number, event.PR.Head.SHA); err != nil {
 			s.logger.Warn().Err(err).
 				Int("pr_number", event.Number).
 				Str("repo", event.Repository.FullName).
-				Msg("failed to update preview group latest sha on pr synchronize")
+				Str("action", event.Action).
+				Msg("failed to update preview group latest sha on pr event")
 		}
 	}
 	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode)
@@ -2448,6 +2511,10 @@ func (s *PRService) GetInstallationToken(ctx context.Context, installationID int
 	return s.tokenProvider.GetInstallationToken(ctx, installationID)
 }
 
+func (s *PRService) GetInstallationDetails(ctx context.Context, installationID int64) (InstallationDetails, error) {
+	return s.tokenProvider.GetInstallationDetails(ctx, installationID)
+}
+
 // GitHubBranch represents a branch returned by the GitHub API.
 type GitHubBranch struct {
 	Name      string `json:"name"`
@@ -2643,6 +2710,291 @@ func (s *PRService) stablePRPreviewURL(owner, repo string, number int) string {
 		baseURL = defaultAppBaseURL
 	}
 	return fmt.Sprintf("%s/previews/github/%s/%s/pull/%d?launch=1", baseURL, owner, repo, number)
+}
+
+const prPreviewCommentMarker = "<!-- 143-preview-comment -->"
+
+func (s *PRService) SyncPRPreviewSurfaces(ctx context.Context, payload SyncPRPreviewSurfacesPayload) error {
+	if s == nil || s.previews == nil || s.repos == nil || s.tokenProvider == nil {
+		return nil
+	}
+	if !s.prPreviewSurfacesEnabled {
+		return nil
+	}
+	repo, err := s.repos.GetByID(ctx, payload.OrgID, payload.RepositoryID)
+	if err != nil {
+		return fmt.Errorf("load repository for PR preview surfaces: %w", err)
+	}
+	policy, err := s.previews.GetRepositoryPreviewPolicy(ctx, payload.OrgID, payload.RepositoryID)
+	if err != nil {
+		return fmt.Errorf("load repository preview policy: %w", err)
+	}
+	if !policy.PRPreviewSurfacesEnabled {
+		return nil
+	}
+	if payload.Draft {
+		return nil
+	}
+	if repo.Status != models.RepositoryStatusActive {
+		return nil
+	}
+	owner, repoName := payload.Owner, payload.Repo
+	if owner == "" || repoName == "" {
+		owner, repoName = splitRepo(repo.FullName)
+	}
+	if owner == "" || repoName == "" || payload.PRNumber == 0 || payload.HeadSHA == "" {
+		return fmt.Errorf("invalid PR preview surface payload")
+	}
+	stableURL := s.stablePRPreviewURL(owner, repoName, payload.PRNumber)
+	state, err := s.previews.GetPRPreviewState(ctx, payload.OrgID, payload.RepositoryID, payload.PRNumber)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("load pr preview state: %w", err)
+	}
+	token, err := s.tokenProvider.GetInstallationToken(ctx, repo.InstallationID)
+	if err != nil {
+		return fmt.Errorf("get GitHub installation token: %w", err)
+	}
+	configOwner, configRepo := payload.HeadOwner, payload.HeadRepo
+	if configOwner == "" || configRepo == "" {
+		configOwner, configRepo = owner, repoName
+	}
+	configName, err := s.validatePRPreviewHeadConfig(ctx, token, configOwner, configRepo, payload.HeadSHA)
+	if err != nil {
+		syncErrMsg := err.Error()
+		// Check the 404 condition before propagating a DB write failure: a missing
+		// config file is a permanent condition that should always return nil, even
+		// if the best-effort error record cannot be written.
+		var apiErr *GitHubAPIError
+		is404 := errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+		recordErr := s.previews.RecordPRPreviewSurfaceSync(ctx, payload.OrgID, payload.RepositoryID, payload.PRNumber, payload.HeadSHA, nil, syncErrMsg)
+		if is404 {
+			return nil
+		}
+		if recordErr != nil {
+			return errors.Join(err, recordErr)
+		}
+		return err
+	}
+	ready, err := s.previews.RepositoryPreviewConfigReady(ctx, payload.OrgID, payload.RepositoryID, configName)
+	if err != nil {
+		return fmt.Errorf("check repository preview config readiness: %w", err)
+	}
+	if !ready {
+		notReadyMsg := fmt.Sprintf("preview config %q has no successful preview run yet; run a test preview first", configName)
+		if recordErr := s.previews.RecordPRPreviewSurfaceSync(ctx, payload.OrgID, payload.RepositoryID, payload.PRNumber, payload.HeadSHA, nil, notReadyMsg); recordErr != nil {
+			return recordErr
+		}
+		return nil
+	}
+	details, detailsErr := s.tokenProvider.GetInstallationDetails(ctx, repo.InstallationID)
+	if detailsErr != nil {
+		return fmt.Errorf("get GitHub installation details: %w", detailsErr)
+	}
+
+	var errs []error
+	var commentID *int64
+	if state != nil {
+		commentID = state.GitHubCommentID
+	}
+	if policy.GitHubPRCommentEnabled {
+		if !prPreviewCommentPermissionOK(details.Permissions) {
+			errs = append(errs, fmt.Errorf("GitHub App needs Issues write or Pull requests write permission to publish PR preview comments"))
+		} else {
+			lockErr := s.previews.RunWithPRPreviewSurfaceLock(ctx, payload.OrgID, payload.RepositoryID, payload.PRNumber, func(lockCtx context.Context) error {
+				lockedState, stateErr := s.previews.GetPRPreviewState(lockCtx, payload.OrgID, payload.RepositoryID, payload.PRNumber)
+				if stateErr != nil && !errors.Is(stateErr, pgx.ErrNoRows) {
+					return fmt.Errorf("load locked pr preview state: %w", stateErr)
+				}
+				lockedCommentID := commentID
+				if lockedState != nil {
+					lockedCommentID = lockedState.GitHubCommentID
+				}
+				id, syncErr := s.syncPRPreviewComment(lockCtx, token, owner, repoName, payload.PRNumber, stableURL, lockedCommentID)
+				if syncErr != nil {
+					return fmt.Errorf("sync PR preview comment: %w", syncErr)
+				}
+				if id != nil {
+					commentID = id
+				}
+				return nil
+			})
+			if lockErr != nil {
+				errs = append(errs, lockErr)
+			}
+		}
+	}
+	// Commit statuses must be posted to the repo that owns the HEAD commit.
+	// For fork PRs the HEAD SHA lives in the fork repo (base token has no
+	// write access). For cross-repo non-fork PRs the SHA doesn't exist in the
+	// base repo either, so we only publish for same-repo PRs.
+	if policy.GitHubCommitStatusEnabled && !payload.Fork && strings.EqualFold(configOwner, owner) && strings.EqualFold(configRepo, repoName) {
+		if !prPreviewCommitStatusPermissionOK(details.Permissions) {
+			errs = append(errs, fmt.Errorf("GitHub App needs Commit statuses write permission to publish PR preview statuses"))
+		} else if syncErr := s.publishPRPreviewCommitStatus(ctx, token, owner, repoName, payload.HeadSHA, stableURL); syncErr != nil {
+			errs = append(errs, fmt.Errorf("publish PR preview commit status: %w", syncErr))
+		}
+	}
+	syncErrMsg := ""
+	joined := errors.Join(errs...)
+	if joined != nil {
+		syncErrMsg = joined.Error()
+	}
+	if err := s.previews.RecordPRPreviewSurfaceSync(ctx, payload.OrgID, payload.RepositoryID, payload.PRNumber, payload.HeadSHA, commentID, syncErrMsg); err != nil {
+		if joined != nil {
+			return errors.Join(joined, err)
+		}
+		return err
+	}
+	return joined
+}
+
+func (s *PRService) validatePRPreviewHeadConfig(ctx context.Context, token, owner, repo, headSHA string) (string, error) {
+	content, err := s.GetFileContent(ctx, token, owner, repo, headSHA, ".143/config.json")
+	if err != nil {
+		return "", fmt.Errorf("read PR head preview config: %w", err)
+	}
+	options, err := preview.InspectConfigOptions([]byte(content), "")
+	if err != nil {
+		return "", fmt.Errorf("inspect PR head preview config: %w", err)
+	}
+	if options.RequiresSelection {
+		return "", fmt.Errorf("PR head preview config requires preview_config_name selection")
+	}
+	cfg, err := preview.ParseNamedConfig([]byte(content), options.SelectedName)
+	if err != nil {
+		return "", fmt.Errorf("parse PR head preview config: %w", err)
+	}
+	detection := preview.DetectReadiness(cfg)
+	if detection.Readiness != models.PreviewReadinessReady {
+		if len(detection.ValidationErrors) > 0 {
+			return "", fmt.Errorf("PR head preview config is not ready: %s", strings.Join(detection.ValidationErrors, "; "))
+		}
+		return "", fmt.Errorf("PR head preview config is not ready")
+	}
+	return options.SelectedName, nil
+}
+
+func prPreviewPermissionWrites(value string) bool {
+	return value == "write" || value == "admin"
+}
+
+func prPreviewCommentPermissionOK(perms InstallationPermissions) bool {
+	return prPreviewPermissionWrites(perms.Issues) || prPreviewPermissionWrites(perms.PullRequests)
+}
+
+func prPreviewCommitStatusPermissionOK(perms InstallationPermissions) bool {
+	return prPreviewPermissionWrites(perms.Statuses)
+}
+
+func (s *PRService) syncPRPreviewComment(ctx context.Context, token, owner, repo string, prNumber int, stableURL string, knownID *int64) (*int64, error) {
+	body := prPreviewCommentBody(stableURL)
+	if knownID != nil {
+		existing, err := s.getIssueComment(ctx, token, owner, repo, *knownID)
+		if err == nil {
+			if strings.TrimSpace(existing.Body) == strings.TrimSpace(body) {
+				return knownID, nil
+			}
+			return knownID, s.updateIssueComment(ctx, token, owner, repo, *knownID, body)
+		}
+		var apiErr *GitHubAPIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+			return nil, err
+		}
+	}
+	markerID, markerBody, err := s.findPRPreviewComment(ctx, token, owner, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	if markerID != nil {
+		if strings.TrimSpace(markerBody) != strings.TrimSpace(body) {
+			if err := s.updateIssueComment(ctx, token, owner, repo, *markerID, body); err != nil {
+				return nil, err
+			}
+		}
+		return markerID, nil
+	}
+	id, err := s.createIssueComment(ctx, token, owner, repo, prNumber, body)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+type githubIssueComment struct {
+	ID   int64  `json:"id"`
+	Body string `json:"body"`
+}
+
+func (s *PRService) getIssueComment(ctx context.Context, token, owner, repo string, commentID int64) (githubIssueComment, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)
+	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	if err != nil {
+		return githubIssueComment{}, err
+	}
+	var comment githubIssueComment
+	if err := json.Unmarshal(body, &comment); err != nil {
+		return githubIssueComment{}, fmt.Errorf("decode issue comment: %w", err)
+	}
+	return comment, nil
+}
+
+func (s *PRService) findPRPreviewComment(ctx context.Context, token, owner, repo string, prNumber int) (*int64, string, error) {
+	const maxPages = 50
+	for page := 1; page <= maxPages; page++ {
+		path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100&page=%d", owner, repo, prNumber, page)
+		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		var comments []githubIssueComment
+		if err := json.Unmarshal(body, &comments); err != nil {
+			return nil, "", fmt.Errorf("decode issue comments: %w", err)
+		}
+		for _, comment := range comments {
+			if strings.Contains(comment.Body, prPreviewCommentMarker) {
+				id := comment.ID
+				return &id, comment.Body, nil
+			}
+		}
+		if len(comments) < 100 {
+			break
+		}
+	}
+	return nil, "", nil
+}
+
+func (s *PRService) createIssueComment(ctx context.Context, token, owner, repo string, prNumber int, body string) (int64, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, prNumber)
+	resp, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{"body": body})
+	if err != nil {
+		return 0, err
+	}
+	var comment githubIssueComment
+	if err := json.Unmarshal(resp, &comment); err != nil {
+		return 0, fmt.Errorf("decode created issue comment: %w", err)
+	}
+	return comment.ID, nil
+}
+
+func (s *PRService) updateIssueComment(ctx context.Context, token, owner, repo string, commentID int64, body string) error {
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)
+	_, err := s.doGitHubRequest(ctx, token, http.MethodPatch, path, map[string]string{"body": body})
+	return err
+}
+
+func (s *PRService) publishPRPreviewCommitStatus(ctx context.Context, token, owner, repo, headSHA, stableURL string) error {
+	path := fmt.Sprintf("/repos/%s/%s/statuses/%s", owner, repo, headSHA)
+	_, err := s.doGitHubRequest(ctx, token, http.MethodPost, path, map[string]string{
+		"state":       "success",
+		"target_url":  stableURL,
+		"description": "Open 143 preview",
+		"context":     "preview/143",
+	})
+	return err
+}
+
+func prPreviewCommentBody(stableURL string) string {
+	return fmt.Sprintf("%s\n### Preview\n\n[Open preview](%s)\n\nThis link opens, resumes, starts, or diagnoses the latest preview for this PR.\n", prPreviewCommentMarker, stableURL)
 }
 
 func (s *PRService) prPreviewURL(ctx context.Context, run *models.Session, repo *models.Repository, owner, repoName string, number int, branchName, headSHA, prURL string) string {

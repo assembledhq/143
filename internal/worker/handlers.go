@@ -366,6 +366,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("merge_pull_request_when_ready", newMergePullRequestWhenReadyHandler(services, logger))
+		w.Register(models.JobTypeSyncPRPreviewSurfaces, newSyncPRPreviewSurfacesHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
 		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
 		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
@@ -528,6 +529,7 @@ type prCreator interface {
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
 	// snapshot uploads (spawned by CreatePR) have either promoted or
 	// cleared their pending_snapshot_key. Called by the server's graceful
@@ -8917,6 +8919,32 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 			return err
 		}
 		return nil
+	}
+}
+
+func newSyncPRPreviewSurfacesHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input ghservice.SyncPRPreviewSurfacesPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal sync_pr_preview_surfaces payload: %w", err)
+		}
+		if input.OrgID == uuid.Nil {
+			orgID, err := parseOrgID("", ctx)
+			if err != nil {
+				return fmt.Errorf("parse org ID: %w", err)
+			}
+			input.OrgID = orgID
+		}
+		if input.RepositoryID == uuid.Nil {
+			return fmt.Errorf("repository_id is required")
+		}
+		logger.Info().
+			Str("org_id", input.OrgID.String()).
+			Str("repository_id", input.RepositoryID.String()).
+			Int("pr_number", input.PRNumber).
+			Str("head_sha", input.HeadSHA).
+			Msg("starting sync_pr_preview_surfaces job")
+		return services.PR.SyncPRPreviewSurfaces(ctx, input)
 	}
 }
 

@@ -80,7 +80,9 @@ var previewStartupCacheTestCols = []string{
 }
 
 var repositoryPreviewPolicyTestCols = []string{
-	"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "updated_by_user_id", "created_at", "updated_at",
+	"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode",
+	"pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled",
+	"updated_by_user_id", "created_at", "updated_at",
 }
 
 var sessionPreviewPrewarmRunTestCols = []string{
@@ -93,10 +95,11 @@ var sessionPreviewPrewarmRunTestCols = []string{
 var prPreviewStateTestCols = []string{
 	"id", "org_id", "repo_id", "pr_number", "github_comment_id",
 	"last_preview_instance_id", "last_screenshot_blob_path", "last_visual_diff_blob_path",
-	"base_snapshot_key", "status", "created_at", "updated_at",
+	"base_snapshot_key", "status", "last_surface_sync_sha", "last_surface_sync_at",
+	"last_surface_sync_error", "created_at", "updated_at",
 }
 
-func TestPreviewStore_UpdateRepositoryPreviewPolicy_PreservesUnspecifiedModes(t *testing.T) {
+func TestPreviewStore_UpsertRepositoryPreviewPolicy_PreservesUnspecifiedModes(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -112,12 +115,12 @@ func TestPreviewStore_UpdateRepositoryPreviewPolicy_PreservesUnspecifiedModes(t 
 	sessionMode := models.PreviewSessionPrewarmModeSmart
 
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewAnyArgs(5)...).
+		WithArgs(previewAnyArgs(8)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(sessionMode), userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(sessionMode), false, true, true, userID, now, now))
 
-	policy, err := store.UpdateRepositoryPreviewPolicy(context.Background(), orgID, repoID, userID, nil, &sessionMode)
-	require.NoError(t, err, "UpdateRepositoryPreviewPolicy should accept a session-only update")
+	policy, err := store.UpsertRepositoryPreviewPolicy(context.Background(), orgID, repoID, userID, RepositoryPreviewPolicyPatch{SessionPrewarmMode: &sessionMode})
+	require.NoError(t, err, "UpsertRepositoryPreviewPolicy should accept a session-only update")
 	require.Equal(t, models.PreviewAutoModeWarm, policy.AutoMode, "session-only update should preserve existing auto mode")
 	require.Equal(t, sessionMode, policy.SessionPrewarmMode, "session-only update should persist the requested mode")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -3286,12 +3289,12 @@ func TestPreviewStore_UpsertPRPreviewState(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO pr_preview_state").
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(12)...).
 		WillReturnRows(
 			pgxmock.NewRows(prPreviewStateTestCols).
 				AddRow(generatedID, orgID, repoID, 123, &commentID,
 					&previewID, "blob://screenshot", "blob://diff",
-					"snap-key", "running", now, now),
+					"snap-key", "running", "", nil, "", now, now),
 		)
 
 	err = store.UpsertPRPreviewState(context.Background(), state)
@@ -3319,7 +3322,7 @@ func TestPreviewStore_GetPRPreviewState(t *testing.T) {
 			pgxmock.NewRows(prPreviewStateTestCols).
 				AddRow(stateID, orgID, repoID, 42, nil,
 					nil, "", "",
-					"", "never_started", now, now),
+					"", "never_started", "", nil, "", now, now),
 		)
 
 	state, err := store.GetPRPreviewState(context.Background(), orgID, repoID, 42)
@@ -4231,6 +4234,52 @@ func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
 	deleted, err := NewPreviewStore(mock).DeleteExpiredDependencyCacheLocations(context.Background(), cutoff)
 	require.NoError(t, err, "DeleteExpiredDependencyCacheLocations should delete stale location hints")
 	require.Equal(t, int64(7), deleted, "DeleteExpiredDependencyCacheLocations should report deleted rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_RepositoryPreviewReadyExcludesLatestBrokenAttempt(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+
+	mock.ExpectQuery("WITH readiness AS[\\s\\S]+latest_status[\\s\\S]+NOT IN \\('failed', 'unavailable'\\)").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"ready"}).AddRow(false))
+
+	ready, err := store.RepositoryPreviewReady(context.Background(), uuid.New(), uuid.New())
+
+	require.NoError(t, err, "RepositoryPreviewReady should evaluate readiness query")
+	require.False(t, ready, "RepositoryPreviewReady should return false when the latest configured attempt is broken")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_RunWithPRPreviewSurfaceLockUsesAdvisoryTransactionLock(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	called := false
+
+	mock.ExpectBegin()
+	mock.ExpectExec("SELECT pg_advisory_xact_lock\\(hashtextextended\\(@lock_key, 0\\)\\)").
+		WithArgs(previewAnyArgs(1)...).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
+	mock.ExpectCommit()
+
+	err = store.RunWithPRPreviewSurfaceLock(context.Background(), uuid.New(), uuid.New(), 42, func(context.Context) error {
+		called = true
+		return nil
+	})
+
+	require.NoError(t, err, "RunWithPRPreviewSurfaceLock should commit after the protected operation")
+	require.True(t, called, "RunWithPRPreviewSurfaceLock should execute the protected function")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
