@@ -100,6 +100,35 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("Assistant replied")).toBeInTheDocument();
   });
 
+  it("anchors grouped hidden logs by the first hidden transcript entry", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "log",
+        data: makeLog({ id: 1, level: "info", message: "hidden diagnostic" }),
+        transcriptEntryId: "log_1",
+      },
+      {
+        kind: "log",
+        data: makeLog({ id: 2, level: "info", message: "second hidden diagnostic" }),
+        transcriptEntryId: "log_2",
+      },
+    ];
+
+    const { container } = render(
+      <ChatTimeline
+        entries={entries}
+        isRunning={false}
+        getEntryContainerProps={(entry) => ({
+          "data-session-entry-id": entry.transcriptEntryId,
+        })}
+      />,
+    );
+
+    expect(container.querySelector('[data-session-entry-id="log_1"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-session-entry-id="log_2"]')).toBeNull();
+    expect(screen.getByText("2 log entries")).toBeInTheDocument();
+  });
+
   it("scopes user message bubbles for readable text selection", () => {
     const entries: TimelineEntry[] = [
       { kind: "message", data: makeMessage({ id: 1, content: "Selectable user prompt", role: "user" }) },

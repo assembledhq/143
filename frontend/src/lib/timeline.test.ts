@@ -335,11 +335,41 @@ describe("flattenTranscriptWindows", () => {
       },
     ];
 
-    const { messages, logs, humanInputs } = flattenTranscriptWindows(turns);
+    const { messages, logs, humanInputs, messageEntryIds, logEntryIds, humanInputEntryIds } = flattenTranscriptWindows(turns);
 
     expect(messages).toEqual([message]);
     expect(logs).toEqual([toolUse]);
     expect(humanInputs).toEqual([humanInput]);
+    expect(messageEntryIds.get(1)).toBe("msg_1");
+    expect(logEntryIds.get(10)).toBe("tuse_10");
+    expect(humanInputEntryIds.get("hir-1")).toBe("hiq_hir-1");
+  });
+
+  it("attaches transcript entry ids to rendered timeline entries", () => {
+    const message = makeMessage({ id: 1, created_at: "2026-01-01T00:00:00Z", role: "user", content: "hi" });
+    const toolUse = makeLog({ id: 10, created_at: "2026-01-01T00:00:10Z", level: "tool_use" });
+    const toolResult = makeLog({
+      id: 11,
+      created_at: "2026-01-01T00:00:11Z",
+      level: "output",
+      metadata: { type: "tool_result" },
+    });
+    const turns: SessionTranscriptTurn[] = [
+      {
+        turn_number: 1,
+        started_at: message.created_at,
+        entries: [
+          { id: "msg_1", kind: "message", created_at: message.created_at, message_id: 1, message },
+          { id: "tuse_10", kind: "tool_use", created_at: toolUse.created_at, log_id: 10, log: toolUse },
+          { id: "tres_11", kind: "tool_result", created_at: toolResult.created_at, log_id: 11, log: toolResult },
+        ],
+      },
+    ];
+
+    const { messages, logs, messageEntryIds, logEntryIds } = flattenTranscriptWindows(turns);
+    const entries = buildTimeline(messages, logs, { messageEntryIds, logEntryIds });
+
+    expect(entries.map((entry) => entry.transcriptEntryId)).toEqual(["msg_1", "tuse_10"]);
   });
 
   it("de-duplicates records that repeat across overlapping turns/pages", () => {
@@ -370,7 +400,7 @@ describe("flattenTranscriptWindows", () => {
       },
     ];
 
-    expect(flattenTranscriptWindows(turns)).toEqual({ messages: [], logs: [], humanInputs: [] });
-    expect(flattenTranscriptWindows(undefined)).toEqual({ messages: [], logs: [], humanInputs: [] });
+    expect(flattenTranscriptWindows(turns)).toMatchObject({ messages: [], logs: [], humanInputs: [] });
+    expect(flattenTranscriptWindows(undefined)).toMatchObject({ messages: [], logs: [], humanInputs: [] });
   });
 });
