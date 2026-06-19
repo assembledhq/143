@@ -233,6 +233,23 @@ func TestRoutineAppDeployLeavesUnchangedCaddyRunning(t *testing.T) {
     docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should not unconditionally rebuild Caddy because compose may recreate the Cloudflare-facing origin")
 }
 
+func TestAppDeployReconcilesCaddyWhenServiceConfigChanges(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, "caddy_service_config_fingerprint", "app deploy should fingerprint the caddy compose service block")
+	require.Contains(t, deployText, "compose_service_fingerprint /opt/143/docker-compose.app.yml caddy", "caddy service fingerprint should use the app compose caddy service block")
+	require.Contains(t, deployText, "caddy_service_config_changed", "caddy reconcile should track compose service config drift separately")
+	require.Contains(t, deployText, `|| [ "$caddy_service_config_changed" -eq 1 ]`, "caddy reconcile should recreate the service when compose wiring changes")
+
+	changedFn := extractShellFunction(t, deployText, "caddy_service_config_changed", "commit_caddy_service_config_fingerprint")
+	require.Contains(t, changedFn, `[ ! -f "$fp_file" ]`, "first deploy with service fingerprinting should reconcile Caddy once")
+	require.Contains(t, changedFn, `printf '%s\n' "$next" > "$fp_file.new"`, "service fingerprint should only be staged until Caddy reconciliation succeeds")
+}
+
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	t.Parallel()
 
