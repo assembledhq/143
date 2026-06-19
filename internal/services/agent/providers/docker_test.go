@@ -803,7 +803,7 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 
 	mock := &mockDockerClient{}
 	mock.containerListFn = func(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
-		require.Contains(t, options.Filters.Get("network"), "143-sandbox", "CountLiveSandboxes should scope counting to the local sandbox network")
+		require.Empty(t, options.Filters.Get("network"), "CountLiveSandboxes should include managed sandboxes on both default and static-egress networks")
 		return []container.Summary{
 			{
 				ID:     "labeled-sandbox",
@@ -814,6 +814,24 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 				ID:     "legacy-sandbox",
 				Image:  "ghcr.io/assembledhq/143-sandbox:latest",
 				Labels: map[string]string{},
+				NetworkSettings: &container.NetworkSettingsSummary{
+					Networks: map[string]*network.EndpointSettings{
+						"143-sandbox": {},
+					},
+				},
+			},
+			{
+				ID:    "static-egress-sandbox",
+				Image: "busybox:1.36.1",
+				Labels: map[string]string{
+					SandboxLabelManaged: "true",
+					SandboxLabelType:    "sandbox",
+				},
+				NetworkSettings: &container.NetworkSettingsSummary{
+					Networks: map[string]*network.EndpointSettings{
+						"143-sandbox-static-egress": {},
+					},
+				},
 			},
 			{
 				ID:     "dns-sidecar",
@@ -825,6 +843,16 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 				Image:  "ghcr.io/assembledhq/143:latest",
 				Labels: map[string]string{},
 			},
+			{
+				ID:     "unrelated-legacy-looking-container",
+				Image:  "ghcr.io/assembledhq/143-sandbox:latest",
+				Labels: map[string]string{},
+				NetworkSettings: &container.NetworkSettingsSummary{
+					Networks: map[string]*network.EndpointSettings{
+						"some-other-network": {},
+					},
+				},
+			},
 		}, nil
 	}
 	p := NewDockerProvider(mock, newTestLogger())
@@ -832,7 +860,7 @@ func TestDockerProvider_CountLiveSandboxes(t *testing.T) {
 	count, err := p.CountLiveSandboxes(context.Background())
 
 	require.NoError(t, err, "CountLiveSandboxes should return the Docker count without error")
-	require.Equal(t, 2, count, "CountLiveSandboxes should include labeled and legacy sandbox containers but skip sidecars")
+	require.Equal(t, 3, count, "CountLiveSandboxes should include default, static-egress, and legacy sandbox containers but skip sidecars")
 }
 
 func TestDockerProvider_CountLiveSandboxesListError(t *testing.T) {
@@ -1002,6 +1030,31 @@ func TestDockerProvider_Create(t *testing.T) {
 		_, err := p.Create(context.Background(), cfg)
 		require.NoError(t, err)
 		require.Empty(t, capturedHostConfig.StorageOpt, "StorageOpt should not be set when DiskLimitGB is 0")
+	})
+
+	t.Run("uses per-sandbox static egress network and resolv.conf", func(t *testing.T) {
+		t.Parallel()
+
+		var capturedHostConfig *container.HostConfig
+
+		mock := &mockDockerClient{}
+		mock.containerCreateFn = func(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error) {
+			capturedHostConfig = hostConfig
+			return container.CreateResponse{ID: "static-egress"}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger(), WithResolvConf("/etc/143/sandbox-resolv.conf"))
+
+		cfg := agent.DefaultSandboxConfig()
+		cfg.NetworkName = "143-sandbox-static-egress"
+		cfg.ResolvConfPath = "/etc/143/sandbox-static-egress-resolv.conf"
+		cfg.EgressMode = agent.SandboxEgressModeStatic
+		sb, err := p.Create(context.Background(), cfg)
+		require.NoError(t, err, "Create should succeed with static egress sandbox network")
+		require.Equal(t, container.NetworkMode("143-sandbox-static-egress"), capturedHostConfig.NetworkMode, "container should join the selected static egress network")
+		require.Len(t, capturedHostConfig.Mounts, 1, "container should mount the selected resolv.conf")
+		require.Equal(t, "/etc/143/sandbox-static-egress-resolv.conf", capturedHostConfig.Mounts[0].Source, "container should use the selected static egress resolver")
+		require.Equal(t, "143-sandbox-static-egress", sb.Metadata["network"], "sandbox metadata should persist the selected network")
+		require.Equal(t, agent.SandboxEgressModeStatic, sb.Metadata[agent.SandboxMetadataEgressMode], "sandbox metadata should persist the egress mode")
 	})
 
 	t.Run("injects env vars into container", func(t *testing.T) {
@@ -2441,6 +2494,34 @@ func TestDockerProvider_WriteFile(t *testing.T) {
 			require.NoError(t, err, "WriteFile should not return an error")
 		})
 	}
+}
+
+func TestDockerProvider_ExecWithStdin(t *testing.T) {
+	t.Parallel()
+
+	var gotConfig container.ExecOptions
+	mock := &mockDockerClient{
+		containerExecCreateFn: func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			gotConfig = config
+			return container.ExecCreateResponse{ID: "test-exec-id"}, nil
+		},
+	}
+	p := NewDockerProvider(mock, newTestLogger())
+	sb := &agent.Sandbox{
+		ID:      "test-container",
+		WorkDir: "/workspace/repo",
+		Env:     map[string]string{"NODE_ENV": "test"},
+	}
+
+	exitCode, err := p.ExecWithStdin(context.Background(), sb, "tar xzf - -C /workspace/repo", strings.NewReader("archive-bytes"), io.Discard, io.Discard)
+	require.NoError(t, err, "ExecWithStdin should stream stdin without error")
+	require.Equal(t, 0, exitCode, "ExecWithStdin should return the inspected exit code")
+	require.Equal(t, []string{"sh", "-c", "tar xzf - -C /workspace/repo"}, gotConfig.Cmd, "ExecWithStdin should run the requested shell command")
+	require.True(t, gotConfig.AttachStdin, "ExecWithStdin should attach stdin")
+	require.True(t, gotConfig.AttachStdout, "ExecWithStdin should attach stdout")
+	require.True(t, gotConfig.AttachStderr, "ExecWithStdin should attach stderr")
+	require.Equal(t, "/workspace/repo", gotConfig.WorkingDir, "ExecWithStdin should use the sandbox working directory")
+	require.Contains(t, gotConfig.Env, "NODE_ENV=test", "ExecWithStdin should pass sandbox environment variables")
 }
 
 func TestDockerProvider_Options(t *testing.T) {

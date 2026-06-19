@@ -15,7 +15,9 @@ var templateFS embed.FS
 var templates *template.Template
 
 func init() {
-	templates = template.Must(template.ParseFS(templateFS, "templates/*.template"))
+	templates = template.Must(template.New("").Funcs(template.FuncMap{
+		"join": strings.Join,
+	}).ParseFS(templateFS, "templates/*.template"))
 }
 
 // render executes a named template with the given data and returns the result.
@@ -97,6 +99,31 @@ func DirectionAlignmentPrompt() string {
 // ComplexityEstimatePrompt returns the system prompt for complexity estimation.
 func ComplexityEstimatePrompt() string {
 	return render("complexity_estimate_prompt.template", nil)
+}
+
+// ─── Preview ───────────────────────────────────────────────────────────────
+
+// SessionPreviewPrewarmClassifierPrompt returns the system prompt for deciding
+// whether speculative session preview work is useful.
+func SessionPreviewPrewarmClassifierPrompt() string {
+	return render("session_preview_prewarm_classifier.template", nil)
+}
+
+type SessionPreviewPrewarmClassifierUserPromptData struct {
+	RepositoryFullName string
+	RepositoryLanguage string
+	SessionSource      string
+	UserPrompt         string
+	IssueLabels        []string
+	IssueType          string
+	PreviewHistory     string
+	CapacitySummary    string
+	Phase              string
+	ChangedFileKinds   []string
+}
+
+func SessionPreviewPrewarmClassifierUserPrompt(data SessionPreviewPrewarmClassifierUserPromptData) string {
+	return render("session_preview_prewarm_classifier_user.template", data)
 }
 
 // ─── Feedback ────────────────────────────────────────────────────────────────
@@ -240,6 +267,40 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 	return render("review_loop_fix.template", data)
 }
 
+// ─── Automations ────────────────────────────────────────────────────────────
+
+type AutomationGoalFastImprovementPromptData struct {
+	MaxGoalChars int
+}
+
+func AutomationGoalFastImprovementPrompt(data AutomationGoalFastImprovementPromptData) string {
+	return render("automation_goal_fast_improvement.template", data)
+}
+
+type AutomationGoalProposalJudgePromptData struct {
+	MaxGoalChars int
+}
+
+func AutomationGoalProposalJudgePrompt(data AutomationGoalProposalJudgePromptData) string {
+	return render("automation_goal_proposal_judge.template", data)
+}
+
+type AutomationGoalDeepImprovementPromptData struct {
+	MaxGoalChars  int
+	ImprovementID string
+	AutomationID  string
+	RepositoryID  string
+	Name          string
+	Scope         string
+	CurrentGoal   string
+	ConfigJSON    string
+	EvidenceJSON  string
+}
+
+func AutomationGoalDeepImprovementPrompt(data AutomationGoalDeepImprovementPromptData) string {
+	return render("automation_goal_deep_improvement.template", data)
+}
+
 // ─── Slack ────────────────────────────────────────────────────────────────────
 
 // SlackSummarizerPrompt returns the system prompt for Slack thread analysis.
@@ -282,6 +343,7 @@ func PRContentPrompt(data PRContentPromptData) string {
 type PRContentUserPromptData struct {
 	RepoTemplate     string   // the repo's PR template (if any)
 	ResultSummary    string   // what the agent did
+	ThreadContext    string   // summaries from all visible session threads
 	SessionTitle     string   // session title (for manual sessions)
 	IssueTitle       string   // issue title
 	IssueSource      string   // issue source (e.g. "linear", "sentry")

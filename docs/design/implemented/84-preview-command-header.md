@@ -1,6 +1,6 @@
 # Design: Preview Command Header
 
-> Status: Implemented | Last reviewed: 2026-05-22
+> Status: Implemented | Last reviewed: 2026-06-13
 
 The Preview tab should present preview access as the primary action, not as one peer button in a lifecycle-control strip.
 
@@ -27,3 +27,16 @@ The command-header pattern keeps a stable hierarchy:
 - metadata: communicate state without adding another call to action
 
 This keeps the Preview tab scalable as additional preview tooling is added.
+
+## Preview Detail Page
+
+The branch preview detail route follows the same command hierarchy. `/previews/:id` is the canonical page for opening, starting, retrying, and inspecting a preview. `?launch=1` is not a second page; it is an intent flag that starts the latest runtime when needed and opens the preview automatically once bootstrap completes.
+
+The visible page should stay small:
+
+- Header: repository title, branch, short commit SHA, quiet status text, and a `Preview actions` menu.
+- Main command card: one primary state and action such as `Open preview`, `Opening when ready`, `Start preview`, or `Retry preview`.
+- Metadata: repository, branch, commit, source, expiration, and last stopped time.
+- Details: service/infrastructure diagnostics, stable links, and request metadata hidden behind an explicit details disclosure.
+
+Debug-only implementation details such as runtime IDs and bootstrap tokens do not belong in the default surface.

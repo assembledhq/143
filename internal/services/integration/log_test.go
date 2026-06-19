@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -489,7 +490,7 @@ func TestMezmoProviderNormalizesLogEntries(t *testing.T) {
 	t.Parallel()
 
 	// Mezmo returns results under a "lines" key.
-	mezmoBody, _ := json.Marshal(map[string]any{
+	mezmoBody, err := json.Marshal(map[string]any{
 		"lines": []map[string]any{
 			{
 				"timestamp": "2026-05-28T12:00:00Z",
@@ -499,10 +500,12 @@ func TestMezmoProviderNormalizesLogEntries(t *testing.T) {
 			},
 		},
 	})
+	require.NoError(t, err, "test should build a valid Mezmo response")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(mezmoBody)
+		_, writeErr := w.Write(mezmoBody)
+		require.NoError(t, writeErr, "test server should write Mezmo response")
 	}))
 	defer server.Close()
 
@@ -516,12 +519,89 @@ func TestMezmoProviderNormalizesLogEntries(t *testing.T) {
 		Query: "level:error",
 		Since: durationPtr(time.Hour),
 	})
-	require.NoError(t, err)
+	require.NoError(t, err, "QueryLogs should accept a Mezmo lines response")
 	require.Len(t, result.Entries, 1, "should return one normalized entry")
-	require.Equal(t, "connection refused", result.Entries[0].Message)
-	require.Equal(t, "error", result.Entries[0].Level)
-	require.Equal(t, "api", result.Entries[0].Service)
-	require.Equal(t, models.ProviderMezmo, result.Entries[0].Provider)
+	require.Equal(t, "connection refused", result.Entries[0].Message, "entry message should be normalized from Mezmo payload")
+	require.Equal(t, "error", result.Entries[0].Level, "entry level should be normalized from Mezmo payload")
+	require.Equal(t, "api", result.Entries[0].Service, "entry service should be normalized from Mezmo payload")
+	require.Equal(t, models.ProviderMezmo, result.Entries[0].Provider, "entry provider should identify Mezmo")
+}
+
+func TestMezmoProviderUsesExportAPI(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 6, 10, 4, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 10, 5, 0, 0, 0, time.UTC)
+	limit := 2
+	direction := LogDirectionAsc
+
+	mezmoBody, err := json.Marshal(map[string]any{
+		"lines": []map[string]any{
+			{
+				"timestamp": start.Add(time.Minute).Format(time.RFC3339),
+				"message":   "first match",
+			},
+		},
+	})
+	require.NoError(t, err, "test should build a valid Mezmo response")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method, "Mezmo log queries should use the documented export method")
+		require.Equal(t, "/v2/export", r.URL.Path, "Mezmo log queries should use the documented v2 export path")
+		require.Equal(t, "Token test-key", r.Header.Get("Authorization"), "Mezmo log queries should send the documented access-token auth header")
+
+		query := r.URL.Query()
+		require.Equal(t, strconv.FormatInt(start.Unix(), 10), query.Get("from"), "Mezmo export should receive the lower time bound as a unix timestamp")
+		require.Equal(t, strconv.FormatInt(end.Unix(), 10), query.Get("to"), "Mezmo export should receive the upper time bound as a unix timestamp")
+		require.Equal(t, "3", query.Get("size"), "Mezmo export should request one extra record for truncation detection")
+		require.Equal(t, "head", query.Get("prefer"), "ascending queries should ask Mezmo for the first matching lines")
+		require.Equal(t, "service:api", query.Get("query"), "Mezmo export should receive the provider-native query")
+
+		w.Header().Set("Content-Type", "application/json")
+		_, writeErr := w.Write(mezmoBody)
+		require.NoError(t, writeErr, "test server should write Mezmo response")
+	}))
+	defer server.Close()
+
+	provider := NewMezmoProvider(MezmoConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	result, err := provider.QueryLogs(context.Background(), LogQueryRequest{
+		Query:     "service:api",
+		StartTime: &start,
+		EndTime:   &end,
+		Limit:     &limit,
+		Direction: &direction,
+	})
+	require.NoError(t, err, "QueryLogs should query Mezmo export successfully")
+	require.Len(t, result.Entries, 1, "QueryLogs should return the exported line")
+	require.Equal(t, "first match", result.Entries[0].Message, "QueryLogs should normalize the exported line")
+}
+
+func TestMezmoProviderRejectsDatasetScope(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Fail(t, "Mezmo provider should reject dataset scopes before sending a request")
+	}))
+	defer server.Close()
+
+	provider := NewMezmoProvider(MezmoConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		Dataset:    "production",
+		HTTPClient: server.Client(),
+	})
+
+	_, err := provider.QueryLogs(context.Background(), LogQueryRequest{
+		Query: "service:api",
+		Since: durationPtr(time.Hour),
+	})
+	require.Error(t, err, "QueryLogs should reject unsupported Mezmo dataset scopes")
+	require.Contains(t, err.Error(), "dataset scoping is not supported", "error should explain that Mezmo dataset scoping is unsupported")
 }
 
 func TestVictoriaLogsListFieldsNative(t *testing.T) {

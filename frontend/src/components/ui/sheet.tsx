@@ -29,7 +29,7 @@ function SheetOverlay({
     <DialogPrimitive.Overlay
       data-slot="sheet-overlay"
       className={cn(
-        "fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+        "fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
         className
       )}
       {...props}
@@ -41,9 +41,9 @@ type SheetSide = "left" | "right" | "top" | "bottom"
 
 const sheetSideClasses: Record<SheetSide, string> = {
   right:
-    "inset-y-0 right-0 h-full w-3/4 border-l sm:max-w-md data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right",
+    "inset-y-0 right-0 h-full w-[calc(100vw-2rem)] border-l sm:max-w-md data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right",
   left:
-    "inset-y-0 left-0 h-full w-3/4 border-r sm:max-w-sm data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left",
+    "inset-y-0 left-0 h-full w-[calc(100vw-2rem)] border-r sm:max-w-sm data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left",
   top:
     "inset-x-0 top-0 max-h-[100svh] w-full border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
   bottom:

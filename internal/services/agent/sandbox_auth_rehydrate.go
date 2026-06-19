@@ -46,6 +46,10 @@ type ContainerHoldingSessionLister interface {
 // matters — a wrong value persists until the next turn boundary.
 type OrgSettingsLoader func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error)
 
+type SandboxAuthRehydrater interface {
+	Rehydrate(ctx context.Context, sessionID uuid.UUID, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (socketPath string, err error)
+}
+
 // RehydrateSandboxAuthListeners is a one-shot startup pass that re-opens the
 // per-session GitHub credential socket listener for sessions whose containers
 // are still alive across a worker restart (preview holds keep them running).
@@ -181,8 +185,14 @@ func RehydrateSandboxAuthListeners(
 				settings = loaded
 			}
 
-			if _, err := sandboxAuth.Listen(ctx, run.ID, run, &repo, settings); err != nil {
-				rowLog.Warn().Err(err).
+			var listenErr error
+			if rehydrater, ok := sandboxAuth.(SandboxAuthRehydrater); ok {
+				_, listenErr = rehydrater.Rehydrate(ctx, run.ID, run, &repo, settings)
+			} else {
+				_, listenErr = sandboxAuth.Listen(ctx, run.ID, run, &repo, settings)
+			}
+			if listenErr != nil {
+				rowLog.Warn().Err(listenErr).
 					Str("container_id", containerID).
 					Msg("rehydrate: failed to re-open sandbox auth socket; next turn boundary will retry")
 				totalErrored++

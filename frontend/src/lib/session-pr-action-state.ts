@@ -1,4 +1,13 @@
-import type { PullRequestHealthResponse } from "./types";
+import type { PRCreationState, PRPushState, PullRequestHealthResponse } from "./types";
+
+type RepairableFailedChecksInput = Pick<PullRequestHealthResponse, "can_fix_tests" | "failing_test_count" | "checks">;
+
+export function hasRepairableFailedChecks(health: RepairableFailedChecksInput | null | undefined): boolean {
+  if (!health) {
+    return false;
+  }
+  return health.can_fix_tests || health.failing_test_count > 0 || (health.checks ?? []).some((check) => check.status === "failed");
+}
 
 export type LifecycleActionState = {
   visible: boolean;
@@ -25,7 +34,7 @@ export type CreatePRActionInput = {
   queueingPR: boolean;
   creatingPR: boolean;
   finalizingPR: boolean;
-  prState?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  prState?: PRCreationState;
   prCreationError?: string;
   localError?: string;
   hasRecoverableError: boolean;
@@ -154,7 +163,7 @@ export type PushChangesActionInput = {
   ghBlocked: boolean;
   queueingPush: boolean;
   pushingChanges: boolean;
-  pushState?: "idle" | "queued" | "pushing" | "succeeded" | "failed";
+  pushState?: PRPushState;
   pushError?: string;
   localError?: string;
 };

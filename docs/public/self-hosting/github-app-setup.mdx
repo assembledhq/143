@@ -3,7 +3,7 @@ title: GitHub App setup
 description: Create and configure the GitHub App required for a self-hosted 143 deployment.
 section: Self-hosting
 order: 31
-status: beta
+status: stable
 audience: operator
 tags:
   - github
@@ -38,6 +38,31 @@ You will need:
 ## Webhooks
 
 Webhook delivery must reach your public API origin. Use a stable HTTPS URL and verify that the webhook secret in GitHub matches the deployment secret.
+
+## Permissions and events
+
+Configure these GitHub App permissions:
+
+- Repository Contents: Read & Write.
+- Repository Pull requests: Read & Write.
+- Repository Workflows: Read & Write.
+- Repository Issues: Read.
+- Repository Checks: Read.
+- Repository Deployments: Read.
+- Repository Metadata: Read.
+- Organization Members: Read.
+
+Subscribe the app to these webhook events:
+
+- Installation.
+- Installation repositories.
+- Pull request.
+- Pull request review.
+- Pull request review comment.
+- Deployment status.
+- Organization.
+
+The Organization Members permission and Organization webhook event power GitHub organization auto-join by allowing 143 to sync org member rosters and react when members are added, removed, or the GitHub organization is renamed.
 
 <Callout type="warning" title="Secrets">
 Do not commit the GitHub App private key, client secret, or webhook secret. Store them through the deployment's encrypted secret flow.

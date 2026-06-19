@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 import { AutopilotPageContent } from "./autopilot-page-content";
 import type { AutopilotQueueRow } from "@/lib/types";
 
@@ -17,6 +17,13 @@ vi.mock("@/hooks/use-analyze", () => ({
     handleAnalyze: vi.fn(),
     isAnalyzing: false,
     isPending: false,
+  }),
+}));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { id: "user-1", role: "admin" },
+    isLoading: false,
   }),
 }));
 
@@ -38,6 +45,8 @@ const queueRow: AutopilotQueueRow = {
   available_action: "start_run",
 };
 
+let queueRows: AutopilotQueueRow[] = [queueRow];
+
 vi.mock("./use-autopilot-page-data", () => ({
   useAutopilotPageData: () => ({
     isLoading: false,
@@ -52,7 +61,7 @@ vi.mock("./use-autopilot-page-data", () => ({
       weightsSummary: "Default weights",
     },
     queue: {
-      data: [queueRow],
+      data: queueRows,
       meta: {
         summary: {
           top_issue_id: "issue-1",
@@ -84,6 +93,10 @@ vi.mock("@/components/autopilot-proposal-card", () => ({
 }));
 
 describe("AutopilotPageContent", () => {
+  beforeEach(() => {
+    queueRows = [queueRow];
+  });
+
   it("shows aggregate summary cards without duplicating the top opportunity", async () => {
     renderWithProviders(<AutopilotPageContent />);
 
@@ -108,5 +121,234 @@ describe("AutopilotPageContent", () => {
     const sourceHeader = await screen.findByText("Source");
     const tableHeader = sourceHeader.closest("thead");
     expect(tableHeader).toHaveClass("sticky", "top-0", "z-10", "bg-card");
+  });
+
+  it("offers to create a session for a queue issue that has no linked session yet", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: null,
+        latest_session: undefined,
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+
+    expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
+  });
+
+  it("lets admins start a blocked queue issue and attach session notes", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: "Autopilot skipped this issue.",
+        latest_session: undefined,
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
+
+    const notes = screen.getByLabelText("Session notes");
+    await userEvent.type(notes, "Focus on the mobile checkout regression.");
+    expect(notes).toHaveValue("Focus on the mobile checkout regression.");
+    expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
+  });
+
+  it("lets admins start a blocked issue that already has a linked session", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: "Autopilot skipped this issue.",
+        latest_session: { id: "sess-1", title: "Existing session", updated_at: "2024-01-01T00:00:00Z" },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
+  });
+
+  it("lets admins start a failed (retry) issue with a linked session instead of showing Retry", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "retry",
+        latest_session: { id: "sess-1", title: "Failed session", updated_at: "2024-01-01T00:00:00Z" },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Start run" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer to start a run for a blocked issue without a repository", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "blocked",
+        action_disabled_reason: "No repository selected",
+        repo: undefined,
+        latest_session: { id: "sess-1", title: "Existing session", updated_at: "2024-01-01T00:00:00Z" },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Blocked" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
+  });
+
+  it("uses Open preview as the primary action for a current ready runtime", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Open preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open PR" })).not.toBeInTheDocument();
+  });
+
+  it("makes stale previews update-first while keeping stale open secondary", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "def456",
+          new_commits_available: true,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Update to latest" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open stale preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows Retry preview instead of generic Open for failed preview rows", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "failed",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows Start preview for preview targets without a runtime", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          status: "target_created",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Start preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("shows a disabled Starting button for in-progress preview launches", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "starting",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    const btn = await screen.findByRole("button", { name: "Starting..." });
+    expect(btn).toBeInTheDocument();
+    expect(btn).toBeDisabled();
+  });
+
+  it("does not let a preview target override view_run for an in-progress session", async () => {
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "view_run",
+        display_run_state: "running",
+        latest_session: { id: "session-1", title: "Fix auth", updated_at: new Date().toISOString() },
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "abc123",
+          new_commits_available: false,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("link", { name: "View run" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
   });
 });

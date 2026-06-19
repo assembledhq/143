@@ -56,13 +56,21 @@ const (
 	DefaultInstallTimeoutSeconds = 420
 	MaxInstallTimeoutSeconds     = 1800
 
-	DefaultPreviewDiskMiB      = 10 * 1024
-	DefaultSingleServiceMemory = 384
-	DefaultMultiServiceMemory  = 768
-	DefaultInfraServiceMemory  = 1024
-	MaxPreviewCPUMillis        = 2000
-	MaxPreviewMemoryMiB        = 1024
-	MaxPreviewEphemeralDiskMiB = 10 * 1024
+	DefaultPreviewDiskMiB = 10 * 1024
+	// Per-topology memory defaults (MiB). Large frontend dev servers (e.g. an
+	// rspack/webpack build running alongside a backend service) routinely need
+	// several GiB; the previous 384/768/1024 defaults caused the dev server to
+	// be OOM-killed mid-response, truncating bundles and serving a blank page.
+	DefaultSingleServiceMemory = 1024
+	DefaultMultiServiceMemory  = 2048
+	DefaultInfraServiceMemory  = 4096
+	MaxPreviewCPUMillis        = models.MaxPreviewMaxCPUMillis
+	// MaxPreviewMemoryMiB is the ceiling a repo may request via
+	// preview.resources.{requests,limits}.memory in .143/config.json. Defaults
+	// stay modest (above) to bound per-worker capacity; repos that need more
+	// opt in explicitly up to this cap.
+	MaxPreviewMemoryMiB        = models.MaxPreviewMaxMemoryMiB
+	MaxPreviewEphemeralDiskMiB = models.MaxPreviewMaxEphemeralDiskMiB
 )
 
 var ErrInvalidConfig = errors.New("invalid preview config")
@@ -467,9 +475,67 @@ func extractPreviewSection(data []byte) ([]byte, error) {
 // ValidateConfig
 // =============================================================================
 
+// ResourcePolicy is the effective org resource policy for repo-authored
+// preview.resources requests. Admin settings may lower these values, but they
+// cannot raise them above the platform hard caps.
+type ResourcePolicy struct {
+	AllowRepoResourceRequests bool
+	MaxCPUMillis              int
+	MaxMemoryMiB              int
+	MaxDiskMiB                int
+}
+
+func defaultResourcePolicy() ResourcePolicy {
+	return ResourcePolicy{
+		AllowRepoResourceRequests: true,
+		MaxCPUMillis:              MaxPreviewCPUMillis,
+		MaxMemoryMiB:              MaxPreviewMemoryMiB,
+		MaxDiskMiB:                MaxPreviewEphemeralDiskMiB,
+	}
+}
+
+func ResourcePolicyFromOrgSettings(settings models.OrgSettings) ResourcePolicy {
+	return normalizeResourcePolicy(ResourcePolicy{
+		AllowRepoResourceRequests: settings.SandboxResources.EffectiveAllowRepoResourceRequests(),
+		MaxCPUMillis:              settings.SandboxResources.PreviewMaxCPUMillis,
+		MaxMemoryMiB:              settings.SandboxResources.PreviewMaxMemoryMiB,
+		MaxDiskMiB:                settings.SandboxResources.PreviewMaxEphemeralDiskMiB,
+	})
+}
+
+func normalizeResourcePolicy(policy ResourcePolicy) ResourcePolicy {
+	defaults := defaultResourcePolicy()
+	if policy.MaxCPUMillis <= 0 {
+		policy.MaxCPUMillis = defaults.MaxCPUMillis
+	}
+	if policy.MaxCPUMillis > MaxPreviewCPUMillis {
+		policy.MaxCPUMillis = MaxPreviewCPUMillis
+	}
+	if policy.MaxMemoryMiB <= 0 {
+		policy.MaxMemoryMiB = defaults.MaxMemoryMiB
+	}
+	if policy.MaxMemoryMiB > MaxPreviewMemoryMiB {
+		policy.MaxMemoryMiB = MaxPreviewMemoryMiB
+	}
+	if policy.MaxDiskMiB <= 0 {
+		policy.MaxDiskMiB = defaults.MaxDiskMiB
+	}
+	if policy.MaxDiskMiB > MaxPreviewEphemeralDiskMiB {
+		policy.MaxDiskMiB = MaxPreviewEphemeralDiskMiB
+	}
+	return policy
+}
+
 // ValidateConfig checks all structural and security constraints on a parsed config.
 func ValidateConfig(cfg *models.PreviewConfig) []string {
+	return ValidateConfigWithResourcePolicy(cfg, defaultResourcePolicy())
+}
+
+// ValidateConfigWithResourcePolicy checks structural/security constraints using
+// the effective org resource policy for preview.resources.
+func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy ResourcePolicy) []string {
 	var errs []string
+	resourcePolicy = normalizeResourcePolicy(resourcePolicy)
 
 	// Primary must reference an existing service.
 	if cfg.Primary == "" {
@@ -522,7 +588,7 @@ func ValidateConfig(cfg *models.PreviewConfig) []string {
 	}
 
 	errs = append(errs, validatePreviewInstallConfig(cfg.Install)...)
-	errs = append(errs, validatePreviewResources(cfg.Resources)...)
+	errs = append(errs, validatePreviewResources(cfg.Resources, resourcePolicy)...)
 
 	// Per-infrastructure validation.
 	for name, infra := range cfg.Infrastructure {
@@ -700,10 +766,34 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 			field := fmt.Sprintf("preview.install.cache.paths[%d]", i)
 			errs = append(errs, validatePreviewDependencyCachePath(field, path, false)...)
 		}
+		if install.Cache.PackageManager != nil {
+			for i, include := range install.Cache.PackageManager.Include {
+				field := fmt.Sprintf("preview.install.cache.package_manager.include[%d]", i)
+				if !knownPreviewPackageManager(include) {
+					errs = append(errs, fmt.Sprintf("%s: unknown package manager %q", field, include))
+				}
+			}
+			for i, path := range install.Cache.PackageManager.Paths {
+				field := fmt.Sprintf("preview.install.cache.package_manager.paths[%d]", i)
+				errs = append(errs, validatePreviewPackageManagerCachePath(field, path)...)
+			}
+		}
+		if install.Cache.Build != nil {
+			for i, path := range install.Cache.Build.Paths {
+				field := fmt.Sprintf("preview.install.cache.build.paths[%d]", i)
+				errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
+			}
+		}
 	}
 	if paths, enabled := ResolvePreviewInstallCachePaths(install); enabled {
 		for i, path := range paths {
 			field := fmt.Sprintf("preview.install effective cache path[%d]", i)
+			errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
+		}
+	}
+	if paths, enabled := ResolvePreviewBuildCachePaths(install); enabled {
+		for i, path := range paths {
+			field := fmt.Sprintf("preview.install effective build cache path[%d]", i)
 			errs = append(errs, validatePreviewDependencyCachePath(field, path, true)...)
 		}
 	}
@@ -719,6 +809,15 @@ func validatePreviewInstallConfig(install *models.PreviewInstallConfig) []string
 		errs = append(errs, fmt.Sprintf("preview.install.timeout_seconds must be between 1 and %d seconds when set", MaxInstallTimeoutSeconds))
 	}
 	return errs
+}
+
+func knownPreviewPackageManager(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "npm", "pnpm", "yarn", "bun", "pip", "uv", "poetry", "go":
+		return true
+	default:
+		return false
+	}
 }
 
 func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []string {
@@ -738,8 +837,11 @@ func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []str
 			break
 		}
 	}
-	if clean == ".143/cache/preview-install" || strings.HasPrefix(clean, ".143/cache/preview-install/") {
+	if dependencyCachePathTargetsPreviewInstallMarkers(filepath.ToSlash(clean)) {
 		errs = append(errs, fmt.Sprintf("%s: path %q must not target preview install markers", field, raw))
+	}
+	if dependencyCachePathTargetsPlatformCache(filepath.ToSlash(clean)) {
+		errs = append(errs, fmt.Sprintf("%s: path %q must not target platform preview cache", field, raw))
 	}
 	if !validPreviewInstallCleanPath.MatchString(raw) {
 		errs = append(errs, fmt.Sprintf("%s: path %q contains unsupported characters", field, raw))
@@ -748,6 +850,35 @@ func validatePreviewDependencyCachePath(field, raw string, allowGlob bool) []str
 		errs = append(errs, fmt.Sprintf("%s: path %q glob paths are not allowed", field, raw))
 	}
 	return errs
+}
+
+func validatePreviewPackageManagerCachePath(field, raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{field + " is required"}
+	}
+	if strings.HasPrefix(raw, "/") {
+		return []string{fmt.Sprintf("%s: path %q must be a relative path", field, raw)}
+	}
+	if strings.Contains(raw, "*") {
+		return []string{fmt.Sprintf("%s: path %q glob paths are not allowed", field, raw)}
+	}
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+	if clean == "." {
+		return []string{fmt.Sprintf("%s: path %q is too broad to cache", field, raw)}
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return []string{fmt.Sprintf("%s: path %q escapes the sandbox home", field, raw)}
+	}
+	sensitive := []string{".ssh", ".gnupg", ".codex", ".claude", ".config/gh", ".143"}
+	for _, forbidden := range sensitive {
+		if clean == forbidden || strings.HasPrefix(clean, forbidden+"/") || strings.HasPrefix(forbidden, clean+"/") {
+			return []string{fmt.Sprintf("%s: path %q must not target sensitive sandbox home state", field, raw)}
+		}
+	}
+	if !validPreviewInstallCleanPath.MatchString(raw) {
+		return []string{fmt.Sprintf("%s: path %q contains unsupported characters", field, raw)}
+	}
+	return nil
 }
 
 func defaultPreviewInstallConfig(install *models.PreviewInstallConfig) {
@@ -776,6 +907,9 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 		if clean == "" || clean == "." {
 			return
 		}
+		if dependencyCachePathTargetsPreviewInstallMarkers(clean) || dependencyCachePathTargetsPlatformCache(clean) {
+			return
+		}
 		if _, ok := seen[clean]; ok {
 			return
 		}
@@ -797,6 +931,223 @@ func ResolvePreviewInstallCachePaths(install *models.PreviewInstallConfig) ([]st
 	}
 	sort.Strings(paths)
 	return paths, len(paths) > 0
+}
+
+// ResolvePreviewBuildCachePaths returns the effective build-artifact cache
+// paths and whether build caching is enabled for this install config. Build
+// caching is default-on when dependency caching is on and a path can be
+// inferred: JS lockfiles imply Turborepo's local cache locations next to the
+// lockfile. Explicit paths come from preview.install.cache.build.paths.
+func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]string, bool) {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Build != nil && install.Cache.Build.Enabled != nil && !*install.Cache.Build.Enabled {
+		return nil, false
+	}
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(raw string) {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+		if clean == "" || clean == "." {
+			return
+		}
+		if dependencyCachePathTargetsPreviewInstallMarkers(clean) || dependencyCachePathTargetsPlatformCache(clean) {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	if install.Cache != nil && install.Cache.Build != nil {
+		for _, path := range install.Cache.Build.Paths {
+			add(path)
+		}
+	}
+	for _, lockfile := range install.Lockfiles {
+		for _, inferred := range inferPreviewBuildCachePaths(lockfile) {
+			add(inferred)
+		}
+	}
+	sort.Strings(paths)
+	return paths, len(paths) > 0
+}
+
+// CacheRestorablePreviewInstallVerifyPaths returns the verify paths that can
+// be satisfied by dependency cache restores. Platform-owned cache paths are
+// intentionally ignored here for compatibility with existing configs: they may
+// still be valid after a normal install, but restored dependency blobs never
+// contain them.
+func CacheRestorablePreviewInstallVerifyPaths(verifyPaths []string) []string {
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, len(verifyPaths))
+	for _, raw := range verifyPaths {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+		if clean == "" || clean == "." || dependencyCachePathTargetsPlatformCache(clean) {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	return paths
+}
+
+// inferPreviewBuildCachePaths maps a JS lockfile to the Turborepo local cache
+// directories used by turbo >=1.9 (node_modules/.cache/turbo) and older or
+// explicitly configured setups (.turbo/cache), rooted at the lockfile's
+// directory.
+func inferPreviewBuildCachePaths(lockfile string) []string {
+	clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(lockfile)))
+	if clean == "" || clean == "." {
+		return nil
+	}
+	switch filepath.Base(clean) {
+	case "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb":
+	default:
+		return nil
+	}
+	dir := pathDir(clean)
+	join := func(p string) string {
+		if dir == "." {
+			return p
+		}
+		return dir + "/" + p
+	}
+	return []string{join("node_modules/.cache/turbo"), join(".turbo/cache")}
+}
+
+func ResolvePreviewInstallPackageManagerCachePaths(install *models.PreviewInstallConfig) ([]string, []string, bool) {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return nil, nil, false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return nil, nil, false
+	}
+	if install.Cache != nil && install.Cache.PackageManager != nil && install.Cache.PackageManager.Enabled != nil && !*install.Cache.PackageManager.Enabled {
+		return nil, nil, false
+	}
+	managersSeen := make(map[string]struct{})
+	pathsSeen := make(map[string]struct{})
+	var managers []string
+	var paths []string
+	addManager := func(manager string) {
+		manager = strings.ToLower(strings.TrimSpace(manager))
+		if !knownPreviewPackageManager(manager) {
+			return
+		}
+		if _, ok := managersSeen[manager]; ok {
+			return
+		}
+		managersSeen[manager] = struct{}{}
+		managers = append(managers, manager)
+		for _, p := range previewPackageManagerDefaultPaths(manager) {
+			addPath := filepath.ToSlash(filepath.Clean(strings.TrimSpace(p)))
+			if addPath == "" || addPath == "." {
+				continue
+			}
+			if _, ok := pathsSeen[addPath]; ok {
+				continue
+			}
+			pathsSeen[addPath] = struct{}{}
+			paths = append(paths, addPath)
+		}
+	}
+	for _, lockfile := range install.Lockfiles {
+		if manager, ok := inferPreviewPackageManagerFromLockfile(lockfile); ok {
+			addManager(manager)
+		}
+	}
+	for _, part := range install.Command {
+		if manager, ok := inferPreviewPackageManagerFromCommandPart(part); ok {
+			addManager(manager)
+		}
+	}
+	if install.Cache != nil && install.Cache.PackageManager != nil {
+		for _, manager := range install.Cache.PackageManager.Include {
+			addManager(manager)
+		}
+		for _, p := range install.Cache.PackageManager.Paths {
+			clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(p)))
+			if clean == "" || clean == "." {
+				continue
+			}
+			if _, ok := pathsSeen[clean]; ok {
+				continue
+			}
+			pathsSeen[clean] = struct{}{}
+			paths = append(paths, clean)
+		}
+	}
+	sort.Strings(managers)
+	sort.Strings(paths)
+	return paths, managers, len(paths) > 0
+}
+
+func inferPreviewPackageManagerFromLockfile(lockfile string) (string, bool) {
+	base := filepath.Base(filepath.ToSlash(filepath.Clean(strings.TrimSpace(lockfile))))
+	switch base {
+	case "package-lock.json", "npm-shrinkwrap.json":
+		return "npm", true
+	case "pnpm-lock.yaml":
+		return "pnpm", true
+	case "yarn.lock":
+		return "yarn", true
+	case "bun.lock", "bun.lockb":
+		return "bun", true
+	case "requirements.txt", "requirements-dev.txt", "Pipfile.lock":
+		return "pip", true
+	case "uv.lock":
+		return "uv", true
+	case "poetry.lock":
+		return "poetry", true
+	case "go.mod", "go.sum":
+		return "go", true
+	default:
+		return "", false
+	}
+}
+
+func inferPreviewPackageManagerFromCommandPart(part string) (string, bool) {
+	name := filepath.Base(strings.TrimSpace(part))
+	switch name {
+	case "npm", "pnpm", "yarn", "bun", "pip", "uv", "poetry", "go":
+		return name, true
+	case "pip3":
+		return "pip", true
+	default:
+		return "", false
+	}
+}
+
+func previewPackageManagerDefaultPaths(manager string) []string {
+	switch strings.ToLower(strings.TrimSpace(manager)) {
+	case "npm":
+		return []string{".npm"}
+	case "pnpm":
+		return []string{".local/share/pnpm/store"}
+	case "yarn":
+		return []string{".yarn/berry/cache"}
+	case "bun":
+		return []string{".bun/install/cache"}
+	case "pip":
+		return []string{".cache/pip"}
+	case "uv":
+		return []string{".cache/uv"}
+	case "poetry":
+		return []string{".cache/pypoetry"}
+	case "go":
+		return []string{"go/pkg/mod", ".cache/go-build"}
+	default:
+		return nil
+	}
 }
 
 func inferPreviewDependencyCachePath(lockfile string) (string, bool) {
@@ -831,8 +1182,17 @@ func pathDir(clean string) string {
 	return clean[:idx]
 }
 
-func validatePreviewResources(resources models.PreviewResourceRequirements) []string {
+func validatePreviewResources(resources models.PreviewResourceRequirements, policy ResourcePolicy) []string {
 	var errs []string
+	hasResources := resources.Requests.CPU != "" ||
+		resources.Requests.Memory != "" ||
+		resources.Requests.EphemeralStorage != "" ||
+		resources.Limits.CPU != "" ||
+		resources.Limits.Memory != "" ||
+		resources.Limits.EphemeralStorage != ""
+	if hasResources && !policy.AllowRepoResourceRequests {
+		errs = append(errs, "preview.resources cannot be set when repo resource requests are disabled")
+	}
 
 	reqCPU, reqCPUSet, err := parseCPUQuantity("preview.resources.requests.cpu", resources.Requests.CPU)
 	if err != nil {
@@ -860,23 +1220,23 @@ func validatePreviewResources(resources models.PreviewResourceRequirements) []st
 		errs = append(errs, err.Error())
 	}
 
-	if reqCPUSet && reqCPU > MaxPreviewCPUMillis {
-		errs = append(errs, "preview.resources.requests.cpu must be at most 2 cores")
+	if reqCPUSet && reqCPU > policy.MaxCPUMillis {
+		errs = append(errs, "preview.resources.requests.cpu must be at most "+cpuLimitLabel(policy.MaxCPUMillis))
 	}
-	if limitCPUSet && limitCPU > MaxPreviewCPUMillis {
-		errs = append(errs, "preview.resources.limits.cpu must be at most 2 cores")
+	if limitCPUSet && limitCPU > policy.MaxCPUMillis {
+		errs = append(errs, "preview.resources.limits.cpu must be at most "+cpuLimitLabel(policy.MaxCPUMillis))
 	}
-	if reqMemorySet && reqMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, "preview.resources.requests.memory must be at most 1Gi")
+	if reqMemorySet && reqMemory > policy.MaxMemoryMiB {
+		errs = append(errs, "preview.resources.requests.memory must be at most "+byteLimitLabel(policy.MaxMemoryMiB))
 	}
-	if limitMemorySet && limitMemory > MaxPreviewMemoryMiB {
-		errs = append(errs, "preview.resources.limits.memory must be at most 1Gi")
+	if limitMemorySet && limitMemory > policy.MaxMemoryMiB {
+		errs = append(errs, "preview.resources.limits.memory must be at most "+byteLimitLabel(policy.MaxMemoryMiB))
 	}
-	if reqDiskSet && reqDisk > MaxPreviewEphemeralDiskMiB {
-		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most 10Gi")
+	if reqDiskSet && reqDisk > policy.MaxDiskMiB {
+		errs = append(errs, "preview.resources.requests.ephemeral-storage must be at most "+byteLimitLabel(policy.MaxDiskMiB))
 	}
-	if limitDiskSet && limitDisk > MaxPreviewEphemeralDiskMiB {
-		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most 10Gi")
+	if limitDiskSet && limitDisk > policy.MaxDiskMiB {
+		errs = append(errs, "preview.resources.limits.ephemeral-storage must be at most "+byteLimitLabel(policy.MaxDiskMiB))
 	}
 
 	if reqCPUSet && limitCPUSet && reqCPU > limitCPU {
@@ -910,6 +1270,24 @@ func parseCPUQuantity(field, raw string) (int, bool, error) {
 		return 0, true, fmt.Errorf("%s must be a positive CPU quantity such as 500m, 1, or 1.5", field)
 	}
 	return int(math.Ceil(cores * 1000)), true, nil
+}
+
+func cpuLimitLabel(millis int) string {
+	if millis%1000 == 0 {
+		cores := millis / 1000
+		if cores == 1 {
+			return "1 core"
+		}
+		return strconv.Itoa(cores) + " cores"
+	}
+	return strconv.Itoa(millis) + "m"
+}
+
+func byteLimitLabel(mib int) string {
+	if mib%1024 == 0 {
+		return strconv.Itoa(mib/1024) + "Gi"
+	}
+	return strconv.Itoa(mib) + "Mi"
 }
 
 func parseByteQuantityMiB(field, raw string) (int, bool, error) {
@@ -1139,6 +1517,13 @@ func DetectReadiness(cfg *models.PreviewConfig) models.PreviewDetectionResult {
 
 // ResolveResourceLimits returns the appropriate resource limits based on config.
 func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
+	return ResolveResourceLimitsWithPolicy(cfg, defaultResourcePolicy())
+}
+
+// ResolveResourceLimitsWithPolicy returns resource limits capped by the
+// effective org policy.
+func ResolveResourceLimitsWithPolicy(cfg *models.PreviewConfig, resourcePolicy ResourcePolicy) models.ResourceLimits {
+	resourcePolicy = normalizeResourcePolicy(resourcePolicy)
 	limits := models.ResourceLimits{
 		MemoryMiB: DefaultSingleServiceMemory,
 		CPUMillis: 500,
@@ -1165,6 +1550,15 @@ func ResolveResourceLimits(cfg *models.PreviewConfig) models.ResourceLimits {
 	}
 	applyResourceList(cfg.Resources.Requests)
 	applyResourceList(cfg.Resources.Limits)
+	if limits.CPUMillis > resourcePolicy.MaxCPUMillis {
+		limits.CPUMillis = resourcePolicy.MaxCPUMillis
+	}
+	if limits.MemoryMiB > resourcePolicy.MaxMemoryMiB {
+		limits.MemoryMiB = resourcePolicy.MaxMemoryMiB
+	}
+	if limits.DiskMiB > resourcePolicy.MaxDiskMiB {
+		limits.DiskMiB = resourcePolicy.MaxDiskMiB
+	}
 
 	return limits
 }
@@ -1179,4 +1573,15 @@ func ApplyResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, cfg *mo
 	sandboxCfg.MemoryLimitMB = limits.MemoryMiB
 	sandboxCfg.CPULimit = float64(limits.CPUMillis) / 1000
 	sandboxCfg.DiskLimitGB = int(math.Ceil(float64(limits.DiskMiB) / 1024.0))
+}
+
+// ApplyPreviewInstanceResourceLimitsToSandboxConfig maps persisted preview
+// reservation limits onto the sandbox config used by durable worker jobs.
+func ApplyPreviewInstanceResourceLimitsToSandboxConfig(sandboxCfg *agent.SandboxConfig, instance *models.PreviewInstance) {
+	if sandboxCfg == nil || instance == nil {
+		return
+	}
+	sandboxCfg.MemoryLimitMB = instance.MemoryLimitMB
+	sandboxCfg.CPULimit = float64(instance.CPULimitMillis) / 1000
+	sandboxCfg.DiskLimitGB = int(math.Ceil(float64(instance.DiskLimitMB) / 1024.0))
 }

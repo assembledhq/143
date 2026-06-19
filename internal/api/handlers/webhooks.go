@@ -61,21 +61,56 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 	switch event {
 	case "installation":
 		h.handleInstallation(w, r, body)
+	case "organization":
+		h.handleOrganization(w, r, body)
 	case "installation_repositories":
 		h.handleInstallationRepositories(w, r, body)
+	case "push":
+		h.handlePush(w, r, body)
 	case "pull_request":
 		h.handlePullRequest(w, r, body)
 	case "pull_request_review":
 		h.handlePullRequestReview(w, r, body)
 	case "pull_request_review_comment":
 		h.handlePullRequestReviewComment(w, r, body)
+	case "issue_comment":
+		h.handleIssueComment(w, r, body)
 	case "check_suite":
 		h.handleCheckSuite(w, r, body)
 	case "check_run":
 		h.handleCheckRun(w, r, body)
+	case "status":
+		h.handleStatus(w, r, body)
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": event})
 	}
+}
+
+func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.IssueCommentEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse issue_comment event")
+		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+
+	if err := h.prService.HandleIssueCommentEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ISSUE_COMMENT_EVENT_FAILED", "failed to process issue_comment event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
 func (h *WebhookHandler) verifySignature(payload []byte, signature string) bool {
@@ -109,6 +144,7 @@ type installationPayload struct {
 type webhookAccount struct {
 	ID    int64  `json:"id"`
 	Login string `json:"login"`
+	Type  string `json:"type"`
 }
 
 type webhookRepo struct {
@@ -124,6 +160,15 @@ type installationReposEvent struct {
 	RepositoriesRemoved []webhookRepo       `json:"repositories_removed"`
 }
 
+type organizationEvent struct {
+	Action       string              `json:"action"`
+	Installation installationPayload `json:"installation"`
+	Organization webhookAccount      `json:"organization"`
+	Membership   struct {
+		User webhookAccount `json:"user"`
+	} `json:"membership"`
+}
+
 func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Request, body []byte) {
 	var event installationEvent
 	if err := json.Unmarshal(body, &event); err != nil {
@@ -134,12 +179,13 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 	ctx := r.Context()
 
 	switch event.Action {
-	case "created":
+	case "created", "new_permissions_accepted":
 		if h.githubInstallations != nil {
 			inst := &models.GitHubInstallation{
 				InstallationID: event.Installation.ID,
 				AccountID:      event.Installation.Account.ID,
 				AccountLogin:   event.Installation.Account.Login,
+				AccountType:    nilIfEmpty(event.Installation.Account.Type),
 				Status:         "active",
 			}
 			if err := h.githubInstallations.UpsertInstallation(ctx, inst); err != nil {
@@ -152,6 +198,10 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 			}
 		}
 
+		if event.Action == "new_permissions_accepted" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "installation permissions accepted"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "installation created"})
 
 	case "deleted":
@@ -162,6 +212,10 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 			}
 			if err := h.githubInstallations.DeactivateOrgLinksByInstallationID(ctx, event.Installation.ID); err != nil {
 				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_LINK_UPDATE_FAILED", "failed to deactivate github installation links", err)
+				return
+			}
+			if err := h.githubInstallations.ClearRosterForInstallation(ctx, event.Installation.ID); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_ROSTER_CLEAR_FAILED", "failed to clear github organization roster", err)
 				return
 			}
 		}
@@ -175,6 +229,45 @@ func (h *WebhookHandler) handleInstallation(w http.ResponseWriter, r *http.Reque
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": event.Action})
 	}
+}
+
+func (h *WebhookHandler) handleOrganization(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.githubInstallations == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "github_installation_store_not_configured"})
+		return
+	}
+	var event organizationEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse organization event")
+		return
+	}
+	switch event.Action {
+	case "member_added":
+		if err := h.githubInstallations.UpsertOrgMember(r.Context(), event.Installation.ID, event.Membership.User.ID, event.Membership.User.Login); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "ORG_MEMBER_UPSERT_FAILED", "failed to update github organization roster", err)
+			return
+		}
+	case "member_removed":
+		if event.Membership.User.ID == 0 {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "organization updated"})
+			return
+		}
+		if err := h.githubInstallations.DeleteOrgMember(r.Context(), event.Installation.ID, event.Membership.User.ID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "ORG_MEMBER_DELETE_FAILED", "failed to update github organization roster", err)
+			return
+		}
+	case "renamed":
+		if event.Organization.Login != "" {
+			if err := h.githubInstallations.RefreshOrgLinkAccountLogin(r.Context(), event.Installation.ID, event.Organization.Login); err != nil {
+				writeError(w, r, http.StatusInternalServerError, "INSTALLATION_LINK_UPDATE_FAILED", "failed to refresh github organization name", err)
+				return
+			}
+		}
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "action": event.Action})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "organization updated"})
 }
 
 func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -200,6 +293,30 @@ func (h *WebhookHandler) handleInstallationRepositories(w http.ResponseWriter, r
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "repositories updated"})
+}
+
+func (h *WebhookHandler) handlePush(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+	var event ghservice.PushEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse push event")
+		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+	if err := h.prService.HandlePushEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PUSH_EVENT_FAILED", "failed to process push event", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
 func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Request, body []byte) {
@@ -331,6 +448,33 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 
 	if err := h.prService.HandleCheckRunEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CHECK_RUN_FAILED", "failed to process check_run event", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func (h *WebhookHandler) handleStatus(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+
+	var event ghservice.StatusEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse status event")
+		return
+	}
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+
+	if err := h.prService.HandleStatusEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "STATUS_FAILED", "failed to process status event", err)
 		return
 	}
 

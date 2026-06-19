@@ -109,6 +109,7 @@ func TestDetectIndeterminateSignals(t *testing.T) {
 		mergeable        *bool
 		githubState      string
 		checkRuns        []gitHubCheckRun
+		commitStatuses   []gitHubCommitStatus
 		expectMergeIndet bool
 		expectTestsIndet bool
 	}{
@@ -173,6 +174,16 @@ func TestDetectIndeterminateSignals(t *testing.T) {
 			expectTestsIndet: true,
 		},
 		{
+			name:        "pending test commit status is indeterminate",
+			mergeable:   boolPtr(true),
+			githubState: "clean",
+			commitStatuses: []gitHubCommitStatus{
+				{Context: "ci/circleci: frontend_test", State: "pending"},
+			},
+			expectMergeIndet: false,
+			expectTestsIndet: true,
+		},
+		{
 			name:        "in-progress lint check is not test indeterminate",
 			mergeable:   boolPtr(true),
 			githubState: "clean",
@@ -188,7 +199,7 @@ func TestDetectIndeterminateSignals(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			mergeIndet, testsIndet := detectIndeterminateSignals(tt.mergeable, tt.githubState, tt.checkRuns)
+			mergeIndet, testsIndet := detectIndeterminateSignals(tt.mergeable, tt.githubState, tt.checkRuns, tt.commitStatuses)
 			require.Equal(t, tt.expectMergeIndet, mergeIndet, "merge state indeterminate flag should match")
 			require.Equal(t, tt.expectTestsIndet, testsIndet, "tests indeterminate flag should match")
 		})
@@ -629,7 +640,7 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 			expectCanMerge: true,
 		},
 		{
-			name: "clean PR with a failing check is not mergeable",
+			name: "clean PR with a failing check is not mergeable and offers fix tests",
 			input: models.PullRequestHealthResponse{
 				Status:     "open",
 				MergeState: models.PullRequestMergeStateClean,
@@ -637,7 +648,8 @@ func TestDerivePullRequestRepairActions(t *testing.T) {
 					{Name: "lint", Category: models.PullRequestCheckCategoryLint, Status: models.PullRequestCheckStatusFailed},
 				},
 			},
-			expectCanMerge: false,
+			expectCanFixTests: true,
+			expectCanMerge:    false,
 		},
 		{
 			name: "clean PR with only passed checks is still mergeable",

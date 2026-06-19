@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -54,17 +53,17 @@ const KNOWN_LABELS = new Map<string, string>([
 
 const CATEGORY_DATA = [
   {
-    name: "Smileys & People",
+    name: "Smileys and people",
     keywords: "faces people emotion hands",
     emojis: "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🫡 🤐 🤨 😐 😑 😶 🫥 😏 😒 🙄 😬 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 🫤 😟 🙁 ☹️ 😮 😯 😲 😳 🥺 🥹 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👻 👽 👾 🤖 😺 😸 😹 😻 😼 😽 🙀 😿 😾 👋 🤚 🖐️ ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 🫶 👐 🤲 🤝 🙏 💅 🤳 💪 🦾 🦿 🦵 🦶 👂 🦻 👃 🧠 🫀 🫁 🦷 🦴 👀 👁️ 👅 👄 🫦",
   },
   {
-    name: "Animals & Nature",
+    name: "Animals and nature",
     keywords: "animals nature plants weather",
     emojis: "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐻‍❄️ 🐨 🐯 🦁 🐮 🐷 🐽 🐸 🐵 🙈 🙉 🙊 🐒 🐔 🐧 🐦 🐤 🐣 🐥 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🫎 🐝 🪱 🐛 🦋 🐌 🐞 🐜 🪰 🪲 🪳 🦟 🦗 🕷️ 🕸️ 🦂 🐢 🐍 🦎 🦖 🦕 🐙 🦑 🦐 🦞 🦀 🪼 🪸 🐡 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🦧 🦣 🐘 🦛 🦏 🐪 🐫 🦒 🦘 🦬 🐃 🐂 🐄 🫏 🐎 🐖 🐏 🐑 🦙 🐐 🦌 🐕 🐩 🦮 🐕‍🦺 🐈 🐈‍⬛ 🪶 🪽 🐓 🦃 🦤 🦚 🦜 🦢 🦩 🕊️ 🐇 🦝 🦨 🦡 🦫 🦦 🦥 🐁 🐀 🐿️ 🦔 🌵 🎄 🌲 🌳 🌴 🪵 🌱 🌿 ☘️ 🍀 🎍 🪴 🎋 🍃 🍂 🍁 🪺 🪹 🍄 🐚 🪨 🌾 💐 🌷 🌹 🥀 🪻 🪷 🌺 🌸 🌼 🌻 🌞 🌝 🌛 🌜 🌚 🌕 🌖 🌗 🌘 🌑 🌒 🌓 🌔 🌙 🌎 🌍 🌏 🪐 💫 ⭐ 🌟 ✨ ⚡ ☄️ 💥 🔥 🌪️ 🌈 ☀️ 🌤️ ⛅ 🌥️ ☁️ 🌦️ 🌧️ ⛈️ 🌩️ 🌨️ ❄️ ☃️ ⛄ 🌬️ 💨 💧 💦 ☔ ☂️ 🌊 🌫️",
   },
   {
-    name: "Food & Drink",
+    name: "Food and drink",
     keywords: "food drink meals",
     emojis: "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🫒 🥑 🍆 🥔 🥕 🌽 🌶️ 🫑 🥒 🥬 🥦 🧄 🧅 🥜 🫘 🌰 🫚 🫛 🍞 🥐 🥖 🫓 🥨 🥯 🥞 🧇 🧀 🍖 🍗 🥩 🥓 🍔 🍟 🍕 🌭 🥪 🌮 🌯 🫔 🥙 🧆 🥚 🍳 🥘 🍲 🫕 🥣 🥗 🍿 🧈 🧂 🥫 🍱 🍘 🍙 🍚 🍛 🍜 🍝 🍠 🍢 🍣 🍤 🍥 🥮 🍡 🥟 🥠 🥡 🦪 🍦 🍧 🍨 🍩 🍪 🎂 🍰 🧁 🥧 🍫 🍬 🍭 🍮 🍯 🍼 🥛 ☕ 🫖 🍵 🍶 🍾 🍷 🍸 🍹 🍺 🍻 🥂 🥃 🫗 🥤 🧋 🧃 🧉 🧊 🥢 🍽️ 🍴 🥄 🔪 🫙 🏺",
   },
@@ -74,7 +73,7 @@ const CATEGORY_DATA = [
     emojis: "🎃 🎄 🎆 🎇 🧨 ✨ 🎈 🎉 🎊 🎋 🎍 🎎 🎏 🎐 🎑 🧧 🎀 🎁 🎗️ 🎟️ 🎫 🎖️ 🏆 🏅 🥇 🥈 🥉 ⚽ ⚾ 🥎 🏀 🏐 🏈 🏉 🎾 🥏 🎳 🏏 🏑 🏒 🥍 🏓 🏸 🥊 🥋 🥅 ⛳ ⛸️ 🎣 🤿 🎽 🎿 🛷 🥌 🎯 🪀 🪁 🔫 🎱 🔮 🪄 🎮 🕹️ 🎰 🎲 🧩 🧸 🪅 🪩 🪆 ♠️ ♥️ ♦️ ♣️ ♟️ 🃏 🀄 🎴 🎭 🖼️ 🎨 🧵 🪡 🧶 🪢",
   },
   {
-    name: "Travel & Places",
+    name: "Travel and places",
     keywords: "travel places transport buildings",
     emojis: "🚗 🚕 🚙 🚌 🚎 🏎️ 🚓 🚑 🚒 🚐 🛻 🚚 🚛 🚜 🦯 🦽 🦼 🛴 🚲 🛵 🏍️ 🛺 🚨 🚔 🚍 🚘 🚖 🚡 🚠 🚟 🚃 🚋 🚞 🚝 🚄 🚅 🚈 🚂 🚆 🚇 🚊 🚉 ✈️ 🛫 🛬 🛩️ 💺 🛰️ 🚀 🛸 🚁 🛶 ⛵ 🚤 🛥️ 🛳️ ⛴️ 🚢 ⚓ 🛟 🪝 ⛽ 🚧 🚦 🚥 🚏 🗺️ 🗿 🗽 🗼 🏰 🏯 🏟️ 🎡 🎢 🎠 ⛲ ⛱️ 🏖️ 🏝️ 🏜️ 🌋 ⛰️ 🏔️ 🗻 🏕️ ⛺ 🛖 🏠 🏡 🏘️ 🏚️ 🏗️ 🏭 🏢 🏬 🏣 🏤 🏥 🏦 🏨 🏪 🏫 🏩 💒 🏛️ ⛪ 🕌 🛕 🕍 🕋 ⛩️ 🛤️ 🛣️ 🗾 🎑 🏞️ 🌅 🌄 🌠 🎇 🎆 🌇 🌆 🏙️ 🌃 🌌 🌉 🌁",
   },
@@ -176,14 +175,14 @@ export function AutomationEmojiPicker({
     [value],
   );
   const recentOptions = useMemo(
-    () => recentEmojis.map((emoji) => AUTOMATION_EMOJI_BY_VALUE.get(emoji) ?? makeOption(emoji, "Frequently Used", "recent")).filter((item) => item.emoji),
+    () => recentEmojis.map((emoji) => AUTOMATION_EMOJI_BY_VALUE.get(emoji) ?? makeOption(emoji, "Recently used", "recent")).filter((item) => item.emoji),
     [recentEmojis],
   );
   const visibleGroups = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
       return [
-        ...(recentOptions.length > 0 ? [{ name: "Frequently Used", emojis: recentOptions }] : []),
+        ...(recentOptions.length > 0 ? [{ name: "Recently used", emojis: recentOptions }] : []),
         ...EMOJI_CATEGORIES.map((category) => ({
           name: category.name,
           emojis: category.emojis,
@@ -192,21 +191,26 @@ export function AutomationEmojiPicker({
     }
 
     return [{
-      name: "Search Results",
+      name: "Search results",
       emojis: AUTOMATION_EMOJIS.filter((item) => item.keywords.toLowerCase().includes(normalizedQuery)),
     }];
   }, [query, recentOptions]);
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) setQuery("");
+    setPickerOpen(nextOpen);
+  };
 
   const selectEmoji = (emoji: string) => {
     const nextRecentEmojis = [emoji, ...recentEmojis.filter((item) => item !== emoji)].slice(0, MAX_RECENT_EMOJIS);
     setRecentEmojis(nextRecentEmojis);
     writeRecentEmojis(nextRecentEmojis);
     onChange(emoji);
-    setPickerOpen(false);
+    handleOpenChange(false);
   };
 
   return (
-    <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+    <Popover open={pickerOpen} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         {trigger === "inline" ? (
           <Button
@@ -225,41 +229,47 @@ export function AutomationEmojiPicker({
         ) : trigger === "icon" ? (
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="icon-lg"
             aria-label={triggerLabel}
             disabled={disabled}
-            className={cn("text-lg leading-none", className)}
+            className={cn(
+              "size-10 rounded-lg border border-transparent bg-transparent text-lg leading-none shadow-none hover:border-border hover:bg-muted/50",
+              className,
+            )}
           >
             {selected.emoji}
           </Button>
         ) : (
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
+            size="icon-lg"
             aria-label={triggerLabel}
             disabled={disabled}
-            className={cn("h-9 w-16 justify-center gap-1 px-2", className)}
+            className={cn(
+              "size-10 rounded-lg border border-transparent bg-transparent p-0 text-lg leading-none shadow-none hover:border-border hover:bg-muted/50",
+              className,
+            )}
           >
-            <span className="text-lg leading-none" aria-hidden="true">{selected.emoji}</span>
-            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span className="leading-none" aria-hidden="true">{selected.emoji}</span>
           </Button>
         )}
       </PopoverTrigger>
-      <PopoverContent className="w-[22rem] p-0" align="start">
-        <Command shouldFilter={false}>
+      <PopoverContent className="w-[20rem] overflow-hidden rounded-xl p-0 shadow-lg" align="start">
+        <Command shouldFilter={false} className="rounded-xl">
           <CommandInput
-            placeholder="Search emoji..."
+            placeholder="Search emojis"
             value={query}
             onValueChange={setQuery}
           />
-          <CommandList className="max-h-[22rem] px-2 py-2">
+          <CommandList className="max-h-[18rem] px-2 py-2">
             <CommandEmpty>No emoji found.</CommandEmpty>
             {visibleGroups.map((group) => (
               <CommandGroup
                 key={group.name}
                 heading={group.name}
-                className="[&_[cmdk-group-heading]]:sticky [&_[cmdk-group-heading]]:top-0 [&_[cmdk-group-heading]]:z-10 [&_[cmdk-group-heading]]:bg-popover [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-items]]:grid [&_[cmdk-group-items]]:grid-cols-8 [&_[cmdk-group-items]]:gap-1"
+                className="[&_[cmdk-group-heading]]:sticky [&_[cmdk-group-heading]]:top-0 [&_[cmdk-group-heading]]:z-10 [&_[cmdk-group-heading]]:bg-popover [&_[cmdk-group-heading]]:px-1 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-group-items]]:grid [&_[cmdk-group-items]]:grid-cols-8 [&_[cmdk-group-items]]:gap-0.5"
               >
                 {group.emojis.map((item, index) => (
                   <CommandItem
@@ -267,8 +277,8 @@ export function AutomationEmojiPicker({
                     value={item.keywords}
                     aria-label={item.label}
                     className={cn(
-                      "flex h-9 w-9 cursor-pointer items-center justify-center rounded-md p-0 text-lg leading-none transition-colors hover:bg-accent",
-                      item.emoji === selected.emoji && "bg-primary text-primary-foreground data-[selected=true]:bg-primary data-[selected=true]:text-primary-foreground",
+                      "flex size-8 cursor-pointer items-center justify-center rounded-lg p-0 text-lg leading-none transition-colors hover:bg-muted/70 data-[selected=true]:bg-muted/70",
+                      item.emoji === selected.emoji && "bg-primary/10 ring-1 ring-primary/25 data-[selected=true]:bg-primary/10",
                     )}
                     onSelect={() => selectEmoji(item.emoji)}
                   >

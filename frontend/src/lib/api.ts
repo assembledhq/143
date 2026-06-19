@@ -2,11 +2,14 @@ import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
 import { normalizeAPIResponse } from './api-normalize';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
-const SENTRY_CLIENT_ID = process.env.NEXT_PUBLIC_SENTRY_CLIENT_ID || '';
-const SENTRY_REDIRECT_URI = process.env.NEXT_PUBLIC_SENTRY_REDIRECT_URI || '';
 
 export class ApiError extends Error {
-  constructor(public code: string, message: string, public details?: unknown) {
+  constructor(
+    public code: string,
+    message: string,
+    public details?: unknown,
+    public status?: number,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -89,7 +92,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new ApiError(
       body?.error?.code || 'UNKNOWN',
       body?.error?.message || res.statusText,
-      body?.error?.details
+      body?.error?.details,
+      res.status,
     );
   }
 
@@ -98,6 +102,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 function get<T>(path: string, options?: RequestInit): Promise<T> {
   return request<T>(path, options);
+}
+
+function timeoutSignal(timeoutMs: number, parent?: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  parent?.addEventListener('abort', abort, { once: true });
+  controller.signal.addEventListener('abort', () => {
+    globalThis.clearTimeout(timeout);
+    parent?.removeEventListener('abort', abort);
+  }, { once: true });
+  return controller.signal;
 }
 
 function post<T>(path: string, body?: unknown): Promise<T> {
@@ -147,7 +163,8 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
     throw new ApiError(
       body?.error?.code || 'UNKNOWN',
       body?.error?.message || res.statusText,
-      body?.error?.details
+      body?.error?.details,
+      res.status,
     );
   }
 
@@ -178,12 +195,7 @@ export const api = {
       window.location.href = `${API_BASE}/api/v1/auth/google/login${qs ? `?${qs}` : ''}`;
     },
     loginSentry: () => {
-      const params = new URLSearchParams({
-        client_id: SENTRY_CLIENT_ID,
-        response_type: 'code',
-        redirect_uri: SENTRY_REDIRECT_URI,
-      });
-      window.location.href = `https://sentry.io/oauth/authorize/?${params.toString()}`;
+      window.location.href = `${API_BASE}/api/v1/integrations/sentry/login`;
     },
     loginEmail: (email: string, password: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
@@ -196,10 +208,26 @@ export const api = {
     logout: () => post('/api/v1/auth/logout'),
     memberships: () =>
       get<import('./types').SingleResponse<import('./types').MembershipsResponse>>('/api/v1/auth/memberships'),
+    // (Re)send the email-verification link to the signed-in user's own
+    // address. Verifying unlocks email-domain auto-join for password
+    // accounts; OAuth accounts are attested by their provider already.
+    sendEmailVerification: () => post<void>('/api/v1/auth/email-verifications'),
+    confirmEmailVerification: (token: string) =>
+      post<import('./types').SingleResponse<import('./types').ConfirmEmailVerificationResponse>>(
+        '/api/v1/auth/email-verifications/confirm',
+        { token },
+      ),
   },
   organizations: {
     create: (name: string) =>
       post<import('./types').SingleResponse<import('./types').OrganizationCreated>>('/api/v1/organizations', { name }),
+    // Workspaces the current user can join because their provider-verified
+    // email domain matches an org's verified auto-join domain. User-scoped,
+    // works for zero-membership users — same family as invitations.listPending.
+    listJoinable: () =>
+      get<import('./types').JoinableOrgsResponse>('/api/v1/orgs/joinable'),
+    join: (orgId: string) =>
+      post<import('./types').SingleResponse<import('./types').MembershipSummary>>(`/api/v1/orgs/${orgId}/join`),
   },
   repositories: {
     list: (opts?: { includeDisconnected?: boolean }) => {
@@ -234,20 +262,52 @@ export const api = {
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
-    fixTests: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`),
-    resolveConflicts: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`),
+    fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
+    resolveConflicts: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`, body ?? {}),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
     queueMergeWhenReady: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
     cancelMergeWhenReady: (id: string) => del<import('./types').SingleResponse<import('./types').PullRequestMergeWhenReadyStatus>>(`/api/v1/pull-requests/${id}/merge-when-ready`),
   },
   previews: {
-    list: (params?: { repository_id?: string; branch?: string; status?: string }) => {
+    current: {
+      list: (params?: { repository_id?: string; scope?: 'running' | 'resumable' | 'attention' | 'recent'; pinned?: boolean; q?: string; limit?: number; cursor?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+        if (params?.scope) searchParams.set('scope', params.scope);
+        if (params?.pinned !== undefined) searchParams.set('pinned', String(params.pinned));
+        if (params?.q) searchParams.set('q', params.q);
+        if (params?.limit) searchParams.set('limit', String(params.limit));
+        if (params?.cursor) searchParams.set('cursor', params.cursor);
+        const query = searchParams.toString();
+        return get<import('./types').ListResponse<import('./types').PreviewCurrentResponse> & { meta: import('./types').PreviewListMeta }>(`/api/v1/previews/current${query ? `?${query}` : ''}`);
+      },
+      get: (id: string) =>
+        get<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}`),
+      history: (id: string, params?: { limit?: number; cursor?: string }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.limit) searchParams.set('limit', String(params.limit));
+        if (params?.cursor) searchParams.set('cursor', params.cursor);
+        const query = searchParams.toString();
+        return get<import('./types').ListResponse<unknown>>(`/api/v1/previews/current/${id}/history${query ? `?${query}` : ''}`);
+      },
+      startLatest: (id: string, body?: { restart?: boolean; ttl_seconds?: number }) =>
+        post<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}/start-latest`, body ?? {}),
+      restart: (id: string, body?: { restart?: boolean; ttl_seconds?: number }) =>
+        post<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}/restart`, body ?? {}),
+      stop: (id: string) =>
+        post<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}/stop`),
+    },
+    list: (params?: { repository_id?: string; branch?: string; status?: string; scope?: 'running' | 'resumable' | 'recent'; q?: string; limit?: number; cursor?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.branch) searchParams.set('branch', params.branch);
       if (params?.status) searchParams.set('status', params.status);
+      if (params?.scope) searchParams.set('scope', params.scope);
+      if (params?.q) searchParams.set('q', params.q);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
       const query = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews${query ? `?${query}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').BranchPreviewResponse> & { meta: import('./types').PreviewListMeta }>(`/api/v1/previews${query ? `?${query}` : ''}`);
     },
     create: (body: import('./types').BranchPreviewCreateRequest) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>('/api/v1/previews', body),
@@ -262,8 +322,12 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
     get: (id: string) =>
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
-    getPullRequest: (owner: string, repo: string, number: string | number) =>
-      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}`),
+    getPullRequest: (owner: string, repo: string, number: string | number, params?: { intent?: 'open' | 'status' | 'diagnose' }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.intent) searchParams.set('intent', params.intent);
+      const qs = searchParams.toString();
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}${qs ? `?${qs}` : ''}`);
+    },
     restart: (id: string, body?: { start_latest?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
     startLatest: (id: string) =>
@@ -272,13 +336,41 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/stop`),
     bootstrap: (id: string) =>
       post<import('./types').SingleResponse<{ token: string; preview_id: string }>>(`/api/v1/previews/${id}/bootstrap`),
-    apiTokens: {
-      list: () => get<import('./types').ListResponse<import('./types').PreviewAPIToken>>('/api/v1/previews/api-tokens'),
-      create: (body: { name: string; scopes: string[]; repository_ids: string[] }) =>
-        post<import('./types').SingleResponse<import('./types').PreviewAPIToken & { token: string }>>('/api/v1/previews/api-tokens', body),
-      revoke: (id: string) =>
-        del<import('./types').SingleResponse<{ status: string }>>(`/api/v1/previews/api-tokens/${id}`),
+    policies: {
+      list: () => get<import('./types').ListResponse<import('./types').PreviewPolicySummary>>('/api/v1/previews/policies'),
+      update: (repositoryId: string, body: {
+        auto_mode?: 'off' | 'warm' | 'on';
+        session_prewarm_mode?: 'off' | 'cache' | 'smart';
+        pr_preview_surfaces_enabled?: boolean;
+        github_pr_comment_enabled?: boolean;
+        github_commit_status_enabled?: boolean;
+      }) =>
+        request<import('./types').SingleResponse<unknown>>(`/api/v1/repositories/${repositoryId}/preview-policy`, {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        }),
+      testPreview: (repositoryId: string, body?: { preview_config_name?: string }) =>
+        post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(
+          `/api/v1/repositories/${repositoryId}/preview-policy/test-preview`,
+          body ?? {},
+        ),
     },
+  },
+  apiKeys: {
+    create: (body: import('./types').CreateAPIKeyRequest) =>
+      post<import('./types').SingleResponse<import('./types').CreateAPIKeyResponse>>('/api/v1/api-keys', body),
+    listClients: () =>
+      get<import('./types').ListResponse<import('./types').APIClient>>('/api/v1/api-keys'),
+    updateClient: (id: string, body: Partial<Pick<import('./types').APIClient, 'name' | 'description' | 'status'>>) =>
+      patch<import('./types').SingleResponse<import('./types').APIClient>>(`/api/v1/api-keys/${id}`, body),
+    disableClient: (id: string) =>
+      del<void>(`/api/v1/api-keys/${id}`),
+    listTokens: (clientId: string) =>
+      get<import('./types').ListResponse<import('./types').APIToken>>(`/api/v1/api-keys/${clientId}/tokens`),
+    createToken: (clientId: string, body: import('./types').CreateAPITokenRequest) =>
+      post<import('./types').SingleResponse<import('./types').APIToken & { token: string }>>(`/api/v1/api-keys/${clientId}/tokens`, body),
+    revokeToken: (clientId: string, tokenId: string) =>
+      del<void>(`/api/v1/api-keys/${clientId}/tokens/${tokenId}`),
   },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => {
@@ -318,7 +410,7 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').Issue>>(`/api/v1/issues${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => get<import('./types').SingleResponse<import('./types').Issue>>(`/api/v1/issues/${id}`),
-    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string }) =>
+    triggerFix: (issueId: string, options?: { agent_type?: string; autonomy_level?: string; token_mode?: string; message?: string; force?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/issues/${issueId}/fix`, options),
   },
   autopilot: {
@@ -403,13 +495,16 @@ export const api = {
     update: (id: string, body: { title: string }) =>
       patch<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${id}`, body),
     getLogs: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/logs`),
+    getLogDetail: (sessionId: string, logId: number) =>
+      get<import('./types').SingleResponse<import('./types').SessionLogDetail>>(`/api/v1/sessions/${sessionId}/logs/${logId}`),
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
-    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
+    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
         ...(options.draft !== undefined ? { draft: options.draft } : {}),
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
+        ...(options.mergeWhenReady ? { merge_when_ready: true } : {}),
       } : undefined),
     createBranch: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/branch`, options ? {
@@ -498,22 +593,18 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/revert`),
     getThreadMessages: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages`),
-    getThreadMessageWindow: (sessionId: string, threadId: string, params: { position?: 'latest'; before?: string; limit?: number } = { position: 'latest' }) => {
+    getThreadTranscriptWindow: (sessionId: string, threadId: string, params: { position?: 'latest' | 'around'; before?: string; after?: string; anchorEntryId?: string; anchorMessageId?: number; anchorTurnNumber?: number; limitTurns?: number; include?: Array<'messages' | 'tools' | 'human_inputs' | 'system'> } = { position: 'latest' }) => {
       const searchParams = new URLSearchParams();
       if (params.position) searchParams.set('position', params.position);
       if (params.before) searchParams.set('before', params.before);
-      if (params.limit) searchParams.set('limit', String(params.limit));
+      if (params.after) searchParams.set('after', params.after);
+      if (params.anchorEntryId) searchParams.set('anchor_entry_id', params.anchorEntryId);
+      if (params.anchorMessageId != null) searchParams.set('anchor_message_id', String(params.anchorMessageId));
+      if (params.anchorTurnNumber != null) searchParams.set('anchor_turn_number', String(params.anchorTurnNumber));
+      if (params.limitTurns != null) searchParams.set('limit_turns', String(params.limitTurns));
+      if (params.include?.length) searchParams.set('include', params.include.join(','));
       const qs = searchParams.toString();
-      return get<import('./types').ThreadMessageWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/messages${qs ? `?${qs}` : ''}`);
-    },
-    getThreadLogs: (sessionId: string, threadId: string, params: { turnNumbers?: number[] } = {}) => {
-      const searchParams = new URLSearchParams();
-      const turnNumbers = Array.from(new Set((params.turnNumbers ?? []).filter((turn) => Number.isInteger(turn) && turn >= 0))).sort((a, b) => a - b);
-      if (turnNumbers.length > 0) {
-        searchParams.set('turn_numbers', turnNumbers.join(','));
-      }
-      const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').SessionLog>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/logs${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SessionTranscriptWindowResponse>(`/api/v1/sessions/${sessionId}/threads/${threadId}/transcript${qs ? `?${qs}` : ''}`);
     },
     listRecoverableThreadInboxEntries: (sessionId: string, threadId: string) =>
       get<import('./types').ListResponse<import('./types').ThreadInboxEntry>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/inbox/recoverable`),
@@ -588,8 +679,11 @@ export const api = {
         return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
           .then(r => r.data ?? []);
       },
-      console: (sessionId: string) =>
-        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(`/api/v1/sessions/${sessionId}/preview/console`)
+      console: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
+        get<import('./types').ListResponse<import('./preview-types').ConsoleMessage>>(
+          `/api/v1/sessions/${sessionId}/preview/console`,
+          { signal: timeoutSignal(opts?.timeoutMs ?? 5000, opts?.signal) },
+        )
           .then(r => r.data ?? []),
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
@@ -600,6 +694,14 @@ export const api = {
   settings: {
     get: () => get<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings'),
     update: (data: Record<string, unknown>) => patch<import('./types').SingleResponse<import('./types').Organization>>('/api/v1/settings', data),
+    getAgentCapabilities: () =>
+      get<import('./types').ListResponse<import('./types').AgentCapabilityDefinition>>('/api/v1/agent-capabilities'),
+    getAgentCapabilityPolicy: () =>
+      get<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>('/api/v1/settings/agent/capabilities'),
+    updateAgentCapabilityPolicy: (capabilities: import('./types').AgentCapabilityGrant[]) =>
+      patch<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>('/api/v1/settings/agent/capabilities', { capabilities }),
+    getNetworkStatus: () => get<import('./types').SingleResponse<import('./types').NetworkSettingsStatus>>('/api/v1/settings/network'),
+    getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
   },
@@ -612,33 +714,9 @@ export const api = {
       }),
     delete: (provider: string) => del(`/api/v1/settings/credentials/${provider}`),
   },
-  userCredentials: {
-    listPersonal: () =>
-      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/personal'),
-    upsertPersonal: (provider: string, config: Record<string, unknown>, isTeamDefault?: boolean) =>
-      request<import('./types').SingleResponse<import('./types').UserCredentialSummary>>(`/api/v1/settings/credentials/personal/${provider}`, {
-        method: 'PUT',
-        body: JSON.stringify({ config, is_team_default: isTeamDefault ?? false }),
-      }),
-    deletePersonal: (provider: string) =>
-      del(`/api/v1/settings/credentials/personal/${provider}`),
-    listTeamDefaults: () =>
-      get<import('./types').ListResponse<import('./types').UserCredentialSummary>>('/api/v1/settings/credentials/team'),
-    setTeamDefault: (provider: string, userId: string) =>
-      request(`/api/v1/settings/credentials/team/${provider}`, {
-        method: 'PUT',
-        body: JSON.stringify({ user_id: userId }),
-      }),
-    removeTeamDefault: (provider: string) =>
-      del(`/api/v1/settings/credentials/team/${provider}`),
-    listResolved: () =>
-      get<import('./types').ListResponse<import('./types').ResolvedCredential>>('/api/v1/settings/credentials/resolved'),
-  },
-  // Unified coding-credentials API — replaces the split userCredentials +
-  // codingAuths surface. See docs/design/future/65-unified-coding-credentials.md.
-  // The legacy `codingAuths` and `userCredentials` clients below still work
-  // (their writes are mirrored into coding_credentials by the backend) and
-  // remain in use by /settings/agent until the cleanup PR.
+  // Unified coding-credentials API — replaces the legacy split
+  // userCredentials + codingAuths surface, whose endpoints now return
+  // 410 Gone. See docs/design/future/65-unified-coding-credentials.md.
   codingCredentials: {
     list: (scope: 'org' | 'personal' | 'resolved' = 'personal') =>
       get<import('./types').ListResponse<import('./types').CodingCredentialSummary>>(
@@ -673,31 +751,6 @@ export const api = {
         body: JSON.stringify({ scope, ordered_ids: orderedIDs }),
       }),
   },
-  codingAuths: {
-    list: () =>
-      get<import('./types').ListResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths'),
-    create: (body: {
-      agent: string;
-      auth_type: string;
-      label?: string;
-      api_key?: string;
-      api_type?: string;
-      base_url?: string;
-      agent_defaults?: Record<string, string>;
-    }) =>
-      post<import('./types').SingleResponse<import('./types').CodingAuth>>('/api/v1/settings/coding-auths', body),
-    reorder: (ids: string[]) =>
-      request('/api/v1/settings/coding-auths/reorder', {
-        method: 'PATCH',
-        body: JSON.stringify({ ids }),
-      }),
-    update: (id: string, body: { label?: string }) =>
-      request<import('./types').SingleResponse<import('./types').CodingAuth>>(`/api/v1/settings/coding-auths/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      }),
-    delete: (id: string) => del(`/api/v1/settings/coding-auths/${id}`),
-  },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
     loginGitHub: () => {
@@ -706,21 +759,48 @@ export const api = {
     loginLinear: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/linear/login`;
     },
+    loginSentry: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/sentry/login`;
+    },
     connectLinear: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/linear/connect'),
     loginSlack: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/slack/login`;
     },
     connectSlack: () => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/slack/connect'),
-    listSlackChannels: () => get<{ data: Array<{ id: string; name: string; selected: boolean }> }>('/api/v1/integrations/slack/channels'),
+    getSlackHealth: () => get<import('./types').SingleResponse<import('./types').SlackInstallationHealth>>('/api/v1/integrations/slack/health'),
+    getSlackSettings: () => get<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings'),
+    updateSlackSettings: (settings: import('./types').SlackBotSettingsUpdate) =>
+      request<import('./types').SingleResponse<import('./types').SlackBotSettings>>('/api/v1/integrations/slack/settings', {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
+    listSlackUserLinks: () => get<import('./types').ListResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links'),
+    upsertSlackUserLink: (link: import('./types').SlackUserLinkUpsert) =>
+      request<import('./types').SingleResponse<import('./types').SlackUserLink>>('/api/v1/integrations/slack/user-links', {
+        method: 'POST',
+        body: JSON.stringify(link),
+      }),
+    deleteSlackUserLink: (id: string) => del<void>(`/api/v1/integrations/slack/user-links/${encodeURIComponent(id)}`),
+    listSlackChannels: () => get<{ data: import('./types').SlackChannel[] }>('/api/v1/integrations/slack/channels'),
     updateSlackChannels: (channelIds: string[]) => request('/api/v1/integrations/slack/channels', {
       method: 'PATCH',
       body: JSON.stringify({ channel_ids: channelIds }),
     }),
+    updateSlackChannelSettings: (channelId: string, settings: import('./types').SlackChannelSettingsUpdate) =>
+      request<import('./types').SingleResponse<unknown>>(`/api/v1/integrations/slack/channels/${encodeURIComponent(channelId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(settings),
+      }),
     connectNotion: (accessToken: string) => post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/notion/connect', { access_token: accessToken }),
     connectCircleCI: (authToken: string, projectSlug: string) =>
       post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/circleci/connect', {
         auth_token: authToken,
         project_slug: projectSlug,
+      }),
+    connectMezmo: (apiKey: string, baseUrl?: string) =>
+      post<import('./types').SingleResponse<import('./types').Integration>>('/api/v1/integrations/mezmo/connect', {
+        api_key: apiKey,
+        base_url: baseUrl ?? '',
       }),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; repos_seen?: number; errors: number } }>('/api/v1/integrations/github/sync'),
@@ -862,12 +942,37 @@ export const api = {
     createInvitation: (body: { email?: string; github_username?: string; acceptance_method?: 'email' | 'github' | 'either'; role: string }) =>
       post<import('./types').SingleResponse<import('./types').InvitationResponse>>('/api/v1/team/invitations', body),
     revokeInvitation: (id: string) => del<void>(`/api/v1/team/invitations/${id}`),
+    listDomains: () =>
+      get<import('./types').ListResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains'),
+    addDomain: (domain: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>('/api/v1/team/domains', { domain }),
+    verifyDomain: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}/verify`),
+    updateDomain: (id: string, body: { auto_join_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<import('./types').OrganizationDomain>>(`/api/v1/team/domains/${id}`, body),
+    removeDomain: (id: string) => del<void>(`/api/v1/team/domains/${id}`),
+    listGitHubOrgs: () =>
+      get<import('./types').GitHubOrgAutoJoinResponse>('/api/v1/team/github-orgs'),
+    updateGitHubOrg: (installationId: number, body: { auto_join_enabled: boolean }) =>
+      patch<import('./types').SingleResponse<unknown>>(`/api/v1/team/github-orgs/${installationId}`, body),
     githubInviteStatus: () =>
       get<import('./types').SingleResponse<import('./types').GitHubInviteStatus>>('/api/v1/team/github/status'),
     searchGitHubUsers: (q: string) =>
       get<import('./types').ListResponse<import('./types').GitHubUserSuggestion>>(
         `/api/v1/team/github/users?q=${encodeURIComponent(q)}`,
       ),
+  },
+  cli: {
+    // Org join links for the `curl .../install/<token> | sh` onboarding flow (admin-only).
+    listJoinTokens: () =>
+      get<import('./types').ListResponse<import('./types').JoinToken>>('/api/v1/org/join-tokens'),
+    createJoinToken: (body: { name?: string; role?: string; max_uses?: number; expires_in_days?: number }) =>
+      post<import('./types').SingleResponse<import('./types').CreatedJoinToken>>('/api/v1/org/join-tokens', body),
+    revokeJoinToken: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
+    // The caller's own CLI device tokens (any authenticated user).
+    listCliTokens: () =>
+      get<import('./types').ListResponse<import('./types').CliToken>>('/api/v1/auth/cli-tokens'),
+    revokeCliToken: (id: string) => del<void>(`/api/v1/auth/cli-tokens/${id}`),
   },
   projects: {
     list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; search?: string; proposed_by_pm?: boolean; created_by?: string; created_by_ids?: string[]; include_archived?: boolean; only_archived?: boolean }) => {
@@ -956,6 +1061,25 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Automation>>('/api/v1/automations', body),
     update: (id: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`, body),
+    improveGoalDraft: (body: {
+      mode: import('./types').AutomationGoalImprovementMode;
+      name?: string;
+      goal: string;
+      repository_id?: string;
+      scope?: string;
+      config?: Record<string, unknown>;
+    }) =>
+      post<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>('/api/v1/automations/goal-improvements', body),
+    improveGoalSaved: (id: string, body: { mode: import('./types').AutomationGoalImprovementMode; include_recent_runs?: number }) =>
+      post<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/${id}/goal-improvements`, body),
+    listGoalImprovements: (id: string, limit = 10) =>
+      get<import('./types').ListResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/${id}/goal-improvements?limit=${limit}`),
+    getGoalImprovement: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/goal-improvements/${id}`),
+    cancelGoalImprovement: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/goal-improvements/${id}/cancel`),
+    applyGoalImprovement: (automationId: string, improvementId: string, body: { expected_base_goal_hash: string; proposed_goal: string }) =>
+      post<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${automationId}/goal-improvements/${improvementId}/apply`, body),
     del: (id: string) => del(`/api/v1/automations/${id}`),
     pause: (id: string) =>
       post<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}/pause`),
@@ -974,6 +1098,10 @@ export const api = {
     },
     getRun: (id: string, runId: string) =>
       get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
+    getCapabilities: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>(`/api/v1/automations/${id}/capabilities`),
+    updateCapabilities: (id: string, capabilities: import('./types').AgentCapabilityGrant[]) =>
+      patch<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>(`/api/v1/automations/${id}/capabilities`, { capabilities }),
     stats: (id: string, params?: { since?: string; until?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.since) searchParams.set('since', params.since);
@@ -1068,6 +1196,12 @@ export const api = {
     },
     startBatch: (body: { name: string; task_ids: string[]; configs: Array<{ model: string; config_ref?: string }> }) =>
       post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/batch', body),
+    compare: (body: {
+      name?: string;
+      task_ids: string[];
+      baseline_config: { model: string; config_ref?: string };
+      candidate_configs: Array<{ model: string; config_ref?: string }>;
+    }) => post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/compare', body),
     getBatch: (id: string) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`),
     // Bootstrap
     bootstrap: (body: { repo_id: string }) =>
@@ -1079,8 +1213,33 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`);
     },
-    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices: number[] }) =>
+    acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices?: number[]; candidate_ids?: string[] }) =>
       post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),
+    reviewBootstrapCandidate: (candidateId: string, body: { status: import('./types').EvalBootstrapCandidateStatus; rejection_reason?: string }) =>
+      patch<import('./types').SingleResponse<{ candidate_id: string; status: import('./types').EvalBootstrapCandidateStatus; rejection_reason?: string }>>(`/api/v1/evals/bootstrap/candidates/${candidateId}`, body),
+    listDatasets: (params?: { repository_id?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').EvalDataset>>(`/api/v1/evals/datasets${qs ? `?${qs}` : ''}`);
+    },
+    createDataset: (body: { name: string; dataset_type: import('./types').EvalDatasetType; repository_id?: string; description?: string; source_summary?: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalDataset>>('/api/v1/evals/datasets', body),
+    addDatasetTask: (datasetId: string, body: { task_id: string; slice_key?: string }) =>
+      post<import('./types').SingleResponse<import('./types').EvalDatasetTask>>(`/api/v1/evals/datasets/${datasetId}/tasks`, body),
+    listReleaseGates: () =>
+      get<import('./types').ListResponse<import('./types').EvalReleaseGate>>('/api/v1/evals/release-gates'),
+    upsertReleaseGate: (body: {
+      gate_name: string;
+      enabled?: boolean;
+      dataset_id?: string;
+      min_pass_at_1?: number;
+      min_pass_at_k?: number;
+      max_policy_violations?: number;
+      max_regression_delta?: number;
+      canary_stages?: unknown;
+      rollback_rules?: unknown;
+    }) => post<import('./types').SingleResponse<import('./types').EvalReleaseGate>>('/api/v1/evals/release-gates', body),
   },
   usage: {
     getSummary: (params?: { start?: string; end?: string }) => {

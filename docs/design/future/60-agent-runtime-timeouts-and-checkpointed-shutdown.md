@@ -591,7 +591,7 @@ Initial expected mapping from current behavior:
 
 - `codex`: full resume
 - `claude_code`: full resume
-- `gemini_cli`: full resume
+- `opencode`: full resume
 - `amp`: filesystem resume
 - `pi`: filesystem resume
 

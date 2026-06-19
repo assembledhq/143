@@ -177,11 +177,13 @@ make secrets-setup        # generates your age keypair (one-time)
 export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
 source ~/.bash_profile
 
-# If .env.enc already exists in the repo, just decrypt it:
+# If your team keeps encrypted secrets in a private sibling repo
+# (default ../143-infra), clone it next to this one and decrypt:
+git clone git@github.com:<your-org>/143-infra.git ../143-infra
 make secrets-decrypt
 ```
 
-See the [secrets management guide](secrets/README.md) for the full walkthrough including production secrets, adding team members, and Render deploy setup.
+Encrypted bundles never live in this (public) repo — see the [secrets management guide](secrets/README.md) for the layout, the full walkthrough, production secrets, and adding team members.
 
 ## Testing Webhooks
 

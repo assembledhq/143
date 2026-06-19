@@ -3,9 +3,17 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ChevronDown, Loader2, Minus, Plus, Settings2, Sparkles } from "lucide-react";
+import {
+  ChevronDown,
+  Loader2,
+  Minus,
+  Plus,
+  Settings2,
+  Sparkles,
+} from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Command,
   CommandEmpty,
@@ -16,7 +24,11 @@ import {
 } from "@/components/ui/command";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -36,9 +48,19 @@ import {
 import { api } from "@/lib/api";
 import { agentTypeForModel } from "@/lib/agents";
 import { automationGoalLengthState } from "@/lib/automation-validation";
+import {
+  automationProductTriggerOptions,
+  type AutomationProductTrigger,
+} from "@/lib/automation-triggers";
 import { useAuth } from "@/hooks/use-auth";
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationComposer } from "@/components/automation-composer";
+import { AutomationGoalImprovementControl } from "@/components/automation-goal-improvement";
+import {
+  AutomationCapabilitiesEditor,
+  capabilitySummary,
+  normalizeCapabilityGrants,
+} from "@/components/automation-capabilities-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
 import { PageContainer } from "@/components/page-container";
@@ -55,11 +77,13 @@ import {
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import {
-  browserTimezone,
-  hourOptions,
-  minuteOptions,
-} from "../schedule-time";
+import type {
+  AgentCapabilityDefinition,
+  AgentCapabilityGrant,
+  AutomationGitHubEventFilters,
+  ListResponse,
+} from "@/lib/types";
+import { browserTimezone, hourOptions, minuteOptions } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
 
 export default function NewAutomationPage() {
@@ -67,7 +91,9 @@ export default function NewAutomationPage() {
   const searchParams = useSearchParams();
   const { user, isLoading } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
-  const initialTemplate = getAutomationTemplate(searchParams.get("template") ?? "");
+  const initialTemplate = getAutomationTemplate(
+    searchParams.get("template") ?? "",
+  );
   const goalEditorRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -81,7 +107,9 @@ export default function NewAutomationPage() {
   const [iconValue, setIconValue] = useState("⚙️");
   const [scope, setScope] = useState("");
   const [selectedRepoId, setSelectedRepoId] = useState("");
-  const [intervalValue, setIntervalValue] = useState(initialTemplate?.defaultInterval ?? 1);
+  const [intervalValue, setIntervalValue] = useState(
+    initialTemplate?.defaultInterval ?? 1,
+  );
   const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">(
     initialTemplate?.defaultUnit ?? "days",
   );
@@ -89,21 +117,38 @@ export default function NewAutomationPage() {
   const [intervalRunMinute, setIntervalRunMinute] = useState("00");
   const [detectedTimezone] = useState<string>(() => browserTimezone());
   const [timezone, setTimezone] = useState<string>(detectedTimezone);
+  const [scheduleEnabled, setScheduleEnabled] = useState(true);
+  const [productTriggers, setProductTriggers] = useState<
+    AutomationProductTrigger[]
+  >([]);
+  const [triggerBaseBranches, setTriggerBaseBranches] = useState("");
+  const [triggerAuthors, setTriggerAuthors] = useState("");
+  const [triggerPaths, setTriggerPaths] = useState("");
+  const [triggerFeedbackTypes, setTriggerFeedbackTypes] = useState("");
+  const [triggerReviewStates, setTriggerReviewStates] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
-  const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<Record<string, string>>({});
+  const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<
+    Record<string, string>
+  >({});
   const [model, setModel] = useState<string | undefined>(undefined);
   const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
   const [prePRReviewLoops, setPrePRReviewLoops] = useState(1);
-  const [reasoningEffort, setReasoningEffort] = useState<CodingAgentReasoningEffort>("");
+  const [reasoningEffort, setReasoningEffort] =
+    useState<CodingAgentReasoningEffort>("");
   const [priority, setPriority] = useState(50);
+  const [capabilityOverride, setCapabilityOverride] = useState<
+    AgentCapabilityGrant[] | null
+  >(null);
   const [redirecting, setRedirecting] = useState(false);
 
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
     queryFn: () => api.settings.get(),
   });
-  const settings = (settingsResponse?.data?.settings ?? {}) as { default_agent_type?: string };
+  const settings = (settingsResponse?.data?.settings ?? {}) as {
+    default_agent_type?: string;
+  };
 
   const { data: reposData } = useQuery({
     queryKey: ["repositories"],
@@ -111,15 +156,41 @@ export default function NewAutomationPage() {
   });
   const repos = reposData?.data ?? [];
 
+  const { data: capabilityCatalogResponse } = useQuery<
+    ListResponse<AgentCapabilityDefinition>
+  >({
+    queryKey: ["agent-capabilities"],
+    queryFn: () => api.settings.getAgentCapabilities(),
+  });
+  const capabilityCatalog = useMemo(
+    () => capabilityCatalogResponse?.data ?? [],
+    [capabilityCatalogResponse?.data],
+  );
+  const capabilityGrants = useMemo(
+    () =>
+      capabilityOverride ?? normalizeCapabilityGrants(capabilityCatalog, []),
+    [capabilityCatalog, capabilityOverride],
+  );
+
   const repoId = selectedRepoId || repos[0]?.id || "";
   const selectedRepo = repos.find((repo) => repo.id === repoId);
   const selectedBaseBranch = repoId
-    ? baseBranchByRepoId[repoId] ?? selectedRepo?.default_branch ?? ""
+    ? (baseBranchByRepoId[repoId] ?? selectedRepo?.default_branch ?? "")
     : "";
   const defaultAgentType = settings.default_agent_type ?? "codex";
-  const effectiveAgentType = model ? agentTypeForModel(model) ?? defaultAgentType : defaultAgentType;
-  const supportsNativeReviewLoop = ["codex", "claude_code", "amp", "pi"].includes(effectiveAgentType);
-  const effectivePrePRReviewLoops = supportsNativeReviewLoop ? prePRReviewLoops : 0;
+  const effectiveAgentType = model
+    ? (agentTypeForModel(model) ?? defaultAgentType)
+    : defaultAgentType;
+  const supportsNativeReviewLoop = [
+    "codex",
+    "claude_code",
+    "amp",
+    "pi",
+    "opencode",
+  ].includes(effectiveAgentType);
+  const effectivePrePRReviewLoops = supportsNativeReviewLoop
+    ? prePRReviewLoops
+    : 0;
   const prePRReviewDescription = supportsNativeReviewLoop
     ? effectivePrePRReviewLoops === 0
       ? "Off"
@@ -139,6 +210,35 @@ export default function NewAutomationPage() {
     });
   };
 
+  const toggleProductTrigger = (
+    trigger: AutomationProductTrigger,
+    checked: boolean,
+  ) => {
+    setProductTriggers((current) => {
+      if (checked) {
+        return current.includes(trigger) ? current : [...current, trigger];
+      }
+      return current.filter((item) => item !== trigger);
+    });
+  };
+
+  const githubEventFilters: AutomationGitHubEventFilters = useMemo(
+    () => ({
+      base_branches: commaList(triggerBaseBranches),
+      authors: commaList(triggerAuthors),
+      paths: commaList(triggerPaths),
+      feedback_types: commaList(triggerFeedbackTypes),
+      review_states: commaList(triggerReviewStates),
+    }),
+    [
+      triggerAuthors,
+      triggerBaseBranches,
+      triggerFeedbackTypes,
+      triggerPaths,
+      triggerReviewStates,
+    ],
+  );
+
   const createMutation = useMutation({
     mutationFn: () =>
       api.automations.create({
@@ -148,16 +248,26 @@ export default function NewAutomationPage() {
         icon_value: iconValue,
         repository_id: repoId,
         scope: scope.trim() || undefined,
-        interval_value: intervalValue,
-        interval_unit: intervalUnit,
-        interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
+        schedule_type: scheduleEnabled ? "interval" : "none",
+        ...(scheduleEnabled
+          ? {
+              interval_value: intervalValue,
+              interval_unit: intervalUnit,
+              interval_run_at: `${intervalRunHour}:${intervalRunMinute}`,
+            }
+          : {}),
         timezone,
+        triggers: productTriggers,
+        github_event_filters: githubEventFilters,
         model,
         identity_scope: identityScope,
         pre_pr_review_loops: effectivePrePRReviewLoops,
-        ...(showReasoningSelector && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+        ...(showReasoningSelector && reasoningEffort
+          ? { reasoning_effort: reasoningEffort }
+          : {}),
         base_branch: selectedBaseBranch.trim() || undefined,
         priority,
+        ...(capabilityOverride ? { capabilities: capabilityOverride } : {}),
       }),
     onSuccess: (res) => {
       setRedirecting(true);
@@ -188,7 +298,8 @@ export default function NewAutomationPage() {
     name.trim().length > 0 &&
     goal.trim().length > 0 &&
     !goalLength.isTooLong &&
-    repoId.length > 0;
+    repoId.length > 0 &&
+    (scheduleEnabled || productTriggers.length > 0);
 
   return (
     <PageContainer size="wide">
@@ -207,13 +318,41 @@ export default function NewAutomationPage() {
             goal={goal}
             onGoalChange={setGoal}
             repositoryId={repoId || undefined}
-            branch={selectedBaseBranch || selectedRepo?.default_branch || undefined}
+            branch={
+              selectedBaseBranch || selectedRepo?.default_branch || undefined
+            }
             agentType={effectiveAgentType}
             goalEditorContainerRef={goalEditorRef}
-            footerControls={(
+            goalImprovementControls={
+              <AutomationGoalImprovementControl
+                name={name}
+                goal={goal}
+                repositoryId={repoId || undefined}
+                scope={scope.trim() || undefined}
+                config={{
+                  schedule_type: scheduleEnabled ? "interval" : "none",
+                  triggers: productTriggers,
+                  github_event_filters: githubEventFilters,
+                  base_branch: selectedBaseBranch.trim() || undefined,
+                  agent_type: effectiveAgentType,
+                  model,
+                  reasoning_effort:
+                    showReasoningSelector && reasoningEffort
+                      ? reasoningEffort
+                      : undefined,
+                  pre_pr_review_loops: effectivePrePRReviewLoops,
+                }}
+                disabled={createMutation.isPending || redirecting}
+                onDraftApply={setGoal}
+              />
+            }
+            footerControls={
               <>
                 <Select value={repoId} onValueChange={setSelectedRepoId}>
-                  <SelectTrigger className="h-9 w-full sm:w-[210px]" aria-label="Repository">
+                  <SelectTrigger
+                    className="h-8 w-full border-transparent bg-muted/25 shadow-none hover:bg-muted/50 sm:w-[210px]"
+                    aria-label="Repository"
+                  >
                     <SelectValue placeholder="Select repo" />
                   </SelectTrigger>
                   <SelectContent>
@@ -225,77 +364,166 @@ export default function NewAutomationPage() {
                   </SelectContent>
                 </Select>
 
-                <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-2 py-1">
-                  <span className="text-sm font-medium leading-none text-muted-foreground">Run every</span>
-                  <Input
-                    id="interval-value"
-                    aria-label="Interval value"
-                    type="number"
-                    min={1}
-                    max={365}
-                    value={intervalValue}
-                    onChange={(e) => {
-                      const parsed = parseInt(e.target.value, 10);
-                      setIntervalValue(Number.isNaN(parsed) ? 1 : Math.max(1, parsed));
-                    }}
-                    className="h-7 w-16 px-2 text-base sm:text-xs"
-                  />
-                  <Select
-                    value={intervalUnit}
-                    onValueChange={(v) => {
-                      if (v === "hours" || v === "days" || v === "weeks") {
-                        setIntervalUnit(v);
-                      }
-                    }}
-                  >
-                    <SelectTrigger className="h-7 w-24 text-base sm:text-xs" aria-label="Interval unit">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="hours">hours</SelectItem>
-                      <SelectItem value="days">days</SelectItem>
-                      <SelectItem value="weeks">weeks</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <span className="text-sm font-medium leading-none text-muted-foreground">At</span>
-                  <Select value={intervalRunHour} onValueChange={setIntervalRunHour}>
-                    <SelectTrigger className="h-7 w-18 text-base sm:text-xs" aria-label="Run at hour">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {hourOptions.map((h) => (
-                        <SelectItem key={h} value={h}>{h}</SelectItem>
+                <div
+                  role="group"
+                  aria-label="Automation triggers"
+                  className="flex w-full flex-col gap-2 rounded-lg bg-muted/25 px-3 py-2"
+                >
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <span className="text-sm font-medium leading-none text-muted-foreground">
+                      Triggers
+                    </span>
+                    <Label className="flex min-h-7 cursor-pointer items-center gap-2 text-sm font-normal">
+                      <Checkbox
+                        checked={scheduleEnabled}
+                        onCheckedChange={(checked) =>
+                          setScheduleEnabled(checked === true)
+                        }
+                        aria-label="On a schedule"
+                      />
+                      <span>On a schedule</span>
+                    </Label>
+                  </div>
+                  {scheduleEnabled ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium leading-none text-muted-foreground">
+                        Run every
+                      </span>
+                      <Input
+                        id="interval-value"
+                        aria-label="Interval value"
+                        type="number"
+                        min={1}
+                        max={365}
+                        value={intervalValue}
+                        onChange={(e) => {
+                          const parsed = parseInt(e.target.value, 10);
+                          setIntervalValue(
+                            Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
+                          );
+                        }}
+                        className="h-7 w-16 px-2 text-base sm:text-xs"
+                      />
+                      <Select
+                        value={intervalUnit}
+                        onValueChange={(v) => {
+                          if (v === "hours" || v === "days" || v === "weeks") {
+                            setIntervalUnit(v);
+                          }
+                        }}
+                      >
+                        <SelectTrigger
+                          className="h-7 w-24 text-base sm:text-xs"
+                          aria-label="Interval unit"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="hours">hours</SelectItem>
+                          <SelectItem value="days">days</SelectItem>
+                          <SelectItem value="weeks">weeks</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <span className="text-sm font-medium leading-none text-muted-foreground">
+                        At
+                      </span>
+                      <Select
+                        value={intervalRunHour}
+                        onValueChange={setIntervalRunHour}
+                      >
+                        <SelectTrigger
+                          className="h-7 w-18 text-base sm:text-xs"
+                          aria-label="Run at hour"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {hourOptions.map((h) => (
+                            <SelectItem key={h} value={h}>
+                              {h}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <span className="text-sm text-muted-foreground">:</span>
+                      <Select
+                        value={intervalRunMinute}
+                        onValueChange={setIntervalRunMinute}
+                      >
+                        <SelectTrigger
+                          className="h-7 w-18 text-base sm:text-xs"
+                          aria-label="Run at minute"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {minuteOptions.map((m) => (
+                            <SelectItem key={m} value={m}>
+                              {m}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <TimezonePicker
+                        value={timezone}
+                        onChange={setTimezone}
+                        detected={detectedTimezone}
+                        className="w-full sm:w-auto"
+                      />
+                    </div>
+                  ) : null}
+                  <div className="space-y-1">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Pull request events
+                    </span>
+                    <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                      {automationProductTriggerOptions.map((option) => (
+                        <Label
+                          key={option.value}
+                          className="flex min-h-6 cursor-pointer items-center gap-2 text-sm font-normal"
+                        >
+                          <Checkbox
+                            checked={productTriggers.includes(option.value)}
+                            onCheckedChange={(checked) =>
+                              toggleProductTrigger(
+                                option.value,
+                                checked === true,
+                              )
+                            }
+                            aria-label={option.label}
+                          />
+                          <span className="min-w-0 leading-snug">
+                            {option.label}
+                          </span>
+                        </Label>
                       ))}
-                    </SelectContent>
-                  </Select>
-                  <span className="text-sm text-muted-foreground">:</span>
-                  <Select value={intervalRunMinute} onValueChange={setIntervalRunMinute}>
-                    <SelectTrigger className="h-7 w-18 text-base sm:text-xs" aria-label="Run at minute">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {minuteOptions.map((m) => (
-                        <SelectItem key={m} value={m}>{m}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <TimezonePicker
-                    value={timezone}
-                    onChange={setTimezone}
-                    detected={detectedTimezone}
-                    className="w-full sm:w-auto"
-                  />
+                    </div>
+                  </div>
+                  {!scheduleEnabled && productTriggers.length === 0 ? (
+                    <p className="text-xs text-destructive">
+                      Select at least one trigger.
+                    </p>
+                  ) : null}
                 </div>
-
               </>
-            )}
-            secondaryControls={(
+            }
+            secondaryControls={
               <>
-                <TemplatePicker open={templateOpen} onOpenChange={setTemplateOpen} onSelect={applyTemplate} />
+                <TemplatePicker
+                  open={templateOpen}
+                  onOpenChange={setTemplateOpen}
+                  onSelect={applyTemplate}
+                />
                 <Button asChild variant="ghost" size="sm">
-                  <Link href="/automations/templates">Browse all templates</Link>
+                  <Link href="/automations/templates">
+                    Browse all templates
+                  </Link>
                 </Button>
-                <Sheet modal={false} open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                <Sheet
+                  modal={false}
+                  open={advancedOpen}
+                  onOpenChange={setAdvancedOpen}
+                >
                   <SheetTrigger asChild>
                     <Button type="button" variant="outline" size="sm">
                       <Settings2 className="mr-2 h-4 w-4" />
@@ -306,12 +534,18 @@ export default function NewAutomationPage() {
                     <SheetHeader>
                       <SheetTitle>Advanced settings</SheetTitle>
                       <SheetDescription>
-                        Tune lower-frequency defaults for identity, model, branch, scope, priority, and review.
+                        Tune lower-frequency defaults for identity, model,
+                        branch, scope, priority, and review.
                       </SheetDescription>
                     </SheetHeader>
                     <div className="mt-6 space-y-5">
                       <div className="space-y-1.5">
-                        <Label htmlFor="scope">Scope <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                        <Label htmlFor="scope">
+                          Scope{" "}
+                          <span className="font-normal text-muted-foreground">
+                            (optional)
+                          </span>
+                        </Label>
                         <Input
                           id="scope"
                           value={scope}
@@ -321,7 +555,12 @@ export default function NewAutomationPage() {
                       </div>
                       <div className="space-y-1.5">
                         <Label>Run as</Label>
-                        <Select value={identityScope} onValueChange={(value: "org" | "personal") => setIdentityScope(value)}>
+                        <Select
+                          value={identityScope}
+                          onValueChange={(value: "org" | "personal") =>
+                            setIdentityScope(value)
+                          }
+                        >
                           <SelectTrigger aria-label="Run as">
                             <SelectValue />
                           </SelectTrigger>
@@ -345,15 +584,26 @@ export default function NewAutomationPage() {
                           <Label>Reasoning</Label>
                           <Select
                             value={reasoningEffort || "__default__"}
-                            onValueChange={(value) => setReasoningEffort(value === "__default__" ? "" : toCodingAgentReasoningEffort(value))}
+                            onValueChange={(value) =>
+                              setReasoningEffort(
+                                value === "__default__"
+                                  ? ""
+                                  : toCodingAgentReasoningEffort(value),
+                              )
+                            }
                           >
                             <SelectTrigger aria-label="Reasoning">
                               <SelectValue placeholder="Default reasoning" />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="__default__">Default reasoning</SelectItem>
+                              <SelectItem value="__default__">
+                                Default reasoning
+                              </SelectItem>
                               {reasoningOptions.map((option) => (
-                                <SelectItem key={option.value} value={option.value}>
+                                <SelectItem
+                                  key={option.value}
+                                  value={option.value}
+                                >
                                   {option.label}
                                 </SelectItem>
                               ))}
@@ -368,7 +618,10 @@ export default function NewAutomationPage() {
                           value={selectedBaseBranch}
                           defaultBranch={selectedRepo?.default_branch}
                           onValueChange={(branch) =>
-                            setBaseBranchByRepoId((prev) => ({ ...prev, [repoId]: branch }))
+                            setBaseBranchByRepoId((prev) => ({
+                              ...prev,
+                              [repoId]: branch,
+                            }))
                           }
                           label="Base branch"
                           disabled={!repoId}
@@ -378,7 +631,10 @@ export default function NewAutomationPage() {
                       </div>
                       <div className="space-y-1.5">
                         <Label>Priority</Label>
-                        <Select value={String(priority)} onValueChange={(v) => setPriority(parseInt(v, 10))}>
+                        <Select
+                          value={String(priority)}
+                          onValueChange={(v) => setPriority(parseInt(v, 10))}
+                        >
                           <SelectTrigger aria-label="Priority">
                             <SelectValue />
                           </SelectTrigger>
@@ -390,15 +646,109 @@ export default function NewAutomationPage() {
                           </SelectContent>
                         </Select>
                       </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <Label>Capabilities</Label>
+                          <span className="truncate text-xs text-muted-foreground">
+                            {capabilityOverride
+                              ? capabilitySummary(
+                                  capabilityCatalog,
+                                  capabilityOverride,
+                                )
+                              : "Org defaults"}
+                          </span>
+                        </div>
+                        <AutomationCapabilitiesEditor
+                          catalog={capabilityCatalog}
+                          grants={capabilityGrants}
+                          onChange={setCapabilityOverride}
+                        />
+                      </div>
+                      <div className="space-y-3 rounded-md border border-border p-3">
+                        <div className="space-y-1">
+                          <Label>Trigger filters</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Comma-separated filters applied when GitHub sends
+                            matching context.
+                          </p>
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="trigger-base-branches">
+                              Target branches
+                            </Label>
+                            <Input
+                              id="trigger-base-branches"
+                              value={triggerBaseBranches}
+                              onChange={(e) =>
+                                setTriggerBaseBranches(e.target.value)
+                              }
+                              placeholder="main, release"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="trigger-authors">Authors</Label>
+                            <Input
+                              id="trigger-authors"
+                              value={triggerAuthors}
+                              onChange={(e) =>
+                                setTriggerAuthors(e.target.value)
+                              }
+                              placeholder="octocat, dependabot[bot]"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="trigger-paths">Paths</Label>
+                            <Input
+                              id="trigger-paths"
+                              value={triggerPaths}
+                              onChange={(e) => setTriggerPaths(e.target.value)}
+                              placeholder="src/, package.json"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="trigger-feedback-types">
+                              Feedback types
+                            </Label>
+                            <Input
+                              id="trigger-feedback-types"
+                              value={triggerFeedbackTypes}
+                              onChange={(e) =>
+                                setTriggerFeedbackTypes(e.target.value)
+                              }
+                              placeholder="Inline review comment"
+                            />
+                          </div>
+                          <div className="space-y-1.5 sm:col-span-2">
+                            <Label htmlFor="trigger-review-states">
+                              Review states
+                            </Label>
+                            <Input
+                              id="trigger-review-states"
+                              value={triggerReviewStates}
+                              onChange={(e) =>
+                                setTriggerReviewStates(e.target.value)
+                              }
+                              placeholder="approved, changes_requested, commented"
+                            />
+                          </div>
+                        </div>
+                      </div>
                       <div className="space-y-1.5">
-                        <Label htmlFor="pre-pr-review-loops">Pre-PR review</Label>
+                        <Label htmlFor="pre-pr-review-loops">
+                          Pre-PR review
+                        </Label>
                         <div className="flex items-center gap-2">
                           <Button
                             type="button"
                             variant="outline"
                             size="icon"
                             aria-label="Decrease review passes"
-                            onClick={() => setPrePRReviewLoops((value) => Math.max(0, value - 1))}
+                            onClick={() =>
+                              setPrePRReviewLoops((value) =>
+                                Math.max(0, value - 1),
+                              )
+                            }
                             disabled={!supportsNativeReviewLoop}
                           >
                             <Minus className="h-4 w-4" />
@@ -412,7 +762,11 @@ export default function NewAutomationPage() {
                             value={effectivePrePRReviewLoops}
                             onChange={(e) => {
                               const parsed = parseInt(e.target.value, 10);
-                              setPrePRReviewLoops(Number.isNaN(parsed) ? 0 : Math.min(5, Math.max(0, parsed)));
+                              setPrePRReviewLoops(
+                                Number.isNaN(parsed)
+                                  ? 0
+                                  : Math.min(5, Math.max(0, parsed)),
+                              );
                             }}
                             disabled={!supportsNativeReviewLoop}
                             className="w-20 text-center"
@@ -422,17 +776,25 @@ export default function NewAutomationPage() {
                             variant="outline"
                             size="icon"
                             aria-label="Increase review passes"
-                            onClick={() => setPrePRReviewLoops((value) => Math.min(5, value + 1))}
+                            onClick={() =>
+                              setPrePRReviewLoops((value) =>
+                                Math.min(5, value + 1),
+                              )
+                            }
                             disabled={!supportsNativeReviewLoop}
                           >
                             <Plus className="h-4 w-4" />
                           </Button>
                         </div>
-                        <p className="text-xs text-muted-foreground">{prePRReviewDescription}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {prePRReviewDescription}
+                        </p>
                       </div>
                       <div className="flex justify-end gap-2 pt-2">
                         <SheetClose asChild>
-                          <Button type="button" variant="outline">Cancel</Button>
+                          <Button type="button" variant="outline">
+                            Cancel
+                          </Button>
                         </SheetClose>
                         <SheetClose asChild>
                           <Button type="button">Apply</Button>
@@ -442,8 +804,8 @@ export default function NewAutomationPage() {
                   </SheetContent>
                 </Sheet>
               </>
-            )}
-            submitArea={(
+            }
+            submitArea={
               <div className="flex items-center gap-3">
                 {createMutation.isError && (
                   <p className="text-xs text-destructive">
@@ -452,7 +814,9 @@ export default function NewAutomationPage() {
                 )}
                 <Button
                   onClick={() => createMutation.mutate()}
-                  disabled={!canSubmit || createMutation.isPending || redirecting}
+                  disabled={
+                    !canSubmit || createMutation.isPending || redirecting
+                  }
                 >
                   {createMutation.isPending || redirecting ? (
                     <>
@@ -464,7 +828,7 @@ export default function NewAutomationPage() {
                   )}
                 </Button>
               </div>
-            )}
+            }
           />
         </div>
       </div>
@@ -482,11 +846,17 @@ function TemplatePicker({
   onSelect: (template: AutomationTemplate) => void;
 }) {
   const featured = useMemo(
-    () => automationTemplates.filter((template) => featuredAutomationTemplateIDs.includes(template.id)),
+    () =>
+      automationTemplates.filter((template) =>
+        featuredAutomationTemplateIDs.includes(template.id),
+      ),
     [],
   );
   const remaining = useMemo(
-    () => automationTemplates.filter((template) => !featuredAutomationTemplateIDs.includes(template.id)),
+    () =>
+      automationTemplates.filter(
+        (template) => !featuredAutomationTemplateIDs.includes(template.id),
+      ),
     [],
   );
 
@@ -499,18 +869,36 @@ function TemplatePicker({
           <ChevronDown className="ml-2 h-3.5 w-3.5" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-[min(36rem,calc(100vw-2rem))] p-0" align="start">
+      <PopoverContent
+        className="w-[min(36rem,calc(100vw-2rem))] p-0"
+        align="start"
+      >
         <Command>
           <CommandInput placeholder="Search templates..." />
           <CommandList className="max-h-[420px]">
             <CommandEmpty>No templates found.</CommandEmpty>
-            <TemplateGroup heading="Featured" templates={featured} onSelect={onSelect} />
-            <TemplateGroup heading="All templates" templates={remaining} onSelect={onSelect} />
+            <TemplateGroup
+              heading="Featured"
+              templates={featured}
+              onSelect={onSelect}
+            />
+            <TemplateGroup
+              heading="All templates"
+              templates={remaining}
+              onSelect={onSelect}
+            />
           </CommandList>
         </Command>
       </PopoverContent>
     </Popover>
   );
+}
+
+function commaList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function TemplateGroup({
@@ -538,7 +926,9 @@ function TemplateGroup({
             </span>
             <span className="min-w-0 space-y-1">
               <span className="block text-sm font-medium">{template.name}</span>
-              <span className="line-clamp-2 block text-xs text-muted-foreground">{template.summary}</span>
+              <span className="line-clamp-2 block text-xs text-muted-foreground">
+                {template.summary}
+              </span>
             </span>
           </CommandItem>
         );

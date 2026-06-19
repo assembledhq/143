@@ -27,11 +27,25 @@ const mocks = vi.hoisted(() => ({
   llmModelsMock: vi.fn().mockResolvedValue({
     data: { openai: ["gpt-5.4", "gpt-5.4-mini"] },
   }),
-  resolvedCredsMock: vi.fn().mockResolvedValue({
-    data: [{ provider: "openai", source: "personal" }],
+  codingCredentialsListMock: vi.fn().mockResolvedValue({
+    data: [
+      {
+        id: "cc-codex",
+        org_id: "org-1",
+        user_id: "user-1",
+        scope: "personal",
+        priority: 1,
+        agent: "codex",
+        auth_type: "api_key",
+        provider: "openai",
+        label: "Codex API key",
+        status: "healthy",
+        is_default: true,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    ],
   }),
-  codingAuthsListMock: vi.fn().mockResolvedValue({ data: [] }),
-  codingCredentialsListMock: vi.fn().mockResolvedValue({ data: [] }),
   codexAuthStatusMock: vi.fn().mockResolvedValue({ data: { status: "completed" } }),
   authMeMock: vi.fn().mockResolvedValue({
     data: {
@@ -71,12 +85,6 @@ vi.mock("@/lib/api", () => ({
     },
     uploads: {
       upload: vi.fn(),
-    },
-    userCredentials: {
-      listResolved: mocks.resolvedCredsMock,
-    },
-    codingAuths: {
-      list: mocks.codingAuthsListMock,
     },
     codingCredentials: {
       list: mocks.codingCredentialsListMock,

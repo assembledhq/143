@@ -15,7 +15,8 @@ import (
 var humanInputRequestColumns = []string{
 	"id", "org_id", "session_id", "thread_id", "turn_number", "agent_type",
 	"provider_request_id", "request_kind", "status", "title", "body",
-	"context", "blocks_phase", "choices", "response_schema", "provider_payload",
+	"context", "blocks_phase", "assigned_user_id", "sensitivity", "preferred_channel",
+	"choices", "response_schema", "provider_payload",
 	"answer_text", "answer_payload", "answered_by", "answered_at", "expires_at", "created_at",
 }
 
@@ -26,7 +27,8 @@ func newHumanInputRequestRow(id, orgID, sessionID uuid.UUID, now time.Time) []an
 		id, orgID, sessionID, (*uuid.UUID)(nil), 2, models.AgentTypeClaudeCode,
 		humanInputStringPtr("toolu_123"), models.HumanInputRequestKindSingleChoice,
 		models.HumanInputRequestStatusPending, "Framework", "Which framework?",
-		(*string)(nil), (*string)(nil), choiceJSON, json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
+		(*string)(nil), (*string)(nil), (*uuid.UUID)(nil), models.HumanInputSensitivityTeam,
+		models.HumanInputPreferredChannelSlackThread, choiceJSON, json.RawMessage(nil), json.RawMessage(`{"raw":true}`),
 		(*string)(nil), json.RawMessage(nil), (*uuid.UUID)(nil), (*time.Time)(nil), (*time.Time)(nil), now,
 	}
 }
@@ -61,7 +63,7 @@ func TestSessionHumanInputRequestStore_Create(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(requestID, now))
 
@@ -107,6 +109,8 @@ func TestSessionHumanInputRequestStore_ListBySession(t *testing.T) {
 		Status:            models.HumanInputRequestStatusPending,
 		Title:             "Framework",
 		Body:              "Which framework?",
+		Sensitivity:       models.HumanInputSensitivityTeam,
+		PreferredChannel:  models.HumanInputPreferredChannelSlackThread,
 		Choices:           []models.HumanInputChoice{{ID: "react", Label: "React"}},
 		ProviderPayload:   json.RawMessage(`{"raw":true}`),
 		CreatedAt:         now,
@@ -132,10 +136,10 @@ func TestSessionHumanInputRequestStore_AnswerPending(t *testing.T) {
 
 	row := newHumanInputRequestRow(requestID, orgID, sessionID, now)
 	row[8] = models.HumanInputRequestStatusAnswered
-	row[16] = &answer
-	row[17] = payload
-	row[18] = &userID
-	row[19] = &now
+	row[19] = &answer
+	row[20] = payload
+	row[21] = &userID
+	row[22] = &now
 
 	mock.ExpectQuery("UPDATE session_human_input_requests").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -169,10 +173,10 @@ func TestSessionHumanInputRequestStore_AnswerLatestPendingFreeTextBySessionRequi
 	row[3] = (*uuid.UUID)(nil)
 	row[7] = models.HumanInputRequestKindFreeText
 	row[8] = models.HumanInputRequestStatusAnswered
-	row[16] = &answer
-	row[17] = payload
-	row[18] = &userID
-	row[19] = &now
+	row[19] = &answer
+	row[20] = payload
+	row[21] = &userID
+	row[22] = &now
 
 	mock.ExpectQuery(`(?s)UPDATE session_human_input_requests.*WHERE org_id = @org_id\s+AND session_id = @session_id\s+AND thread_id IS NULL\s+AND status = 'pending'\s+AND id = \(`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -207,10 +211,10 @@ func TestSessionHumanInputRequestStore_AnswerLatestPendingFreeTextByThread(t *te
 	row[3] = &threadID
 	row[7] = models.HumanInputRequestKindFreeText
 	row[8] = models.HumanInputRequestStatusAnswered
-	row[16] = &answer
-	row[17] = payload
-	row[18] = &userID
-	row[19] = &now
+	row[19] = &answer
+	row[20] = payload
+	row[21] = &userID
+	row[22] = &now
 
 	mock.ExpectQuery(`(?s)UPDATE session_human_input_requests.*WHERE org_id = @org_id\s+AND session_id = @session_id\s+AND thread_id IS NOT DISTINCT FROM @thread_id\s+AND status = 'pending'\s+AND id = \(`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

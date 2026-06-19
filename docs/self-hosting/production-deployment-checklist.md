@@ -39,7 +39,7 @@ Notes:
 - [ ] `ENCRYPTION_MASTER_KEY` (required if you want encrypted credentials at rest)
 - [ ] Worker capacity knobs (for `MODE=worker` or mixed `MODE=all` nodes):
   - `WORKER_PROCESS_COUNT` (default `1`) — how many in-process worker loops run on this node
-  - For fleet deploys, put worker sizing env vars in `.env.production.enc` like other deploy env vars.
+  - For fleet deploys, put worker sizing env vars in `.env.production.enc` like other deploy env vars (the bundle lives in your private secrets checkout — see [docs/secrets/README.md](../secrets/README.md)).
   - For mixed worker sizes, set `WORKER_BUCKET_MAP=hcloud-cpx21:10.0.0.4,hcloud-cpx31:10.0.0.5,hcloud-ccx23:10.0.0.6` (supports CPX shared + CCX dedicated families), or set `WORKER_PROCESS_COUNT` directly per worker.
   - The codebase still has internal sandbox CPU/memory/disk defaults, but those are not part of the documented self-hosting env surface in this checklist.
   - See [worker-capacity-tuning.md](worker-capacity-tuning.md) for sizing guidance by server size.

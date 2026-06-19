@@ -65,7 +65,7 @@ export function CommentsSummary({
                 )}
               >
                 {c.resolved ? (
-                  <Check className="h-3 w-3 shrink-0 mt-0.5 text-emerald-500" />
+                  <Check className="h-3 w-3 shrink-0 mt-0.5 text-success" />
                 ) : (
                   <span className="h-3 w-3 shrink-0 mt-0.5 flex items-center justify-center">
                     <span className="h-1.5 w-1.5 rounded-full bg-primary" />

@@ -4,7 +4,8 @@ import Image from "next/image";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription } from "@/components/ui/card";
+import { ErrorText } from "@/components/ui/error-notice";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,12 +159,32 @@ function LoginPageContent() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <Card className="w-full max-w-sm">
-        <CardHeader className="text-center">
-          <CardTitle className="text-lg font-semibold">143.dev</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
+    <div className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden bg-background px-4 py-10">
+      {/* Brand atmosphere: a soft gradient bloom behind the card. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -top-44 left-1/2 h-[420px] w-[640px] max-w-[100vw] -translate-x-1/2 rounded-full bg-[image:var(--gradient-primary)] opacity-[0.14] blur-[110px]"
+      />
+      <div className="relative mb-7 flex flex-col items-center gap-4">
+        <Image
+          src="/icon-192.png"
+          alt=""
+          width={48}
+          height={48}
+          className="h-12 w-12 rounded-xl border border-border/60 shadow-sm"
+          aria-hidden="true"
+        />
+        <div className="space-y-1 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+            Welcome to 143
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            The open-source platform for AI coding agents
+          </p>
+        </div>
+      </div>
+      <Card className="relative w-full max-w-sm shadow-md">
+        <CardContent className="space-y-4 pt-6">
           {invitation && (invitedEmail || invitedGitHubUsername || invitedOrg) && (
             <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-left">
               <div className="mb-2 flex items-center gap-2">
@@ -193,7 +214,7 @@ function LoginPageContent() {
 
           {providers?.demo && providers.demo_email && providers.demo_password && (
             <div
-              className="rounded-md border border-amber-300/50 bg-amber-50/50 px-3 py-2 text-sm text-muted-foreground dark:border-amber-500/30 dark:bg-amber-950/30"
+              className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-muted-foreground"
               data-testid="demo-banner"
             >
               <div className="font-medium text-foreground">Demo environment</div>
@@ -248,9 +269,9 @@ function LoginPageContent() {
           )}
 
           {error && (
-            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
+            <ErrorText className="rounded-md bg-destructive/10 px-3 py-2 text-sm" role="alert">
               {error}
-            </div>
+            </ErrorText>
           )}
 
           {!emailAuthReady && !emailAuthPending && (
@@ -354,6 +375,17 @@ function LoginPageContent() {
           )}
         </CardContent>
       </Card>
+      <p className="relative mt-6 text-center text-xs text-muted-foreground">
+        By continuing, you agree to the{" "}
+        <a href="/terms" className="underline underline-offset-2 hover:text-foreground">
+          terms of service
+        </a>{" "}
+        and{" "}
+        <a href="/privacy" className="underline underline-offset-2 hover:text-foreground">
+          privacy policy
+        </a>
+        .
+      </p>
     </div>
   );
 }

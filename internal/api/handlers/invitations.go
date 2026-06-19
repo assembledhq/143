@@ -15,6 +15,32 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+// recipientEmailForInvitations returns the email identifier the in-app
+// invitation surfaces may match against: the account's address when it is
+// attested (OAuth provider claim, verification link, or emailed-token
+// claim), "" otherwise — and "" is a no-match in every downstream check.
+//
+// This gate closes a takeover shape the token path never had: password
+// signup requires no email proof, so without it an attacker could register
+// victim@corp.com, see the victim's pending invitations in the org
+// switcher, and accept (or maliciously decline) them — invitations can
+// carry any role, including admin. The emailed token link keeps working
+// for unverified users because possessing the token IS receipt proof; the
+// github_login match also stays trusted because the session's GitHub
+// identity comes from OAuth, not user input. Lookup errors fail closed.
+func (h *AuthHandler) recipientEmailForInvitations(r *http.Request, user *models.User) string {
+	verifiedAt, err := h.userStore.GetEmailVerifiedAt(r.Context(), user.ID)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(err).Str("user_id", user.ID.String()).
+			Msg("failed to load email verification for invitation matching; treating as unverified")
+		return ""
+	}
+	if verifiedAt == nil {
+		return ""
+	}
+	return user.Email
+}
+
 // ListPendingInvitations returns the pending invitations addressed to the
 // authenticated user — surfaces the in-app "you have invitations" affordance
 // in the org switcher without forcing the user to open the email link.
@@ -37,7 +63,7 @@ func (h *AuthHandler) ListPendingInvitations(w http.ResponseWriter, r *http.Requ
 		githubLogin = *user.GitHubLogin
 	}
 
-	rows, err := h.invitationStore.ListPendingForUser(r.Context(), user.ID, user.Email, githubLogin)
+	rows, err := h.invitationStore.ListPendingForUser(r.Context(), user.ID, h.recipientEmailForInvitations(r, user), githubLogin)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "LIST_FAILED", "failed to list pending invitations", err)
 		return
@@ -220,6 +246,11 @@ func (h *AuthHandler) DeclineInvitationByID(w http.ResponseWriter, r *http.Reque
 // dismiss it from their UI. Status and recipient-match checks are
 // unconditional; the Revoke / Accept WHERE clauses remain the authoritative
 // concurrency guard.
+//
+// Email matching goes through recipientEmailForInvitations: an unattested
+// account email is treated as no identifier at all, so an attacker who
+// password-registered someone else's address can neither accept nor
+// decline (deny) that person's invitations from the in-app surface.
 func (h *AuthHandler) loadInvitationForRecipient(r *http.Request, user *models.User, invID uuid.UUID, githubLogin string, allowExpired bool) (models.Invitation, *invitationError, error) {
 	inv, err := h.invitationStore.GetByID(r.Context(), invID)
 	if err != nil {
@@ -233,7 +264,7 @@ func (h *AuthHandler) loadInvitationForRecipient(r *http.Request, user *models.U
 		return models.Invitation{}, nil, err
 	}
 
-	invErr := validateInvitationForRecipient(inv, user.Email, githubLogin)
+	invErr := validateInvitationForRecipient(inv, h.recipientEmailForInvitations(r, user), githubLogin)
 	if invErr != nil {
 		if allowExpired && invErr.code == "INVITE_EXPIRED" {
 			return inv, nil, nil

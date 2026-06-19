@@ -21,7 +21,9 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/api"
+	"github.com/assembledhq/143/internal/api/handlers"
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/auth"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/cluster"
 	"github.com/assembledhq/143/internal/config"
@@ -36,9 +38,11 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/adapters"
 	"github.com/assembledhq/143/internal/services/agent/providers"
+	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -201,35 +205,9 @@ func main() {
 	credentialStore := db.NewOrgCredentialStore(pool, cryptoSvc)
 	userCredentialStore := db.NewUserCredentialStore(pool, cryptoSvc)
 	codingCredentialStore := db.NewCodingCredentialStore(pool, cryptoSvc)
-	// Wire the unified coding-credentials mirror into both legacy stores so
-	// every existing write path (OAuth services, /settings/coding-auths,
-	// /settings/credentials/personal, /settings/credentials/team) lands in
-	// `coding_credentials` as well as the legacy table. Reads come from the
-	// unified store via AgentEnv.CodingCredentials. The mirror is removed in
-	// the unified-credentials cleanup PR.
-	credentialStore.SetCodingMirror(codingCredentialStore)
-	userCredentialStore.SetCodingMirror(codingCredentialStore)
-	// Pipe mirror failures into the application logger so a drift between
-	// the legacy and unified tables is visible in production telemetry.
-	mirrorLog := func(format string, args ...any) {
-		logger.Warn().Msgf(format, args...)
-	}
-	credentialStore.SetMirrorLogger(mirrorLog)
-	userCredentialStore.SetMirrorLogger(mirrorLog)
-	codingCredentialStore.SetMirrorLogger(mirrorLog)
-	// Expose the mirror's drift / failure counters through OTel so the
-	// dual-write rollout has a dashboard signal when the unified table is
-	// drifting from the legacy stores. Cleaned up alongside the mirror itself.
-	if _, err := metrics.NewMirrorMetrics(func() (uint64, uint64) {
-		return codingCredentialStore.MirrorDriftCount(), codingCredentialStore.MirrorFailureCount()
-	}); err != nil {
-		logger.Fatal().Err(err).Msg("failed to initialize coding-credentials mirror metrics")
-	}
-	// Both OAuth services depend on a scope-aware credential surface. The
-	// adapter routes org-scope traffic to the legacy OrgCredentialStore
-	// (mirrored to coding_credentials) and personal-scope traffic to the
-	// unified CodingCredentialStore directly — see internal/db/scoped_credential_store.go.
-	scopedCredentialStore := db.NewScopedCredentialStore(credentialStore, codingCredentialStore)
+	// Both OAuth services depend on a scope-aware credential surface backed
+	// by the unified store — see internal/db/scoped_credential_store.go.
+	scopedCredentialStore := db.NewScopedCredentialStore(codingCredentialStore)
 	codexAuthSvc := codexauth.NewService(scopedCredentialStore, logger)
 	claudeCodeAuthSvc := claudecodeauth.NewService(scopedCredentialStore, logger)
 
@@ -246,6 +224,7 @@ func main() {
 	// gracefully degrades when Docker is not available).
 	fileReader := sandbox.FileReader(sandbox.NoOpFileReader{})
 	var pvProvider preview.PreviewCapableProvider
+	var dependencyCache preview.DependencyCache
 	var snapshotExec preview.SnapshotExecutor
 	var apiSandboxProvider agent.SandboxProvider
 	var sandboxCapacity *agent.SandboxCapacityGate
@@ -264,7 +243,6 @@ func main() {
 				providers.WithHealthCheckImage(cfg.SandboxHealthCheckImage),
 				providers.WithRequireDiskQuota(cfg.SandboxRequireDiskQuota),
 			)
-			var dependencyCache preview.DependencyCache
 			if previewDependencyCacheEnabled(*cfg) {
 				dependencyS3Region := cfg.PreviewDependencyCacheS3Region
 				if dependencyS3Region == "" {
@@ -292,7 +270,7 @@ func main() {
 						Logger:        logger,
 						WorkerNodeID:  cfg.NodeID,
 						Prefix:        cfg.PreviewDependencyCachePrefix,
-						LocalDir:      cfg.PreviewDependencyCacheLocalDir,
+						LocalDir:      config.ResolvePreviewDependencyCacheLocalDir(cfg.PreviewDependencyCacheLocalDir),
 						LocalMaxBytes: cfg.PreviewDependencyCacheLocalMaxBytes,
 					})
 					if cacheErr != nil {
@@ -311,7 +289,13 @@ func main() {
 					}
 				}
 			}
-			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(apiDockerCli, sandboxExec, logger, previewproviders.WithDependencyCache(dependencyCache))
+			dockerPreviewProvider := previewproviders.NewDockerPreviewProvider(
+				apiDockerCli,
+				sandboxExec,
+				logger,
+				previewproviders.WithDependencyCache(dependencyCache),
+				previewproviders.WithPackageManagerCacheEnabled(cfg.PreviewPackageManagerCacheEnabled),
+			)
 			pvProvider = dockerPreviewProvider
 			snapshotExec = sandboxExec
 			apiSandboxProvider = sandboxExec
@@ -413,6 +397,7 @@ func main() {
 	var sandboxAuthShutdown func()
 	var processWorkers []*worker.Worker
 	var jobStore *db.JobStore
+	var evalBootstrapStore *db.EvalBootstrapStore
 	var workerPreviewStore *db.PreviewStore
 	// Hoisted so the shutdown goroutine below (declared at main scope) can
 	// reach the PR service for draining post-PR snapshot uploads. Stays nil
@@ -435,6 +420,7 @@ func main() {
 		sessionMessageStore := db.NewSessionMessageStore(pool)
 		sessionThreadStore := db.NewSessionThreadStore(pool)
 		sessionHumanInputStore := db.NewSessionHumanInputRequestStore(pool)
+		evalBootstrapStore = db.NewEvalBootstrapStore(pool)
 		priorityScoreStore := db.NewPriorityScoreStore(pool)
 		complexityEstimateStore := db.NewComplexityEstimateStore(pool)
 		pmPlanStore := db.NewPMPlanStore(pool)
@@ -486,8 +472,10 @@ func main() {
 			EvalTasks:           db.NewEvalTaskStore(pool),
 			EvalRuns:            db.NewEvalRunStore(pool),
 			EvalBatches:         db.NewEvalBatchStore(pool),
-			EvalBootstraps:      db.NewEvalBootstrapStore(pool),
+			EvalBootstraps:      evalBootstrapStore,
+			EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 			Repositories:        repoStore,
+			GitHubInstallations: db.NewGitHubInstallationStore(pool),
 			SessionMessages:     sessionMessageStore,
 			SessionThreads:      sessionThreadStore,
 			HumanInputRequests:  sessionHumanInputStore,
@@ -500,6 +488,8 @@ func main() {
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
+			SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
+			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
 			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
@@ -518,24 +508,68 @@ func main() {
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore, pmPlanStore, pmDecisionLogStore,
 				projectStore, projectTaskStore, projectCycleStore, pmDocumentStore, integrationStore,
-				sessionMessageStore, automationRunStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
+				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader)
 			if services != nil {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
+				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
+					var prewarmDependencyCache preview.PreviewPathCache
+					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
+						prewarmDependencyCache = pathCache
+					}
 					services.PreviewController = previewManager
 					services.PreviewStarter = preview.NewStartRunner(preview.StartRunnerConfig{
 						Manager:         previewManager,
 						Previews:        previewStore,
 						Sessions:        sessionStore,
 						Repositories:    repoStore,
+						Orgs:            orgStore,
 						FileReader:      fileReader,
 						SandboxProvider: apiSandboxProvider,
 						SandboxCapacity: sandboxCapacity,
+						StaticEgress:    agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 						Snapshots:       snapshotStore,
 						GitHub:          services.GitHub,
 						NodeID:          cfg.NodeID,
+						DependencyCache: prewarmDependencyCache,
+						PrewarmEnabled:  cfg.PreviewCachePrewarmEnabled,
+						PrewarmTimeout:  cfg.PreviewCachePrewarmTimeout,
 						Logger:          logger,
 					})
+					previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+					if keyringErr != nil {
+						logger.Warn().Err(keyringErr).Msg("failed to initialize preview RPC keyring for Slack preview control; worker RPC auth disabled")
+						previewRPCKeyring = auth.PreviewTokenKeyring{}
+					}
+					var slackBranchPreviewHandler *handlers.BranchPreviewHandler
+					if prSvc, ok := services.PR.(*ghservice.PRService); ok {
+						autoPreviewNodeStore := db.NewNodeStore(pool)
+						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+							MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+							PreferredRegion:      cfg.NodeRegion,
+						})
+						previewStopper := preview.NewWorkerStopper(previewStore, autoPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID, previewManager)
+						prSvc.SetPreviewTeardown(previewStore, previewStopper)
+						prSvc.SetPreviewOriginTemplate(cfg.PreviewOriginTemplate)
+						branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prSvc, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
+						branchPreviewHandler.SetWorkerRuntime(jobStore, autoPreviewSelector)
+						services.AutoPreviewStarter = branchPreviewHandler
+						slackBranchPreviewHandler = branchPreviewHandler
+					}
+					slackPreviewNodeStore := db.NewNodeStore(pool)
+					slackPreviewSelector := preview.NewWorkerSelectorWithOptions(slackPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
+						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+						PreferredRegion:      cfg.NodeRegion,
+					})
+					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
+					slackPreviewHandler.SetJobStore(jobStore)
+					slackPreviewHandler.SetWorkerRuntime(slackPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID)
+					slackPreviewHandler.SetStaticEgressRuntime(orgStore, agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP))
+					slackPreviewHandler.SetSandboxCapacityGate(sandboxCapacity)
+					services.SlackPreviewControl = handlers.NewSlackPreviewControl(slackPreviewHandler, slackBranchPreviewHandler, pullRequestStore, repoStore, cfg.FrontendURL)
+					services.PreviewCachePrewarmEnabled = cfg.PreviewCachePrewarmEnabled
+					services.PreviewCachePrewarmPriority = cfg.PreviewCachePrewarmPriority
+					services.PreviewCachePrewarmTimeout = cfg.PreviewCachePrewarmTimeout
 				}
 				// Wire eval pub/sub publishers so worker handlers can wake
 				// the API SSE subscribers on every state transition without
@@ -557,9 +591,11 @@ func main() {
 					"Fix the missing dependencies, or set MODE=api to disable the in-process worker.")
 		}
 		retentionCfg := worker.DataRetentionConfig{
-			WebhookDays: cfg.DataRetentionWebhookDays,
-			LogsDays:    cfg.DataRetentionLogsDays,
-			JobsDays:    cfg.DataRetentionJobsDays,
+			WebhookDays:              cfg.DataRetentionWebhookDays,
+			LogsDays:                 cfg.DataRetentionLogsDays,
+			JobsDays:                 cfg.DataRetentionJobsDays,
+			SlackInboundPayloadDays:  cfg.DataRetentionSlackInboundPayloadDays,
+			SlackInboundPayloadBatch: cfg.DataRetentionSlackInboundPayloadBatch,
 		}
 
 		if sandboxCapacity != nil && services.SandboxGC != nil {
@@ -603,17 +639,16 @@ func main() {
 		if services != nil {
 			if orch, ok := services.Orchestrator.(*agent.Orchestrator); ok {
 				rehydrateCtx, rehydrateCancel := context.WithTimeout(ctx, 2*time.Minute)
-				keep, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
+				_, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
 				if rehydrateErr != nil {
 					logger.Warn().Err(rehydrateErr).Msg("startup: rehydrating sandbox auth listeners failed; remaining sessions will retry on next turn boundary")
 				}
-				// Only sweep when rehydrate actually ran (keep != nil) — a nil
-				// keep means we don't know which sockets are live, so sweeping
-				// would clobber listeners the next turn boundary will rebind.
-				// See orch.RehydrateSandboxAuthListeners' return contract.
-				if keep != nil && services.SandboxAuthSweep != nil {
-					services.SandboxAuthSweep(keep)
-				}
+				// Do not sweep the shared socket directory at startup. During
+				// rolling deploys, an older worker generation on this same host
+				// may still own live session sockets while the new generation
+				// boots. A broad startup sweep cannot distinguish those live
+				// sockets from stale dirs and would unlink /run/143-auth/sock
+				// inside still-running sandboxes.
 				rehydrateCancel()
 			}
 		}
@@ -644,6 +679,7 @@ func main() {
 			cfg.NodeRegion,
 			previewRoutingReady.Load,
 			sandboxCapacity,
+			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
 			go runPreviewRuntimeHeartbeat(ctx, workerPreviewStore, cfg.NodeID, logger, 30*time.Second, 90*time.Second)
@@ -658,6 +694,7 @@ func main() {
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
+		go worker.RunPreviewHealthSampler(ctx, db.NewPreviewStore(pool), logger, time.Minute)
 		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
@@ -679,7 +716,12 @@ func main() {
 				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 				PreferredRegion:      cfg.NodeRegion,
 			})
-			client := preview.NewWorkerPreviewClient(cfg.SessionSecret)
+			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+			if keyringErr != nil {
+				logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+				previewRPCKeyring = auth.PreviewTokenKeyring{}
+			}
+			client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
 			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
 		}
 		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
@@ -712,7 +754,14 @@ func main() {
 		)
 		scheduler.SetPMDocStore(pmDocumentStore)
 		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
+		scheduler.SetDomainRecheck(
+			db.NewOrganizationDomainStore(pool),
+			domains.NewVerifier(),
+			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
+		)
+		scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
 		go scheduler.Start(ctx, 10*time.Minute)
 	}
 
@@ -807,7 +856,7 @@ func main() {
 		drainCancel()
 		if !workerDrainTimedOut && workerPreviewStore != nil && cfg.NodeID != "" {
 			if drained := waitForActivePreviewsToDrain(context.Background(), workerPreviewStore, cfg.NodeID, logger, cfg.WorkerPreviewDrainTimeout, 5*time.Second); !drained {
-				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorker(context.Background(), cfg.NodeID, "worker preview drain timeout"); err != nil {
+				if _, err := workerPreviewStore.MarkActivePreviewRuntimesLostByWorkerWithReason(context.Background(), cfg.NodeID, "worker preview drain timeout", models.PreviewUnavailableReasonDeployDrainTimeout); err != nil {
 					logger.Warn().Err(err).Str("worker_node_id", cfg.NodeID).Msg("failed to mark preview runtimes lost after drain timeout")
 				}
 			}
@@ -886,6 +935,7 @@ func startProcessWorkers(
 	nodeRegion string,
 	previewRoutingReady func() bool,
 	sandboxCapacity *agent.SandboxCapacityGate,
+	staticEgress agent.StaticEgressRuntimeConfig,
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -902,7 +952,7 @@ func startProcessWorkers(
 		})
 	}
 
-	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity))
+	nodeManager.SetMetadataProvider(buildWorkerMetadataProvider(workers, previewCapable, previewInternalBaseURL, nodeRegion, previewRoutingReady, sandboxCapacity, staticEgress))
 
 	for i, w := range workers {
 		go w.Start(ctx)
@@ -935,6 +985,7 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeR
 	}
 	if previewCapable {
 		metadata["preview_capable"] = true
+		metadata["preview_rpc_auth_check"] = true
 	}
 	if previewInternalBaseURL != "" {
 		metadata["preview_internal_base_url"] = previewInternalBaseURL
@@ -942,13 +993,25 @@ func buildBaseMetadata(previewCapable bool, previewInternalBaseURL string, nodeR
 	return metadata
 }
 
-func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate) func() map[string]any {
+func buildStaticEgressMetadata(runtime agent.StaticEgressRuntimeConfig) map[string]any {
+	metadata := map[string]any{}
+	if runtime.Enabled && runtime.Capable && runtime.PublicIP != "" {
+		metadata["static_egress_capable"] = true
+		metadata["static_egress_public_ip"] = runtime.PublicIP
+	}
+	return metadata
+}
+
+func buildWorkerMetadataProvider(workers []*worker.Worker, previewCapable bool, previewInternalBaseURL string, nodeRegion string, previewRoutingReady func() bool, sandboxCapacity *agent.SandboxCapacityGate, staticEgress agent.StaticEgressRuntimeConfig) func() map[string]any {
 	return func() map[string]any {
 		advertisePreview := previewCapable
 		if previewRoutingReady != nil {
 			advertisePreview = advertisePreview && previewRoutingReady()
 		}
 		metadata := buildBaseMetadata(advertisePreview, previewInternalBaseURL, nodeRegion)
+		for k, v := range buildStaticEgressMetadata(staticEgress) {
+			metadata[k] = v
+		}
 		metadata["active_job_count"] = totalActiveJobs(workers)
 		metadata["active_run_agent_count"] = totalActiveRunAgentJobs(workers)
 		if sandboxCapacity != nil {
@@ -1056,6 +1119,24 @@ func canBuildServices(cfg *config.Config, logger zerolog.Logger) bool {
 	return true
 }
 
+type internalSandboxAuthRouter interface {
+	Post(pattern string, h http.HandlerFunc)
+}
+
+func registerInternalSandboxAuthRoutes(router internalSandboxAuthRouter, broker handlers.InternalSandboxAuthBroker, cfg *config.Config, logger zerolog.Logger) {
+	if router == nil || broker == nil || cfg == nil {
+		return
+	}
+	keyring, err := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+	if err != nil {
+		logger.Warn().Err(err).Msg("sandbox auth: preview RPC keyring is not configured; internal sandbox auth RPC unavailable")
+		return
+	}
+	handler := handlers.NewInternalSandboxAuthHandler(broker, cfg.NodeID, keyring, logger)
+	router.Post("/internal/sandbox-auth/acquire", handler.Acquire)
+	router.Post("/internal/sandbox-auth/release", handler.Release)
+}
+
 func validateSessionExecutorStartupConfig(cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is required")
@@ -1089,10 +1170,7 @@ func configureSessionExecutorDispatch(
 		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
 			Image:       cfg.SessionExecutorImage,
 			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds: []string{
-				"/var/run/docker.sock:/var/run/docker.sock",
-				"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
-			},
+			Binds:       sessionExecutorBinds(),
 			GroupAdd:    sessionExecutorGroupAddFromEnv(),
 			Env:         os.Environ(),
 			StopTimeout: cfg.SessionExecutorStopTimeout,
@@ -1102,6 +1180,26 @@ func configureSessionExecutorDispatch(
 		BuildSHA:              version.BuildSHA,
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
 	}
+}
+
+func sessionExecutorBinds() []string {
+	return []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
+	}
+}
+
+func sessionExecutorIDFromEnv() (uuid.UUID, bool, error) {
+	raw := strings.TrimSpace(os.Getenv("SESSION_EXECUTOR_ID"))
+	if raw == "" {
+		return uuid.Nil, false, nil
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, true, fmt.Errorf("parse SESSION_EXECUTOR_ID: %w", err)
+	}
+	return id, true, nil
 }
 
 func sessionExecutorGroupAddFromEnv() []string {
@@ -1143,6 +1241,7 @@ func buildServices(
 	integrationStore *db.IntegrationStore,
 	sessionMessageStore *db.SessionMessageStore,
 	automationRunStore *db.AutomationRunStore,
+	evalBootstrapStore *db.EvalBootstrapStore,
 	snapshotStore storage.SnapshotStore,
 	billingMetrics *metrics.BillingMetrics,
 	cancelRegistry *agent.CancelRegistry,
@@ -1247,7 +1346,6 @@ func buildServices(
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
 		Credentials:       credentialStore,
-		UserCredentials:   userCredentialStore,
 		CodingCredentials: codingCredentialStore,
 		Orgs:              orgStore,
 		OrgSettingsCache:  orgSettingsCache,
@@ -1270,7 +1368,11 @@ func buildServices(
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	projectTaskUpdater := pm.NewProjectHooks(projectTaskStore, projectStore, logger)
+	automationStore := db.NewAutomationStore(pool)
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
+	automationGoalImprovementStore := db.NewAutomationGoalImprovementStore(pool)
+	automationGoalImprovementUpdater := automations.NewGoalImprovementService(automationGoalImprovementStore, automationStore, automationRunStore, sessionStore, jobStore, pool, llmClient)
+	automationGoalImprovementUpdater.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(pool), logger))
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 
@@ -1287,21 +1389,55 @@ func buildServices(
 	}
 	identityResolver.SetUsers(userStore)
 	identityResolver.SetIntegrations(integrationStore)
-	var sandboxAuthServer *sandboxauth.Server
+	var (
+		sandboxAuthBroker       *sandboxauth.Broker
+		orchestratorSandboxAuth agent.SandboxAuthServer
+		prSandboxAuth           agent.SandboxAuthServer
+	)
 	if cfg.SandboxAuthSocketDir != "" {
-		if cfg.Env == "production" {
-			if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
-				logger.Error().
-					Err(err).
-					Str("socket_dir", cfg.SandboxAuthSocketDir).
-					Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+		if executorID, ok, err := sessionExecutorIDFromEnv(); err != nil {
+			logger.Error().Err(err).Msg("sandbox auth: invalid session executor id — worker services disabled")
+			return nil
+		} else if ok {
+			if strings.TrimSpace(cfg.PreviewInternalBaseURL) == "" {
+				logger.Error().Msg("sandbox auth: PREVIEW_INTERNAL_BASE_URL is required for session executor remote broker access")
 				return nil
 			}
+			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+			if keyringErr != nil {
+				logger.Error().Err(keyringErr).Msg("sandbox auth: preview RPC keyring is required for session executor remote broker access")
+				return nil
+			}
+			orchestratorSandboxAuth = sandboxauth.NewRemoteBrokerClient(sandboxauth.RemoteBrokerClientConfig{
+				BaseURL:  cfg.PreviewInternalBaseURL,
+				NodeID:   cfg.NodeID,
+				HolderID: executorID,
+				Keyring:  previewRPCKeyring,
+				Logger:   logger,
+			})
+			prSandboxAuth = orchestratorSandboxAuth
+			logger.Info().
+				Str("worker_base_url", cfg.PreviewInternalBaseURL).
+				Str("executor_id", executorID.String()).
+				Msg("sandbox auth: session executor will use worker-owned remote broker")
+		} else {
+			if cfg.Env == "production" {
+				if err := sandboxauth.ValidateSocketDirForStartup(cfg.SandboxAuthSocketDir); err != nil {
+					logger.Error().
+						Err(err).
+						Str("socket_dir", cfg.SandboxAuthSocketDir).
+						Msg("sandbox auth: socket directory preflight failed — worker services disabled")
+					return nil
+				}
+			}
+			sandboxAuthServer := sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
+			sandboxAuthBroker = sandboxauth.NewBroker(sandboxAuthServer, sessionStore, repoStore, orgStore, logger)
+			orchestratorSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-orchestrator", logger)
+			prSandboxAuth = sandboxauth.NewLeaseClient(sandboxAuthBroker, "worker-pr", logger)
+			logger.Info().
+				Str("socket_dir", cfg.SandboxAuthSocketDir).
+				Msg("sandbox auth: worker-owned credential socket broker enabled")
 		}
-		sandboxAuthServer = sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
-		logger.Info().
-			Str("socket_dir", cfg.SandboxAuthSocketDir).
-			Msg("sandbox auth: per-session credential socket bridge enabled")
 	} else {
 		logger.Warn().
 			Msg("sandbox auth: SANDBOX_AUTH_SOCKET_DIR is empty; per-session credential socket disabled — sandbox `git push` will require GITHUB_TOKEN env fallback")
@@ -1310,49 +1446,51 @@ func buildServices(
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
 
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:           sandboxProvider,
-		Adapters:           agentAdapters,
-		Env:                agentEnv,
-		Sessions:           sessionStore,
-		SessionLogs:        sessionLogStore,
-		SessionQuestions:   sessionQuestionStore,
-		HumanInputRequests: sessionHumanInputStore,
-		SessionMessages:    sessionMessageStore,
-		SessionThreads:     sessionThreadStore,
-		SessionIssueLinks:  db.NewSessionIssueLinkStore(pool),
-		IssueSnapshots:     db.NewSessionTurnIssueSnapshotStore(pool),
-		DecisionLog:        pmDecisionLogStore,
-		ProjectTasks:       projectTaskUpdater,
-		AutomationRuns:     automationRunUpdater,
-		Issues:             issueStore,
-		Repositories:       repoStore,
-		Orgs:               orgStore,
-		Jobs:               jobStore,
-		GitHub:             ghSvc,
-		CodexAuth:          codexAuthSvc,
-		ClaudeCodeAuth:     claudeCodeAuthSvc,
-		Credentials:        credentialStore,
-		UserCredentials:    userCredentialStore,
-		CodingCredentials:  codingCredentialStore,
-		Snapshots:          snapshotStore,
-		Uploads:            uploadStore,
-		FileReader:         fileReader,
-		MentionIndexes:     mentionIndexCache,
-		UsageTracker:       usageTracker,
-		SandboxCapacity:    sandboxCapacity,
-		ThreadRuntimes:     threadRuntimeStore,
-		ThreadInbox:        threadInboxStore,
-		SandboxHolders:     sessionSandboxHolderStore,
-		Cancels:            cancelRegistry,
-		ThreadCancels:      threadCancelRegistry,
-		OrgSettingsCache:   orgSettingsCache,
-		IdentityResolver:   identityResolver,
-		SandboxAuth:        sandboxAuthServer,
-		Users:              userStore,
-		InternalAPIURL:     cfg.BaseURL + "/api/v1/internal",
-		InternalAPISecret:  cfg.SessionSecret,
-		NodeID:             cfg.NodeID,
-		Logger:             logger,
+		Provider:                   sandboxProvider,
+		Adapters:                   agentAdapters,
+		Env:                        agentEnv,
+		Sessions:                   sessionStore,
+		SessionLogs:                sessionLogStore,
+		SessionQuestions:           sessionQuestionStore,
+		HumanInputRequests:         sessionHumanInputStore,
+		SessionMessages:            sessionMessageStore,
+		SessionThreads:             sessionThreadStore,
+		SessionIssueLinks:          db.NewSessionIssueLinkStore(pool),
+		IssueSnapshots:             db.NewSessionTurnIssueSnapshotStore(pool),
+		DecisionLog:                pmDecisionLogStore,
+		ProjectTasks:               projectTaskUpdater,
+		AutomationRuns:             automationRunUpdater,
+		AutomationGoalImprovements: automationGoalImprovementUpdater,
+		Issues:                     issueStore,
+		Repositories:               repoStore,
+		Orgs:                       orgStore,
+		Jobs:                       jobStore,
+		GitHub:                     ghSvc,
+		CodexAuth:                  codexAuthSvc,
+		ClaudeCodeAuth:             claudeCodeAuthSvc,
+		Credentials:                credentialStore,
+		CodingCredentials:          codingCredentialStore,
+		Snapshots:                  snapshotStore,
+		Uploads:                    uploadStore,
+		FileReader:                 fileReader,
+		MentionIndexes:             mentionIndexCache,
+		UsageTracker:               usageTracker,
+		SandboxCapacity:            sandboxCapacity,
+		StaticEgress:               agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
+		ThreadRuntimes:             threadRuntimeStore,
+		ThreadInbox:                threadInboxStore,
+		SandboxHolders:             sessionSandboxHolderStore,
+		Cancels:                    cancelRegistry,
+		ThreadCancels:              threadCancelRegistry,
+		OrgSettingsCache:           orgSettingsCache,
+		IdentityResolver:           identityResolver,
+		SandboxAuth:                orchestratorSandboxAuth,
+		Users:                      userStore,
+		EvalBootstraps:             evalBootstrapStore,
+		InternalAPIURL:             cfg.BaseURL + "/api/v1/internal",
+		InternalAPISecret:          cfg.SessionSecret,
+		NodeID:                     cfg.NodeID,
+		Logger:                     logger,
 	})
 
 	// PR service.
@@ -1361,11 +1499,12 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, repoStore, jobStore, logger,
 	)
+	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
 		sandboxProvider,
 		snapshotStore,
-		sandboxAuthServer,
+		prSandboxAuth,
 		integrationStore,
 		userCredentialStore,
 		appUserAuthSvc,
@@ -1373,6 +1512,8 @@ func buildServices(
 		orgStore,
 		llmClient,
 		prTemplateStore,
+		redisClient,
+		logger,
 	)
 
 	// Failure analysis service.
@@ -1404,6 +1545,7 @@ func buildServices(
 	pmSvc.SetPMDocumentStore(pmDocumentStore)
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
 	pmSvc.SetSessionLogStore(sessionLogStore)
+	pmSvc.SetSessionMessageStore(sessionMessageStore)
 	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
@@ -1526,24 +1668,28 @@ func buildServices(
 	}
 
 	svc := &worker.Services{
-		Orchestrator:    orchestrator,
-		PR:              prService,
-		Failure:         failureSvc,
-		SandboxProvider: sandboxProvider,
-		ProjectTasks:    projectTaskUpdater,
-		AutomationRuns:  automationRunUpdater,
-		Prioritization:  prioritizationSvc,
-		PM:              pmSvc,
-		SlackSummarizer: slackSummarizer,
-		LLM:             llmClient,
-		GitHub:          ghSvc,
-		TitleService:    titleService,
-		Linear:          linearService,
-		SlackbotMetrics: workerSlackbotMetrics,
-		FrontendURL:     cfg.FrontendURL,
-		ReviewLoops:     reviewLoopSvc,
-		RuntimeSampler:  runtimeSampler,
-		SandboxGC:       sandboxGC,
+		Orchestrator:      orchestrator,
+		PR:                prService,
+		Failure:           failureSvc,
+		SandboxProvider:   sandboxProvider,
+		ProjectTasks:      projectTaskUpdater,
+		AutomationRuns:    automationRunUpdater,
+		Prioritization:    prioritizationSvc,
+		PM:                pmSvc,
+		SlackSummarizer:   slackSummarizer,
+		LLM:               llmClient,
+		GitHub:            ghSvc,
+		GitHubOrgRoster:   ghSvc,
+		Snapshots:         snapshotStore,
+		TitleService:      titleService,
+		Linear:            linearService,
+		SlackbotMetrics:   workerSlackbotMetrics,
+		Redis:             redisClient,
+		FrontendURL:       cfg.FrontendURL,
+		ReviewLoops:       reviewLoopSvc,
+		RuntimeSampler:    runtimeSampler,
+		SandboxGC:         sandboxGC,
+		SandboxAuthBroker: sandboxAuthBroker,
 	}
 	configureSessionExecutorDispatch(svc, cfg, pool, dockerCli, jobStore, logger)
 
@@ -1552,7 +1698,7 @@ func buildServices(
 	// worker handler: disabling the flag must stop new inbound events while
 	// still allowing already-enqueued linear_agent_event jobs to drain.
 	if linearService != nil {
-		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore}
+		linearAgentSettingsView := db.LinearAgentSettingsView{Orgs: orgStore, Repos: repoStore}
 		repoResolver := linear.NewAgentRepoResolver(
 			db.NewLinearTeamRepoMappingStore(pool),
 			linearAgentSettingsView,
@@ -1578,12 +1724,11 @@ func buildServices(
 			Logger:  logger,
 		}
 	}
-	if sandboxAuthServer != nil {
+	if sandboxAuthBroker != nil {
 		// Capture by value: the closure outlives buildServices, but the
-		// *Server pointer is stable for the process lifetime.
-		s := sandboxAuthServer
-		svc.SandboxAuthShutdown = s.Shutdown
-		svc.SandboxAuthSweep = s.SweepStaleSessionDirs
+		// *Broker pointer is stable for the process lifetime.
+		b := sandboxAuthBroker
+		svc.SandboxAuthShutdown = b.Shutdown
 	}
 	return svc
 }
@@ -1613,6 +1758,8 @@ func wireWorkerPRService(
 	orgStore *db.OrganizationStore,
 	llmClient llm.Client,
 	prTemplateStore *db.PRTemplateStore,
+	redisClient *cache.Client,
+	logger zerolog.Logger,
 ) {
 	if prService == nil {
 		return
@@ -1626,4 +1773,6 @@ func wireWorkerPRService(
 	prService.SetOrgStore(orgStore)
 	prService.SetLLMClient(llmClient)
 	prService.SetPRTemplateStore(prTemplateStore)
+	prService.SetRedisClient(redisClient)
+	prService.SetPullRequestStreams(cache.NewPullRequestStreams(redisClient, logger))
 }

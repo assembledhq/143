@@ -1,0 +1,92 @@
+#!/bin/sh
+# 143-tools installer — served by the 143 server with the server URL (and an
+# optional org join token) templated in, so there is nothing to configure
+# after `| sh`.
+#
+# The entire body is wrapped in a function invoked on the last line: a
+# connection that drops mid-download executes nothing rather than half a
+# script.
+set -eu
+
+main() {
+	SERVER_URL='{{.ServerURL}}'
+	JOIN_TOKEN='{{.JoinToken}}'
+
+	os=$(uname -s)
+	arch=$(uname -m)
+	case "$os" in
+		Darwin) os=darwin ;;
+		Linux) os=linux ;;
+		*) echo "143-tools: unsupported OS: $os (darwin and linux only)" >&2; exit 1 ;;
+	esac
+	case "$arch" in
+		x86_64 | amd64) arch=amd64 ;;
+		arm64 | aarch64) arch=arm64 ;;
+		*) echo "143-tools: unsupported architecture: $arch (amd64 and arm64 only)" >&2; exit 1 ;;
+	esac
+
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+
+	echo "Downloading 143-tools ($os/$arch) from $SERVER_URL ..."
+	curl -fsSL "$SERVER_URL/download/143-tools/$os/$arch" -o "$tmp/143-tools"
+	curl -fsSL "$SERVER_URL/download/143-tools/checksums.txt" -o "$tmp/checksums.txt"
+
+	expected=$(awk -v f="143-tools-$os-$arch" '$2 == f || $2 == "*" f { print $1 }' "$tmp/checksums.txt")
+	if [ -z "$expected" ]; then
+		echo "143-tools: no checksum for 143-tools-$os-$arch in checksums.txt" >&2
+		exit 1
+	fi
+	if command -v sha256sum >/dev/null 2>&1; then
+		actual=$(sha256sum "$tmp/143-tools" | awk '{ print $1 }')
+	else
+		actual=$(shasum -a 256 "$tmp/143-tools" | awk '{ print $1 }')
+	fi
+	if [ "$actual" != "$expected" ]; then
+		echo "143-tools: checksum mismatch (expected $expected, got $actual)" >&2
+		exit 1
+	fi
+
+	chmod +x "$tmp/143-tools"
+	bin_dir="$HOME/.local/bin"
+	if mkdir -p "$bin_dir" 2>/dev/null && [ -w "$bin_dir" ]; then
+		mv "$tmp/143-tools" "$bin_dir/143-tools"
+	else
+		bin_dir="/usr/local/bin"
+		echo "~/.local/bin is not writable — installing to $bin_dir (sudo may prompt) ..."
+		sudo mv "$tmp/143-tools" "$bin_dir/143-tools"
+	fi
+	echo "Installed $bin_dir/143-tools"
+
+	case ":$PATH:" in
+		*":$bin_dir:"*) ;;
+		*) echo "NOTE: $bin_dir is not on your PATH — add it to your shell profile." ;;
+	esac
+
+	# Write (or merge into) ~/.config/143-tools/config.json. An existing
+	# login token for this server is preserved, so re-running the installer
+	# upgrades the binary in place.
+	if [ -n "$JOIN_TOKEN" ]; then
+		"$bin_dir/143-tools" setup --server "$SERVER_URL" --join "$JOIN_TOKEN"
+	else
+		"$bin_dir/143-tools" setup --server "$SERVER_URL"
+	fi
+
+	# Chain into login when a human is at the keyboard. Login waits on a
+	# loopback socket, not stdin, so running under `curl | sh` (stdin is the
+	# pipe) is fine — but CI and provisioning scripts get a hint instead.
+	# The probe OPENS /dev/tty rather than testing existence: on Linux the
+	# device node exists even in CI, but opening it fails without a
+	# controlling terminal.
+	if ! { : < /dev/tty; } 2>/dev/null; then
+		echo "No TTY detected — run '143-tools login' to authenticate."
+		return 0
+	fi
+	if "$bin_dir/143-tools" whoami --local >/dev/null 2>&1; then
+		echo "Already logged in to $SERVER_URL — run '143-tools whoami' to confirm."
+		return 0
+	fi
+	"$bin_dir/143-tools" login
+}
+
+main "$@"

@@ -79,6 +79,37 @@ func (m AutopilotTriggerMode) Validate() error {
 	}
 }
 
+type AutopilotPreviewStatus string
+
+const (
+	AutopilotPreviewStatusTargetCreated  AutopilotPreviewStatus = "target_created"
+	AutopilotPreviewStatusStarting       AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusStarting)
+	AutopilotPreviewStatusReady          AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusReady)
+	AutopilotPreviewStatusPartiallyReady AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusPartiallyReady)
+	AutopilotPreviewStatusUnhealthy      AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusUnhealthy)
+	AutopilotPreviewStatusStopped        AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusStopped)
+	AutopilotPreviewStatusFailed         AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusFailed)
+	AutopilotPreviewStatusExpired        AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusExpired)
+	AutopilotPreviewStatusUnavailable    AutopilotPreviewStatus = AutopilotPreviewStatus(PreviewStatusUnavailable)
+)
+
+func (s AutopilotPreviewStatus) Validate() error {
+	switch s {
+	case AutopilotPreviewStatusTargetCreated,
+		AutopilotPreviewStatusStarting,
+		AutopilotPreviewStatusReady,
+		AutopilotPreviewStatusPartiallyReady,
+		AutopilotPreviewStatusUnhealthy,
+		AutopilotPreviewStatusStopped,
+		AutopilotPreviewStatusFailed,
+		AutopilotPreviewStatusExpired,
+		AutopilotPreviewStatusUnavailable:
+		return nil
+	default:
+		return fmt.Errorf("invalid AutopilotPreviewStatus: %q", s)
+	}
+}
+
 type AutopilotIssueSource struct {
 	Type IssueSource `json:"type"`
 	Key  string      `json:"key"`
@@ -121,11 +152,21 @@ type AutopilotPullRequestRef struct {
 	MergedAt *time.Time        `json:"merged_at,omitempty"`
 }
 
+type AutopilotPreviewRef struct {
+	TargetID            uuid.UUID              `json:"target_id"`
+	PreviewID           *uuid.UUID             `json:"preview_id,omitempty"`
+	Status              AutopilotPreviewStatus `json:"status"`
+	CommitSHA           string                 `json:"commit_sha"`
+	LatestCommitSHA     string                 `json:"latest_commit_sha,omitempty"`
+	NewCommitsAvailable bool                   `json:"new_commits_available"`
+}
+
 type AutopilotQueueRow struct {
 	ID                   uuid.UUID                `json:"id"`
 	Rank                 int                      `json:"rank"`
 	Source               AutopilotIssueSource     `json:"source"`
 	Title                string                   `json:"title"`
+	IssueURL             *string                  `json:"issue_url,omitempty"`
 	Repo                 *AutopilotRepoRef        `json:"repo,omitempty"`
 	IssueStatus          IssueStatus              `json:"issue_status"`
 	CustomerImpact       AutopilotCustomerImpact  `json:"customer_impact"`
@@ -135,6 +176,7 @@ type AutopilotQueueRow struct {
 	LatestSession        *AutopilotSessionRef     `json:"latest_session,omitempty"`
 	LatestAgentRun       *AutopilotAgentRunRef    `json:"latest_agent_run,omitempty"`
 	LatestPR             *AutopilotPullRequestRef `json:"latest_pr,omitempty"`
+	LatestPreview        *AutopilotPreviewRef     `json:"latest_preview,omitempty"`
 	AvailableAction      AutopilotQueueAction     `json:"available_action"`
 	ActionDisabledReason *string                  `json:"action_disabled_reason"`
 }

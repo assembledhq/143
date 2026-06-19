@@ -16,9 +16,24 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
+
+func withUserAndOrg(r *http.Request, userID, orgID uuid.UUID, role string) *http.Request {
+	ctx := middleware.WithOrgID(r.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.Role(role)})
+	ctx = middleware.WithActiveRole(ctx, role)
+	return r.WithContext(ctx)
+}
+
+func withAdminUser(r *http.Request, userID, orgID uuid.UUID) *http.Request {
+	ctx := middleware.WithOrgID(r.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	ctx = middleware.WithActiveRole(ctx, "admin")
+	return r.WithContext(ctx)
+}
 
 type mockCodingCredentialStore struct {
 	getFn              func(ctx context.Context, scope models.Scope, id uuid.UUID) (*models.DecryptedCodingCredential, error)
@@ -404,6 +419,43 @@ func TestCodingCredentialHandlerCreate(t *testing.T) {
 			expectedStatus: http.StatusCreated,
 		},
 		{
+			name: "creates explicit opencode api key",
+			body: `{"scope":"personal","agent":"opencode","auth_type":"api_key","api_key":"sk-openrouter-opencode","api_type":"openrouter","base_url":"https://openrouter.opencode.example","agent_defaults":{"OPENCODE_MODEL":"not-in-curated-list","OPENCODE_MODEL_CUSTOM":"xai/grok-code-fast"}}`,
+			role: "admin",
+			setupStore: func(t *testing.T) *mockCodingCredentialStore {
+				return &mockCodingCredentialStore{
+					createFn: func(_ context.Context, scope models.Scope, label string, cfg models.ProviderConfig, opts db.CreateOpts) (*uuid.UUID, error) {
+						require.Equal(t, models.CodingCredentialScopePersonal, scope.Label(), "Create should use personal scope for OpenCode credentials")
+						require.Equal(t, "OpenCode API key", label, "Create should apply the OpenCode default label")
+						require.Equal(t, models.ProviderOpenCode, cfg.Provider(), "Create should map OpenCode api_key to an explicit OpenCode provider config")
+						oc, ok := cfg.(models.OpenCodeConfig)
+						require.True(t, ok, "OpenCode credentials should use OpenCodeConfig")
+						require.Equal(t, models.ProviderOpenRouter, oc.BackingProvider, "Create should preserve the explicit OpenCode backing provider")
+						require.Equal(t, "https://openrouter.opencode.example", oc.BaseURL, "Create should preserve OpenCode backing base URL")
+						require.Equal(t, "xai/grok-code-fast", oc.Model, "Create should persist the explicit OpenCode custom model override on the credential")
+						require.NotNil(t, opts.CreatedBy, "Create should record the current user id for OpenCode credentials")
+						return &createdID, nil
+					},
+					getFn: func(context.Context, models.Scope, uuid.UUID) (*models.DecryptedCodingCredential, error) {
+						return &models.DecryptedCodingCredential{
+							ID:       createdID,
+							OrgID:    orgID,
+							UserID:   &userID,
+							Provider: models.ProviderOpenCode,
+							Config: models.OpenCodeConfig{
+								APIKey:          "sk-openrouter-opencode",
+								BackingProvider: models.ProviderOpenRouter,
+							},
+							Status:    models.CodingCredentialStatusActive,
+							CreatedAt: now,
+							UpdatedAt: now,
+						}, nil
+					},
+				}
+			},
+			expectedStatus: http.StatusCreated,
+		},
+		{
 			name: "creates org api key and merges defaults",
 			body: `{"scope":"org","agent":"amp","auth_type":"api_key","api_key":"amp-token","agent_defaults":{"AMP_MODE":"deep"}}`,
 			role: "admin",
@@ -663,7 +715,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	verifiedAt := now.Add(-time.Hour)
 	rows := []models.DecryptedCodingCredential{
 		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Codex", Config: models.OpenAIConfig{APIKey: "sk-openai-123456"}, Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
-		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAIChatGPT, Config: models.OpenAIChatGPTConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAISubscription, Config: models.OpenAISubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "max"}, Priority: 1, Status: models.CodingCredentialStatusActive, LastVerifiedAt: &verifiedAt, RateLimitedUntil: ptrTime(now.Add(time.Hour)), RateLimitMessage: ptrString("try again at 8:50 AM"), CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gemini-key"}, Priority: 2, Status: models.CodingCredentialStatusPendingAuth, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-key"}, Priority: 3, Status: "disabled", CreatedAt: now, UpdatedAt: now},
@@ -686,8 +738,8 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.True(t, orgRows[3].IsDefault, "first non-rate-limited runnable org row should be marked default")
 	require.Equal(t, models.CodingAuthStatusNeedsReauth, orgRows[1].Status, "pending_auth row should need reauth")
 	require.Equal(t, "max", orgRows[0].UsageNote, "subscription usage note should prefer account type")
-	require.Equal(t, "Gemini CLI API key", defaultLabelFor(models.AgentTypeGeminiCLI, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover gemini")
 	require.Equal(t, "Pi API key", defaultLabelFor(models.AgentTypePi, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover pi")
+	require.Equal(t, "OpenCode API key", defaultLabelFor(models.AgentTypeOpenCode, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover opencode")
 	require.Equal(t, "Coding auth", defaultLabelFor("", ""), "defaultLabelFor should cover unknown agents")
 
 	cfg, provider, err := codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: models.AgentTypeClaudeCode, AuthType: models.CodingAuthTypeAPIKey, APIKey: "sk-ant", BaseURL: "https://anthropic.test"})
@@ -695,10 +747,36 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.Equal(t, models.ProviderAnthropic, provider, "Claude Code api keys should map to anthropic provider")
 	require.Equal(t, models.ProviderAnthropic, cfg.Provider(), "Claude Code config should report anthropic provider")
 
-	cfg, provider, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: models.AgentTypeGeminiCLI, AuthType: models.CodingAuthTypeAPIKey, APIKey: "gemini-key"})
-	require.NoError(t, err, "codingCredentialConfigFromInput should accept Gemini api keys")
-	require.Equal(t, models.ProviderGemini, provider, "Gemini api keys should map to gemini provider")
-	require.Equal(t, models.ProviderGemini, cfg.Provider(), "Gemini config should report gemini provider")
+	cfg, provider, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{
+		Agent:    models.AgentTypeOpenCode,
+		AuthType: models.CodingAuthTypeAPIKey,
+		APIKey:   "sk-openrouter-opencode",
+		APIType:  string(models.ProviderOpenRouter),
+		BaseURL:  "https://openrouter.opencode.test",
+		AgentDefaults: map[string]string{
+			"OPENCODE_MODEL":        "not-in-curated-list",
+			"OPENCODE_MODEL_CUSTOM": "xai/grok-code-fast",
+		},
+	})
+	require.NoError(t, err, "codingCredentialConfigFromInput should accept OpenCode api keys")
+	require.Equal(t, models.ProviderOpenCode, provider, "OpenCode api keys should map to the explicit opencode provider")
+	require.Equal(t, models.ProviderOpenCode, cfg.Provider(), "OpenCode config should report opencode provider")
+	openCodeCfg, ok := cfg.(models.OpenCodeConfig)
+	require.True(t, ok, "OpenCode config should have the typed OpenCode shape")
+	require.Equal(t, models.ProviderOpenRouter, openCodeCfg.BackingProvider, "OpenCode config should preserve the explicit backing provider")
+	require.Equal(t, "xai/grok-code-fast", openCodeCfg.Model, "OpenCode config should preserve custom model defaults")
+
+	_, _, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{
+		Agent:    models.AgentTypeOpenCode,
+		AuthType: models.CodingAuthTypeAPIKey,
+		APIKey:   "sk-openai-opencode",
+		APIType:  string(models.ProviderOpenAI),
+		AgentDefaults: map[string]string{
+			"OPENCODE_MODEL": models.OpenCodeModelClaudeHaiku45,
+		},
+	})
+	require.Error(t, err, "codingCredentialConfigFromInput should reject OpenCode direct provider/model mismatches")
+	require.Contains(t, err.Error(), "opencode backing_provider", "codingCredentialConfigFromInput should explain the OpenCode backing-provider mismatch")
 
 	_, _, err = codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: "unknown", AuthType: models.CodingAuthTypeAPIKey, APIKey: "key"})
 	require.Error(t, err, "codingCredentialConfigFromInput should reject unsupported agents")
@@ -1127,54 +1205,26 @@ func TestAuthTypeForProvider(t *testing.T) {
 	tests := []struct {
 		name     string
 		provider models.ProviderName
-		cfg      models.ProviderConfig
 		want     models.CodingAuthType
 	}{
 		{
 			name:     "anthropic api key",
 			provider: models.ProviderAnthropic,
-			cfg:      models.AnthropicConfig{APIKey: "sk-ant-1"},
 			want:     models.CodingAuthTypeAPIKey,
-		},
-		{
-			// During the dual-write window a legacy mirrored row can still
-			// arrive with provider=anthropic and a non-nil Subscription
-			// embedded (the post-step migration is what later rewrites it
-			// to anthropic_subscription). The auth_type response field must
-			// agree with usageNoteFor's view of the same row.
-			name:     "anthropic with embedded subscription is reported as subscription",
-			provider: models.ProviderAnthropic,
-			cfg: models.AnthropicConfig{
-				Subscription: &models.AnthropicSubscription{
-					AccessToken:  "tok",
-					RefreshToken: "ref",
-					AccountType:  "claude_pro",
-				},
-			},
-			want: models.CodingAuthTypeSubscription,
 		},
 		{
 			name:     "anthropic_subscription provider",
 			provider: models.ProviderAnthropicSubscription,
-			cfg:      models.AnthropicSubscriptionConfig{AccessToken: "tok"},
 			want:     models.CodingAuthTypeSubscription,
 		},
 		{
 			name:     "openai api key",
 			provider: models.ProviderOpenAI,
-			cfg:      models.OpenAIConfig{APIKey: "sk-openai"},
 			want:     models.CodingAuthTypeAPIKey,
 		},
 		{
 			name:     "openai_subscription provider",
 			provider: models.ProviderOpenAISubscription,
-			cfg:      models.OpenAISubscriptionConfig{AccessToken: "tok"},
-			want:     models.CodingAuthTypeSubscription,
-		},
-		{
-			name:     "legacy openai_chatgpt provider",
-			provider: models.ProviderOpenAIChatGPT,
-			cfg:      models.OpenAIChatGPTConfig{AccessToken: "tok"},
 			want:     models.CodingAuthTypeSubscription,
 		},
 	}
@@ -1183,7 +1233,7 @@ func TestAuthTypeForProvider(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, authTypeForProvider(tt.provider, tt.cfg))
+			require.Equal(t, tt.want, authTypeForProvider(tt.provider))
 		})
 	}
 }

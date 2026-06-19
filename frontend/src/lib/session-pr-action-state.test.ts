@@ -6,6 +6,7 @@ import {
   deriveMergeActionState,
   deriveMergeWhenReadyActionState,
   derivePushChangesActionState,
+  hasRepairableFailedChecks,
 } from "./session-pr-action-state";
 
 const baseHealth: PullRequestHealthResponse = {
@@ -37,6 +38,35 @@ const baseHealth: PullRequestHealthResponse = {
 };
 
 describe("session PR action state", () => {
+  it("detects repairable failed checks from flags, counts, or check summaries", () => {
+    const tests = [
+      {
+        name: "backend flag",
+        health: { ...baseHealth, can_fix_tests: true },
+        expected: true,
+      },
+      {
+        name: "legacy count",
+        health: { ...baseHealth, failing_test_count: 1 },
+        expected: true,
+      },
+      {
+        name: "failed check",
+        health: { ...baseHealth, checks: [{ name: "backend", category: "unknown" as const, status: "failed" as const }] },
+        expected: true,
+      },
+      {
+        name: "passing checks",
+        health: baseHealth,
+        expected: false,
+      },
+    ];
+
+    for (const tt of tests) {
+      expect(hasRepairableFailedChecks(tt.health), `${tt.name} should map repairable failed-check state`).toBe(tt.expected);
+    }
+  });
+
   it("maps create PR lifecycle blockers into visible disabled states", () => {
     const base = {
       canShipPR: true,

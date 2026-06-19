@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -24,7 +24,6 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
-	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
@@ -36,12 +35,13 @@ import (
 	"github.com/assembledhq/143/internal/services/prioritization"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
-	"github.com/assembledhq/143/internal/version"
+	"github.com/assembledhq/143/internal/services/storage"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
 
 var sandboxCapacityDetailPattern = regexp.MustCompile(`sandbox capacity reached:\s*(\d+)/(\d+)\s+sandboxes active or reserved`)
@@ -214,7 +214,7 @@ func registerStaleSandboxDeadLetter(ctx context.Context, stores *Stores, logger 
 			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, session.OrgID, session.ID, "failed", 0)
 		}
 		enqueueSlackRunUpdateIfLinked(writeCtx, stores, logger, session.OrgID, session.ID, "failed", "143 session failed", errMsg, true)
-		enqueueSlackSessionNotifications(writeCtx, stores, logger, session.OrgID, session.ID, session.AutomationRunID, "session.failed", "143 session failed", errMsg)
+		enqueueSlackSessionNotifications(writeCtx, stores, logger, session.OrgID, session.ID, session.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 	})
 }
 
@@ -301,15 +301,17 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
 		}
 		enqueueSlackRunUpdateIfLinked(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, "failed", "143 session failed", errMsg, true)
-		enqueueSlackSessionNotifications(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, failedSession.AutomationRunID, "session.failed", "143 session failed", errMsg)
+		enqueueSlackSessionNotifications(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, failedSession.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 	})
 }
 
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
-	WebhookDays int
-	LogsDays    int
-	JobsDays    int
+	WebhookDays              int
+	LogsDays                 int
+	JobsDays                 int
+	SlackInboundPayloadDays  int
+	SlackInboundPayloadBatch int
 }
 
 // RegisterHandlers registers all job handlers on the worker.
@@ -336,9 +338,20 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
+	if stores.GitHubInstallations != nil && services != nil && services.GitHubOrgRoster != nil {
+		w.Register(models.JobTypeSyncGitHubOrgRoster, newSyncGitHubOrgRosterHandler(stores, services, logger))
+	}
 	if services != nil && services.PreviewStarter != nil {
 		w.Register(models.JobTypeStartPreview, newStartPreviewHandler(stores, services, logger))
 		w.Register(models.JobTypeStartBranchPreview, newStartBranchPreviewHandler(stores, services, logger))
+		if services.AutoPreviewStarter != nil {
+			w.Register(models.JobTypeAutoPreviewDeferred, newAutoPreviewDeferredHandler(stores, services, logger))
+		}
+		w.Register(models.JobTypePreviewCachePrewarm, newPreviewCachePrewarmHandler(services, logger))
+		w.Register(models.JobTypeSessionPreviewWarmBuild, newSessionPreviewWarmBuildHandler(services, logger))
+	}
+	if stores != nil && stores.Sessions != nil && stores.Repositories != nil && stores.Previews != nil && stores.Jobs != nil && services != nil && (services.SessionPrewarmClassifier != nil || services.LLM != nil) {
+		w.Register(models.JobTypeSessionPreviewPrewarmClassify, newSessionPreviewPrewarmClassifyHandler(stores, services, logger))
 	}
 	if hasServiceHandlersDependencies(services) {
 		w.Register("run_agent", newRunAgentHandler(stores, services, logger))
@@ -353,9 +366,17 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
 		w.Register("merge_pull_request_when_ready", newMergePullRequestWhenReadyHandler(services, logger))
+		w.Register(models.JobTypeSyncPRPreviewSurfaces, newSyncPRPreviewSurfacesHandler(services, logger))
 		w.Register("analyze_failure", newAnalyzeFailureHandler(stores, services, logger))
 		w.Register("fork_session_thread", newForkSessionThreadHandler(stores, services, logger))
 		w.Register("revert_session_thread", newRevertSessionThreadHandler(stores, services, logger))
+	}
+	if stores != nil && stores.EvalRuns != nil && stores.EvalTasks != nil {
+		w.Register("run_eval_grader", newEvalGraderHandler(stores, services, logger))
+		w.Register("run_eval", newLegacyRunEvalCompatHandler(stores, logger))
+	}
+	if stores != nil && stores.EvalBootstraps != nil {
+		w.Register("run_eval_bootstrap", newLegacyRunEvalBootstrapCompatHandler(stores, logger))
 	}
 	if services != nil && services.Feedback != nil {
 		w.Register("process_review_comment", newProcessReviewCommentHandler(services, logger))
@@ -368,6 +389,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("audit_retention_cleanup", newAuditRetentionCleanupHandler(stores, logger))
 	}
 	w.Register("data_retention_cleanup", newDataRetentionCleanupHandler(stores, retentionCfg, logger))
+	if stores.Previews != nil {
+		w.Register(models.JobTypeBackfillPreviewGroups, newBackfillPreviewGroupsHandler(stores, logger))
+	}
 	if services != nil && services.Linear != nil {
 		w.Register("prepare_linear_primary", newPrepareLinearPrimaryHandler(services.Linear, logger))
 		w.Register("link_linear_issue", newLinkLinearIssueHandler(services.Linear, logger))
@@ -385,12 +409,6 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 				w.Register("linear_agent_event", h)
 			}
 		}
-	}
-	if stores.EvalRuns != nil && stores.EvalTasks != nil {
-		w.Register("run_eval", newRunEvalHandler(stores, services, logger))
-	}
-	if stores.EvalBootstraps != nil && services != nil && services.SandboxProvider != nil {
-		w.Register("run_eval_bootstrap", newRunEvalBootstrapHandler(stores, services, logger))
 	}
 }
 
@@ -415,17 +433,19 @@ type Stores struct {
 	Webhooks            *db.WebhookDeliveryStore
 	PriorityScores      *db.PriorityScoreStore
 	ComplexityEstimates *db.ComplexityEstimateStore
-	Projects            *db.ProjectStore        // nil-safe: projects feature disabled if nil
-	ProjectTasks        *db.ProjectTaskStore    // nil-safe
-	Credentials         *db.OrgCredentialStore  // nil-safe: needed for sync_slack
-	AuditLogs           *db.AuditLogStore       // nil-safe: audit retention cleanup
-	Organizations       *db.OrganizationStore   // nil-safe: needed for audit retention
-	SessionLogs         *db.SessionLogStore     // nil-safe: data retention cleanup
-	EvalTasks           *db.EvalTaskStore       // nil-safe: eval feature
-	EvalRuns            *db.EvalRunStore        // nil-safe: eval feature
-	EvalBatches         *db.EvalBatchStore      // nil-safe: eval feature
-	EvalBootstraps      *db.EvalBootstrapStore  // nil-safe: eval bootstrap feature
-	Repositories        *db.RepositoryStore     // nil-safe: needed for eval repo lookup
+	Projects            *db.ProjectStore         // nil-safe: projects feature disabled if nil
+	ProjectTasks        *db.ProjectTaskStore     // nil-safe
+	Credentials         *db.OrgCredentialStore   // nil-safe: needed for sync_slack
+	AuditLogs           *db.AuditLogStore        // nil-safe: audit retention cleanup
+	Organizations       *db.OrganizationStore    // nil-safe: needed for audit retention
+	SessionLogs         *db.SessionLogStore      // nil-safe: data retention cleanup
+	EvalTasks           *db.EvalTaskStore        // nil-safe: eval feature
+	EvalRuns            *db.EvalRunStore         // nil-safe: eval feature
+	EvalBatches         *db.EvalBatchStore       // nil-safe: eval feature
+	EvalBootstraps      *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
+	EvalReleaseGates    *db.EvalReleaseGateStore // nil-safe: eval release gates
+	Repositories        *db.RepositoryStore      // nil-safe: needed for eval repo lookup
+	GitHubInstallations *db.GitHubInstallationStore
 	SessionMessages     *db.SessionMessageStore // nil-safe: needed for title regeneration
 	SessionThreads      *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
 	HumanInputRequests  *db.SessionHumanInputRequestStore
@@ -439,6 +459,8 @@ type Stores struct {
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
 	SlackInstallations  *db.SlackInstallationStore
+	SlackOrgSelections  *db.SlackOrgSelectionStore
+	SlackBotSettings    *db.SlackBotSettingsStore
 	SlackUserLinks      *db.SlackUserLinkStore
 	SlackChannels       *db.SlackChannelSettingsStore
 	SlackSessionLinks   *db.SlackSessionLinkStore
@@ -469,10 +491,32 @@ func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run mod
 	return nil
 }
 
+func enqueueRunAgentForSession(ctx context.Context, stores *Stores, session models.Session) error {
+	if stores == nil || stores.Jobs == nil {
+		return errors.New("run_agent enqueue store unavailable")
+	}
+	if session.ID == uuid.Nil {
+		return errors.New("session id is required to enqueue run_agent")
+	}
+	if session.OrgID == uuid.Nil {
+		return errors.New("org id is required to enqueue run_agent")
+	}
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+		return fmt.Errorf("enqueue run_agent: %w", err)
+	}
+	return nil
+}
+
 // MemoryReinforcer retrieves and reinforces memories for a repo.
 type MemoryReinforcer interface {
 	GetContextMemories(ctx context.Context, req agent.MemoryContextRequest) (*agent.MemoryContextResult, error)
 	ReinforceMemories(ctx context.Context, orgID uuid.UUID, memoryIDs []uuid.UUID) error
+}
+
+type SandboxAuthBroker interface {
+	Acquire(ctx context.Context, orgID, sessionID, holderID uuid.UUID) (string, error)
+	Release(ctx context.Context, orgID, sessionID, holderID uuid.UUID) error
 }
 
 type prCreator interface {
@@ -482,7 +526,10 @@ type prCreator interface {
 	SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
+	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
+	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
+	SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error
 	// WaitForPostPRSnapshotUploads blocks until any in-flight post-PR
 	// snapshot uploads (spawned by CreatePR) have either promoted or
 	// cleared their pending_snapshot_key. Called by the server's graceful
@@ -506,10 +553,15 @@ type Services struct {
 	SlackSummarizer *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
 	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
 	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster githubOrgRosterService        // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots       storage.SnapshotStore         // nil-safe: needed for eval code_check grading
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
-	FrontendURL     string                        // optional base URL for Slack links
+	// Redis is optional and used for non-authoritative shared caches such as
+	// Slack user display names. Losing it should only increase provider lookups.
+	Redis       *cache.Client
+	FrontendURL string // optional base URL for Slack links
 	// LinearAgentDeps wires the inbound agent feature (assign / @-mention
 	// triggers a 143 session). It is intentionally independent of the
 	// dispatcher kill switch so queued linear_agent_event jobs continue to
@@ -535,12 +587,9 @@ type Services struct {
 	// so listener goroutines and on-disk socket files don't outlive the
 	// process.
 	SandboxAuthShutdown func()
-	// SandboxAuthSweep removes per-session subdirs in the socket dir whose
-	// UUID isn't in the keep set. Called once at startup, after the
-	// rehydrate pass has re-Listen'd for every still-alive container, so
-	// leftover dirs from prior worker generations don't accumulate. nil
-	// when no SandboxAuthSocketDir is configured.
-	SandboxAuthSweep func(keep map[uuid.UUID]struct{})
+	// SandboxAuthBroker is the worker-owned lease manager exposed through
+	// signed internal RPCs for detached session executors.
+	SandboxAuthBroker SandboxAuthBroker
 	// RuntimeSampler periodically polls per-container resource usage and
 	// records it as OTel histograms so operators can size SANDBOX_* limits
 	// against actual consumption rather than allocation. nil when sampling
@@ -554,9 +603,27 @@ type Services struct {
 	// PreviewStarter completes durable preview startup jobs. nil when this
 	// node has no preview provider.
 	PreviewStarter previewStarter
+	// AutoPreviewStarter handles deferred auto-preview starts (E6 queue-at-cap).
+	// nil-safe: deferred auto_preview_deferred jobs are no-ops if not configured.
+	AutoPreviewStarter ghservice.AutoPreviewStarter
+	// PreviewCachePrewarmEnabled gates opportunistic low-priority prewarm
+	// enqueues from successful session turns.
+	PreviewCachePrewarmEnabled bool
+	// PreviewCachePrewarmPriority is the job priority for opportunistic prewarm
+	// work; production defaults it below foreground preview starts.
+	PreviewCachePrewarmPriority int
+	// PreviewCachePrewarmTimeout bounds speculative prewarm reservations before
+	// they are swept as failed.
+	PreviewCachePrewarmTimeout time.Duration
+	// SessionPrewarmClassifier optionally overrides the default platform-LLM
+	// classifier used by smart session preview prewarm jobs.
+	SessionPrewarmClassifier sessionPrewarmClassifier
 	// PreviewController handles control-plane actions for already-created
 	// previews. nil when preview control is unavailable on this process.
 	PreviewController previewController
+	// SlackPreviewControl creates and opens previews from Slack actions using
+	// the same product control plane as the web preview surfaces.
+	SlackPreviewControl SlackPreviewControl
 
 	// SessionExecutorDispatcher moves run_agent and continue_session ownership
 	// from the worker process to durable per-session executor containers when
@@ -571,15 +638,26 @@ type Services struct {
 	RequireSessionExecutorDispatcher bool
 }
 
+type githubOrgRosterService interface {
+	ListOrgMembers(ctx context.Context, installationID int64, orgLogin string) ([]ghservice.OrgMember, error)
+}
+
 type previewStarter interface {
 	StartReservedPreview(ctx context.Context, payload previewsvc.StartPreviewJobPayload) error
 	StartReservedBranchPreview(ctx context.Context, payload previewsvc.StartBranchPreviewJobPayload) error
+	PrewarmPreviewCaches(ctx context.Context, payload previewsvc.PreviewCachePrewarmJobPayload) error
+	WarmSessionPreview(ctx context.Context, payload previewsvc.SessionPreviewWarmBuildJobPayload) error
 }
 
 type previewController interface {
 	RecyclePreview(ctx context.Context, orgID, previewID uuid.UUID) error
 	StopPreview(ctx context.Context, orgID, previewID uuid.UUID) error
 	SetLifetime(ctx context.Context, orgID, previewID uuid.UUID, duration time.Duration) (time.Time, error)
+}
+
+type SlackPreviewControl interface {
+	CreatePreviewForSlack(ctx context.Context, orgID uuid.UUID, target models.SlackPreviewTarget, actor models.SlackActor) (models.PreviewInstance, error)
+	OpenPreviewURL(ctx context.Context, orgID, previewID uuid.UUID, actor models.SlackActor) (string, error)
 }
 
 type orchestratorService interface {
@@ -598,6 +676,10 @@ type orchestratorService interface {
 // llmClient is the interface for LLM completion calls used by eval graders.
 type llmClient interface {
 	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+}
+
+type sessionPrewarmClassifier interface {
+	Classify(ctx context.Context, input previewsvc.SessionPrewarmClassifierInput) previewsvc.SessionPrewarmClassifierResult
 }
 
 type pmService interface {
@@ -697,7 +779,7 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID}
 			}
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-				EventKind: "preview.failed",
+				EventKind: string(models.SlackNotificationPreviewFailed),
 				Title:     "Preview failed",
 				Body:      err.Error(),
 				SessionID: &input.SessionID,
@@ -706,7 +788,7 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 			return &FatalError{Err: err}
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-			EventKind: "preview.ready",
+			EventKind: string(models.SlackNotificationPreviewReady),
 			Title:     "Preview ready",
 			Body:      "The preview is ready.",
 			SessionID: &input.SessionID,
@@ -745,7 +827,7 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
 			}
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-				EventKind: "preview.failed",
+				EventKind: string(models.SlackNotificationPreviewFailed),
 				Title:     "Preview failed",
 				Body:      err.Error(),
 				PreviewID: &input.PreviewID,
@@ -753,13 +835,513 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 			return &FatalError{Err: err}
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-			EventKind: "preview.ready",
+			EventKind: string(models.SlackNotificationPreviewReady),
 			Title:     "Preview ready",
 			Body:      "The preview is ready.",
 			PreviewID: &input.PreviewID,
 		})
 		return nil
 	}
+}
+
+// newAutoPreviewDeferredHandler retries an auto-preview start that was
+// deferred because the auto-pool was full at webhook time. It re-checks
+// capacity at dequeue time and backs off with a RetryableError when the
+// pool is still saturated, so auto-preview starts queue naturally rather
+// than being silently dropped.
+func newAutoPreviewDeferredHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	retryDelay := 2 * time.Minute
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.AutoPreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred: starter not configured")}
+		}
+		var input previewsvc.AutoPreviewDeferredPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal auto_preview_deferred payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred payload missing required ids")}
+		}
+
+		// Load repo so we can call StartAutoPullRequestPreview.
+		if stores == nil || stores.Repositories == nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred: repository store not configured")}
+		}
+		repo, err := stores.Repositories.GetByID(ctx, input.OrgID, input.RepositoryID)
+		if err != nil {
+			return &FatalError{Err: fmt.Errorf("auto_preview_deferred: load repository: %w", err)}
+		}
+
+		// Check pool capacity. If still full, back off and let the retry
+		// mechanism reschedule rather than immediately calling the starter
+		// (which would enqueue another deferred job, creating a chain).
+		if stores.Previews != nil && stores.Organizations != nil {
+			maxActive := models.DefaultPreviewAutoPoolMaxActive
+			if org, orgErr := stores.Organizations.GetByID(ctx, input.OrgID); orgErr == nil {
+				if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil && settings.PreviewAutoPoolMaxActive > 0 {
+					maxActive = settings.PreviewAutoPoolMaxActive
+				}
+			}
+			count, countErr := stores.Previews.CountActiveAutoPreviews(ctx, input.OrgID)
+			if countErr == nil && count >= maxActive {
+				logger.Debug().
+					Str("org_id", input.OrgID.String()).
+					Int("active", count).
+					Int("max", maxActive).
+					Dur("retry_after", retryDelay).
+					Msg("auto_preview_deferred: pool still full, backing off")
+				return &RetryableError{Err: fmt.Errorf("auto-preview pool full (%d/%d)", count, maxActive), RetryAfter: &retryDelay}
+			}
+		}
+
+		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode); err != nil {
+			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)
+		}
+		return nil
+	}
+}
+
+func newPreviewCachePrewarmHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.PreviewCachePrewarmJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal preview_cache_prewarm payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("preview_cache_prewarm payload missing required ids")}
+		}
+		switch input.Source {
+		case previewsvc.PreviewCachePrewarmSourceSession:
+			if input.SessionID == uuid.Nil {
+				return &FatalError{Err: fmt.Errorf("preview_cache_prewarm session payload missing session_id")}
+			}
+		case previewsvc.PreviewCachePrewarmSourceBranch:
+			if input.PreviewTargetID == uuid.Nil || input.CommitSHA == "" {
+				return &FatalError{Err: fmt.Errorf("preview_cache_prewarm branch payload missing target or commit")}
+			}
+		default:
+			return &FatalError{Err: fmt.Errorf("preview_cache_prewarm payload has invalid source %q", input.Source)}
+		}
+		logger.Info().
+			Str("repository_id", input.RepositoryID.String()).
+			Str("source", string(input.Source)).
+			Msg("processing preview_cache_prewarm job")
+		if err := services.PreviewStarter.PrewarmPreviewCaches(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCachePrewarmCapacitySkipped) || errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				logger.Info().Err(err).Msg("preview cache prewarm skipped due to capacity")
+				return nil
+			}
+			return &FatalError{Err: err}
+
+		}
+		return nil
+	}
+}
+
+func newSessionPreviewWarmBuildHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if services == nil || services.PreviewStarter == nil {
+			return &FatalError{Err: fmt.Errorf("preview starter is not configured")}
+		}
+		var input previewsvc.SessionPreviewWarmBuildJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal session_preview_warm_build payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.SessionID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("session_preview_warm_build payload missing required ids")}
+		}
+		logger.Info().
+			Str("org_id", input.OrgID.String()).
+			Str("repository_id", input.RepositoryID.String()).
+			Str("session_id", input.SessionID.String()).
+			Int64("workspace_revision", input.WorkspaceRevision).
+			Msg("processing session preview warm build job")
+		if err := services.PreviewStarter.WarmSessionPreview(ctx, input); err != nil {
+			if errors.Is(err, previewsvc.ErrPreviewCapacity) {
+				logger.Info().Err(err).Msg("session preview warm build skipped due to capacity")
+				return nil
+			}
+			return &FatalError{Err: err}
+		}
+		return nil
+	}
+}
+
+func newSessionPreviewPrewarmClassifyHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if stores == nil || stores.Sessions == nil || stores.Repositories == nil || stores.Previews == nil || stores.Jobs == nil {
+			return &FatalError{Err: fmt.Errorf("session preview prewarm classifier dependencies are not configured")}
+		}
+		var input previewsvc.SessionPreviewPrewarmClassifyJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return &FatalError{Err: fmt.Errorf("unmarshal session preview prewarm classifier payload: %w", err)}
+		}
+		if input.OrgID == uuid.Nil || input.SessionID == uuid.Nil || input.RepositoryID == uuid.Nil {
+			return &FatalError{Err: fmt.Errorf("session preview prewarm classifier payload missing required ids")}
+		}
+		session, err := stores.Sessions.GetByID(ctx, input.OrgID, input.SessionID)
+		if err != nil {
+			return fmt.Errorf("load session for prewarm classifier: %w", err)
+		}
+		if session.RepositoryID == nil || *session.RepositoryID != input.RepositoryID || session.WorkspaceRevision != input.WorkspaceRevision {
+			status := "skipped_superseded"
+			if session.RepositoryID == nil || *session.RepositoryID != input.RepositoryID {
+				status = "failed"
+			}
+			return recordSessionPreviewPrewarmDecision(ctx, stores, session, input.JobID, input.RepositoryID, models.PreviewSessionPrewarmModeSmart, models.PreviewSpeculativeDecisionNone, 0, "superseded", "Session moved before classifier completed.", status)
+		}
+		repo, err := stores.Repositories.GetByID(ctx, input.OrgID, input.RepositoryID)
+		if err != nil {
+			return fmt.Errorf("load repository for prewarm classifier: %w", err)
+		}
+		classifier := sessionPrewarmClassifierForServices(services)
+		if classifier == nil {
+			return recordSessionPreviewPrewarmDecision(ctx, stores, session, input.JobID, input.RepositoryID, models.PreviewSessionPrewarmModeSmart, models.PreviewSpeculativeDecisionNone, 0, "classifier_error", "Classifier is not configured.", "decided")
+		}
+		classifierStarted := time.Now()
+		historicalOpenCount := sessionPrewarmHistoricalOpenCount(ctx, stores, logger, session)
+		result := classifier.Classify(ctx, previewsvc.SessionPrewarmClassifierInput{
+			RepositoryFullName:         repo.FullName,
+			RepositoryLanguage:         stringPtrValue(repo.Language),
+			SessionSource:              sessionPrewarmSource(session),
+			UserPrompt:                 sessionPrewarmPromptSeed(ctx, stores, logger, session),
+			IssueLabels:                sessionPrewarmIssueLabels(ctx, stores, logger, session),
+			IssueType:                  sessionPrewarmIssueType(ctx, stores, logger, session),
+			PreviewHistory:             sessionPrewarmPreviewHistory(ctx, stores, logger, session),
+			HistoricalPreviewOpenCount: historicalOpenCount,
+			CapacitySummary:            sessionPrewarmCapacitySummary(ctx, stores, logger, session.OrgID),
+			ChangedFileKinds:           sessionPrewarmChangedFileKinds(session),
+			Phase:                      input.Phase,
+		})
+		metrics.RecordSessionPreviewClassifierLatency(ctx, input.OrgID.String(), input.Phase, time.Since(classifierStarted))
+		if result.Status == "" {
+			result.Status = "decided"
+		}
+		if err := recordSessionPreviewPrewarmDecision(ctx, stores, session, input.JobID, input.RepositoryID, models.PreviewSessionPrewarmModeSmart, result.Decision, result.Confidence, result.Reason, result.Explanation, result.Status); err != nil {
+			return err
+		}
+		if result.Decision == models.PreviewSpeculativeDecisionCache {
+			enqueueSessionPreviewCachePrewarmForDecision(ctx, stores, services, logger, session, models.PreviewSessionPrewarmModeSmart, result.Decision, result.Confidence, result.Reason, result.Explanation, nil)
+		} else if result.Decision == models.PreviewSpeculativeDecisionWarmCandidate && strings.EqualFold(input.Phase, "post_turn") {
+			enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, input.OrgID, input.SessionID, "post_turn_classifier")
+		}
+		return nil
+	}
+}
+
+func sessionPrewarmClassifierForServices(services *Services) sessionPrewarmClassifier {
+	if services == nil {
+		return nil
+	}
+	if services.SessionPrewarmClassifier != nil {
+		return services.SessionPrewarmClassifier
+	}
+	if services.LLM == nil {
+		return nil
+	}
+	return previewsvc.NewSessionPrewarmClassifier(services.LLM, 5*time.Second)
+}
+
+func recordSessionPreviewPrewarmDecision(ctx context.Context, stores *Stores, session models.Session, jobID, repositoryID uuid.UUID, mode models.PreviewSessionPrewarmMode, decision models.PreviewSpeculativeDecision, confidence float64, reason, explanation, status string) error {
+	if stores == nil || stores.Previews == nil {
+		return nil
+	}
+	var jobIDPtr *uuid.UUID
+	if jobID != uuid.Nil {
+		jobIDCopy := jobID
+		jobIDPtr = &jobIDCopy
+	}
+	_, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      repositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Mode:              mode,
+		Decision:          decision,
+		Confidence:        confidence,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            status,
+		JobID:             jobIDPtr,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	})
+	if err != nil {
+		return fmt.Errorf("record session preview prewarm classifier decision: %w", err)
+	}
+	metrics.RecordSessionPreviewPrewarmDecision(ctx, session.OrgID.String(), string(mode), string(decision), sessionPrewarmSource(session), reason)
+	return nil
+}
+
+func sessionPrewarmSource(session models.Session) string {
+	if session.AutomationRunID != nil {
+		return "automation"
+	}
+	if session.ProjectTaskID != nil {
+		return "project"
+	}
+	if session.LinearIdentifierHint != nil && strings.TrimSpace(*session.LinearIdentifierHint) != "" {
+		return "linear"
+	}
+	if session.Origin != "" {
+		return string(session.Origin)
+	}
+	return "manual"
+}
+
+func sessionPrewarmQueuedTimeout(services *Services) time.Duration {
+	if services != nil && services.PreviewCachePrewarmTimeout > 0 {
+		return services.PreviewCachePrewarmTimeout
+	}
+	return defaultSessionPrewarmQueuedTimeout
+}
+
+func expireStaleSessionPreviewPrewarmRuns(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID uuid.UUID) {
+	if stores == nil || stores.Previews == nil || orgID == uuid.Nil {
+		return
+	}
+	timeout := sessionPrewarmQueuedTimeout(services)
+	rows, err := stores.Previews.ExpireStaleQueuedSessionPreviewPrewarmRuns(ctx, orgID, time.Now().Add(-timeout))
+	if err != nil {
+		logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to expire stale queued session preview prewarm runs")
+		return
+	}
+	if rows > 0 {
+		logger.Info().Int64("count", rows).Str("org_id", orgID.String()).Msg("expired stale queued session preview prewarm runs")
+	}
+}
+
+func sessionPrewarmCapacitySummary(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID) string {
+	if stores == nil || stores.Previews == nil || orgID == uuid.Nil {
+		return "unknown"
+	}
+	active, err := stores.Previews.CountActiveSessionPreviewPrewarmRuns(ctx, orgID)
+	if err != nil {
+		logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to count active session preview prewarm runs for classifier")
+		return "unknown"
+	}
+	maxActive := 0
+	if stores.Organizations != nil {
+		org, orgErr := stores.Organizations.GetByID(ctx, orgID)
+		if orgErr != nil {
+			logger.Warn().Err(orgErr).Str("org_id", orgID.String()).Msg("failed to load org settings for classifier capacity summary")
+		} else if settings, parseErr := models.ParseOrgSettings(org.Settings); parseErr != nil {
+			logger.Warn().Err(parseErr).Str("org_id", orgID.String()).Msg("failed to parse org settings for classifier capacity summary")
+		} else {
+			maxActive = settings.PreviewSessionPrewarmMaxActive
+		}
+	}
+	if maxActive <= 0 {
+		return fmt.Sprintf("active=%d max=unknown", active)
+	}
+	return fmt.Sprintf("active=%d max=%d remaining=%d", active, maxActive, max(0, maxActive-active))
+}
+
+func sessionPrewarmHistoricalOpenCount(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) int {
+	if stores == nil || stores.Previews == nil || session.OrgID == uuid.Nil || session.RepositoryID == nil {
+		return 0
+	}
+	count, err := stores.Previews.CountSessionsWithPanelOpened(ctx, session.OrgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to count sessions with panel opened for classifier")
+		return 0
+	}
+	return count
+}
+
+func sessionPrewarmPreviewHistory(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
+	if stores == nil || stores.Previews == nil || session.OrgID == uuid.Nil || session.ID == uuid.Nil {
+		return "unknown"
+	}
+	parts := make([]string, 0, 2)
+	for _, decision := range []models.PreviewSpeculativeDecision{
+		models.PreviewSpeculativeDecisionCache,
+		models.PreviewSpeculativeDecisionWarmCandidate,
+	} {
+		run, err := stores.Previews.GetLatestSessionPreviewPrewarmRun(ctx, session.OrgID, session.ID, decision)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				logger.Warn().Err(err).Str("session_id", session.ID.String()).Str("decision", string(decision)).Msg("failed to load session preview prewarm history")
+			}
+			continue
+		}
+		staleness := "current"
+		if run.WorkspaceRevision != session.WorkspaceRevision {
+			staleness = "stale"
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s:%s", decision, run.Status, staleness))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sessionPrewarmPromptSeed(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
+	if session.PMApproach != nil && strings.TrimSpace(*session.PMApproach) != "" {
+		return *session.PMApproach
+	}
+	if stores == nil || stores.SessionMessages == nil {
+		return ""
+	}
+	messages, err := stores.SessionMessages.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load messages for session preview prewarm classifier")
+		return ""
+	}
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleUser && strings.TrimSpace(msg.Content) != "" {
+			return msg.Content
+		}
+	}
+	return ""
+}
+
+func sessionPrewarmIssueLabels(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) []string {
+	if stores == nil || stores.SessionIssueLinks == nil || stores.Issues == nil {
+		return nil
+	}
+	links, err := stores.SessionIssueLinks.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load issue links for session preview prewarm classifier")
+		return nil
+	}
+	if len(links) == 0 {
+		return nil
+	}
+	issueIDs := make([]uuid.UUID, 0, len(links))
+	for _, link := range links {
+		if link.IssueID != uuid.Nil {
+			issueIDs = append(issueIDs, link.IssueID)
+		}
+	}
+	issues, err := stores.Issues.ListByIDs(ctx, session.OrgID, issueIDs)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load issue labels for session preview prewarm classifier")
+		return nil
+	}
+	seen := map[string]struct{}{}
+	labels := make([]string, 0)
+	for _, issue := range issues {
+		for _, tag := range issue.Tags {
+			label := strings.TrimSpace(tag)
+			if label == "" {
+				continue
+			}
+			key := strings.ToLower(label)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+func sessionPrewarmIssueType(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session) string {
+	if stores == nil || stores.ComplexityEstimates == nil || session.PrimaryIssueID == nil || *session.PrimaryIssueID == uuid.Nil {
+		return ""
+	}
+	estimate, err := stores.ComplexityEstimates.GetByIssueID(ctx, session.OrgID, *session.PrimaryIssueID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load issue type for session preview prewarm classifier")
+		}
+		return ""
+	}
+	if estimate.IssueType == nil {
+		return ""
+	}
+	return strings.TrimSpace(*estimate.IssueType)
+}
+
+func sessionPrewarmChangedFileKinds(session models.Session) []string {
+	if session.Diff == nil || strings.TrimSpace(*session.Diff) == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, event := range parseDiffFileEvents(*session.Diff) {
+		kind := sessionPrewarmFileKind(event.Path)
+		if kind != "" {
+			seen[kind] = struct{}{}
+		}
+	}
+	order := []string{"frontend", "backend", "config", "test", "docs"}
+	kinds := make([]string, 0, len(seen))
+	for _, kind := range order {
+		if _, ok := seen[kind]; ok {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds
+}
+
+func sessionPrewarmFileKind(path string) string {
+	p := strings.ToLower(strings.TrimSpace(path))
+	if p == "" {
+		return ""
+	}
+	base := p
+	if idx := strings.LastIndex(base, "/"); idx >= 0 {
+		base = base[idx+1:]
+	}
+	switch {
+	case strings.Contains(p, "/test/") || strings.Contains(p, "/tests/") || strings.Contains(p, "__tests__/") ||
+		strings.HasSuffix(base, "_test.go") || strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.tsx") ||
+		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.tsx"):
+		return "test"
+	case strings.HasPrefix(p, "docs/") || strings.HasSuffix(base, ".md") || strings.HasSuffix(base, ".mdx"):
+		return "docs"
+	case strings.HasSuffix(base, ".tsx") || strings.HasSuffix(base, ".jsx") || strings.HasSuffix(base, ".css") ||
+		strings.HasSuffix(base, ".scss") || strings.HasSuffix(base, ".vue") || strings.HasSuffix(base, ".svelte") ||
+		strings.Contains(p, "frontend/") || strings.Contains(p, "src/app/") || strings.Contains(p, "src/components/"):
+		return "frontend"
+	case strings.HasSuffix(base, ".json") || strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml") ||
+		strings.HasSuffix(base, ".toml") || strings.HasSuffix(base, ".lock") || strings.HasPrefix(base, "dockerfile") ||
+		base == "package.json" || base == "go.mod":
+		return "config"
+	case strings.HasSuffix(base, ".go") || strings.HasSuffix(base, ".rs") || strings.HasSuffix(base, ".py") ||
+		strings.HasSuffix(base, ".rb") || strings.HasSuffix(base, ".java") || strings.HasSuffix(base, ".kt") ||
+		strings.HasSuffix(base, ".php") || strings.Contains(p, "backend/") || strings.Contains(p, "internal/"):
+		return "backend"
+	default:
+		return ""
+	}
+}
+
+func sessionPreviewPrewarmUntrustedFork(session models.Session) bool {
+	if len(session.InputManifest) == 0 {
+		return false
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(session.InputManifest, &manifest); err != nil {
+		return false
+	}
+	return boolAtPath(manifest, "pull_request", "head", "repo", "fork") ||
+		boolAtPath(manifest, "pull_request", "head_repo", "fork") ||
+		boolAtPath(manifest, "pull_request", "head_repo_fork") ||
+		boolAtPath(manifest, "github", "pull_request", "head", "repo", "fork") ||
+		boolAtPath(manifest, "github", "pull_request", "head_repo_fork") ||
+		boolAtPath(manifest, "untrusted_fork")
+}
+
+func boolAtPath(root map[string]any, path ...string) bool {
+	var current any = root
+	for _, part := range path {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return false
+		}
+		current, ok = obj[part]
+		if !ok {
+			return false
+		}
+	}
+	value, ok := current.(bool)
+	return ok && value
 }
 
 // prioritize handler recomputes priority scores for an issue.
@@ -1060,18 +1642,19 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		}
 
 		session := &models.Session{
-			OrgID:             orgID,
-			AgentType:         agentType,
-			Status:            "pending",
-			AutonomyLevel:     models.DefaultSessionAutonomy,
-			TokenMode:         "low",
-			ModelOverride:     automation.ModelOverride,
-			ReasoningEffort:   automation.ReasoningEffort,
-			TriggeredByUserID: sessionTriggeredByUserID,
-			TargetBranch:      targetBranch,
-			RepositoryID:      automation.RepositoryID,
-			AutomationRunID:   &runID,
-			PMApproach:        goalSeed,
+			OrgID:              orgID,
+			AgentType:          agentType,
+			Status:             "pending",
+			AutonomyLevel:      models.DefaultSessionAutonomy,
+			TokenMode:          "low",
+			ModelOverride:      automation.ModelOverride,
+			ReasoningEffort:    automation.ReasoningEffort,
+			TriggeredByUserID:  sessionTriggeredByUserID,
+			TargetBranch:       targetBranch,
+			RepositoryID:       automation.RepositoryID,
+			AutomationRunID:    &runID,
+			PMApproach:         goalSeed,
+			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			// Session creation failed after we claimed the row — flip
@@ -1467,6 +2050,8 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		threadMessages := fetchSlackThreadContext(ctx, slackClient, slackCfg.AccessToken, payload.ChannelID, threadTS, logger)
 		contextFiles := fetchSlackContextFiles(ctx, slackClient, slackCfg.AccessToken, payload.FileIDs, logger)
 		contextRefs := detectSlackContextReferences(payload.Text, threadMessages)
+		resolvedContext := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
+		userResolver := newSlackCachedUserDisplayResolver(slackClient, slackRedisClient(services), slackCfg.AccessToken, payload.TeamID, logger)
 
 		var mappedUserID *uuid.UUID
 		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
@@ -1496,7 +2081,8 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					UserID:     mappedUserID,
 					TurnNumber: session.CurrentTurn,
 					Role:       models.MessageRoleUser,
-					Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+					Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
+					References: slackContextReferencesForSessionInput(contextRefs),
 				}
 				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
 					return fmt.Errorf("create slack follow-up message: %w", err)
@@ -1521,13 +2107,14 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
-				if posted, err := slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText); err != nil {
-					logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
+				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, slackbotsvc.SlackRoutingModeAuto)
+				posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, existingLink, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
+				if postErr != nil {
+					logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
 				} else {
 					if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
 						logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack continuation status timestamp")
 					}
-					recordSlackOutboundInChannel(ctx, stores, services, logger, existingLink, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 				}
 				return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 			}
@@ -1555,17 +2142,39 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			PMApproach:        &title,
 		}
 		if stores.SlackChannels != nil {
-			settings, settingsErr := stores.SlackChannels.GetByChannel(ctx, orgID, payload.TeamID, payload.ChannelID)
+			settings, settingsErr := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, payload.TeamID, payload.ChannelID)
 			if settingsErr == nil {
-				if !stringSliceContains(settings.AllowedActions, "session") {
+				if !stringSliceContains(settings.AllowedActions, string(slackbotsvc.CapabilitySession)) {
 					if markErr := stores.SlackInboundEvents.MarkFailed(ctx, orgID, inboundID, "Slack-started sessions are not allowed in this channel"); markErr != nil {
 						logger.Warn().Err(markErr).Str("channel_id", payload.ChannelID).Msg("failed to mark disallowed Slack session event failed")
 					}
-					logger.Warn().Str("channel_id", payload.ChannelID).Msg("Slack-started session blocked by channel settings")
+					logger.Warn().Str("channel_id", payload.ChannelID).Msg("Slack-started session blocked by effective Slack channel settings")
 					return nil
 				}
-				session.RepositoryID = settings.DefaultRepositoryID
-				session.TargetBranch = settings.DefaultBranch
+				if mappedUserID != nil && stores.Memberships != nil {
+					membership, membershipErr := stores.Memberships.Get(ctx, *mappedUserID, orgID)
+					if membershipErr != nil || !roleCanStartSlackSession(membership.Role) {
+						if markErr := stores.SlackInboundEvents.MarkFailed(ctx, orgID, inboundID, "Slack-started sessions require builder access"); markErr != nil {
+							logger.Warn().Err(markErr).Str("channel_id", payload.ChannelID).Msg("failed to mark unauthorized Slack session event failed")
+						}
+						logger.Warn().Err(membershipErr).Str("channel_id", payload.ChannelID).Msg("Slack-started session blocked by mapped user role")
+						return nil
+					}
+				}
+				contextSettings := settings
+				contextSettings.DefaultRepositoryID = nil
+				resolvedContext = slackbotsvc.ResolveSlackContext(slackbotsvc.SlackContextResolveInput{
+					Settings:              contextSettings,
+					Text:                  payload.Text,
+					References:            slackContextReferencesForResolver(ctx, stores, logger, orgID, contextRefs),
+					RepositoryDefaults:    slackRepositoryDefaultsForContext(ctx, stores, logger, orgID, installationID, payload.TeamID, payload.ChannelID),
+					TriggeringSlackUserID: payload.SlackUserID,
+				})
+				session.RepositoryID = resolvedContext.RepositoryID
+				if strings.TrimSpace(resolvedContext.Branch) != "" {
+					branch := strings.TrimSpace(resolvedContext.Branch)
+					session.TargetBranch = &branch
+				}
 			} else if !errors.Is(settingsErr, pgx.ErrNoRows) {
 				logger.Warn().Err(settingsErr).Str("channel_id", payload.ChannelID).Msg("failed to load Slack channel settings")
 			}
@@ -1580,7 +2189,8 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			UserID:     mappedUserID,
 			TurnNumber: 0,
 			Role:       models.MessageRoleUser,
-			Content:    renderSlackPrompt(payload.Text, permalink, threadMessages, contextRefs, contextFiles),
+			Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
+			References: slackContextReferencesForSessionInput(contextRefs),
 		}
 		if err := stores.SessionMessages.Create(ctx, initial); err != nil {
 			return fmt.Errorf("create initial slack session message: %w", err)
@@ -1612,30 +2222,24 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to persist Slack session attribution")
 			}
 		}
-		dedupeKey := db.RunAgentDedupeKey(session.ID)
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(session), 5, &dedupeKey); err != nil {
-			return fmt.Errorf("enqueue slack-started session: %w", err)
+		if shouldEnqueueSlackStartedRun(session, resolvedContext) {
+			if err := enqueueRunAgentForSession(ctx, stores, *session); err != nil {
+				return fmt.Errorf("enqueue slack-started session: %w", err)
+			}
 		}
 		ackText := slackSessionAckText(services, session.ID, "Starting")
 		if teamLine := slackTeamSessionLine(*link); teamLine != "" {
 			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 		}
-		ackBlocks := slackSessionAckBlocks(ctx, stores, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText)
-		var posted ingestion.SlackPostedMessage
-		var postErr error
+		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode)
 		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
-		if len(ackBlocks) > 0 {
-			posted, postErr = slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks)
-		} else {
-			posted, postErr = slackClient.PostMessage(ctx, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText)
-		}
+		posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, *link, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 		if postErr != nil {
 			logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack session acknowledgement")
 		} else {
 			if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, session.ID, posted.Timestamp); updateErr != nil {
 				logger.Warn().Err(updateErr).Str("session_id", session.ID.String()).Msg("failed to save Slack acknowledgement status timestamp")
 			}
-			recordSlackOutboundInChannel(ctx, stores, services, logger, *link, ackChannelID, posted.Timestamp, models.SlackOutboundMessageKindAck, "sent", ackText)
 		}
 		return stores.SlackInboundEvents.MarkProcessed(ctx, orgID, inboundID)
 	}
@@ -1706,14 +2310,14 @@ func slackChannelResponseVisibility(ctx context.Context, stores *Stores, logger 
 	if stores == nil || stores.SlackChannels == nil || channelID == "" {
 		return "thread"
 	}
-	settings, err := stores.SlackChannels.GetByChannel(ctx, orgID, teamID, channelID)
+	settings, err := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, teamID, channelID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack response visibility")
 		}
 		return "thread"
 	}
-	return slackNormalizeResponseVisibility(settings.ResponseVisibility)
+	return slackNormalizeResponseVisibility(string(settings.ResponseVisibility))
 }
 
 func slackNormalizeResponseVisibility(value string) string {
@@ -1723,6 +2327,17 @@ func slackNormalizeResponseVisibility(value string) string {
 	default:
 		return "thread"
 	}
+}
+
+func slackNormalizeOptionalResponseVisibility(value *models.SlackResponseVisibility) string {
+	if value == nil {
+		return "thread"
+	}
+	return slackNormalizeResponseVisibility(string(*value))
+}
+
+func slackResponseVisibilityPtr(value models.SlackResponseVisibility) *models.SlackResponseVisibility {
+	return &value
 }
 
 func slackDeliveryTargetFromVisibility(link models.SlackSessionLink, replyThreadTS, responseVisibility, dmChannelID string) (string, string, bool) {
@@ -1746,6 +2361,79 @@ func slackDeliveryTarget(ctx context.Context, stores *Stores, slackClient *inges
 	}
 	channelID, threadTS, _ := slackDeliveryTargetFromVisibility(link, replyThreadTS, visibility, dmChannelID)
 	return channelID, threadTS
+}
+
+func slackRepositoryDefaultsForContext(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string) []slackbotsvc.SlackRepositoryDefault {
+	if stores == nil {
+		return nil
+	}
+	defaults := []slackbotsvc.SlackRepositoryDefault{}
+	if stores.SlackChannels != nil && channelID != "" {
+		channelSettings, err := stores.SlackChannels.GetByChannel(ctx, orgID, teamID, channelID)
+		if err == nil && channelSettings.DefaultRepositoryID != nil {
+			defaults = appendSlackRepositoryDefault(ctx, stores, logger, defaults, orgID, *channelSettings.DefaultRepositoryID, channelSettings.DefaultBranch, slackbotsvc.SlackRepositoryResolutionSourceChannelDefault)
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack channel repository default")
+		}
+	}
+	if stores.SlackBotSettings != nil && installationID != uuid.Nil {
+		botSettings, err := stores.SlackBotSettings.GetByInstallation(ctx, orgID, installationID)
+		if err == nil && botSettings.DefaultRepositoryID != nil {
+			defaults = appendSlackRepositoryDefault(ctx, stores, logger, defaults, orgID, *botSettings.DefaultRepositoryID, botSettings.DefaultBranch, slackbotsvc.SlackRepositoryResolutionSourceInstallDefault)
+		} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Msg("failed to load Slack install repository default")
+		}
+	}
+	if stores.Organizations != nil {
+		org, err := stores.Organizations.GetByID(ctx, orgID)
+		if err == nil {
+			settings, parseErr := models.ParseOrgSettings(org.Settings)
+			if parseErr != nil {
+				logger.Warn().Err(parseErr).Str("org_id", orgID.String()).Msg("failed to parse org settings for Slack repository default")
+			} else if settings.DefaultWorkRepositoryID != nil {
+				defaults = appendSlackRepositoryDefault(ctx, stores, logger, defaults, orgID, *settings.DefaultWorkRepositoryID, nil, slackbotsvc.SlackRepositoryResolutionSourceOrgDefault)
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load org settings for Slack repository default")
+		}
+	}
+	if stores.Repositories != nil {
+		repos, err := stores.Repositories.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+		if err == nil && len(repos) == 1 {
+			repo := repos[0]
+			defaults = append(defaults, slackbotsvc.SlackRepositoryDefault{
+				RepositoryID:   repo.ID,
+				RepositoryName: repo.FullName,
+				Branch:         repo.DefaultBranch,
+				Source:         slackbotsvc.SlackRepositoryResolutionSourceSingleRepo,
+			})
+		} else if err != nil {
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list repositories for Slack single-repo fallback")
+		}
+	}
+	return defaults
+}
+
+func appendSlackRepositoryDefault(ctx context.Context, stores *Stores, logger zerolog.Logger, defaults []slackbotsvc.SlackRepositoryDefault, orgID, repoID uuid.UUID, branch *string, source slackbotsvc.SlackRepositoryResolutionSource) []slackbotsvc.SlackRepositoryDefault {
+	candidate := slackbotsvc.SlackRepositoryDefault{
+		RepositoryID: repoID,
+		Source:       source,
+	}
+	if branch != nil {
+		candidate.Branch = strings.TrimSpace(*branch)
+	}
+	if stores != nil && stores.Repositories != nil {
+		repo, err := stores.Repositories.GetByID(ctx, orgID, repoID)
+		if err == nil {
+			candidate.RepositoryName = repo.FullName
+			if candidate.Branch == "" {
+				candidate.Branch = repo.DefaultBranch
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("repository_id", repoID.String()).Msg("failed to load repository default details")
+		}
+	}
+	return append(defaults, candidate)
 }
 
 func slackStartSessionReplyThreadTS(payload models.SlackStartSessionJobPayload) string {
@@ -1786,6 +2474,8 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 	previews := []db.SlackHomePreviewSummary{}
 	automationRuns := []db.SlackHomeAutomationRunSummary{}
 	memberships := []models.MembershipSummary{}
+	var botSettings *models.SlackBotSettings
+	var defaultRepo *models.Repository
 	if stores != nil && stores.SlackSessionLinks != nil {
 		var err error
 		pending, err = stores.SlackSessionLinks.ListPendingHumanInputsForSlackUser(ctx, orgID, teamID, slackUserID, 5)
@@ -1814,6 +2504,20 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			}
 		}
 	}
+	if stores != nil && stores.SlackBotSettings != nil {
+		if settings, err := stores.SlackBotSettings.GetByOrg(ctx, orgID); err == nil {
+			botSettings = &settings
+			if settings.DefaultRepositoryID != nil && stores.Repositories != nil {
+				if repo, repoErr := stores.Repositories.GetByID(ctx, orgID, *settings.DefaultRepositoryID); repoErr == nil {
+					defaultRepo = &repo
+				} else if !errors.Is(repoErr, pgx.ErrNoRows) {
+					logger.Warn().Err(repoErr).Str("repository_id", settings.DefaultRepositoryID.String()).Msg("failed to load Slack App Home default repository")
+				}
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home defaults")
+		}
+	}
 	blocks := []ingestion.SlackBlock{
 		{
 			Type: "header",
@@ -1832,6 +2536,7 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 		},
 	}
 	blocks = append(blocks, slackHomePendingBlocks(services, pending)...)
+	blocks = append(blocks, slackHomePersonalDefaultsBlock(botSettings, defaultRepo))
 	blocks = append(blocks, slackHomeRecentWorkBlock(services, recent))
 	blocks = append(blocks, slackHomeActivePreviewBlocks(services, orgID, previews)...)
 	blocks = append(blocks, slackHomeAutomationRunBlock(services, automationRuns), slackHomeOrgSelectorBlock(memberships, orgID),
@@ -1846,6 +2551,70 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 	}
 }
 
+func slackHomePersonalDefaultsBlock(settings *models.SlackBotSettings, repo *models.Repository) ingestion.SlackBlock {
+	if settings == nil {
+		return ingestion.SlackBlock{
+			Type: "section",
+			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Personal defaults*\nUsing the connected organization's Slack defaults."},
+		}
+	}
+	repoLabel := "Not set"
+	if repo != nil && strings.TrimSpace(repo.FullName) != "" {
+		repoLabel = strings.TrimSpace(repo.FullName)
+	} else if settings.DefaultRepositoryID != nil {
+		repoLabel = settings.DefaultRepositoryID.String()
+	}
+	branchLabel := "Not set"
+	if settings.DefaultBranch != nil && strings.TrimSpace(*settings.DefaultBranch) != "" {
+		branchLabel = "`" + strings.TrimSpace(*settings.DefaultBranch) + "`"
+	}
+	text := fmt.Sprintf(
+		"*Personal defaults*\nRepository: %s\nBranch: %s\nRouting: %s\nReplies: %s\nNotifications: %s",
+		repoLabel,
+		branchLabel,
+		slackRoutingModeLabel(models.SlackRoutingMode(settings.RoutingMode)),
+		slackResponseVisibilityLabel(settings.ResponseVisibility),
+		slackNotificationPresetLabel(settings.NotificationPreset),
+	)
+	return ingestion.SlackBlock{
+		Type: "section",
+		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+	}
+}
+
+func slackRoutingModeLabel(mode models.SlackRoutingMode) string {
+	switch mode {
+	case models.SlackRoutingModeAnswerOnly:
+		return "Answer only"
+	case models.SlackRoutingModeStartWork:
+		return "Start work"
+	default:
+		return "Auto"
+	}
+}
+
+func slackResponseVisibilityLabel(visibility models.SlackResponseVisibility) string {
+	switch visibility {
+	case models.SlackResponseVisibilityDM:
+		return "DM"
+	default:
+		return "Thread"
+	}
+}
+
+func slackNotificationPresetLabel(preset models.SlackNotificationPreset) string {
+	switch preset {
+	case models.SlackNotificationPresetQuiet:
+		return "Quiet"
+	case models.SlackNotificationPresetVerbose:
+		return "Verbose"
+	case models.SlackNotificationPresetCustom:
+		return "Custom"
+	default:
+		return "Balanced"
+	}
+}
+
 func slackHomeOrgSelectorBlock(memberships []models.MembershipSummary, activeOrgID uuid.UUID) ingestion.SlackBlock {
 	if len(memberships) <= 1 {
 		return ingestion.SlackBlock{
@@ -1853,24 +2622,37 @@ func slackHomeOrgSelectorBlock(memberships []models.MembershipSummary, activeOrg
 			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Organization*\nUsing the connected 143 organization."},
 		}
 	}
-	var b strings.Builder
-	b.WriteString("*Organization*")
+	options := make([]map[string]any, 0, len(memberships))
+	var initial map[string]any
 	for _, membership := range memberships {
-		b.WriteString("\n- ")
-		if membership.OrgID == activeOrgID {
-			b.WriteString("*")
-			b.WriteString(membership.OrgName)
-			b.WriteString("*")
-		} else {
-			b.WriteString(membership.OrgName)
+		label := strings.TrimSpace(membership.OrgName)
+		if label == "" {
+			label = membership.OrgID.String()
 		}
-		b.WriteString(" (`")
-		b.WriteString(string(membership.Role))
-		b.WriteString("`)")
+		option := map[string]any{
+			"text": map[string]string{
+				"type": "plain_text",
+				"text": truncateSlackButtonText(label + " (" + string(membership.Role) + ")"),
+			},
+			"value": membership.OrgID.String(),
+		}
+		options = append(options, option)
+		if membership.OrgID == activeOrgID {
+			initial = option
+		}
+	}
+	element := map[string]any{
+		"type":        "static_select",
+		"action_id":   "slack_select_org",
+		"placeholder": map[string]string{"type": "plain_text", "text": "Select organization"},
+		"options":     options,
+	}
+	if initial != nil {
+		element["initial_option"] = initial
 	}
 	return ingestion.SlackBlock{
-		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: b.String()},
+		Type:     "actions",
+		Elements: []map[string]any{element},
 	}
 }
 
@@ -2040,6 +2822,51 @@ func slackHomeAutomationRunBlock(services *Services, items []db.SlackHomeAutomat
 	}
 }
 
+type slackMessagePoster interface {
+	PostMessage(ctx context.Context, accessToken, channelID, threadTS, text string) (ingestion.SlackPostedMessage, error)
+	PostMessageWithBlocks(ctx context.Context, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock) (ingestion.SlackPostedMessage, error)
+}
+
+func postSlackMessageWithFallback(ctx context.Context, poster slackMessagePoster, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock, kind models.SlackOutboundMessageKind) (ingestion.SlackPostedMessage, error) {
+	if poster == nil {
+		return ingestion.SlackPostedMessage{}, fmt.Errorf("slack message poster is not configured")
+	}
+	if len(blocks) == 0 {
+		posted, err := poster.PostMessage(ctx, accessToken, channelID, threadTS, text)
+		if err != nil {
+			recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed"), kind, "failed", text)
+			return ingestion.SlackPostedMessage{}, err
+		}
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, kind, "sent", text)
+		return posted, nil
+	}
+	posted, err := poster.PostMessageWithBlocks(ctx, accessToken, channelID, threadTS, text, blocks)
+	if err == nil {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, kind, "sent", text)
+		return posted, nil
+	}
+	if !slackIsInvalidBlocksError(err) {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed"), kind, "failed", text)
+		return ingestion.SlackPostedMessage{}, err
+	}
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_invalid_blocks"), kind, "failed_invalid_blocks", text)
+	fallbackPosted, fallbackErr := poster.PostMessage(ctx, accessToken, channelID, threadTS, text)
+	if fallbackErr != nil {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_fallback"), kind, "failed_fallback", text)
+		return ingestion.SlackPostedMessage{}, fallbackErr
+	}
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, fallbackPosted.Timestamp, kind, "sent_fallback", text)
+	return fallbackPosted, nil
+}
+
+func slackIsInvalidBlocksError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "invalid_blocks")
+}
+
+func slackSyntheticMessageTS(kind models.SlackOutboundMessageKind, status string) string {
+	return "attempt:" + string(kind) + ":" + status + ":" + uuid.NewString()
+}
+
 func recordSlackOutboundInChannel(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, channelID, ts string, kind models.SlackOutboundMessageKind, status, text string) {
 	if services != nil && services.SlackbotMetrics != nil {
 		services.SlackbotMetrics.RecordOutboundMessage(ctx, string(kind), status)
@@ -2089,21 +2916,45 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 		if !ok {
 			return fmt.Errorf("unexpected slack credential type")
 		}
-		text := strings.TrimSpace(input.Title)
-		if input.Summary != "" {
-			text += "\n" + strings.TrimSpace(input.Summary)
+		progress := slackbotsvc.NormalizeProgressUpdate(slackbotsvc.ProgressInput{
+			UpdateKind: input.UpdateKind,
+			Title:      input.Title,
+			Summary:    input.Summary,
+			Terminal:   input.Terminal,
+			Failed:     strings.Contains(strings.ToLower(input.UpdateKind+" "+input.Title), "fail"),
+			OccurredAt: time.Now(),
+		})
+		previous := slackbotsvc.SlackProgressPrevious{}
+		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
+			previous.UpdatedAt = link.UpdatedAt
 		}
-		if input.Terminal {
-			text += "\n\nSession: " + slackSessionURL(services, sessionID)
+		if link.LatestProgressKind != nil {
+			previous.Kind = slackbotsvc.SlackProgressKind(*link.LatestProgressKind)
 		}
-		if text == "" {
-			text = "143 session update"
+		if !slackbotsvc.ShouldSendProgressUpdate(progress, previous, slackbotsvc.DefaultSlackProgressPolicy()) {
+			if services != nil && services.SlackbotMetrics != nil {
+				services.SlackbotMetrics.RecordDroppedUpdate(ctx, string(progress.Kind), "progress_policy")
+			}
+			return nil
 		}
+		state := slackLifecycleStateForProgress(progress)
+		rendered := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+			Session:    models.Session{ID: sessionID},
+			Link:       link,
+			State:      state,
+			Title:      progress.Title,
+			Summary:    progress.Summary,
+			SessionURL: slackSessionURL(services, sessionID),
+		})
+		text := rendered.Text
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
 			updateStarted := time.Now()
 			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, text); err == nil {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
+				if updateErr := stores.SlackSessionLinks.SetLatestStatusProgress(ctx, orgID, sessionID, *link.LatestStatusMessageTS, string(progress.Kind)); updateErr != nil {
+					logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack progress kind")
+				}
 				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", text)
 				return nil
 			} else {
@@ -2118,7 +2969,7 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 			return err
 		}
 		if stores.SlackSessionLinks != nil {
-			if updateErr := stores.SlackSessionLinks.SetLatestStatusMessageTS(ctx, orgID, sessionID, posted.Timestamp); updateErr != nil {
+			if updateErr := stores.SlackSessionLinks.SetLatestStatusProgress(ctx, orgID, sessionID, posted.Timestamp, string(progress.Kind)); updateErr != nil {
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack status message timestamp")
 			}
 		}
@@ -2165,16 +3016,15 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				logger.Warn().Err(sessionErr).Str("session_id", sessionID.String()).Msg("failed to load session outcome for Slack final response")
 			}
 		}
-		text, blocks := renderSlackFinalBlocks(services, msg.Content, orgID, sessionID, details)
-		if teamLine := slackTeamSessionLine(link); teamLine != "" {
-			text = strings.TrimSpace(text) + "\n\n" + teamLine
-			if len(blocks) > 0 && blocks[0].Text != nil {
-				blocks[0].Text.Text = strings.TrimSpace(blocks[0].Text.Text) + "\n\n" + teamLine
-			}
-		}
+		text, blocks := renderSlackFinalBlocks(services, msg.Content, orgID, sessionID, link, details)
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
-			terminal := "Completed\nSession: " + slackSessionURL(services, sessionID)
+			terminal := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+				Session:    models.Session{ID: sessionID},
+				Link:       link,
+				State:      slackbotsvc.SessionLifecycleComplete,
+				SessionURL: slackSessionURL(services, sessionID),
+			}).Text
 			updateStarted := time.Now()
 			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, terminal); err != nil {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
@@ -2184,7 +3034,7 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal)
 			}
 		}
-		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
+		posted, err := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, text, blocks, models.SlackOutboundMessageKindFinal)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
@@ -2194,7 +3044,6 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack final message timestamp")
 			}
 		}
-		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindFinal, "sent", text)
 		return nil
 	}
 }
@@ -2234,13 +3083,22 @@ func newSlackDeliverHumanInputHandler(stores *Stores, services *Services, logger
 			return fmt.Errorf("unexpected slack credential type")
 		}
 		text, blocks := renderSlackHumanInput(services, req, sessionID)
-		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
-		posted, err := slackClient.PostMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, threadTS, text, blocks)
+		channelID, threadTS, shouldPost := slackHumanInputDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, req, link, slackReplyThreadTS(link.SlackThreadTS))
+		if !shouldPost {
+			logger.Info().
+				Str("org_id", orgID.String()).
+				Str("session_id", sessionID.String()).
+				Str("human_input_request_id", requestID.String()).
+				Str("sensitivity", string(req.Sensitivity)).
+				Str("preferred_channel", string(req.PreferredChannel)).
+				Msg("skipping Slack human-input delivery because request is not channel-deliverable")
+			return nil
+		}
+		_, err = postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, text, blocks, models.SlackOutboundMessageKindHumanInput)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
 		}
-		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, posted.Timestamp, models.SlackOutboundMessageKindHumanInput, "sent", text)
 		return nil
 	}
 }
@@ -2314,11 +3172,15 @@ func newSlackSendNotificationHandler(stores *Stores, services *Services, logger 
 }
 
 func renderSlackNotification(services *Services, input models.SlackSendNotificationJobPayload) (string, []ingestion.SlackBlock) {
+	renderInput := slackNotificationRenderInput(input)
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
-		title = "143 notification"
+		title = slackNotificationDefaultTitle(renderInput.Kind)
 	}
 	body := strings.TrimSpace(input.Body)
+	if body == "" {
+		body = slackNotificationDefaultBody(renderInput.Kind)
+	}
 	var text strings.Builder
 	text.WriteString("*")
 	text.WriteString(title)
@@ -2375,10 +3237,105 @@ func renderSlackNotification(services *Services, input models.SlackSendNotificat
 			})
 		}
 	}
+	if input.PullRequestID != "" {
+		prURL := strings.TrimSpace(input.PullRequestURL)
+		if prURL == "" && input.SessionID != "" {
+			if sessionID, err := uuid.Parse(input.SessionID); err == nil {
+				prURL = slackSessionURL(services, sessionID)
+			}
+		}
+		if prURL != "" {
+			elements = append(elements, map[string]any{
+				"type": "button",
+				"text": map[string]string{"type": "plain_text", "text": "Review PR"},
+				"url":  prURL,
+			})
+		}
+	}
 	if len(elements) > 0 {
 		blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	}
 	return text.String(), blocks
+}
+
+func slackNotificationRenderInput(input models.SlackSendNotificationJobPayload) models.SlackNotificationRenderInput {
+	return models.SlackNotificationRenderInput{
+		Kind:            models.SlackNotificationKind(input.Kind),
+		Preset:          models.SlackNotificationPreset(input.NotificationPreset),
+		Title:           input.Title,
+		Body:            input.Body,
+		SessionID:       parseOptionalUUID(input.SessionID),
+		AutomationID:    parseOptionalUUID(input.AutomationID),
+		AutomationRunID: parseOptionalUUID(input.AutomationRunID),
+		PullRequestID:   parseOptionalUUID(input.PullRequestID),
+		PreviewID:       parseOptionalUUID(input.PreviewID),
+		ActorUserID:     parseOptionalUUID(input.ActorUserID),
+	}
+}
+
+func parseOptionalUUID(raw string) *uuid.UUID {
+	if raw == "" {
+		return nil
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func slackNotificationDefaultTitle(kind models.SlackNotificationKind) string {
+	switch kind {
+	case models.SlackNotificationSessionCompleted:
+		return "Session completed"
+	case models.SlackNotificationSessionFailed:
+		return "Session failed"
+	case models.SlackNotificationAutomationCompleted:
+		return "Automation completed"
+	case models.SlackNotificationAutomationFailed:
+		return "Automation failed"
+	case models.SlackNotificationAutomationFailureStreak:
+		return "Automation failure streak"
+	case models.SlackNotificationPROpened:
+		return "Pull request opened"
+	case models.SlackNotificationPreviewReady:
+		return "Preview ready"
+	case models.SlackNotificationPreviewFailed:
+		return "Preview failed"
+	case models.SlackNotificationPreviewStale:
+		return "Preview stale"
+	case models.SlackNotificationHumanInputRequested:
+		return "143 needs your response"
+	default:
+		return "143 notification"
+	}
+}
+
+func slackNotificationDefaultBody(kind models.SlackNotificationKind) string {
+	switch kind {
+	case models.SlackNotificationSessionCompleted:
+		return "The requested work finished. Open the session to review the result."
+	case models.SlackNotificationSessionFailed:
+		return "The run failed before completing. Open the session for details and recovery options."
+	case models.SlackNotificationAutomationCompleted:
+		return "An automation run completed."
+	case models.SlackNotificationAutomationFailed:
+		return "An automation run failed and may need attention."
+	case models.SlackNotificationAutomationFailureStreak:
+		return "This automation has failed repeatedly."
+	case models.SlackNotificationPROpened:
+		return "A pull request is ready for review."
+	case models.SlackNotificationPreviewReady:
+		return "A preview is ready to open."
+	case models.SlackNotificationPreviewFailed:
+		return "Preview startup failed. Open the session or preview details to inspect logs."
+	case models.SlackNotificationPreviewStale:
+		return "The session has newer workspace changes than the active preview."
+	case models.SlackNotificationHumanInputRequested:
+		return "The agent is waiting for a human response."
+	default:
+		return ""
+	}
 }
 
 type slackNotificationSubscriptionConfig struct {
@@ -2388,11 +3345,14 @@ type slackNotificationSubscriptionConfig struct {
 	DMUserIDs    []string `json:"dm_user_ids"`
 }
 
-func slackNotificationSubscriptionMatches(raw json.RawMessage, eventKind string, automationID *uuid.UUID) bool {
+func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
 	if len(raw) == 0 || string(raw) == "null" {
-		return false
+		raw = json.RawMessage(`{}`)
 	}
 	cfg := parseSlackNotificationSubscriptionConfig(raw)
+	if len(cfg.Events) == 0 {
+		cfg.Events = slackNotificationPresetEvents(preset)
+	}
 	if len(cfg.Events) == 0 {
 		return false
 	}
@@ -2403,6 +3363,37 @@ func slackNotificationSubscriptionMatches(raw json.RawMessage, eventKind string,
 		return stringSliceContains(cfg.Automations, automationID.String())
 	}
 	return true
+}
+
+func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []string {
+	if preset == nil {
+		return nil
+	}
+	switch *preset {
+	case models.SlackNotificationPresetQuiet:
+		return []string{
+			string(models.SlackNotificationSessionFailed),
+			string(models.SlackNotificationAutomationFailed),
+			string(models.SlackNotificationAutomationFailureStreak),
+			string(models.SlackNotificationPreviewFailed),
+			string(models.SlackNotificationHumanInputRequested),
+		}
+	case models.SlackNotificationPresetBalanced:
+		return []string{
+			string(models.SlackNotificationSessionCompleted),
+			string(models.SlackNotificationSessionFailed),
+			string(models.SlackNotificationAutomationFailed),
+			string(models.SlackNotificationAutomationFailureStreak),
+			string(models.SlackNotificationPROpened),
+			string(models.SlackNotificationPreviewReady),
+			string(models.SlackNotificationPreviewFailed),
+			string(models.SlackNotificationHumanInputRequested),
+		}
+	case models.SlackNotificationPresetVerbose:
+		return []string{"*"}
+	default:
+		return nil
+	}
 }
 
 func slackNotificationEventMatches(events []string, eventKind string) bool {
@@ -2422,12 +3413,44 @@ func slackNotificationEventMatches(events []string, eventKind string) bool {
 }
 
 type slackNotificationFanoutInput struct {
-	EventKind    string
-	Title        string
-	Body         string
-	SessionID    *uuid.UUID
-	PreviewID    *uuid.UUID
-	AutomationID *uuid.UUID
+	EventKind       string
+	Title           string
+	Body            string
+	SessionID       *uuid.UUID
+	PreviewID       *uuid.UUID
+	PullRequestID   *uuid.UUID
+	PullRequestURL  string
+	AutomationID    *uuid.UUID
+	AutomationRunID *uuid.UUID
+}
+
+type slackNotificationDestination struct {
+	TeamID      string
+	ChannelID   string
+	SlackUserID string
+	ThreadTS    string
+}
+
+func slackNotificationDestinations(setting models.SlackChannelSettings, input slackNotificationFanoutInput) []slackNotificationDestination {
+	subs := parseSlackNotificationSubscriptionConfig(setting.NotificationSubscriptions)
+	destinations := []slackNotificationDestination{}
+	if slackNormalizeOptionalResponseVisibility(setting.ResponseVisibility) != "dm" {
+		destinations = append(destinations, slackNotificationDestination{
+			TeamID:    setting.SlackTeamID,
+			ChannelID: setting.SlackChannelID,
+		})
+	}
+	for _, slackUserID := range append(subs.SlackUserIDs, subs.DMUserIDs...) {
+		slackUserID = strings.TrimSpace(slackUserID)
+		if slackUserID == "" {
+			continue
+		}
+		destinations = append(destinations, slackNotificationDestination{
+			TeamID:      setting.SlackTeamID,
+			SlackUserID: slackUserID,
+		})
+	}
+	return destinations
 }
 
 func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, input slackNotificationFanoutInput) {
@@ -2440,23 +3463,8 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 		return
 	}
 	for _, setting := range settings {
-		if !slackNotificationSubscriptionMatches(setting.NotificationSubscriptions, input.EventKind, input.AutomationID) {
+		if !slackNotificationSubscriptionMatches(setting.NotificationSubscriptions, setting.NotificationPreset, input.EventKind, input.AutomationID) {
 			continue
-		}
-		subs := parseSlackNotificationSubscriptionConfig(setting.NotificationSubscriptions)
-		payload := models.SlackSendNotificationJobPayload{
-			OrgID:     orgID.String(),
-			Kind:      input.EventKind,
-			TeamID:    setting.SlackTeamID,
-			ChannelID: setting.SlackChannelID,
-			Title:     input.Title,
-			Body:      input.Body,
-		}
-		if input.SessionID != nil {
-			payload.SessionID = input.SessionID.String()
-		}
-		if input.PreviewID != nil {
-			payload.PreviewID = input.PreviewID.String()
 		}
 		dedupeKeyParts := []string{"slack_notification", input.EventKind, setting.SlackChannelID}
 		if input.SessionID != nil {
@@ -2465,24 +3473,49 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 		if input.PreviewID != nil {
 			dedupeKeyParts = append(dedupeKeyParts, input.PreviewID.String())
 		}
+		if input.PullRequestID != nil {
+			dedupeKeyParts = append(dedupeKeyParts, input.PullRequestID.String())
+		}
 		if input.AutomationID != nil {
 			dedupeKeyParts = append(dedupeKeyParts, input.AutomationID.String())
 		}
 		dedupeKey := strings.Join(dedupeKeyParts, ":")
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "slack_send_notification", payload, 4, &dedupeKey); err != nil {
-			logger.Warn().Err(err).Str("event_kind", input.EventKind).Str("slack_channel_id", setting.SlackChannelID).Msg("failed to enqueue Slack notification")
-		}
-		for _, slackUserID := range append(subs.SlackUserIDs, subs.DMUserIDs...) {
-			slackUserID = strings.TrimSpace(slackUserID)
-			if slackUserID == "" {
-				continue
+		for _, destination := range slackNotificationDestinations(setting, input) {
+			payload := models.SlackSendNotificationJobPayload{
+				OrgID:       orgID.String(),
+				Kind:        input.EventKind,
+				TeamID:      destination.TeamID,
+				ChannelID:   destination.ChannelID,
+				SlackUserID: destination.SlackUserID,
+				ThreadTS:    destination.ThreadTS,
+				Title:       input.Title,
+				Body:        input.Body,
 			}
-			dmPayload := payload
-			dmPayload.ChannelID = ""
-			dmPayload.SlackUserID = slackUserID
-			dmDedupeKey := dedupeKey + ":dm:" + slackUserID
-			if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "slack_send_notification", dmPayload, 4, &dmDedupeKey); err != nil {
-				logger.Warn().Err(err).Str("event_kind", input.EventKind).Str("slack_user_id", slackUserID).Msg("failed to enqueue Slack DM notification")
+			if input.SessionID != nil {
+				payload.SessionID = input.SessionID.String()
+			}
+			if input.PreviewID != nil {
+				payload.PreviewID = input.PreviewID.String()
+			}
+			if input.PullRequestID != nil {
+				payload.PullRequestID = input.PullRequestID.String()
+				payload.PullRequestURL = strings.TrimSpace(input.PullRequestURL)
+			}
+			if input.AutomationID != nil {
+				payload.AutomationID = input.AutomationID.String()
+			}
+			if input.AutomationRunID != nil {
+				payload.AutomationRunID = input.AutomationRunID.String()
+			}
+			if setting.NotificationPreset != nil {
+				payload.NotificationPreset = string(*setting.NotificationPreset)
+			}
+			destinationDedupeKey := dedupeKey
+			if destination.SlackUserID != "" {
+				destinationDedupeKey += ":dm:" + destination.SlackUserID
+			}
+			if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "slack_send_notification", payload, 4, &destinationDedupeKey); err != nil {
+				logger.Warn().Err(err).Str("event_kind", input.EventKind).Str("slack_channel_id", destination.ChannelID).Str("slack_user_id", destination.SlackUserID).Msg("failed to enqueue Slack notification")
 			}
 		}
 	}
@@ -2526,18 +3559,19 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		logger.Warn().Err(err).Str("automation_run_id", automationRunID.String()).Msg("failed to load automation run for Slack notification")
 		return
 	}
-	automationKind := "automation.run.completed"
-	if eventKind == "session.failed" {
-		automationKind = "automation.run.failed"
+	automationKind := string(models.SlackNotificationAutomationCompleted)
+	if eventKind == string(models.SlackNotificationSessionFailed) {
+		automationKind = string(models.SlackNotificationAutomationFailed)
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-		EventKind:    automationKind,
-		Title:        title,
-		Body:         body,
-		SessionID:    &sessionID,
-		AutomationID: &run.AutomationID,
+		EventKind:       automationKind,
+		Title:           title,
+		Body:            body,
+		SessionID:       &sessionID,
+		AutomationID:    &run.AutomationID,
+		AutomationRunID: automationRunID,
 	})
-	if automationKind == "automation.run.failed" {
+	if automationKind == string(models.SlackNotificationAutomationFailed) {
 		streak, streakErr := stores.AutomationRuns.CountConsecutiveFailures(ctx, orgID, run.AutomationID)
 		if streakErr != nil {
 			logger.Warn().Err(streakErr).Str("automation_id", run.AutomationID.String()).Msg("failed to count automation failure streak for Slack notification")
@@ -2545,11 +3579,12 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		}
 		if streak >= 3 {
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-				EventKind:    "automation.run.failure_streak",
-				Title:        "Automation failure streak",
-				Body:         fmt.Sprintf("%d consecutive automation runs failed.", streak),
-				SessionID:    &sessionID,
-				AutomationID: &run.AutomationID,
+				EventKind:       string(models.SlackNotificationAutomationFailureStreak),
+				Title:           "Automation failure streak",
+				Body:            fmt.Sprintf("%d consecutive automation runs failed.", streak),
+				SessionID:       &sessionID,
+				AutomationID:    &run.AutomationID,
+				AutomationRunID: automationRunID,
 			})
 		}
 	}
@@ -2575,7 +3610,7 @@ func enqueueSlackPreviewStaleIfNeeded(ctx context.Context, stores *Stores, logge
 		return
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-		EventKind: "preview.stale",
+		EventKind: string(models.SlackNotificationPreviewStale),
 		Title:     "Preview stale",
 		Body:      "The session has newer workspace changes than the active preview. Refresh the preview to pick up the latest changes.",
 		SessionID: &sessionID,
@@ -2596,81 +3631,175 @@ func slackPreviewIsStaleForSession(session models.Session, preview models.Previe
 }
 
 func renderSlackHumanInput(services *Services, req models.HumanInputRequest, sessionID uuid.UUID) (string, []ingestion.SlackBlock) {
-	var b strings.Builder
-	b.WriteString("*")
-	b.WriteString(req.Title)
-	b.WriteString("*\n")
-	b.WriteString(strings.TrimSpace(req.Body))
+	summary := strings.TrimSpace(req.Body)
 	if len(req.Choices) > 0 {
-		b.WriteString("\n\nChoices:")
+		var choices strings.Builder
+		choices.WriteString(summary)
+		choices.WriteString("\n\nChoices:")
 		for _, choice := range req.Choices {
-			b.WriteString("\n- ")
-			b.WriteString(choice.ID)
-			b.WriteString(": ")
-			b.WriteString(choice.Label)
+			choices.WriteString("\n- ")
+			choices.WriteString(choice.ID)
+			choices.WriteString(": ")
+			choices.WriteString(choice.Label)
 		}
+		summary = strings.TrimSpace(choices.String())
 	}
-	b.WriteString("\n\nAnswer in 143 or use a Slack action.\nSession: ")
-	b.WriteString(slackSessionURL(services, sessionID))
-	text := b.String()
-	blocks := []ingestion.SlackBlock{
-		{
-			Type: "section",
-			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
-		},
-	}
+	rendered := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+		Session:    models.Session{ID: sessionID},
+		State:      slackbotsvc.SessionLifecycleWaiting,
+		Title:      strings.TrimSpace(req.Title),
+		Summary:    summary + "\n\nAnswer in 143 or use a Slack action.",
+		SessionURL: slackSessionURL(services, sessionID),
+	})
+	text := rendered.Text
+	blocks := rendered.Blocks
 	if len(req.Choices) > 0 {
 		elements := make([]map[string]any, 0, min(len(req.Choices), 5))
-		for i, choice := range req.Choices {
-			if i >= 5 {
-				break
-			}
+		if req.Kind == models.HumanInputRequestKindMultiChoice {
 			value, err := json.Marshal(map[string]string{
 				"session_id": sessionID.String(),
 				"request_id": req.ID.String(),
-				"answer":     choice.ID,
 			})
-			if err != nil {
-				continue
+			if err == nil {
+				elements = append(elements, map[string]any{
+					"type":      "button",
+					"action_id": "slack_answer_human_input_multi",
+					"text":      map[string]string{"type": "plain_text", "text": "Choose options"},
+					"value":     string(value),
+				})
 			}
-			label := strings.TrimSpace(choice.Label)
-			if label == "" {
-				label = choice.ID
+		} else {
+			for i, choice := range req.Choices {
+				if i >= 5 {
+					break
+				}
+				value, err := json.Marshal(map[string]string{
+					"session_id": sessionID.String(),
+					"request_id": req.ID.String(),
+					"answer":     choice.ID,
+				})
+				if err != nil {
+					continue
+				}
+				label := strings.TrimSpace(choice.Label)
+				if label == "" {
+					label = choice.ID
+				}
+				actionID := "slack_answer_human_input"
+				if req.Kind == models.HumanInputRequestKindToolApproval || req.Kind == models.HumanInputRequestKindActionChoice {
+					switch strings.ToLower(choice.ID) {
+					case "continue":
+						actionID = "slack_continue_human_input"
+					case "resume":
+						actionID = "slack_resume_human_input"
+					case "stop":
+						actionID = "slack_stop_human_input"
+					case "approve", "approved", "yes", "allow":
+						actionID = "slack_approve_human_input"
+					case "deny", "denied", "no", "reject", "cancel":
+						actionID = "slack_deny_human_input"
+					}
+				}
+				element := map[string]any{
+					"type":      "button",
+					"action_id": actionID,
+					"text": map[string]string{
+						"type": "plain_text",
+						"text": truncateSlackButtonText(label),
+					},
+					"value": string(value),
+				}
+				if choice.Destructive || actionID == "slack_deny_human_input" || actionID == "slack_stop_human_input" {
+					element["style"] = "danger"
+				} else if actionID == "slack_approve_human_input" || actionID == "slack_continue_human_input" || actionID == "slack_resume_human_input" {
+					element["style"] = "primary"
+				}
+				elements = append(elements, element)
 			}
-			elements = append(elements, map[string]any{
-				"type":      "button",
-				"action_id": "slack_answer_human_input",
-				"text": map[string]string{
-					"type": "plain_text",
-					"text": truncateSlackButtonText(label),
-				},
-				"value": string(value),
-			})
 		}
 		if len(elements) > 0 {
 			blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
 		}
 	}
-	blocks = append(blocks, ingestion.SlackBlock{
-		Type: "actions",
-		Elements: []map[string]any{
-			{
-				"type":      "button",
-				"action_id": "slack_answer_human_input_freeform",
-				"text":      map[string]string{"type": "plain_text", "text": "Reply in Slack"},
-				"value": slackActionValue(map[string]string{
-					"session_id": sessionID.String(),
-					"request_id": req.ID.String(),
-				}),
-			},
-			{
-				"type": "button",
-				"text": map[string]string{"type": "plain_text", "text": "Answer in 143"},
-				"url":  slackSessionURL(services, sessionID),
-			},
-		},
+	elements := []map[string]any{}
+	if req.Kind == "" || req.Kind.AcceptsFreeText() {
+		elements = append(elements, map[string]any{
+			"type":      "button",
+			"action_id": "slack_answer_human_input_freeform",
+			"text":      map[string]string{"type": "plain_text", "text": "Reply in Slack"},
+			"value": slackActionValue(map[string]string{
+				"session_id": sessionID.String(),
+				"request_id": req.ID.String(),
+			}),
+		})
+	}
+	elements = append(elements, map[string]any{
+		"type": "button",
+		"text": map[string]string{"type": "plain_text", "text": "Answer in 143"},
+		"url":  slackSessionURL(services, sessionID),
 	})
+	blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	return text, blocks
+}
+
+func slackHumanInputDeliveryTarget(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, accessToken string, logger zerolog.Logger, req models.HumanInputRequest, link models.SlackSessionLink, replyThreadTS string) (string, string, bool) {
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
+	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == models.HumanInputPreferredChannelWeb {
+		return "", "", false
+	}
+	needsDM := req.PreferredChannel == models.HumanInputPreferredChannelSlackDM ||
+		req.Sensitivity == models.HumanInputSensitivityPersonal ||
+		req.Sensitivity == models.HumanInputSensitivitySensitive
+	slackUserID := link.SlackUserID
+	if req.AssignedUserID != nil {
+		needsDM = true
+		slackUserID = ""
+		if stores != nil && stores.SlackUserLinks != nil {
+			assignedLink, err := stores.SlackUserLinks.GetByUser(ctx, req.OrgID, *req.AssignedUserID, link.SlackTeamID)
+			if err == nil {
+				slackUserID = assignedLink.SlackUserID
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				logger.Warn().Err(err).
+					Str("org_id", req.OrgID.String()).
+					Str("assigned_user_id", req.AssignedUserID.String()).
+					Msg("failed to resolve assigned Slack user for human-input delivery")
+			}
+		}
+	}
+	if !needsDM {
+		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, accessToken, logger, link, replyThreadTS)
+		return channelID, threadTS, true
+	}
+	if slackUserID == "" {
+		return "", "", false
+	}
+	dmChannelID, err := slackClient.OpenDM(ctx, accessToken, slackUserID)
+	if err != nil {
+		logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to open Slack DM for human-input delivery")
+		return "", "", false
+	}
+	return slackHumanInputDeliveryTargetFromRequest(req, link, replyThreadTS, dmChannelID)
+}
+
+func slackHumanInputDeliveryTargetFromRequest(req models.HumanInputRequest, link models.SlackSessionLink, replyThreadTS, dmChannelID string) (string, string, bool) {
+	if req.PreferredChannel == models.HumanInputPreferredChannelWeb {
+		return "", "", false
+	}
+	needsDM := req.PreferredChannel == models.HumanInputPreferredChannelSlackDM ||
+		req.Sensitivity == models.HumanInputSensitivityPersonal ||
+		req.Sensitivity == models.HumanInputSensitivitySensitive
+	if needsDM {
+		if dmChannelID == "" {
+			return "", "", false
+		}
+		return dmChannelID, "", true
+	}
+	return link.SlackChannelID, replyThreadTS, true
 }
 
 func truncateSlackButtonText(text string) string {
@@ -2704,13 +3833,31 @@ func enqueueSlackHumanInputsIfPending(ctx context.Context, stores *Stores, logge
 		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "slack_deliver_human_input", payload, 4, &dedupeKey); err != nil {
 			logger.Warn().Err(err).Str("human_input_request_id", req.ID.String()).Msg("failed to enqueue Slack human-input delivery")
 		}
-		enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-			EventKind: "human_input.requested",
-			Title:     "143 needs your response",
-			Body:      strings.TrimSpace(req.Title),
-			SessionID: &sessionID,
-		})
+		if slackHumanInputAllowsNotificationFanout(req) {
+			enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+				EventKind: string(models.SlackNotificationHumanInputRequested),
+				Title:     "143 needs your response",
+				Body:      strings.TrimSpace(req.Title),
+				SessionID: &sessionID,
+			})
+		}
 	}
+}
+
+func slackHumanInputAllowsNotificationFanout(req models.HumanInputRequest) bool {
+	if req.AssignedUserID != nil {
+		return false
+	}
+	if req.Sensitivity == "" {
+		req.Sensitivity = models.HumanInputSensitivityTeam
+	}
+	if req.PreferredChannel == "" {
+		req.PreferredChannel = models.HumanInputPreferredChannelSlackThread
+	}
+	if req.Sensitivity != models.HumanInputSensitivityTeam {
+		return false
+	}
+	return req.PreferredChannel == models.HumanInputPreferredChannelSlackThread
 }
 
 func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -2731,8 +3878,14 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 			if input.CallbackID == "slack_human_input_freeform_modal" {
 				return handleSlackHumanInputFreeformModal(ctx, stores, services, slackClient, input)
 			}
+			if input.CallbackID == "slack_human_input_multi_modal" {
+				return handleSlackHumanInputMultiModal(ctx, stores, services, slackClient, input)
+			}
 			if input.CallbackID == "slack_configure_channel_modal" {
 				return handleSlackConfigureChannelModal(ctx, stores, input)
+			}
+			if input.CallbackID == "slack_missing_context_modal" {
+				return handleSlackMissingContextModal(ctx, stores, services, slackClient, input)
 			}
 			return nil
 		case "slack_open_session":
@@ -2741,26 +3894,111 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 			return handleSlackStartFromHome(ctx, stores, slackClient, input)
 		case "slack_link_account":
 			return handleSlackLinkAccount(ctx, stores, services, slackClient, input)
+		case "slack_select_org":
+			return handleSlackSelectOrg(ctx, stores, services, slackClient, input)
 		case "slack_select_repository":
 			return handleSlackSelectRepository(ctx, stores, input)
 		case "slack_configure_channel":
 			return handleSlackConfigureChannel(ctx, stores, slackClient, input)
+		case "slack_choose_preview_target", "slack_choose_pull_request", "slack_choose_branch":
+			return handleSlackMissingContextPrompt(ctx, stores, slackClient, input)
 		case "slack_create_preview":
-			return handleSlackCreatePreview(ctx, stores, slackClient, input)
+			return handleSlackCreatePreview(ctx, stores, services, slackClient, input)
 		case "slack_open_preview":
 			return handleSlackOpenPreview(ctx, stores, services, slackClient, input)
-		case "slack_answer_human_input":
+		case "slack_answer_human_input", "slack_approve_human_input", "slack_deny_human_input", "slack_continue_human_input", "slack_resume_human_input", "slack_stop_human_input":
 			return handleSlackHumanInputAnswer(ctx, stores, services, slackClient, input)
 		case "slack_answer_human_input_freeform":
 			return handleSlackHumanInputFreeformPrompt(ctx, stores, slackClient, input)
+		case "slack_answer_human_input_multi":
+			return handleSlackHumanInputMultiPrompt(ctx, stores, slackClient, input)
 		case "slack_member_joined_channel":
 			return handleSlackMemberJoinedChannel(ctx, stores, slackClient, input)
 		case "slack_refresh_preview", "slack_restart_preview", "slack_stop_preview", "slack_extend_preview":
 			return handleSlackPreviewAction(ctx, stores, services, input)
+		case "slack_repair_pr", "slack_merge_pr", "slack_claim_team_session", "slack_start_work", "slack_create_pr":
+			return handleSlackSpecializedSessionAction(ctx, stores, services, slackClient, input)
 		default:
 			logger.Debug().Str("action_id", input.ActionID).Msg("unhandled Slack interaction action")
 			return nil
 		}
+	}
+}
+
+func handleSlackSelectOrg(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil || stores.SlackUserLinks == nil || stores.Memberships == nil || stores.SlackInstallations == nil || stores.SlackOrgSelections == nil {
+		return fmt.Errorf("slack org selection dependencies are not configured")
+	}
+	selectedOrgID, err := uuid.Parse(input.Value)
+	if err != nil {
+		return fmt.Errorf("parse selected org_id: %w", err)
+	}
+	currentOrgID, err := uuid.Parse(input.OrgID)
+	if err != nil {
+		return fmt.Errorf("parse org_id: %w", err)
+	}
+	link, err := stores.SlackUserLinks.GetBySlackUser(ctx, currentOrgID, input.TeamID, input.UserID)
+	if err != nil {
+		return fmt.Errorf("resolve slack user link for org selection: %w", err)
+	}
+	if link.UserID == nil {
+		return fmt.Errorf("slack org selection requires a linked 143 user")
+	}
+	if _, err := stores.Memberships.Get(ctx, *link.UserID, selectedOrgID); err != nil {
+		return fmt.Errorf("selected Slack org is not available to mapped user: %w", err)
+	}
+	currentInstall, err := stores.SlackInstallations.GetActiveByOrg(ctx, currentOrgID)
+	if err != nil {
+		return fmt.Errorf("get current Slack installation for org selection: %w", err)
+	}
+	selectedInstall, err := stores.SlackInstallations.GetActiveByOrgTeamApp(ctx, selectedOrgID, input.TeamID, currentInstall.APIAppID)
+	if err != nil {
+		return fmt.Errorf("get selected Slack installation for org selection: %w", err)
+	}
+	selection := &models.SlackOrgSelection{
+		OrgID:               selectedOrgID,
+		SlackInstallationID: selectedInstall.ID,
+		SlackTeamID:         input.TeamID,
+		APIAppID:            selectedInstall.APIAppID,
+		SlackUserID:         input.UserID,
+	}
+	if err := stores.SlackOrgSelections.Upsert(ctx, selection); err != nil {
+		return fmt.Errorf("persist Slack org selection: %w", err)
+	}
+	if input.ChannelID != "" || input.TriggerID != "" {
+		cred, err := stores.Credentials.Get(ctx, selectedOrgID, models.ProviderSlack)
+		if err != nil {
+			return fmt.Errorf("get slack credentials: %w", err)
+		}
+		slackCfg, ok := cred.Config.(models.SlackConfig)
+		if !ok {
+			return fmt.Errorf("unexpected slack credential type")
+		}
+		text := "Future Slack actions from your account in this workspace will use the selected 143 organization.\n\nOpen 143: " + slackFrontendURL(services, "/settings/integrations")
+		if input.TriggerID != "" {
+			return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackInfoModal("Organization selection", text))
+		}
+		if input.UserID == "" {
+			return nil
+		}
+		return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
+	}
+	return nil
+}
+
+func slackInfoModal(title, text string) ingestion.SlackHomeView {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "143"
+	}
+	return ingestion.SlackHomeView{
+		Type:  "modal",
+		Title: &ingestion.SlackTextObject{Type: "plain_text", Text: truncateSlackButtonText(title)},
+		Close: &ingestion.SlackTextObject{Type: "plain_text", Text: "Close"},
+		Blocks: []ingestion.SlackBlock{{
+			Type: "section",
+			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+		}},
 	}
 }
 
@@ -2964,6 +4202,7 @@ func handleSlackSelectRepository(ctx context.Context, stores *Stores, input mode
 		ChannelID      string `json:"channel_id"`
 		RepositoryID   string `json:"repository_id"`
 		DefaultBranch  string `json:"default_branch"`
+		SessionID      string `json:"session_id"`
 	}
 	if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
 		return fmt.Errorf("parse slack repository selection value: %w", err)
@@ -3004,12 +4243,32 @@ func handleSlackSelectRepository(ctx context.Context, stores *Stores, input mode
 		SlackChannelID:            channelID,
 		DefaultRepositoryID:       &repoID,
 		DefaultBranch:             defaultBranchPtr,
-		ResponseVisibility:        "thread",
+		ResponseVisibility:        slackResponseVisibilityPtr(models.SlackResponseVisibilityThread),
 		AllowedActions:            []string{"session", "preview"},
 		NotificationSubscriptions: json.RawMessage(`{}`),
 		Active:                    true,
 	}
-	return stores.SlackChannels.Upsert(ctx, settings)
+	if err := stores.SlackChannels.Upsert(ctx, settings); err != nil {
+		return err
+	}
+	if strings.TrimSpace(value.SessionID) == "" {
+		return nil
+	}
+	if stores.Sessions == nil || stores.Jobs == nil {
+		return fmt.Errorf("slack repository selection session-start dependencies are not configured")
+	}
+	sessionID, err := uuid.Parse(value.SessionID)
+	if err != nil {
+		return fmt.Errorf("parse session_id: %w", err)
+	}
+	session, err := stores.Sessions.SetRepositoryContext(ctx, orgID, sessionID, repoID, defaultBranchPtr)
+	if err != nil {
+		return fmt.Errorf("set Slack session repository context: %w", err)
+	}
+	if !sessionStatusNeedsRunAgent(session.Status) {
+		return nil
+	}
+	return enqueueRunAgentForSession(ctx, stores, session)
 }
 
 func handleSlackConfigureChannel(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
@@ -3168,6 +4427,7 @@ func handleSlackConfigureChannelModal(ctx context.Context, stores *Stores, input
 	if responseVisibility == "" {
 		responseVisibility = "thread"
 	}
+	responseVisibilityValue := models.SlackResponseVisibility(responseVisibility)
 	allowedActions := slackModalSelectedValues(input.RawPayload, "allowed_actions", "selected")
 	if len(allowedActions) == 0 {
 		allowedActions = []string{"session", "preview"}
@@ -3180,12 +4440,319 @@ func handleSlackConfigureChannelModal(ctx context.Context, stores *Stores, input
 		SlackChannelID:            metadata.ChannelID,
 		DefaultRepositoryID:       &repo.ID,
 		DefaultBranch:             &defaultBranch,
-		ResponseVisibility:        responseVisibility,
+		ResponseVisibility:        &responseVisibilityValue,
 		AllowedActions:            allowedActions,
 		NotificationSubscriptions: notificationSubscriptions,
 		Active:                    true,
 	}
 	return stores.SlackChannels.Upsert(ctx, settings)
+}
+
+func handleSlackMissingContextPrompt(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil {
+		return fmt.Errorf("slack missing-context dependencies are not configured")
+	}
+	orgID, err := uuid.Parse(input.OrgID)
+	if err != nil {
+		return fmt.Errorf("parse org_id: %w", err)
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	if input.TriggerID == "" {
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Open the linked 143 session to add the missing context.")
+	}
+	var value struct {
+		OrgID     string `json:"org_id"`
+		SessionID string `json:"session_id"`
+		Kind      string `json:"kind"`
+	}
+	if input.Value != "" {
+		if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
+			return fmt.Errorf("parse Slack missing-context value: %w", err)
+		}
+	}
+	kind := strings.TrimSpace(value.Kind)
+	if kind == "" {
+		switch input.ActionID {
+		case "slack_choose_preview_target":
+			kind = "preview_target"
+		case "slack_choose_pull_request":
+			kind = "pull_request"
+		case "slack_choose_branch":
+			kind = "branch"
+		default:
+			kind = "context"
+		}
+	}
+	options, err := slackMissingContextOptions(ctx, stores, orgID, kind)
+	if err != nil {
+		return err
+	}
+	return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackMissingContextModal(kind, input.Value, options))
+}
+
+type slackMissingContextOption struct {
+	Text  string
+	Value string
+}
+
+func slackMissingContextOptions(ctx context.Context, stores *Stores, orgID uuid.UUID, kind string) ([]slackMissingContextOption, error) {
+	options := []slackMissingContextOption{}
+	if kind == "preview_target" || kind == "branch" {
+		if stores != nil && stores.Repositories != nil {
+			repos, err := stores.Repositories.ListByOrg(ctx, orgID, db.RepositoryFilters{})
+			if err != nil {
+				return nil, fmt.Errorf("list repositories for Slack missing-context options: %w", err)
+			}
+			for _, repo := range repos {
+				if len(options) >= 100 {
+					return options, nil
+				}
+				if kind == "preview_target" {
+					options = append(options, slackMissingContextOption{
+						Text:  repo.FullName,
+						Value: slackActionValue(map[string]string{"repository_id": repo.ID.String(), "display": repo.FullName}),
+					})
+					if len(options) >= 100 {
+						return options, nil
+					}
+				}
+				branch := strings.TrimSpace(repo.DefaultBranch)
+				if branch != "" {
+					options = append(options, slackMissingContextOption{
+						Text:  repo.FullName + " " + branch,
+						Value: slackActionValue(map[string]string{"repository_id": repo.ID.String(), "branch": branch, "display": repo.FullName + "@" + branch}),
+					})
+				}
+			}
+		}
+	}
+	if kind == "preview_target" || kind == "pull_request" {
+		if stores != nil && stores.PullRequests != nil && len(options) < 100 {
+			prs, err := stores.PullRequests.ListByOrg(ctx, orgID, db.PullRequestFilters{Status: models.PullRequestStatusOpen, Limit: 100 - len(options)})
+			if err != nil {
+				return nil, fmt.Errorf("list pull requests for Slack missing-context options: %w", err)
+			}
+			for _, pr := range prs {
+				if len(options) >= 100 {
+					break
+				}
+				label := fmt.Sprintf("%s #%d", pr.GitHubRepo, pr.GitHubPRNumber)
+				if strings.TrimSpace(pr.Title) != "" {
+					label += " " + strings.TrimSpace(pr.Title)
+				}
+				options = append(options, slackMissingContextOption{
+					Text: label,
+					Value: slackActionValue(map[string]string{
+						"pull_request_id":  pr.ID.String(),
+						"pull_request_url": pr.GitHubPRURL,
+						"display":          label,
+					}),
+				})
+			}
+		}
+	}
+	return options, nil
+}
+
+func slackMissingContextModal(kind string, privateMetadata string, options []slackMissingContextOption) ingestion.SlackHomeView {
+	title := "Add context"
+	label := "Context value"
+	placeholder := "Paste a URL, branch, repository, session, or PR"
+	switch kind {
+	case "preview_target":
+		title = "Preview target"
+		label = "Branch, PR, session, or repository"
+		placeholder = "main, https://github.com/acme/api/pull/42, or a session URL"
+	case "pull_request":
+		title = "Pull request"
+		label = "Pull request URL or number"
+		placeholder = "https://github.com/acme/api/pull/42"
+	case "branch":
+		title = "Branch"
+		label = "Branch name"
+		placeholder = "main"
+	}
+	return ingestion.SlackHomeView{
+		Type:            "modal",
+		CallbackID:      "slack_missing_context_modal",
+		PrivateMetadata: privateMetadata,
+		Title:           &ingestion.SlackTextObject{Type: "plain_text", Text: title},
+		Submit:          &ingestion.SlackTextObject{Type: "plain_text", Text: "Continue"},
+		Close:           &ingestion.SlackTextObject{Type: "plain_text", Text: "Cancel"},
+		Blocks: []ingestion.SlackBlock{{
+			Type:    "input",
+			BlockID: "context_value",
+			Label:   &ingestion.SlackTextObject{Type: "plain_text", Text: label},
+			Element: slackMissingContextInputElement(placeholder, options),
+		}},
+	}
+}
+
+func slackMissingContextInputElement(placeholder string, options []slackMissingContextOption) map[string]any {
+	if len(options) > 0 {
+		slackOptions := make([]map[string]any, 0, min(len(options), 100))
+		for i, option := range options {
+			if i >= 100 {
+				break
+			}
+			slackOptions = append(slackOptions, map[string]any{
+				"text":  map[string]string{"type": "plain_text", "text": truncateSlackButtonText(option.Text)},
+				"value": option.Value,
+			})
+		}
+		return map[string]any{
+			"type":        "static_select",
+			"action_id":   "value",
+			"placeholder": map[string]string{"type": "plain_text", "text": placeholder},
+			"options":     slackOptions,
+		}
+	}
+	return map[string]any{
+		"type":        "plain_text_input",
+		"action_id":   "value",
+		"placeholder": map[string]string{"type": "plain_text", "text": placeholder},
+	}
+}
+
+func handleSlackMissingContextModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	var metadata struct {
+		OrgID     string `json:"org_id"`
+		SessionID string `json:"session_id"`
+		Kind      string `json:"kind"`
+	}
+	var payload struct {
+		View struct {
+			PrivateMetadata string `json:"private_metadata"`
+		} `json:"view"`
+	}
+	if err := json.Unmarshal(input.RawPayload, &payload); err != nil {
+		return fmt.Errorf("parse Slack missing-context modal payload: %w", err)
+	}
+	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &metadata); err != nil {
+		return fmt.Errorf("parse Slack missing-context metadata: %w", err)
+	}
+	rawOrgID := input.OrgID
+	if rawOrgID == "" {
+		rawOrgID = metadata.OrgID
+	}
+	orgID, sessionID, err := parseSlackSessionJobIDs(rawOrgID, metadata.SessionID)
+	if err != nil {
+		return err
+	}
+	value := slackModalSelectedValue(input.RawPayload, "context_value", "value")
+	if value == "" {
+		value = slackModalStringValue(input.RawPayload, "context_value", "value")
+	}
+	if value == "" {
+		return nil
+	}
+	if metadata.Kind == "preview_target" && slackMissingContextValueHasPreviewTarget(value) {
+		previewInput := input
+		previewInput.OrgID = orgID.String()
+		previewInput.ActionID = "slack_create_preview"
+		previewInput.Value = value
+		return handleSlackCreatePreview(ctx, stores, services, slackClient, previewInput)
+	}
+	display := slackMissingContextDisplayValue(metadata.Kind, value)
+	prompt := slackMissingContextContinuationPrompt(metadata.Kind, display)
+	return enqueueSlackSessionContinuationPromptWithReferences(ctx, stores, orgID, sessionID, prompt, slackMissingContextReferences(metadata.Kind, value))
+}
+
+func slackMissingContextContinuationPrompt(kind, value string) string {
+	value = strings.TrimSpace(value)
+	switch kind {
+	case "preview_target":
+		return "Continue this Slack-started session using this preview target: " + value + "\n\nCreate or update the preview and report the URL/status."
+	case "pull_request":
+		return "Continue this Slack-started session using this pull request: " + value + "\n\nInspect or repair the pull request and report the outcome."
+	case "branch":
+		return "Continue this Slack-started session using this branch: " + value + "\n\nProceed with the requested work and report the outcome."
+	default:
+		return "Continue this Slack-started session using this additional context: " + value
+	}
+}
+
+func slackMissingContextValueHasPreviewTarget(value string) bool {
+	var actionValue struct {
+		SessionID     string `json:"session_id"`
+		RepositoryID  string `json:"repository_id"`
+		PullRequestID string `json:"pull_request_id"`
+	}
+	if err := json.Unmarshal([]byte(value), &actionValue); err != nil {
+		return false
+	}
+	return actionValue.SessionID != "" || actionValue.RepositoryID != "" || actionValue.PullRequestID != ""
+}
+
+func slackMissingContextDisplayValue(kind, value string) string {
+	var actionValue struct {
+		Display        string `json:"display"`
+		PullRequestURL string `json:"pull_request_url"`
+		Branch         string `json:"branch"`
+		RepositoryID   string `json:"repository_id"`
+		PullRequestID  string `json:"pull_request_id"`
+		SessionID      string `json:"session_id"`
+	}
+	if err := json.Unmarshal([]byte(value), &actionValue); err == nil {
+		switch {
+		case strings.TrimSpace(actionValue.Display) != "":
+			return strings.TrimSpace(actionValue.Display)
+		case strings.TrimSpace(actionValue.PullRequestURL) != "":
+			return strings.TrimSpace(actionValue.PullRequestURL)
+		case strings.TrimSpace(actionValue.Branch) != "":
+			return strings.TrimSpace(actionValue.Branch)
+		case strings.TrimSpace(actionValue.RepositoryID) != "":
+			return "repository " + strings.TrimSpace(actionValue.RepositoryID)
+		case strings.TrimSpace(actionValue.PullRequestID) != "":
+			return "pull request " + strings.TrimSpace(actionValue.PullRequestID)
+		case strings.TrimSpace(actionValue.SessionID) != "":
+			return "session " + strings.TrimSpace(actionValue.SessionID)
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func slackMissingContextReferences(kind, value string) []slackContextReference {
+	display := slackMissingContextDisplayValue(kind, value)
+	if display == "" {
+		return nil
+	}
+	var actionValue struct {
+		Display        string `json:"display"`
+		PullRequestURL string `json:"pull_request_url"`
+		Branch         string `json:"branch"`
+		RepositoryID   string `json:"repository_id"`
+		PullRequestID  string `json:"pull_request_id"`
+	}
+	_ = json.Unmarshal([]byte(value), &actionValue)
+	ref := slackContextReference{Value: display, Source: "slack_modal"}
+	switch kind {
+	case "pull_request":
+		ref.Kind = slackReferenceKindPullRequest
+	case "branch":
+		ref.Kind = slackReferenceKindBranch
+	case "preview_target":
+		switch {
+		case strings.TrimSpace(actionValue.PullRequestURL) != "" || strings.TrimSpace(actionValue.PullRequestID) != "":
+			ref.Kind = slackReferenceKindPullRequest
+		case strings.TrimSpace(actionValue.Branch) != "":
+			ref.Kind = slackReferenceKindBranch
+		case strings.TrimSpace(actionValue.RepositoryID) != "":
+			ref.Kind = slackReferenceKindRepository
+		default:
+			ref.Kind = classifySlackURLReference(display)
+		}
+	default:
+		ref.Kind = classifySlackURLReference(display)
+	}
+	return []slackContextReference{ref}
 }
 
 func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessage {
@@ -3202,12 +4769,17 @@ func slackNotificationSubscriptionsFromModal(raw json.RawMessage) json.RawMessag
 	return encoded
 }
 
-func handleSlackCreatePreview(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.Credentials == nil {
+func handleSlackCreatePreview(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil {
 		return fmt.Errorf("slack preview prompt dependencies are not configured")
 	}
 	var actionValue struct {
-		SessionID string `json:"session_id"`
+		SessionID     string `json:"session_id"`
+		RepositoryID  string `json:"repository_id"`
+		PullRequestID string `json:"pull_request_id"`
+		Branch        string `json:"branch"`
+		CommitSHA     string `json:"commit_sha"`
+		ConfigName    string `json:"config_name"`
 	}
 	if input.Value != "" {
 		_ = json.Unmarshal([]byte(input.Value), &actionValue)
@@ -3217,40 +4789,86 @@ func handleSlackCreatePreview(ctx context.Context, stores *Stores, slackClient *
 		return fmt.Errorf("parse org_id: %w", err)
 	}
 	if actionValue.SessionID != "" {
-		if stores.SessionMessages == nil || stores.Jobs == nil || stores.Sessions == nil {
-			return fmt.Errorf("slack preview creation session dependencies are not configured")
+		if services == nil || services.SlackPreviewControl == nil || stores.Sessions == nil {
+			return fmt.Errorf("slack preview control dependencies are not configured")
 		}
 		sessionID, err := uuid.Parse(actionValue.SessionID)
 		if err != nil {
 			return fmt.Errorf("parse session_id: %w", err)
 		}
+		auth, err := authorizeSlackSessionAction(ctx, stores, input, orgID, sessionID, slackbotsvc.CapabilityPreview, true)
+		if err != nil {
+			return err
+		}
 		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
 		if err != nil {
 			return fmt.Errorf("get session for Slack preview creation: %w", err)
 		}
-		msg := &models.SessionMessage{
-			SessionID:  session.ID,
-			OrgID:      orgID,
-			ThreadID:   session.PrimaryThreadID,
-			UserID:     session.TriggeredByUserID,
-			TurnNumber: session.CurrentTurn,
-			Role:       models.MessageRoleUser,
-			Content:    "Create or refresh a preview for this session and report the preview URL/status.",
+		target := models.SlackPreviewTarget{
+			Kind:      models.SlackPreviewTargetSession,
+			SessionID: &session.ID,
 		}
-		if err := stores.SessionMessages.Create(ctx, msg); err != nil {
-			return fmt.Errorf("create Slack preview request message: %w", err)
+		if session.RepositoryID != nil {
+			target.RepositoryID = *session.RepositoryID
 		}
-		scopeID := session.ID
-		if session.PrimaryThreadID != nil {
-			scopeID = *session.PrimaryThreadID
+		preview, err := services.SlackPreviewControl.CreatePreviewForSlack(ctx, orgID, target, models.SlackActor{
+			UserID:      auth.ActorUserID,
+			SlackTeamID: input.TeamID,
+			SlackUserID: input.UserID,
+		})
+		if err != nil {
+			return fmt.Errorf("create Slack preview: %w", err)
 		}
-		dedupeKey := db.ContinueSessionDedupeKey(scopeID)
-		payload := map[string]string{"org_id": orgID.String(), "session_id": session.ID.String()}
-		if session.PrimaryThreadID != nil {
-			payload["thread_id"] = session.PrimaryThreadID.String()
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Preview requested: "+slackPreviewURL(services, preview.ID))
+	}
+	if actionValue.RepositoryID != "" || actionValue.PullRequestID != "" {
+		if services == nil || services.SlackPreviewControl == nil {
+			return fmt.Errorf("slack preview control dependencies are not configured")
 		}
-		_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
-		return err
+		auth, err := authorizeSlackPreviewAction(ctx, stores, input, orgID)
+		if err != nil {
+			return err
+		}
+		if auth.ActorUserID == uuid.Nil {
+			return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "You need to link your Slack account to 143 before creating previews.")
+		}
+		target := models.SlackPreviewTarget{
+			Kind:       models.SlackPreviewTargetBranch,
+			Branch:     actionValue.Branch,
+			CommitSHA:  actionValue.CommitSHA,
+			ConfigName: actionValue.ConfigName,
+		}
+		if actionValue.PullRequestID != "" {
+			prID, err := uuid.Parse(actionValue.PullRequestID)
+			if err != nil {
+				return fmt.Errorf("parse pull_request_id: %w", err)
+			}
+			target.Kind = models.SlackPreviewTargetPullRequest
+			target.PullRequestID = &prID
+		} else {
+			repoID, err := uuid.Parse(actionValue.RepositoryID)
+			if err != nil {
+				return fmt.Errorf("parse repository_id: %w", err)
+			}
+			target.RepositoryID = repoID
+			if strings.TrimSpace(target.CommitSHA) != "" {
+				target.Kind = models.SlackPreviewTargetCommit
+			} else if strings.TrimSpace(target.Branch) == "" {
+				target.Kind = models.SlackPreviewTargetRepository
+			}
+		}
+		preview, err := services.SlackPreviewControl.CreatePreviewForSlack(ctx, orgID, target, models.SlackActor{
+			UserID:      auth.ActorUserID,
+			SlackTeamID: input.TeamID,
+			SlackUserID: input.UserID,
+		})
+		if err != nil {
+			return fmt.Errorf("create Slack preview: %w", err)
+		}
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Preview requested: "+slackPreviewURL(services, preview.ID))
+	}
+	if stores.Credentials == nil {
+		return fmt.Errorf("slack preview prompt dependencies are not configured")
 	}
 	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
 	if err != nil {
@@ -3292,7 +4910,7 @@ func handleSlackOpenPreview(ctx context.Context, stores *Stores, services *Servi
 	if err != nil {
 		return fmt.Errorf("parse preview_id: %w", err)
 	}
-	if err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
+	if _, err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
 		return err
 	}
 	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
@@ -3303,7 +4921,19 @@ func handleSlackOpenPreview(ctx context.Context, stores *Stores, services *Servi
 	if !ok {
 		return fmt.Errorf("unexpected slack credential type")
 	}
-	text := "Open preview: " + slackPreviewURL(services, previewID)
+	url := slackPreviewURL(services, previewID)
+	if services != nil && services.SlackPreviewControl != nil {
+		actor := models.SlackActor{SlackTeamID: input.TeamID, SlackUserID: input.UserID}
+		if stores.SlackUserLinks != nil {
+			if link, linkErr := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID); linkErr == nil && link.UserID != nil {
+				actor.UserID = *link.UserID
+			}
+		}
+		if resolved, openErr := services.SlackPreviewControl.OpenPreviewURL(ctx, orgID, previewID, actor); openErr == nil && resolved != "" {
+			url = resolved
+		}
+	}
+	text := "Open preview: " + url
 	if input.TriggerID != "" {
 		return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackPreviewOpenModal(text))
 	}
@@ -3360,7 +4990,7 @@ func handleSlackPreviewAction(ctx context.Context, stores *Stores, services *Ser
 	if err != nil {
 		return fmt.Errorf("parse preview_id: %w", err)
 	}
-	if err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
+	if _, err := authorizeSlackPreviewAction(ctx, stores, input, orgID); err != nil {
 		return err
 	}
 	switch input.ActionID {
@@ -3383,9 +5013,178 @@ func handleSlackPreviewAction(ctx context.Context, stores *Stores, services *Ser
 	}
 }
 
-func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID uuid.UUID) error {
+func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	var value struct {
+		OrgID     string `json:"org_id"`
+		SessionID string `json:"session_id"`
+	}
+	if input.Value != "" {
+		if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
+			return fmt.Errorf("parse Slack specialized action value: %w", err)
+		}
+	}
+	rawOrgID := input.OrgID
+	if rawOrgID == "" {
+		rawOrgID = value.OrgID
+	}
+	orgID, sessionID, err := parseSlackSessionJobIDs(rawOrgID, value.SessionID)
+	if err != nil {
+		return err
+	}
+	capability := slackbotsvc.CapabilityPRRequest
+	if input.ActionID == "slack_claim_team_session" || input.ActionID == "slack_start_work" {
+		capability = slackbotsvc.CapabilitySession
+	}
+	auth, err := authorizeSlackSessionAction(ctx, stores, input, orgID, sessionID, capability, true)
+	if err != nil {
+		return err
+	}
+	switch input.ActionID {
+	case "slack_create_pr":
+		if stores == nil || stores.Jobs == nil {
+			return fmt.Errorf("slack PR creation dependencies are not configured")
+		}
+		payload := map[string]string{
+			"org_id":               orgID.String(),
+			"session_id":           sessionID.String(),
+			"requested_by_user_id": auth.ActorUserID.String(),
+		}
+		dedupeKey := "slack_create_pr:" + sessionID.String()
+		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+			return fmt.Errorf("enqueue Slack PR creation: %w", err)
+		}
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation requested for this session.")
+	case "slack_repair_pr", "slack_start_work":
+		prompt := "Continue this session and repair the pull request or branch publication failure. Report the outcome and any next action."
+		if input.ActionID == "slack_start_work" {
+			prompt = "Continue this session from Slack and start the requested work. Report progress and outcome back to Slack."
+		}
+		return enqueueSlackSessionContinuationPrompt(ctx, stores, orgID, sessionID, prompt)
+	case "slack_merge_pr":
+		if stores == nil || stores.PullRequests == nil || services == nil || services.PR == nil {
+			return fmt.Errorf("slack PR merge dependencies are not configured")
+		}
+		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load pull request for Slack merge: %w", err)
+		}
+		if _, err := services.PR.QueueMergeWhenReady(ctx, orgID, pr.ID, auth.ActorUserID); err != nil {
+			return fmt.Errorf("merge pull request from Slack: %w", err)
+		}
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Merge requested for this pull request.")
+	case "slack_claim_team_session":
+		if stores == nil || stores.SlackSessionLinks == nil {
+			return fmt.Errorf("slack team-session claim dependencies are not configured")
+		}
+		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load Slack session link for claim: %w", err)
+		}
+		if _, err := stores.SlackSessionLinks.ClaimTeamSession(ctx, orgID, link.ID, auth.ActorUserID, input.UserID); err != nil {
+			return fmt.Errorf("claim Slack team session: %w", err)
+		}
+		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Team session claimed. Future personal actions will use your linked 143 account.")
+	default:
+		return nil
+	}
+}
+
+func enqueueSlackSessionContinuationPrompt(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, prompt string) error {
+	return enqueueSlackSessionContinuationPromptWithReferences(ctx, stores, orgID, sessionID, prompt, nil)
+}
+
+func enqueueSlackSessionContinuationPromptWithReferences(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, prompt string, refs []slackContextReference) error {
+	if stores == nil || stores.Sessions == nil || stores.SessionMessages == nil || stores.Jobs == nil {
+		return fmt.Errorf("slack session continuation dependencies are not configured")
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		return fmt.Errorf("get session for Slack continuation: %w", err)
+	}
+	msg := &models.SessionMessage{
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   session.PrimaryThreadID,
+		UserID:     session.TriggeredByUserID,
+		TurnNumber: session.CurrentTurn,
+		Role:       models.MessageRoleUser,
+		Content:    prompt,
+		References: slackContextReferencesForSessionInput(refs),
+	}
+	if err := stores.SessionMessages.Create(ctx, msg); err != nil {
+		return fmt.Errorf("create Slack continuation message: %w", err)
+	}
+	scopeID := session.ID
+	if session.PrimaryThreadID != nil {
+		scopeID = *session.PrimaryThreadID
+	}
+	dedupeKey := db.ContinueSessionDedupeKey(scopeID)
+	payload := map[string]string{"org_id": orgID.String(), "session_id": session.ID.String()}
+	if session.PrimaryThreadID != nil {
+		payload["thread_id"] = session.PrimaryThreadID.String()
+	}
+	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
+	return err
+}
+
+func postSlackEphemeralIfPossible(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, orgID uuid.UUID, input models.SlackInteractionJobPayload, text string) error {
+	if stores == nil || stores.Credentials == nil || slackClient == nil || input.ChannelID == "" || input.UserID == "" {
+		return nil
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
+}
+
+type slackActionAuthorizationDecision struct {
+	ActorUserID uuid.UUID
+}
+
+func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID, sessionID uuid.UUID, capability slackbotsvc.Capability, requireMapped bool) (slackActionAuthorizationDecision, error) {
 	if stores == nil {
-		return fmt.Errorf("slack preview action dependencies are not configured")
+		return slackActionAuthorizationDecision{}, fmt.Errorf("slack action dependencies are not configured")
+	}
+	isOriginatingTeamSession := false
+	if stores.SlackSessionLinks != nil {
+		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return slackActionAuthorizationDecision{}, fmt.Errorf("load slack session link for action authorization: %w", err)
+		} else if err == nil {
+			isOriginatingTeamSession = link.TeamSession &&
+				link.SlackTeamID == input.TeamID &&
+				link.SlackChannelID == input.ChannelID
+		}
+	}
+	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
+	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
+		OrgID:                    orgID,
+		TeamID:                   input.TeamID,
+		ChannelID:                input.ChannelID,
+		SlackUserID:              input.UserID,
+		Capability:               capability,
+		AllowedRoles:             []models.Role{models.RoleAdmin, models.RoleMember, models.RoleBuilder},
+		RequireMapped:            requireMapped,
+		AllowUnmappedTeamSession: true,
+		IsOriginatingTeamSession: isOriginatingTeamSession,
+	})
+	if err != nil {
+		return slackActionAuthorizationDecision{}, err
+	}
+	if decision.MappedUserID == nil {
+		return slackActionAuthorizationDecision{}, fmt.Errorf("slack action requires a linked 143 user")
+	}
+	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID}, nil
+}
+
+func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input models.SlackInteractionJobPayload, orgID uuid.UUID) (slackActionAuthorizationDecision, error) {
+	if stores == nil {
+		return slackActionAuthorizationDecision{}, fmt.Errorf("slack preview action dependencies are not configured")
 	}
 	var value struct {
 		SessionID string `json:"session_id"`
@@ -3397,11 +5196,11 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 	if value.SessionID != "" && stores.SlackSessionLinks != nil {
 		sessionID, err := uuid.Parse(value.SessionID)
 		if err != nil {
-			return fmt.Errorf("parse slack preview action session_id: %w", err)
+			return slackActionAuthorizationDecision{}, fmt.Errorf("parse slack preview action session_id: %w", err)
 		}
 		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("load slack session link for preview action: %w", err)
+			return slackActionAuthorizationDecision{}, fmt.Errorf("load slack session link for preview action: %w", err)
 		} else if err == nil {
 			isOriginatingTeamSession = link.TeamSession &&
 				link.SlackTeamID == input.TeamID &&
@@ -3409,7 +5208,7 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
-	_, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
+	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
 		ChannelID:                input.ChannelID,
@@ -3420,7 +5219,13 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 		AllowUnmappedTeamSession: true,
 		IsOriginatingTeamSession: isOriginatingTeamSession,
 	})
-	return err
+	if err != nil {
+		return slackActionAuthorizationDecision{}, err
+	}
+	if decision.MappedUserID == nil {
+		return slackActionAuthorizationDecision{}, nil
+	}
+	return slackActionAuthorizationDecision{ActorUserID: *decision.MappedUserID}, nil
 }
 
 func stringSliceContains(values []string, target string) bool {
@@ -3506,6 +5311,107 @@ func slackHumanInputFreeformModal(privateMetadata string) ingestion.SlackHomeVie
 	}
 }
 
+func handleSlackHumanInputMultiPrompt(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil || stores.HumanInputRequests == nil {
+		return fmt.Errorf("slack human-input multi-choice dependencies are not configured")
+	}
+	var value struct {
+		SessionID string `json:"session_id"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
+		return fmt.Errorf("parse Slack human-input multi-choice value: %w", err)
+	}
+	orgID, sessionID, err := parseSlackSessionJobIDs(input.OrgID, value.SessionID)
+	if err != nil {
+		return err
+	}
+	requestID, err := uuid.Parse(value.RequestID)
+	if err != nil {
+		return fmt.Errorf("parse human input request id: %w", err)
+	}
+	req, err := stores.HumanInputRequests.GetByID(ctx, orgID, sessionID, requestID)
+	if err != nil {
+		return fmt.Errorf("get human input request for Slack multi-choice: %w", err)
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	if input.TriggerID == "" {
+		return nil
+	}
+	return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackHumanInputMultiModal(input.Value, req))
+}
+
+func slackHumanInputMultiModal(privateMetadata string, req models.HumanInputRequest) ingestion.SlackHomeView {
+	options := make([]map[string]any, 0, min(len(req.Choices), 100))
+	for i, choice := range req.Choices {
+		if i >= 100 {
+			break
+		}
+		label := strings.TrimSpace(choice.Label)
+		if label == "" {
+			label = choice.ID
+		}
+		options = append(options, map[string]any{
+			"text":  map[string]string{"type": "plain_text", "text": truncateSlackButtonText(label)},
+			"value": choice.ID,
+		})
+	}
+	return ingestion.SlackHomeView{
+		Type:            "modal",
+		CallbackID:      "slack_human_input_multi_modal",
+		PrivateMetadata: privateMetadata,
+		Title:           &ingestion.SlackTextObject{Type: "plain_text", Text: "Choose options"},
+		Submit:          &ingestion.SlackTextObject{Type: "plain_text", Text: "Send"},
+		Close:           &ingestion.SlackTextObject{Type: "plain_text", Text: "Cancel"},
+		Blocks: []ingestion.SlackBlock{{
+			Type:    "input",
+			BlockID: "choices",
+			Label:   &ingestion.SlackTextObject{Type: "plain_text", Text: "Choices"},
+			Element: map[string]any{
+				"type":      "multi_static_select",
+				"action_id": "selected",
+				"options":   options,
+			},
+		}},
+	}
+}
+
+func handleSlackHumanInputMultiModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	var payload struct {
+		View struct {
+			PrivateMetadata string `json:"private_metadata"`
+		} `json:"view"`
+	}
+	if err := json.Unmarshal(input.RawPayload, &payload); err != nil {
+		return fmt.Errorf("parse Slack human-input multi-choice modal payload: %w", err)
+	}
+	var value struct {
+		SessionID string `json:"session_id"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &value); err != nil {
+		return fmt.Errorf("parse Slack human-input multi-choice modal metadata: %w", err)
+	}
+	selected := slackModalSelectedValues(input.RawPayload, "choices", "selected")
+	encoded, err := json.Marshal(map[string]any{
+		"session_id":          value.SessionID,
+		"request_id":          value.RequestID,
+		"selected_choice_ids": selected,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal Slack human-input multi-choice answer: %w", err)
+	}
+	input.Value = string(encoded)
+	return handleSlackHumanInputAnswer(ctx, stores, services, slackClient, input)
+}
+
 func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
 	var payload struct {
 		View struct {
@@ -3536,9 +5442,10 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 		return fmt.Errorf("slack human-input dependencies are not configured")
 	}
 	var value struct {
-		SessionID string `json:"session_id"`
-		RequestID string `json:"request_id"`
-		Answer    string `json:"answer"`
+		SessionID         string   `json:"session_id"`
+		RequestID         string   `json:"request_id"`
+		Answer            string   `json:"answer"`
+		SelectedChoiceIDs []string `json:"selected_choice_ids"`
 	}
 	if err := json.Unmarshal([]byte(input.Value), &value); err != nil {
 		return fmt.Errorf("parse slack human-input action value: %w", err)
@@ -3551,22 +5458,36 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	if err != nil {
 		return fmt.Errorf("parse human input request id: %w", err)
 	}
-	link, err := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID)
+	decision, err := authorizeSlackHumanInputAnswer(ctx, workerSlackHumanInputAuthStores{
+		sessionLinks: stores.SlackSessionLinks,
+		userLinks:    stores.SlackUserLinks,
+		memberships:  stores.Memberships,
+		requests:     stores.HumanInputRequests,
+	}, orgID, sessionID, requestID, input)
 	if err != nil {
-		return fmt.Errorf("resolve slack user link for human input: %w", err)
-	}
-	if link.UserID == nil {
-		return fmt.Errorf("slack user is not linked to a 143 user")
+		return err
 	}
 	answer := strings.TrimSpace(value.Answer)
-	req, err := stores.HumanInputRequests.AnswerPending(ctx, orgID, sessionID, requestID, &answer, nil, *link.UserID)
+	pendingReq, err := stores.HumanInputRequests.GetByID(ctx, orgID, sessionID, requestID)
+	if err != nil {
+		return fmt.Errorf("get human input request before Slack answer: %w", err)
+	}
+	answerInput := slackHumanInputAnswerInput(pendingReq, answer, value.SelectedChoiceIDs)
+	if err := pendingReq.ValidateAnswer(answerInput); err != nil {
+		return fmt.Errorf("validate Slack human-input answer: %w", err)
+	}
+	answerPayload, err := db.MarshalHumanInputAnswerPayload(answerInput)
+	if err != nil {
+		return fmt.Errorf("marshal Slack human-input answer: %w", err)
+	}
+	req, err := stores.HumanInputRequests.AnswerPending(ctx, orgID, sessionID, requestID, answerInput.AnswerText, answerPayload, decision.AnsweredByUserID)
 	if err != nil {
 		return fmt.Errorf("answer human input request from Slack: %w", err)
 	}
 	if stores.Credentials != nil && input.ChannelID != "" && input.MessageTS != "" {
 		if cred, credErr := stores.Credentials.Get(ctx, orgID, models.ProviderSlack); credErr == nil {
 			if slackCfg, ok := cred.Config.(models.SlackConfig); ok {
-				updateText := fmt.Sprintf("Answered by <@%s>: %s", input.UserID, answer)
+				updateText := slackHumanInputAnsweredText(input.UserID, pendingReq, answer)
 				updateStarted := time.Now()
 				if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, input.ChannelID, input.MessageTS, updateText); err != nil {
 					recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
@@ -3595,6 +5516,148 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 	return err
 }
 
+func slackHumanInputAnswerInput(req models.HumanInputRequest, answer string, selectedChoiceIDs []string) models.HumanInputAnswerInput {
+	answer = strings.TrimSpace(answer)
+	switch req.Kind {
+	case models.HumanInputRequestKindMultiChoice:
+		choices := make([]string, 0, len(selectedChoiceIDs))
+		for _, id := range selectedChoiceIDs {
+			if trimmed := strings.TrimSpace(id); trimmed != "" {
+				choices = append(choices, trimmed)
+			}
+		}
+		if len(choices) == 0 && answer != "" {
+			choices = append(choices, answer)
+		}
+		return models.HumanInputAnswerInput{SelectedChoiceIDs: choices}
+	case models.HumanInputRequestKindSingleChoice, models.HumanInputRequestKindToolApproval, models.HumanInputRequestKindActionChoice:
+		if answer != "" {
+			return models.HumanInputAnswerInput{SelectedChoiceIDs: []string{answer}}
+		}
+		return models.HumanInputAnswerInput{}
+	default:
+		return models.HumanInputAnswerInput{AnswerText: &answer}
+	}
+}
+
+func slackHumanInputAnsweredText(slackUserID string, req models.HumanInputRequest, answer string) string {
+	answerLabel := answer
+	for _, choice := range req.Choices {
+		if choice.ID == answer {
+			answerLabel = strings.TrimSpace(choice.Label)
+			if answerLabel == "" {
+				answerLabel = choice.ID
+			}
+			break
+		}
+	}
+	prefix := "Answered"
+	if req.Kind == models.HumanInputRequestKindToolApproval || req.Kind == models.HumanInputRequestKindActionChoice {
+		switch strings.ToLower(answer) {
+		case "approve", "approved", "yes", "allow", "continue":
+			prefix = "Approved"
+		case "deny", "denied", "no", "reject", "stop", "cancel":
+			prefix = "Denied"
+		}
+	}
+	if slackUserID != "" {
+		return fmt.Sprintf("%s by <@%s> at %s: %s", prefix, slackUserID, slackDateToken(time.Now()), answerLabel)
+	}
+	return fmt.Sprintf("%s at %s: %s", prefix, slackDateToken(time.Now()), answerLabel)
+}
+
+func slackDateToken(t time.Time) string {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	unix := t.UTC().Unix()
+	return fmt.Sprintf("<!date^%d^{date_short_pretty} {time}|%s>", unix, t.UTC().Format(time.RFC3339))
+}
+
+type workerSlackHumanInputAuthStores struct {
+	sessionLinks interface {
+		GetBySession(ctx context.Context, orgID, sessionID uuid.UUID) (models.SlackSessionLink, error)
+	}
+	userLinks interface {
+		GetBySlackUser(ctx context.Context, orgID uuid.UUID, teamID, slackUserID string) (models.SlackUserLink, error)
+	}
+	memberships interface {
+		Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+	}
+	requests interface {
+		GetByID(ctx context.Context, orgID, sessionID, requestID uuid.UUID) (models.HumanInputRequest, error)
+	}
+}
+
+type slackHumanInputAuthorizationDecision struct {
+	AnsweredByUserID uuid.UUID
+	TeamSessionClaim bool
+}
+
+func authorizeSlackHumanInputAnswer(ctx context.Context, stores workerSlackHumanInputAuthStores, orgID, sessionID, requestID uuid.UUID, input models.SlackInteractionJobPayload) (slackHumanInputAuthorizationDecision, error) {
+	if stores.userLinks == nil {
+		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack human-input authorization requires user links")
+	}
+	link, err := stores.userLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID)
+	if err != nil {
+		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("resolve slack user link for human input: %w", err)
+	}
+	if link.UserID == nil {
+		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack user is not linked to a 143 user")
+	}
+	if stores.memberships == nil {
+		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack human-input authorization requires memberships")
+	}
+	membership, err := stores.memberships.Get(ctx, *link.UserID, orgID)
+	if err != nil {
+		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("load slack human-input membership: %w", err)
+	}
+	if !roleCanAnswerSlackHumanInput(membership.Role) {
+		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack human-input answer requires member access")
+	}
+	if stores.requests != nil {
+		req, err := stores.requests.GetByID(ctx, orgID, sessionID, requestID)
+		if err != nil {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("load human-input request for authorization: %w", err)
+		}
+		if req.AssignedUserID != nil && *req.AssignedUserID != *link.UserID {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("human-input request is assigned to another user")
+		}
+	}
+	decision := slackHumanInputAuthorizationDecision{AnsweredByUserID: *link.UserID}
+	if stores.sessionLinks != nil {
+		sessionLink, err := stores.sessionLinks.GetBySession(ctx, orgID, sessionID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("load slack session link for human input: %w", err)
+		}
+		if err == nil && sessionLink.TeamSession {
+			if sessionLink.SlackTeamID != input.TeamID || sessionLink.SlackChannelID != input.ChannelID {
+				return slackHumanInputAuthorizationDecision{}, fmt.Errorf("team-session human input must be answered from the originating Slack channel")
+			}
+			decision.TeamSessionClaim = true
+		}
+	}
+	return decision, nil
+}
+
+func roleCanAnswerSlackHumanInput(role models.Role) bool {
+	switch role {
+	case models.RoleAdmin, models.RoleMember, models.RoleBuilder:
+		return true
+	default:
+		return false
+	}
+}
+
+func roleCanStartSlackSession(role models.Role) bool {
+	switch role {
+	case models.RoleAdmin, models.RoleMember, models.RoleBuilder:
+		return true
+	default:
+		return false
+	}
+}
+
 func parseSlackSessionJobIDs(orgIDRaw, sessionIDRaw string) (uuid.UUID, uuid.UUID, error) {
 	orgID, err := uuid.Parse(orgIDRaw)
 	if err != nil {
@@ -3607,61 +5670,90 @@ func parseSlackSessionJobIDs(orgIDRaw, sessionIDRaw string) (uuid.UUID, uuid.UUI
 	return orgID, sessionID, nil
 }
 
-func renderSlackFinal(services *Services, content string, sessionID uuid.UUID) string {
-	trimmed := strings.TrimSpace(content)
-	const maxSlackFinal = 2400
-	if len(trimmed) > maxSlackFinal {
-		trimmed = strings.TrimSpace(trimmed[:maxSlackFinal]) + "\n\n[Truncated in Slack]"
-	}
-	if trimmed == "" {
-		trimmed = "143 session completed."
-	}
-	return trimmed + "\n\nSession: " + slackSessionURL(services, sessionID)
-}
-
-func renderSlackFinalBlocks(services *Services, content string, orgID, sessionID uuid.UUID, details slackSessionOutcomeDetails) (string, []ingestion.SlackBlock) {
-	text := appendSlackSessionOutcomeDetails(renderSlackFinal(services, content, sessionID), details)
-	blocks := []ingestion.SlackBlock{{
-		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
-	}}
-	elements := []map[string]any{{
-		"type": "button",
-		"text": map[string]string{"type": "plain_text", "text": "Open session"},
-		"url":  slackSessionURL(services, sessionID),
-	}}
+func renderSlackFinalBlocks(services *Services, content string, orgID, sessionID uuid.UUID, link models.SlackSessionLink, details slackSessionOutcomeDetails) (string, []ingestion.SlackBlock) {
+	actions := []slackbotsvc.SlackAction{}
 	if details.Preview != nil {
 		value := slackActionValue(map[string]string{
 			"org_id":     orgID.String(),
 			"session_id": sessionID.String(),
 			"preview_id": details.Preview.ID.String(),
 		})
-		elements = append(elements, map[string]any{
-			"type":      "button",
-			"action_id": "slack_open_preview",
-			"text":      map[string]string{"type": "plain_text", "text": "Open preview"},
-			"value":     value,
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Open preview",
+			ActionID: "slack_open_preview",
+			Value:    value,
 		})
 	} else {
-		elements = append(elements, map[string]any{
-			"type":      "button",
-			"action_id": "slack_create_preview",
-			"text":      map[string]string{"type": "plain_text", "text": "Create preview"},
-			"value": slackActionValue(map[string]string{
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Create preview",
+			ActionID: "slack_create_preview",
+			Value: slackActionValue(map[string]string{
 				"org_id":     orgID.String(),
 				"session_id": sessionID.String(),
 			}),
 		})
 	}
 	if details.PullRequest != nil && strings.TrimSpace(details.PullRequest.GitHubPRURL) != "" {
-		elements = append(elements, map[string]any{
-			"type": "button",
-			"text": map[string]string{"type": "plain_text", "text": "Open PR"},
-			"url":  strings.TrimSpace(details.PullRequest.GitHubPRURL),
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text: "Review PR",
+			URL:  strings.TrimSpace(details.PullRequest.GitHubPRURL),
+		})
+		if details.PullRequest.Status == models.PullRequestStatusOpen {
+			actions = append(actions, slackbotsvc.SlackAction{
+				Text:     "Merge PR",
+				ActionID: "slack_merge_pr",
+				Value: slackActionValue(map[string]string{
+					"org_id":     orgID.String(),
+					"session_id": sessionID.String(),
+				}),
+				Confirm: &slackbotsvc.SlackActionConfirm{
+					Title:       "Merge pull request?",
+					Text:        "143 will queue merge-when-ready for this pull request.",
+					ConfirmText: "Queue merge",
+					DenyText:    "Cancel",
+				},
+			})
+		}
+	} else if details.Session.Status == models.SessionStatusCompleted && details.Session.SnapshotKey != nil && strings.TrimSpace(*details.Session.SnapshotKey) != "" {
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Create PR",
+			ActionID: "slack_create_pr",
+			Value: slackActionValue(map[string]string{
+				"org_id":     orgID.String(),
+				"session_id": sessionID.String(),
+			}),
+			Confirm: &slackbotsvc.SlackActionConfirm{
+				Title:       "Create pull request?",
+				Text:        "143 will publish this session's changes and open a pull request.",
+				ConfirmText: "Create PR",
+				DenyText:    "Cancel",
+			},
 		})
 	}
-	blocks = append(blocks, ingestion.SlackBlock{Type: "actions", Elements: elements})
-	return text, blocks
+	if details.Session.PRCreationState == models.PRCreationStateFailed || details.Session.PRPushState == models.PRPushStateFailed {
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Repair PR",
+			ActionID: "slack_repair_pr",
+			Value: slackActionValue(map[string]string{
+				"org_id":     orgID.String(),
+				"session_id": sessionID.String(),
+			}),
+		})
+	}
+	rendered := slackbotsvc.RenderFinalResponse(content, slackbotsvc.SlackSessionRenderInput{
+		Session:    models.Session{ID: sessionID},
+		Link:       link,
+		SessionURL: slackSessionURL(services, sessionID),
+		Outcome: slackbotsvc.SlackSessionOutcome{
+			BranchURL:     strings.TrimSpace(stringValue(details.Session.BranchURL)),
+			PullRequest:   details.PullRequest,
+			PreviewStatus: slackPreviewStatus(details.Preview),
+			PreviewURL:    strings.TrimSpace(details.PreviewURL),
+			DiffStats:     details.Session.DiffStats,
+		},
+		Actions: actions,
+	})
+	return rendered.Text, rendered.Blocks
 }
 
 type slackSessionOutcomeDetails struct {
@@ -3731,7 +5823,27 @@ func slackTeamSessionLine(link models.SlackSessionLink) string {
 	if !link.TeamSession {
 		return ""
 	}
-	return "_This is a team session started from Slack without a linked 143 user._"
+	return slackbotsvc.TeamSessionLine()
+}
+
+func slackPreviewStatus(preview *models.PreviewInstance) models.PreviewStatus {
+	if preview == nil {
+		return ""
+	}
+	return preview.Status
+}
+
+func slackLifecycleStateForProgress(update slackbotsvc.SlackProgressUpdate) slackbotsvc.SessionLifecycleState {
+	switch update.Kind {
+	case slackbotsvc.SlackProgressCompleted:
+		return slackbotsvc.SessionLifecycleComplete
+	case slackbotsvc.SlackProgressFailed:
+		return slackbotsvc.SessionLifecycleFailed
+	case slackbotsvc.SlackProgressWaitingForInput:
+		return slackbotsvc.SessionLifecycleWaiting
+	default:
+		return slackbotsvc.SessionLifecycleRunning
+	}
 }
 
 func slackPullRequestOutcomeLine(pr models.PullRequest) string {
@@ -3793,8 +5905,182 @@ type slackContextFile struct {
 	Permalink string
 }
 
+const slackUserDisplayCacheTTL = 7 * 24 * time.Hour
+const slackUserPromptLabelMaxRunes = 80
+
+var slackUserMentionPattern = regexp.MustCompile(`<@([UW][A-Z0-9]+)>`)
+
+type slackUserInfoFetcher interface {
+	FetchUserInfo(ctx context.Context, accessToken, userID string) (ingestion.SlackUser, error)
+}
+
+type slackUserDisplayResolver interface {
+	ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool)
+}
+
+type slackUserDisplay struct {
+	SlackID string
+	Handle  string
+}
+
+type slackCachedUserDisplay struct {
+	SlackID     string `json:"slack_id"`
+	Name        string `json:"name,omitempty"`
+	RealName    string `json:"real_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+type slackCachedUserDisplayResolver struct {
+	fetcher     slackUserInfoFetcher
+	redis       *cache.Client
+	accessToken string
+	teamID      string
+	logger      zerolog.Logger
+	local       map[string]slackUserDisplay
+}
+
+func newSlackCachedUserDisplayResolver(fetcher slackUserInfoFetcher, redisClient *cache.Client, accessToken, teamID string, logger zerolog.Logger) *slackCachedUserDisplayResolver {
+	return &slackCachedUserDisplayResolver{
+		fetcher:     fetcher,
+		redis:       redisClient,
+		accessToken: accessToken,
+		teamID:      strings.TrimSpace(teamID),
+		logger:      logger,
+		local:       make(map[string]slackUserDisplay),
+	}
+}
+
+func slackRedisClient(services *Services) *cache.Client {
+	if services == nil {
+		return nil
+	}
+	return services.Redis
+}
+
+func slackUserDisplayCacheKey(teamID, userID string) string {
+	return "143:slack:user:" + strings.TrimSpace(teamID) + ":" + strings.TrimSpace(userID)
+}
+
+func (r *slackCachedUserDisplayResolver) ResolveSlackUserDisplay(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	userID = strings.TrimSpace(userID)
+	if r == nil || userID == "" {
+		return slackUserDisplay{}, false
+	}
+	if display, ok := r.local[userID]; ok {
+		return display, true
+	}
+	if display, ok := r.getShared(ctx, userID); ok {
+		r.local[userID] = display
+		return display, true
+	}
+	if r.fetcher == nil || strings.TrimSpace(r.accessToken) == "" {
+		return slackUserDisplay{}, false
+	}
+	user, err := r.fetcher.FetchUserInfo(ctx, r.accessToken, userID)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to resolve Slack user display name")
+		return slackUserDisplay{}, false
+	}
+	cached := slackCachedUserDisplay{
+		SlackID:     user.ID,
+		Name:        user.Name,
+		RealName:    firstNonEmpty(user.Profile.RealName, user.RealName),
+		DisplayName: user.Profile.DisplayName,
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	r.local[userID] = display
+	r.putShared(ctx, userID, cached)
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) getShared(ctx context.Context, userID string) (slackUserDisplay, bool) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return slackUserDisplay{}, false
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := r.redis.GetBytes(ctx, key)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return slackUserDisplay{}, false
+		}
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to read Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	var cached slackCachedUserDisplay
+	if err := json.Unmarshal(data, &cached); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to decode Slack user display from Redis")
+		return slackUserDisplay{}, false
+	}
+	display := cached.toDisplay(userID)
+	if strings.TrimSpace(display.Handle) == "" {
+		return slackUserDisplay{}, false
+	}
+	return display, true
+}
+
+func (r *slackCachedUserDisplayResolver) putShared(ctx context.Context, userID string, cached slackCachedUserDisplay) {
+	if r == nil || r.redis == nil || !r.redis.Available() || r.teamID == "" {
+		return
+	}
+	key := slackUserDisplayCacheKey(r.teamID, userID)
+	data, err := json.Marshal(cached)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("slack_user_id", userID).Msg("failed to marshal Slack user display cache entry")
+		return
+	}
+	if err := r.redis.SetBytes(ctx, key, data, slackUserDisplayCacheTTL); err != nil {
+		r.logger.Warn().Err(err).Str("key", key).Msg("failed to write Slack user display to Redis")
+	}
+}
+
+func (c slackCachedUserDisplay) toDisplay(fallbackID string) slackUserDisplay {
+	return slackUserDisplay{
+		SlackID: firstNonEmpty(c.SlackID, fallbackID),
+		Handle:  sanitizeSlackUserHandle(c.Name),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sanitizeSlackUserHandle(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		}
+		if b.Len() >= slackUserPromptLabelMaxRunes {
+			break
+		}
+	}
+	return b.String()
+}
+
 func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile) string {
+	return renderSlackPromptWithUserResolver(context.Background(), text, permalink, threadMessages, references, files, nil)
+}
+
+func renderSlackPromptWithUserResolver(ctx context.Context, text, permalink string, threadMessages []ingestion.SlackMessage, references []slackContextReference, files []slackContextFile, userResolver slackUserDisplayResolver) string {
 	cleaned := strings.TrimSpace(text)
+	cleaned = humanizeSlackMentions(ctx, cleaned, userResolver)
 	var b strings.Builder
 	b.WriteString(cleaned)
 	if permalink != "" {
@@ -3845,20 +6131,51 @@ func renderSlackPrompt(text, permalink string, threadMessages []ingestion.SlackM
 			if line == "" {
 				continue
 			}
+			line = humanizeSlackMentions(ctx, line, userResolver)
 			if len(line) > 500 {
 				line = line[:500] + "..."
 			}
 			b.WriteString("- ")
 			if msg.User != "" {
-				b.WriteString("<@")
-				b.WriteString(msg.User)
-				b.WriteString(">: ")
+				b.WriteString(slackUserAuthorLabel(ctx, msg.User, userResolver))
+				b.WriteString(": ")
 			}
 			b.WriteString(line)
 			b.WriteByte('\n')
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func humanizeSlackMentions(ctx context.Context, text string, userResolver slackUserDisplayResolver) string {
+	if userResolver == nil || text == "" {
+		return text
+	}
+	return slackUserMentionPattern.ReplaceAllStringFunc(text, func(raw string) string {
+		// raw is already the full pattern match "<@UXXX>"; extract the captured ID directly.
+		userID := raw[2 : len(raw)-1]
+		display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+		if !ok || display.Handle == "" {
+			return raw
+		}
+		return "@" + display.Handle
+	})
+}
+
+func slackUserAuthorLabel(ctx context.Context, userID string, userResolver slackUserDisplayResolver) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "Slack user"
+	}
+	if userResolver == nil {
+		return "<@" + userID + ">"
+	}
+	display, ok := userResolver.ResolveSlackUserDisplay(ctx, userID)
+	if !ok || display.Handle == "" {
+		return "<@" + userID + ">"
+	}
+	slackID := firstNonEmpty(display.SlackID, userID)
+	return "@" + display.Handle + " (Slack " + slackID + ")"
 }
 
 func fetchSlackContextFiles(ctx context.Context, client *ingestion.SlackAPIClient, accessToken string, fileIDs []string, logger zerolog.Logger) []slackContextFile {
@@ -3899,8 +6216,9 @@ const (
 )
 
 type slackContextReference struct {
-	Kind  slackReferenceKind
-	Value string
+	Kind   slackReferenceKind
+	Value  string
+	Source string
 }
 
 var (
@@ -3914,38 +6232,38 @@ var (
 func detectSlackContextReferences(text string, threadMessages []ingestion.SlackMessage) []slackContextReference {
 	seen := map[string]bool{}
 	refs := []slackContextReference{}
-	addRef := func(kind slackReferenceKind, value string) {
+	addRef := func(kind slackReferenceKind, value, source string) {
 		value = strings.TrimRight(strings.TrimSpace(value), ".,)")
 		if value == "" || seen[string(kind)+":"+value] {
 			return
 		}
 		seen[string(kind)+":"+value] = true
-		refs = append(refs, slackContextReference{Kind: kind, Value: value})
+		refs = append(refs, slackContextReference{Kind: kind, Value: value, Source: source})
 	}
-	addRefs := func(input string) {
+	addRefs := func(input, source string) {
 		for _, rawURL := range slackURLReferencePattern.FindAllString(input, -1) {
 			urlRef := strings.TrimRight(rawURL, ".,)")
 			kind := classifySlackURLReference(urlRef)
-			addRef(kind, urlRef)
+			addRef(kind, urlRef, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, ref := range slackLinearIssuePattern.FindAllString(input, -1) {
-			addRef(slackReferenceKindIssue, ref)
+			addRef(slackReferenceKindIssue, ref, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, ref := range slackRepoIssuePattern.FindAllString(input, -1) {
-			addRef(slackReferenceKindIssue, ref)
+			addRef(slackReferenceKindIssue, ref, source)
 			if len(refs) >= 20 {
 				return
 			}
 		}
 		for _, match := range slackBranchPattern.FindAllStringSubmatch(input, -1) {
 			if len(match) > 1 {
-				addRef(slackReferenceKindBranch, match[1])
+				addRef(slackReferenceKindBranch, match[1], source)
 			}
 			if len(refs) >= 20 {
 				return
@@ -3953,21 +6271,134 @@ func detectSlackContextReferences(text string, threadMessages []ingestion.SlackM
 		}
 		for _, match := range slackFilePathReferencePattern.FindAllStringSubmatch(input, -1) {
 			if len(match) > 1 {
-				addRef(slackReferenceKindFilePath, match[1])
+				addRef(slackReferenceKindFilePath, match[1], source)
 			}
 			if len(refs) >= 20 {
 				return
 			}
 		}
 	}
-	addRefs(text)
+	addRefs(text, "message")
 	for _, msg := range threadMessages {
 		if len(refs) >= 20 {
 			break
 		}
-		addRefs(msg.Text)
+		addRefs(msg.Text, "thread")
 	}
 	return refs
+}
+
+func slackContextReferencesForResolver(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, refs []slackContextReference) []slackbotsvc.SlackContextReference {
+	converted := make([]slackbotsvc.SlackContextReference, 0, len(refs))
+	for _, ref := range refs {
+		resolved := slackbotsvc.SlackContextReference{
+			Kind:   slackbotsvc.SlackContextReferenceKind(ref.Kind),
+			Value:  ref.Value,
+			Source: ref.Source,
+		}
+		if ref.Kind == slackReferenceKindRepository {
+			resolved.ResolvedID = resolveSlackRepositoryReferenceID(ctx, stores, logger, orgID, ref.Value)
+		}
+		converted = append(converted, resolved)
+	}
+	return converted
+}
+
+func resolveSlackRepositoryReferenceID(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, value string) *uuid.UUID {
+	if stores == nil || stores.Repositories == nil || orgID == uuid.Nil {
+		return nil
+	}
+	fullName := slackRepositoryFullNameFromReference(value)
+	if fullName == "" {
+		return nil
+	}
+	repo, err := stores.Repositories.GetByFullName(ctx, orgID, fullName)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("repository", fullName).Msg("failed to resolve Slack repository reference")
+		}
+		return nil
+	}
+	return &repo.ID
+}
+
+func slackRepositoryFullNameFromReference(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err == nil && strings.EqualFold(parsed.Hostname(), "github.com") {
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0] + "/" + parts[1]
+		}
+		return ""
+	}
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[0], " ") && !strings.Contains(parts[1], " ") {
+		return parts[0] + "/" + parts[1]
+	}
+	return ""
+}
+
+func slackContextReferencesForSessionInput(refs []slackContextReference) models.SessionInputReferences {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make(models.SessionInputReferences, 0, len(refs))
+	for _, ref := range refs {
+		value := strings.TrimSpace(ref.Value)
+		if value == "" {
+			continue
+		}
+		switch ref.Kind {
+		case slackReferenceKindFilePath:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindFile,
+				Token:   "@" + value,
+				Path:    value,
+				Display: value,
+			})
+		case slackReferenceKindSentry:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "sentry",
+				Display: value,
+			})
+		case slackReferenceKindPullRequest, slackReferenceKindRepository:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "github",
+				Display: value,
+			})
+		case slackReferenceKindIssue:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "linear",
+				Display: value,
+			})
+		case slackReferenceKindPreview:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "preview",
+				Display: value,
+			})
+		case slackReferenceKindBranch:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "branch",
+				Display: value,
+			})
+		default:
+			out = append(out, models.SessionInputReference{
+				Kind:    models.SessionInputReferenceKindApp,
+				ID:      "url",
+				Display: value,
+			})
+		}
+	}
+	return out
 }
 
 func classifySlackURLReference(value string) slackReferenceKind {
@@ -4041,14 +6472,110 @@ func slackSessionTitle(text string) string {
 }
 
 func slackSessionAckText(services *Services, sessionID uuid.UUID, verb string) string {
-	return fmt.Sprintf("%s a 143 session for this Slack thread...\n\nSession: %s", verb, slackSessionURL(services, sessionID))
+	state := slackbotsvc.SessionLifecycleStarting
+	if strings.EqualFold(strings.TrimSpace(verb), "continuing") {
+		state = slackbotsvc.SessionLifecycleRunning
+	}
+	return slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+		Session:    models.Session{ID: sessionID},
+		State:      state,
+		Title:      strings.TrimSpace(verb) + " a 143 session",
+		SessionURL: slackSessionURL(services, sessionID),
+	}).Text
 }
 
-func slackSessionAckBlocks(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string) []ingestion.SlackBlock {
-	blocks := []ingestion.SlackBlock{{
-		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode) []ingestion.SlackBlock {
+	var sessionID uuid.UUID
+	if session != nil {
+		sessionID = session.ID
+	}
+	loadedContext := slackSessionAckContext(ctx, stores, logger, orgID, teamID, channelID, session)
+	if contextSummary.RepositoryName == "" {
+		contextSummary.RepositoryName = loadedContext.RepositoryName
+	}
+	if contextSummary.Branch == "" {
+		contextSummary.Branch = loadedContext.Branch
+	}
+	if len(contextSummary.Missing) == 0 {
+		contextSummary.Missing = loadedContext.Missing
+	}
+	if routingMode == "" || routingMode == slackbotsvc.SlackRoutingModeAuto {
+		routingMode = slackSessionAckRoutingMode(ctx, stores, logger, orgID, teamID, channelID)
+	}
+	actions := []slackbotsvc.SlackAction{{
+		Text: "Join session",
+		URL:  slackSessionURL(services, sessionID),
 	}}
+	if session != nil {
+		actions = append(actions, slackbotsvc.SlackAction{
+			Text:     "Change repo",
+			ActionID: "slack_configure_channel",
+			Value: slackActionValue(map[string]string{
+				"session_id": session.ID.String(),
+				"team_id":    teamID,
+				"channel_id": channelID,
+			}),
+		})
+		if routingMode == slackbotsvc.SlackRoutingModeAnswerOnly {
+			actions = append(actions, slackbotsvc.SlackAction{
+				Text:     "Start work",
+				ActionID: "slack_start_work",
+				Value: slackActionValue(map[string]string{
+					"session_id": session.ID.String(),
+					"org_id":     orgID.String(),
+				}),
+			})
+		}
+		for _, missing := range contextSummary.Missing {
+			switch missing.Kind {
+			case "preview_target":
+				actions = append(actions, slackbotsvc.SlackAction{
+					Text:     "Choose preview target",
+					ActionID: "slack_choose_preview_target",
+					Value: slackActionValue(map[string]string{
+						"org_id":     orgID.String(),
+						"session_id": session.ID.String(),
+						"kind":       "preview_target",
+					}),
+				})
+			case "pull_request":
+				actions = append(actions, slackbotsvc.SlackAction{
+					Text:     "Choose PR",
+					ActionID: "slack_choose_pull_request",
+					Value: slackActionValue(map[string]string{
+						"org_id":     orgID.String(),
+						"session_id": session.ID.String(),
+						"kind":       "pull_request",
+					}),
+				})
+			case "branch":
+				actions = append(actions, slackbotsvc.SlackAction{
+					Text:     "Choose branch",
+					ActionID: "slack_choose_branch",
+					Value: slackActionValue(map[string]string{
+						"org_id":     orgID.String(),
+						"session_id": session.ID.String(),
+						"kind":       "branch",
+					}),
+				})
+			}
+		}
+	}
+	blocks := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
+		Session:     models.Session{ID: sessionID},
+		State:       slackbotsvc.SessionLifecycleStarting,
+		Title:       strings.TrimSpace(text),
+		Context:     contextSummary,
+		RoutingMode: routingMode,
+		SessionURL:  "",
+		Actions:     actions,
+	}).Blocks
+	if session == nil {
+		blocks = []ingestion.SlackBlock{{
+			Type: "section",
+			Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: text},
+		}}
+	}
 	if session == nil || session.RepositoryID != nil || stores == nil || stores.Repositories == nil {
 		return blocks
 	}
@@ -4081,9 +6608,85 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, logger zerolog.L
 	}
 	blocks = append(blocks, ingestion.SlackBlock{
 		Type: "section",
-		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "I can keep going, but selecting a default repository will make this Slack thread more precise."},
+		Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "Choose a repository before I start durable work for this Slack thread."},
 	}, ingestion.SlackBlock{Type: "actions", Elements: elements})
 	return blocks
+}
+
+func slackSessionAckContext(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID string, session *models.Session) slackbotsvc.SlackSessionContextSummary {
+	summary := slackbotsvc.SlackSessionContextSummary{}
+	if session == nil {
+		return summary
+	}
+	var repoID *uuid.UUID
+	if session.RepositoryID != nil {
+		repoID = session.RepositoryID
+	}
+	if session.TargetBranch != nil {
+		summary.Branch = strings.TrimSpace(*session.TargetBranch)
+	}
+	if stores != nil && stores.SlackChannels != nil && channelID != "" {
+		settings, err := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, teamID, channelID)
+		if err == nil {
+			if repoID == nil {
+				repoID = settings.DefaultRepositoryID
+			}
+			if summary.Branch == "" && settings.DefaultBranch != nil {
+				summary.Branch = strings.TrimSpace(*settings.DefaultBranch)
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack ack effective settings")
+		}
+	}
+	if repoID != nil && stores != nil && stores.Repositories != nil {
+		repo, err := stores.Repositories.GetByID(ctx, orgID, *repoID)
+		if err == nil {
+			summary.RepositoryName = repo.FullName
+			if summary.Branch == "" {
+				summary.Branch = repo.DefaultBranch
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("repository_id", repoID.String()).Msg("failed to load Slack ack repository")
+		}
+	}
+	if summary.RepositoryName == "" {
+		summary.Missing = append(summary.Missing, slackbotsvc.MissingSlackContext{
+			Kind:   "repository",
+			Reason: "Select a default repository to make Slack-started sessions more precise.",
+		})
+	}
+	return summary
+}
+
+func slackSessionAckRoutingMode(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID string) slackbotsvc.SlackRoutingMode {
+	if stores == nil || stores.SlackChannels == nil || channelID == "" {
+		return slackbotsvc.SlackRoutingModeAuto
+	}
+	settings, err := stores.SlackChannels.GetEffectiveByChannel(ctx, orgID, teamID, channelID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("channel_id", channelID).Msg("failed to load Slack ack routing mode")
+		}
+		return slackbotsvc.SlackRoutingModeAuto
+	}
+	return slackbotsvc.SlackRoutingMode(settings.RoutingMode)
+}
+
+func shouldEnqueueSlackStartedRun(session *models.Session, resolved slackbotsvc.SlackContextResolveResult) bool {
+	if session == nil || session.RepositoryID == nil {
+		return false
+	}
+	return !blockingSlackMissingContext(resolved.Missing)
+}
+
+func blockingSlackMissingContext(missing []slackbotsvc.MissingSlackContext) bool {
+	for _, item := range missing {
+		switch item.Kind {
+		case "repository", "preview_target", "pull_request":
+			return true
+		}
+	}
+	return false
 }
 
 func slackSessionURL(services *Services, sessionID uuid.UUID) string {
@@ -4156,6 +6759,7 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
+		defer finalizeSessionBackedEvalArtifacts(ctx, stores, services, logger, orgID, runID)
 		if input.ThreadID != "" {
 			threadID, parseErr := uuid.Parse(input.ThreadID)
 			if parseErr != nil {
@@ -4220,7 +6824,9 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			Dur("session_timeout", sessionTimeout).
 			Dur("runtime_ceiling", runtimeCeiling).
 			Msg("starting run_agent job")
+		markSessionBackedEvalRunning(ctx, stores, services, logger, run)
 		enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "running", "143 is working on this", "I will post the result back in this thread.", false)
+		enqueueSessionPreviewPrewarmOnStart(ctx, stores, services, logger, run)
 
 		var runErr error
 		switch models.SessionStatus(run.Status) {
@@ -4342,21 +6948,792 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 						true,
 					)
 					enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "failed", "143 could not start this session", errMsg, true)
-					enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.failed", "143 session failed", errMsg)
+					enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
 					return &FatalError{Err: fmt.Errorf("session timed out waiting for concurrency slot: %w", err)}
 				}
 				return &RetryableError{Err: err}
 			}
 			enqueueSlackRunUpdateIfLinked(ctx, stores, logger, orgID, runID, "failed", "143 session failed", err.Error(), true)
-			enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.failed", "143 session failed", err.Error())
+			enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", err.Error())
 			return err
 		}
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, runID)
 		enqueueSlackFinalIfLinked(ctx, stores, logger, orgID, runID)
-		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, "session.completed", "143 session completed", "The session finished successfully.")
+		enqueueSlackSessionNotifications(ctx, stores, logger, orgID, runID, run.AutomationRunID, string(models.SlackNotificationSessionCompleted), "143 session completed", "The session finished successfully.")
 		enqueueSlackPreviewStaleIfNeeded(ctx, stores, logger, orgID, runID)
+		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
+		enqueueSessionPreviewPostTurnClassifier(ctx, stores, services, logger, orgID, runID)
+		enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, orgID, runID, "run_agent_completed")
 		return nil
 	}
+}
+
+func newLegacyRunEvalCompatHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			EvalRunID string `json:"eval_run_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal legacy run_eval payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		runID, err := uuid.Parse(input.EvalRunID)
+		if err != nil {
+			return fmt.Errorf("parse eval run ID: %w", err)
+		}
+		if stores == nil || stores.EvalRuns == nil || stores.EvalTasks == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("legacy run_eval compatibility requires eval, session, and job stores")
+		}
+		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval run: %w", err)
+		}
+		if run.SessionID != nil && *run.SessionID != uuid.Nil {
+			session, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load converted eval session: %w", err)
+			}
+			if !sessionStatusNeedsRunAgent(session.Status) {
+				return nil
+			}
+			return enqueueCompatRunAgent(ctx, stores, orgID, session)
+		}
+		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval task: %w", err)
+		}
+		session := legacyEvalRunSessionFromTask(orgID, task, run.Model, run.ConfigRef)
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			return fmt.Errorf("create session for legacy eval run: %w", err)
+		}
+		if err := stores.EvalRuns.AttachSession(ctx, orgID, run.ID, session.ID, session.PrimaryThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				logger.Info().Str("eval_run_id", run.ID.String()).Msg("legacy eval run was already converted by another worker")
+				return nil
+			}
+			return fmt.Errorf("attach legacy eval run session: %w", err)
+		}
+		return enqueueCompatRunAgent(ctx, stores, orgID, *session)
+	}
+}
+
+func newLegacyRunEvalBootstrapCompatHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			BootstrapRunID string `json:"bootstrap_run_id"`
+			OrgID          string `json:"org_id"`
+			RepoID         string `json:"repo_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal legacy run_eval_bootstrap payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		bootstrapRunID, err := uuid.Parse(input.BootstrapRunID)
+		if err != nil {
+			return fmt.Errorf("parse bootstrap run ID: %w", err)
+		}
+		if stores == nil || stores.EvalBootstraps == nil || stores.Sessions == nil || stores.Jobs == nil {
+			return fmt.Errorf("legacy run_eval_bootstrap compatibility requires bootstrap, session, and job stores")
+		}
+		run, err := stores.EvalBootstraps.GetByID(ctx, orgID, bootstrapRunID)
+		if err != nil {
+			return fmt.Errorf("load legacy eval bootstrap run: %w", err)
+		}
+		if run.SessionID != nil && *run.SessionID != uuid.Nil {
+			session, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load converted eval bootstrap session: %w", err)
+			}
+			if !sessionStatusNeedsRunAgent(session.Status) {
+				return nil
+			}
+			return enqueueCompatRunAgent(ctx, stores, orgID, session)
+		}
+		repoID := run.RepoID
+		if repoID == uuid.Nil && input.RepoID != "" {
+			parsed, err := uuid.Parse(input.RepoID)
+			if err != nil {
+				return fmt.Errorf("parse repo ID: %w", err)
+			}
+			repoID = parsed
+		}
+		session := legacyEvalBootstrapSession(orgID, repoID, run.CreatedBy)
+		if err := stores.Sessions.Create(ctx, session); err != nil {
+			return fmt.Errorf("create session for legacy eval bootstrap: %w", err)
+		}
+		if err := stores.EvalBootstraps.AttachSessionThread(ctx, orgID, run.ID, session.ID, session.PrimaryThreadID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				logger.Info().Str("bootstrap_run_id", run.ID.String()).Msg("legacy eval bootstrap was already converted by another worker")
+				return nil
+			}
+			return fmt.Errorf("attach legacy eval bootstrap session: %w", err)
+		}
+		return enqueueCompatRunAgent(ctx, stores, orgID, *session)
+	}
+}
+
+func enqueueCompatRunAgent(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session) error {
+	dedupeKey := db.RunAgentDedupeKey(session.ID)
+	if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "run_agent", db.RunAgentPayload(&session), 5, &dedupeKey); err != nil {
+		return fmt.Errorf("enqueue converted eval session: %w", err)
+	}
+	return nil
+}
+
+func sessionStatusNeedsRunAgent(status models.SessionStatus) bool {
+	switch status {
+	case models.SessionStatusPending, models.SessionStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyEvalRunSessionFromTask(orgID uuid.UUID, task models.EvalTask, model string, configRef *string) *models.Session {
+	title := "Eval: " + task.Name
+	agentType := legacyEvalRunAgentType(model)
+	baseCommitSHA := task.BaseCommitSHA
+	var modelOverride *string
+	if model != "codex" {
+		modelOverride = &model
+	}
+	configLine := "Use the repository's default runtime configuration."
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		configLine = fmt.Sprintf("Use eval config ref %s. Apply that configuration before starting the task.", strings.TrimSpace(*configRef))
+	}
+	inputManifestMap := map[string]any{
+		"eval_task_id":    task.ID.String(),
+		"base_commit_sha": task.BaseCommitSHA,
+		"model":           model,
+	}
+	if task.SolutionCommitSHA != nil && *task.SolutionCommitSHA != "" {
+		inputManifestMap["solution_commit_sha"] = *task.SolutionCommitSHA
+	}
+	if configRef != nil && strings.TrimSpace(*configRef) != "" {
+		inputManifestMap["config_ref"] = strings.TrimSpace(*configRef)
+	}
+	inputManifest, err := json.Marshal(inputManifestMap)
+	if err != nil {
+		inputManifest = json.RawMessage(`{}`)
+	}
+	prompt := fmt.Sprintf(`Run this coding-agent eval exactly as specified.
+
+Repository setup:
+- Start from base commit %s before changing code.
+- %s
+- Do not inspect or apply the known solution diff.
+
+Task:
+%s
+
+When finished, leave the working tree with only the changes needed to solve the task.`, task.BaseCommitSHA, configLine, task.IssueDescription)
+	return &models.Session{
+		OrgID:            orgID,
+		Origin:           models.SessionOriginEvalRun,
+		InteractionMode:  models.SessionInteractionModeSingleRun,
+		ValidationPolicy: models.SessionValidationPolicyOnSessionEnd,
+		AgentType:        agentType,
+		Status:           models.SessionStatusPending,
+		AutonomyLevel:    models.DefaultSessionAutonomy,
+		TokenMode:        models.SessionTokenModeHigh,
+		ModelOverride:    modelOverride,
+		Title:            &title,
+		PMApproach:       &prompt,
+		RepositoryID:     &task.RepoID,
+		BaseCommitSHA:    &baseCommitSHA,
+		InputManifest:    inputManifest,
+	}
+}
+
+func legacyEvalBootstrapSession(orgID, repoID uuid.UUID, createdBy *uuid.UUID) *models.Session {
+	title := "Bootstrap eval tasks"
+	prompt := "Analyze this repository's pull request history and add high-quality candidate eval tasks with `143-tools eval add`."
+	return &models.Session{
+		OrgID:             orgID,
+		Origin:            models.SessionOriginEvalBootstrap,
+		InteractionMode:   models.SessionInteractionModeSingleRun,
+		ValidationPolicy:  models.SessionValidationPolicyOnSessionEnd,
+		AgentType:         models.AgentTypeCodex,
+		Status:            models.SessionStatusPending,
+		AutonomyLevel:     models.DefaultSessionAutonomy,
+		TokenMode:         models.SessionTokenModeLow,
+		TriggeredByUserID: createdBy,
+		Title:             &title,
+		PMApproach:        &prompt,
+		RepositoryID:      &repoID,
+	}
+}
+
+func legacyEvalRunAgentType(model string) models.AgentType {
+	switch model {
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		return models.AgentTypeClaudeCode
+	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekChat:
+		return models.AgentTypeOpenCode
+	default:
+		return models.AgentTypeCodex
+	}
+}
+
+func markSessionBackedEvalRunning(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	switch session.Origin {
+	case models.SessionOriginEvalRun:
+		if stores == nil || stores.EvalRuns == nil {
+			return
+		}
+		run, err := stores.EvalRuns.GetBySessionID(ctx, session.OrgID, session.ID)
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load eval run linked to session")
+			return
+		}
+		if err := stores.EvalRuns.UpdateStatus(ctx, session.OrgID, run.ID, models.EvalRunStatusRunning); err != nil {
+			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to mark session-backed eval run running")
+			return
+		}
+		if run.BatchID != nil {
+			publishEvalBatchSignal(ctx, services, session.OrgID, *run.BatchID, models.EvalBatchStatusRunning, logger)
+		}
+	case models.SessionOriginEvalBootstrap:
+		if stores == nil || stores.EvalBootstraps == nil {
+			return
+		}
+		threadID, err := primaryThreadIDForSession(ctx, stores, session)
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to resolve eval bootstrap session thread")
+			return
+		}
+		run, err := stores.EvalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, threadID)
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load eval bootstrap linked to session")
+			return
+		}
+		if err := stores.EvalBootstraps.UpdateStatus(ctx, session.OrgID, run.ID, models.EvalBootstrapStatusRunning, &session.ID); err != nil {
+			logger.Warn().Err(err).Str("bootstrap_run_id", run.ID.String()).Msg("failed to mark session-backed eval bootstrap running")
+		}
+		publishEvalBootstrapSignal(ctx, services, session.OrgID, run.ID, models.EvalBootstrapStatusRunning, &session.ID, logger)
+	}
+}
+
+func finalizeSessionBackedEvalArtifacts(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to reload session for eval finalization")
+		return
+	}
+	switch session.Origin {
+	case models.SessionOriginEvalRun:
+		finalizeSessionBackedEvalRun(ctx, stores, services, logger, session)
+	case models.SessionOriginEvalBootstrap:
+		finalizeSessionBackedEvalBootstrap(ctx, stores, services, logger, session)
+	}
+}
+
+func finalizeSessionBackedEvalBootstrap(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	if stores.EvalBootstraps == nil {
+		return
+	}
+	status, errMsg, terminal := evalBootstrapStatusForSession(session)
+	if !terminal {
+		return
+	}
+	threadID, err := primaryThreadIDForSession(ctx, stores, session)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to resolve session-backed eval bootstrap thread")
+		return
+	}
+	run, err := stores.EvalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, threadID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load session-backed eval bootstrap")
+		return
+	}
+	if err := stores.EvalBootstraps.UpdateResult(ctx, session.OrgID, run.ID, status, nil, errMsg); err != nil {
+		logger.Warn().Err(err).Str("bootstrap_run_id", run.ID.String()).Msg("failed to finalize session-backed eval bootstrap")
+		return
+	}
+	publishEvalBootstrapSignal(ctx, services, session.OrgID, run.ID, status, &session.ID, logger)
+}
+
+func finalizeSessionBackedEvalRun(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	if stores.EvalRuns == nil {
+		return
+	}
+	status, errMsg, terminal := evalRunStatusForSession(session)
+	if !terminal {
+		return
+	}
+	run, err := stores.EvalRuns.GetBySessionID(ctx, session.OrgID, session.ID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load session-backed eval run")
+		return
+	}
+	threadID, threadErr := primaryThreadIDForSession(ctx, stores, session)
+	if threadErr != nil {
+		logger.Warn().Err(threadErr).Str("session_id", session.ID.String()).Msg("failed to resolve session-backed eval run thread")
+	}
+	var traceThreadID *uuid.UUID
+	if threadErr == nil {
+		traceThreadID = &threadID
+	}
+	diff, diffErr := stores.Sessions.GetDiffByID(ctx, session.OrgID, session.ID)
+	if diffErr != nil {
+		logger.Warn().Err(diffErr).Str("session_id", session.ID.String()).Msg("failed to load session diff for eval run")
+	}
+	agentTrace, _ := json.Marshal(map[string]any{
+		"session_id": session.ID.String(),
+		"thread_id":  stringPtrUUID(traceThreadID),
+		"status":     string(session.Status),
+	})
+	inputManifest, manifestErr := evalRunInputManifest(run, session, traceThreadID)
+	if manifestErr != nil {
+		logger.Warn().Err(manifestErr).Str("eval_run_id", run.ID.String()).Msg("failed to build eval run input manifest")
+		inputManifest = run.InputManifest
+	}
+	if status == models.EvalRunStatusGrading {
+		if diffErr != nil {
+			errStr := fmt.Sprintf("failed to load session diff for grading: %s", diffErr)
+			result := &models.EvalRunResult{
+				Status:        models.EvalRunStatusFailed,
+				ErrorMessage:  &errStr,
+				InputManifest: inputManifest,
+			}
+			if err := stores.EvalRuns.UpdateResult(ctx, session.OrgID, run.ID, result); err != nil {
+				logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to mark eval run failed after diff load error")
+			}
+			return
+		}
+		if err := stores.EvalRuns.UpdatePostSessionArtifacts(ctx, session.OrgID, run.ID, diff.Diff, agentTrace, inputManifest); err != nil {
+			logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to persist session-backed eval run artifacts")
+			return
+		}
+		if stores.Jobs != nil {
+			dedupeKey := "run_eval_grader:" + run.ID.String()
+			if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "eval", "run_eval_grader", map[string]string{
+				"eval_run_id": run.ID.String(),
+				"org_id":      session.OrgID.String(),
+			}, 5, &dedupeKey); err != nil {
+				logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to enqueue eval grader")
+			}
+		}
+		publishEvalRunBatchUpdate(ctx, stores, services, logger, session.OrgID, run)
+		return
+	}
+	result := &models.EvalRunResult{
+		Status:        status,
+		AgentDiff:     diff.Diff,
+		AgentTrace:    agentTrace,
+		ErrorMessage:  errMsg,
+		InputManifest: inputManifest,
+	}
+	if err := stores.EvalRuns.UpdateResult(ctx, session.OrgID, run.ID, result); err != nil {
+		logger.Warn().Err(err).Str("eval_run_id", run.ID.String()).Msg("failed to finalize session-backed eval run")
+		return
+	}
+	publishEvalRunBatchUpdate(ctx, stores, services, logger, session.OrgID, run)
+}
+
+func newEvalGraderHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			EvalRunID string `json:"eval_run_id"`
+			OrgID     string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal run_eval_grader payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		runID, err := uuid.Parse(input.EvalRunID)
+		if err != nil {
+			return fmt.Errorf("parse eval run ID: %w", err)
+		}
+		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
+		if err != nil {
+			return fmt.Errorf("load eval run for grading: %w", err)
+		}
+		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
+		if err != nil {
+			return fmt.Errorf("load eval task for grading: %w", err)
+		}
+		var session *models.Session
+		if run.SessionID != nil && stores.Sessions != nil {
+			loaded, err := stores.Sessions.GetByID(ctx, orgID, *run.SessionID)
+			if err != nil {
+				return fmt.Errorf("load eval run session for grading: %w", err)
+			}
+			session = &loaded
+		}
+		var provider agent.SandboxProvider
+		var snapshots storage.SnapshotStore
+		var llm llmClient
+		if services != nil {
+			provider = services.SandboxProvider
+			snapshots = services.Snapshots
+			llm = services.LLM
+		}
+		result, err := gradeEvalRunArtifacts(ctx, run, task, evalGraderDeps{
+			session:   session,
+			provider:  provider,
+			snapshots: snapshots,
+			llm:       llm,
+		})
+		if err != nil {
+			return fmt.Errorf("grade eval run artifacts: %w", err)
+		}
+		if err := stores.EvalRuns.UpdateResult(ctx, orgID, run.ID, result); err != nil {
+			return fmt.Errorf("update eval grader result: %w", err)
+		}
+		publishEvalRunBatchUpdate(ctx, stores, services, logger, orgID, run)
+		return nil
+	}
+}
+
+type evalGraderDeps struct {
+	session   *models.Session
+	provider  agent.SandboxProvider
+	snapshots storage.SnapshotStore
+	llm       llmClient
+}
+
+func gradeEvalRunArtifacts(ctx context.Context, run models.EvalRun, task models.EvalTask, deps evalGraderDeps) (*models.EvalRunResult, error) {
+	var criteria []models.ScoringCriterion
+	if len(task.ScoringCriteria) > 0 {
+		if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {
+			return nil, fmt.Errorf("parse scoring criteria: %w", err)
+		}
+	}
+	if len(criteria) == 0 {
+		return nil, errors.New("scoring criteria are required")
+	}
+	hasDiff := run.AgentDiff != nil && strings.TrimSpace(*run.AgentDiff) != ""
+	sandbox, sandboxCleanup, sandboxErr := prepareEvalGraderSandbox(ctx, deps)
+	defer sandboxCleanup()
+	results := make([]models.CriterionResult, 0, len(criteria))
+	totalWeight := 0.0
+	weightedScore := 0.0
+	requiredFailed := false
+	for _, criterion := range criteria {
+		weight := criterion.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		totalWeight += weight
+		result := models.CriterionResult{
+			Name:       criterion.Name,
+			GraderType: criterion.GraderType,
+			Score:      0,
+			Pass:       false,
+			Details:    "No agent diff was produced by the session.",
+			Reasoning:  criterion.Notes,
+		}
+		if hasDiff {
+			switch criterion.GraderType {
+			case models.GraderTypeCodeCheck:
+				result = gradeCodeCheckCriterion(ctx, sandbox, sandboxErr, deps, criterion)
+			case models.GraderTypeLLMJudge:
+				result = gradeLLMJudgeCriterion(ctx, deps.llm, run, task, criterion)
+			default:
+				result.Details = "Unsupported grader type."
+			}
+		}
+		if criterion.Required && !result.Pass {
+			requiredFailed = true
+		}
+		weightedScore += result.Score * weight
+		results = append(results, result)
+	}
+	if totalWeight == 0 {
+		totalWeight = float64(len(results))
+	}
+	finalScore := weightedScore / totalWeight
+	passed := finalScore >= task.PassThreshold && !requiredFailed
+	status := models.EvalRunStatusCompleted
+	errMsg := (*string)(nil)
+	if !passed {
+		msg := "eval run did not meet pass threshold"
+		errMsg = &msg
+	}
+	criterionResults, err := json.Marshal(results)
+	if err != nil {
+		return nil, fmt.Errorf("marshal criterion results: %w", err)
+	}
+	return &models.EvalRunResult{
+		Status:           status,
+		AgentDiff:        run.AgentDiff,
+		AgentTrace:       run.AgentTrace,
+		CriterionResults: criterionResults,
+		FinalScore:       &finalScore,
+		Passed:           &passed,
+		ErrorMessage:     errMsg,
+		InputManifest:    run.InputManifest,
+	}, nil
+}
+
+func prepareEvalGraderSandbox(ctx context.Context, deps evalGraderDeps) (*agent.Sandbox, func(), error) {
+	noop := func() {}
+	if deps.provider == nil || deps.snapshots == nil || deps.session == nil || deps.session.SnapshotKey == nil || strings.TrimSpace(*deps.session.SnapshotKey) == "" {
+		return nil, noop, errors.New("completed session snapshot is required for code_check grading")
+	}
+	cfg := agent.DefaultSandboxConfig()
+	cfg.SessionID = deps.session.ID.String()
+	cfg.OrgID = deps.session.OrgID.String()
+	cfg.Purpose = "eval_grader"
+	cfg.Timeout = 10 * time.Minute
+	sandbox, err := agent.HydrateSandboxFromSnapshot(ctx, deps.provider, deps.snapshots, *deps.session.SnapshotKey, cfg)
+	if err != nil {
+		return nil, noop, fmt.Errorf("hydrate eval grader sandbox: %w", err)
+	}
+	cleanup := func() {
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = deps.provider.Destroy(destroyCtx, sandbox)
+	}
+	return sandbox, cleanup, nil
+}
+
+func gradeCodeCheckCriterion(ctx context.Context, sandbox *agent.Sandbox, sandboxErr error, deps evalGraderDeps, criterion models.ScoringCriterion) models.CriterionResult {
+	result := models.CriterionResult{Name: criterion.Name, GraderType: criterion.GraderType, Reasoning: criterion.Notes}
+	if sandboxErr != nil {
+		result.Details = sandboxErr.Error()
+		return result
+	}
+	if deps.provider == nil || sandbox == nil {
+		result.Details = "Sandbox provider is not configured for code_check grading."
+		return result
+	}
+	var cfg models.CodeCheckConfig
+	if len(criterion.GraderConfig) > 0 {
+		if err := json.Unmarshal(criterion.GraderConfig, &cfg); err != nil {
+			result.Details = "Invalid code_check grader_config: " + err.Error()
+			return result
+		}
+	}
+	cfg.Command = strings.TrimSpace(cfg.Command)
+	if cfg.Command == "" {
+		result.Details = "code_check grader_config.command is required."
+		return result
+	}
+	execCtx := ctx
+	cancel := func() {}
+	if cfg.TimeoutSeconds > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
+	}
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	exitCode, err := deps.provider.Exec(execCtx, sandbox, cfg.Command, &stdout, &stderr)
+	result.Pass = err == nil && exitCode == 0
+	if result.Pass {
+		result.Score = 1
+	}
+	result.Details = formatEvalCommandDetails(cfg.Command, exitCode, stdout.String(), stderr.String(), err)
+	return result
+}
+
+func gradeLLMJudgeCriterion(ctx context.Context, llm llmClient, run models.EvalRun, task models.EvalTask, criterion models.ScoringCriterion) models.CriterionResult {
+	result := models.CriterionResult{Name: criterion.Name, GraderType: criterion.GraderType, Reasoning: criterion.Notes}
+	if llm == nil {
+		result.Details = "LLM client is not configured for llm_judge grading."
+		return result
+	}
+	systemPrompt := "You are grading one coding-agent eval criterion. Return compact JSON with fields pass, score, reasoning, and details."
+	diff := ""
+	if run.AgentDiff != nil {
+		diff = *run.AgentDiff
+	}
+	userPrompt := fmt.Sprintf("Criterion: %s\nNotes: %s\nIssue:\n%s\nAgent diff:\n%s", criterion.Name, criterion.Notes, task.IssueDescription, diff)
+	response, err := llm.Complete(ctx, systemPrompt, userPrompt)
+	if err != nil {
+		result.Details = "LLM judge failed: " + err.Error()
+		return result
+	}
+	score, pass, reasoning, details := parseEvalLLMJudgeResponse(response)
+	result.Score = score
+	result.Pass = pass
+	result.Reasoning = reasoning
+	result.Details = details
+	return result
+}
+
+func parseEvalLLMJudgeResponse(response string) (float64, bool, string, string) {
+	type judgeResponse struct {
+		Score     *float64 `json:"score"`
+		Pass      *bool    `json:"pass"`
+		Reasoning string   `json:"reasoning"`
+		Details   string   `json:"details"`
+	}
+	var parsed judgeResponse
+	trimmed := strings.TrimSpace(response)
+	if start := strings.Index(trimmed, "{"); start >= 0 {
+		if end := strings.LastIndex(trimmed, "}"); end >= start {
+			_ = json.Unmarshal([]byte(trimmed[start:end+1]), &parsed)
+		}
+	}
+	score := 0.0
+	if parsed.Score != nil {
+		score = *parsed.Score
+		if score < 0 {
+			score = 0
+		}
+		if score > 1 {
+			score = 1
+		}
+	}
+	pass := false
+	if parsed.Pass != nil {
+		pass = *parsed.Pass
+	} else if parsed.Score != nil {
+		pass = score >= 0.5
+	} else {
+		pass = strings.Contains(strings.ToLower(response), "pass")
+		if pass {
+			score = 1
+		}
+	}
+	if parsed.Score == nil && parsed.Pass != nil && *parsed.Pass {
+		score = 1
+	}
+	reasoning := strings.TrimSpace(parsed.Reasoning)
+	if reasoning == "" {
+		reasoning = strings.TrimSpace(response)
+	}
+	details := strings.TrimSpace(parsed.Details)
+	if details == "" {
+		details = "LLM judge completed."
+	}
+	return score, pass, reasoning, details
+}
+
+func formatEvalCommandDetails(command string, exitCode int, stdout, stderr string, execErr error) string {
+	const maxOutput = 4000
+	if len(stdout) > maxOutput {
+		stdout = stdout[:maxOutput] + "\n[truncated]"
+	}
+	if len(stderr) > maxOutput {
+		stderr = stderr[:maxOutput] + "\n[truncated]"
+	}
+	details := fmt.Sprintf("Command: %s\nExit code: %d", command, exitCode)
+	if execErr != nil {
+		details += "\nError: " + execErr.Error()
+	}
+	if strings.TrimSpace(stdout) != "" {
+		details += "\nStdout:\n" + stdout
+	}
+	if strings.TrimSpace(stderr) != "" {
+		details += "\nStderr:\n" + stderr
+	}
+	return details
+}
+
+func primaryThreadIDForSession(ctx context.Context, stores *Stores, session models.Session) (uuid.UUID, error) {
+	if session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+		return *session.PrimaryThreadID, nil
+	}
+	if stores == nil || stores.SessionThreads == nil {
+		return uuid.Nil, fmt.Errorf("session thread store not configured")
+	}
+	threads, err := stores.SessionThreads.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("list session threads: %w", err)
+	}
+	if len(threads) == 0 {
+		return uuid.Nil, fmt.Errorf("session has no threads")
+	}
+	return threads[0].ID, nil
+}
+
+func evalBootstrapStatusForSession(session models.Session) (models.EvalBootstrapStatus, *string, bool) {
+	switch session.Status {
+	case models.SessionStatusCompleted, models.SessionStatusPRCreated:
+		return models.EvalBootstrapStatusCompleted, nil, true
+	case models.SessionStatusSkipped:
+		msg := "bootstrap session was skipped before producing candidates"
+		return models.EvalBootstrapStatusFailed, &msg, true
+	case models.SessionStatusFailed, models.SessionStatusCancelled:
+		return models.EvalBootstrapStatusFailed, sessionTerminalError(session), true
+	default:
+		return "", nil, false
+	}
+}
+
+func evalRunStatusForSession(session models.Session) (models.EvalRunStatus, *string, bool) {
+	switch session.Status {
+	case models.SessionStatusCompleted, models.SessionStatusPRCreated:
+		return models.EvalRunStatusGrading, nil, true
+	case models.SessionStatusSkipped:
+		msg := "eval run session was skipped before producing a diff"
+		return models.EvalRunStatusFailed, &msg, true
+	case models.SessionStatusFailed, models.SessionStatusCancelled:
+		return models.EvalRunStatusFailed, sessionTerminalError(session), true
+	default:
+		return "", nil, false
+	}
+}
+
+func evalRunInputManifest(run models.EvalRun, session models.Session, threadID *uuid.UUID) (json.RawMessage, error) {
+	manifest := map[string]any{
+		"session_id": session.ID.String(),
+		"status":     string(session.Status),
+		"model":      run.Model,
+	}
+	if threadID != nil && *threadID != uuid.Nil {
+		manifest["thread_id"] = threadID.String()
+	}
+	if session.BaseCommitSHA != nil && *session.BaseCommitSHA != "" {
+		manifest["base_commit_sha"] = *session.BaseCommitSHA
+	}
+	if run.ConfigRef != nil && *run.ConfigRef != "" {
+		manifest["config_ref"] = *run.ConfigRef
+	}
+	return json.Marshal(manifest)
+}
+
+func publishEvalRunBatchUpdate(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID uuid.UUID, run models.EvalRun) {
+	if run.BatchID == nil || stores.EvalBatches == nil {
+		return
+	}
+	if err := stores.EvalBatches.CompleteBatchIfDone(ctx, orgID, *run.BatchID); err != nil {
+		logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to complete eval batch after run update")
+	}
+	batchStatus := models.EvalBatchStatusRunning
+	if batch, err := stores.EvalBatches.GetByID(ctx, orgID, *run.BatchID); err == nil {
+		batchStatus = batch.Status
+		if batch.Status == models.EvalBatchStatusCompleted && stores.EvalReleaseGates != nil {
+			if _, err := stores.EvalReleaseGates.EvaluateBatch(ctx, orgID, *run.BatchID); err != nil {
+				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to evaluate eval release gates")
+			}
+		}
+	}
+	publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, batchStatus, logger)
+}
+
+func sessionTerminalError(session models.Session) *string {
+	if session.Error != nil && strings.TrimSpace(*session.Error) != "" {
+		return session.Error
+	}
+	if session.FailureExplanation != nil && strings.TrimSpace(*session.FailureExplanation) != "" {
+		return session.FailureExplanation
+	}
+	msg := "session ended without a successful result"
+	return &msg
+}
+
+func stringPtrUUID(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	value := id.String()
+	return &value
 }
 
 func enqueueSlackRunUpdateIfLinked(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, updateKind, title, summary string, terminal bool) {
@@ -4551,24 +7928,20 @@ func newDeliverThreadInboxHandler(services *Services, logger zerolog.Logger) Job
 	}
 }
 
-func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID string, logger zerolog.Logger) (*uuid.UUID, error) {
+func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgID, sessionID, threadID uuid.UUID, hasThread bool, queuedMessageID int64, logger zerolog.Logger) (*uuid.UUID, error) {
 	if stores == nil || stores.HumanInputRequests == nil || stores.SessionMessages == nil {
 		return nil, nil
 	}
-	messageID, err := strconv.ParseInt(queuedMessageID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("parse queued message ID: %w", err)
-	}
-	queued, err := stores.SessionMessages.GetByID(ctx, orgID, messageID)
+	queued, err := stores.SessionMessages.GetByID(ctx, orgID, queuedMessageID)
 	if err != nil {
 		return nil, fmt.Errorf("fetch queued message for human input answer: %w", err)
 	}
 	if queued.SessionID != sessionID {
-		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", messageID, queued.SessionID, sessionID)
+		return nil, fmt.Errorf("queued message %d belongs to session %s, not %s", queuedMessageID, queued.SessionID, sessionID)
 	}
 	if hasThread {
 		if queued.ThreadID == nil || *queued.ThreadID != threadID {
-			return nil, fmt.Errorf("queued message %d does not belong to thread %s", messageID, threadID)
+			return nil, fmt.Errorf("queued message %d does not belong to thread %s", queuedMessageID, threadID)
 		}
 	}
 	if queued.UserID == nil {
@@ -4588,7 +7961,7 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 		logger.Warn().Err(err).
 			Str("session_id", sessionID.String()).
 			Str("thread_id", threadID.String()).
-			Int64("queued_message_id", messageID).
+			Int64("queued_message_id", queuedMessageID).
 			Msg("failed to answer pending human-input request from queued message")
 		return nil, nil
 	}
@@ -4654,12 +8027,20 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var continueOpts *agent.ContinueSessionOptions
 		var resultAgentSessionID string
 		var humanInputRequestID *uuid.UUID
+		var queuedMessageID *int64
 		if input.HumanInputRequestID != "" {
 			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
 			if parseErr != nil {
 				return fmt.Errorf("parse human input request ID: %w", parseErr)
 			}
 			humanInputRequestID = &parsedHumanInputRequestID
+		}
+		if input.QueuedMessageID != "" {
+			parsedQueuedMessageID, parseErr := strconv.ParseInt(input.QueuedMessageID, 10, 64)
+			if parseErr != nil {
+				return fmt.Errorf("parse queued message ID: %w", parseErr)
+			}
+			queuedMessageID = &parsedQueuedMessageID
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
@@ -4739,6 +8120,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					ThreadAgentSessionID: thread.AgentSessionID,
 					ResultAgentSessionID: &resultAgentSessionID,
 					HumanInputRequestID:  humanInputRequestID,
+					QueuedMessageID:      queuedMessageID,
 					ThreadID:             &threadIDLocal,
 					OnTurnComplete: func(result *agent.AgentResult) {
 						lastTurnResult = result
@@ -4754,17 +8136,24 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts = threadOpts
 			}
 		}
-		if humanInputRequestID == nil && input.QueuedMessageID != "" {
-			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, input.QueuedMessageID, logger)
+		isPRRepairContinuation := continueOpts != nil && continueOpts.PRRepair != nil
+		if humanInputRequestID == nil && queuedMessageID != nil && !isPRRepairContinuation {
+			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, *queuedMessageID, logger)
 			if answerErr != nil {
 				return answerErr
 			}
 			humanInputRequestID = answeredID
 		}
-		if continueOpts == nil && humanInputRequestID != nil {
-			continueOpts = &agent.ContinueSessionOptions{HumanInputRequestID: humanInputRequestID}
-		} else if continueOpts != nil && humanInputRequestID != nil {
-			continueOpts.HumanInputRequestID = humanInputRequestID
+		if continueOpts == nil && (humanInputRequestID != nil || queuedMessageID != nil) {
+			continueOpts = &agent.ContinueSessionOptions{
+				HumanInputRequestID: humanInputRequestID,
+				QueuedMessageID:     queuedMessageID,
+			}
+		} else if continueOpts != nil {
+			if humanInputRequestID != nil {
+				continueOpts.HumanInputRequestID = humanInputRequestID
+			}
+			continueOpts.QueuedMessageID = queuedMessageID
 		}
 
 		var dispatchThreadID *uuid.UUID
@@ -4981,8 +8370,515 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
+		if continueOpts != nil && continueOpts.PRRepair != nil && services.PR != nil {
+			if completionErr := services.PR.CompletePullRequestRepairRun(ctx, orgID, continueOpts.PRRepair.PullRequestID, continueOpts.PRRepair.RepairRunID); completionErr != nil {
+				logger.Warn().
+					Err(completionErr).
+					Str("session_id", sessionID.String()).
+					Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
+					Msg("failed to complete pull request repair run after continue_session")
+			}
+		}
+		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
+		enqueueSessionPreviewPostTurnClassifier(ctx, stores, services, logger, orgID, sessionID)
+		enqueueSessionPreviewWarmBuildIfCandidate(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		return nil
 	}
+}
+
+func enqueueSessionPreviewCachePrewarm(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
+	if stores == nil || services == nil || !services.PreviewCachePrewarmEnabled || stores.Sessions == nil || stores.Jobs == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for preview cache prewarm enqueue")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if sessionPreviewPrewarmUntrustedFork(session) {
+		if stores.Previews != nil {
+			recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeCache, "skipped_untrusted_fork", "untrusted_fork", "Session came from forked PR content; speculative previews are disabled.")
+		}
+		return
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		UserID:            userID,
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Reason:            reason,
+	}
+	dedupeKey := previewsvc.PreviewCachePrewarmScopeKey(payload)
+	if dedupeKey == "" {
+		return
+	}
+	targetNodeID := models.SessionWorkerTarget(&session)
+	var jobID uuid.UUID
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, orgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to enqueue session preview cache prewarm")
+		return
+	}
+	if stores.Previews != nil {
+		var jobIDPtr *uuid.UUID
+		if jobID != uuid.Nil {
+			jobIDCopy := jobID
+			jobIDPtr = &jobIDCopy
+		}
+		_, runErr := stores.Previews.UpsertPreviewCachePrewarmRun(ctx, &models.PreviewCachePrewarmRun{
+			OrgID:             orgID,
+			RepoID:            *session.RepositoryID,
+			Source:            string(previewsvc.PreviewCachePrewarmSourceSession),
+			SourceID:          session.ID.String(),
+			CacheScopeKey:     dedupeKey,
+			JobID:             jobIDPtr,
+			WorkerNodeID:      stringPtrValue(targetNodeID),
+			Status:            "pending",
+			WorkspaceRevision: session.WorkspaceRevision,
+		})
+		if runErr != nil {
+			logger.Warn().Err(runErr).Str("session_id", session.ID.String()).Msg("failed to upsert session preview cache prewarm run")
+		}
+	}
+}
+
+func enqueueSessionPreviewWarmBuildIfCandidate(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID, reason string) {
+	if stores == nil || services == nil || stores.Sessions == nil || stores.Jobs == nil || stores.Previews == nil || stores.Organizations == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for preview warm enqueue")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil || session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	if sessionPreviewPrewarmUntrustedFork(session) {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeSmart, "skipped_untrusted_fork", "untrusted_fork", "Session came from forked PR content; speculative previews are disabled.")
+		return
+	}
+	policy, err := stores.Previews.GetRepositoryPreviewPolicy(ctx, orgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load repository preview policy for warm enqueue")
+		return
+	}
+	if policy.SessionPrewarmMode != models.PreviewSessionPrewarmModeSmart {
+		return
+	}
+	decision, err := stores.Previews.GetLatestSessionPreviewPrewarmRun(ctx, orgID, sessionID, models.PreviewSpeculativeDecisionWarmCandidate)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session preview warm candidate")
+		}
+		return
+	}
+	if decision.WorkspaceRevision != session.WorkspaceRevision || decision.Status != "decided" {
+		return
+	}
+	org, err := stores.Organizations.GetByID(ctx, orgID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load org settings for preview warm enqueue")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil || settings.PreviewSessionPrewarmMaxActive <= 0 {
+		if err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to parse org settings for preview warm enqueue")
+		}
+		return
+	}
+	expireStaleSessionPreviewPrewarmRuns(ctx, stores, services, logger, orgID)
+	active, err := stores.Previews.CountActiveSessionPreviewPrewarmRuns(ctx, orgID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to count session preview warm capacity")
+		return
+	}
+	if active >= settings.PreviewSessionPrewarmMaxActive {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeSmart, "skipped_capacity", "capacity_tight", fmt.Sprintf("Speculative preview pool is full (%d/%d).", active, settings.PreviewSessionPrewarmMaxActive))
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.SessionPreviewWarmBuildJobPayload{
+		OrgID:             orgID,
+		UserID:            userID,
+		SessionID:         sessionID,
+		RepositoryID:      *session.RepositoryID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      decision.ConfigDigest,
+		Reason:            reason,
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         sessionID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      decision.ConfigDigest,
+		Mode:              models.PreviewSessionPrewarmModeSmart,
+		Decision:          models.PreviewSpeculativeDecisionWarmCandidate,
+		Confidence:        decision.Confidence,
+		Reason:            decision.Reason,
+		Explanation:       decision.Explanation,
+		Status:            "queued",
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to reserve session preview warm build")
+		return
+	}
+	dedupeKey := fmt.Sprintf("session_preview_warm:%s:%d:%s", sessionID, session.WorkspaceRevision, decision.ConfigDigest)
+	priority := -49
+	if services.PreviewCachePrewarmPriority != 0 {
+		priority = services.PreviewCachePrewarmPriority + 1
+	}
+	targetNodeID := models.SessionWorkerTarget(&session)
+	var jobID uuid.UUID
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, orgID, "preview", models.JobTypeSessionPreviewWarmBuild, payload, priority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, orgID, "preview", models.JobTypeSessionPreviewWarmBuild, payload, priority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to enqueue session preview warm build")
+		if _, updateErr := stores.Previews.UpdateSessionPreviewPrewarmRunStatus(ctx, orgID, *session.RepositoryID, sessionID, session.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, decision.ConfigDigest, "failed", err.Error(), true); updateErr != nil {
+			logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to mark session preview warm enqueue failure")
+		}
+		return
+	}
+	jobIDPtr := &jobID
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             orgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         sessionID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      decision.ConfigDigest,
+		Mode:              models.PreviewSessionPrewarmModeSmart,
+		Decision:          models.PreviewSpeculativeDecisionWarmCandidate,
+		Confidence:        decision.Confidence,
+		Reason:            decision.Reason,
+		Explanation:       decision.Explanation,
+		Status:            "queued",
+		JobID:             jobIDPtr,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to record session preview warm job id")
+	}
+	metrics.RecordSessionPreviewPrewarmSkipped(ctx, session.OrgID.String(), reason)
+}
+
+func enqueueSessionPreviewPrewarmOnStart(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session) {
+	if stores == nil || services == nil || !services.PreviewCachePrewarmEnabled || stores.Jobs == nil || stores.Previews == nil || stores.Organizations == nil {
+		return
+	}
+	if session.OrgID == uuid.Nil || session.ID == uuid.Nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if sessionPreviewPrewarmUntrustedFork(session) {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, models.PreviewSessionPrewarmModeOff, "skipped_untrusted_fork", "untrusted_fork", "Session came from forked PR content; speculative previews are disabled.")
+		return
+	}
+	org, err := stores.Organizations.GetByID(ctx, session.OrgID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to load org settings for session preview prewarm")
+		return
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to parse org settings for session preview prewarm")
+		return
+	}
+	if settings.PreviewSessionPrewarmMaxActive <= 0 {
+		return
+	}
+	expireStaleSessionPreviewPrewarmRuns(ctx, stores, services, logger, session.OrgID)
+	policy, err := stores.Previews.GetRepositoryPreviewPolicy(ctx, session.OrgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to load repository preview policy for session prewarm")
+		return
+	}
+	active, countErr := stores.Previews.CountActiveSessionPreviewPrewarmRuns(ctx, session.OrgID)
+	if countErr != nil {
+		logger.Warn().Err(countErr).
+			Str("org_id", session.OrgID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to count active session preview prewarm runs")
+		return
+	}
+	if active >= settings.PreviewSessionPrewarmMaxActive {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, policy.SessionPrewarmMode, "skipped_capacity", "capacity_tight", fmt.Sprintf("Speculative preview pool is full (%d/%d).", active, settings.PreviewSessionPrewarmMaxActive))
+		return
+	}
+	cooling, cooldownErr := stores.Previews.HasRecentSessionPreviewPrewarmCooldown(ctx, session.OrgID, *session.RepositoryID, time.Now().Add(-5*time.Minute))
+	if cooldownErr != nil {
+		logger.Warn().Err(cooldownErr).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to check session preview prewarm cooldown")
+		return
+	}
+	if cooling {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, policy.SessionPrewarmMode, "skipped_cooldown", "capacity_tight", "Repository is in speculative preview cooldown.")
+		return
+	}
+	concurrentRepo, concurrentErr := stores.Previews.HasRecentRepoSessionCachePrewarm(ctx, session.OrgID, *session.RepositoryID, session.ID, time.Now().Add(-5*time.Minute))
+	if concurrentErr != nil {
+		logger.Warn().Err(concurrentErr).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Msg("failed to check concurrent repo session cache prewarm")
+		return
+	}
+	if concurrentRepo {
+		recordSkippedSessionPreviewPrewarm(ctx, stores, logger, session, policy.SessionPrewarmMode, "skipped_cooldown", "concurrent_session", "Another session for this repository recently had a cache prewarm.")
+		return
+	}
+	switch policy.SessionPrewarmMode {
+	case models.PreviewSessionPrewarmModeCache:
+		enqueueSessionPreviewCachePrewarmForDecision(ctx, stores, services, logger, session, models.PreviewSessionPrewarmModeCache, models.PreviewSpeculativeDecisionCache, 1, "policy_cache", "Repository policy is cache-only.", nil)
+	case models.PreviewSessionPrewarmModeSmart:
+		enqueueSessionPreviewPrewarmClassifier(ctx, stores, services, logger, session, "session_start")
+	default:
+		return
+	}
+}
+
+func enqueueSessionPreviewPostTurnClassifier(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	if stores == nil || services == nil || stores.Sessions == nil || stores.Previews == nil || stores.Jobs == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load session for post-turn preview classifier")
+		return
+	}
+	if session.RepositoryID == nil || *session.RepositoryID == uuid.Nil || session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		return
+	}
+	policy, err := stores.Previews.GetRepositoryPreviewPolicy(ctx, orgID, *session.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load preview policy for post-turn classifier")
+		return
+	}
+	if policy.SessionPrewarmMode != models.PreviewSessionPrewarmModeSmart {
+		return
+	}
+	enqueueSessionPreviewPrewarmClassifier(ctx, stores, services, logger, session, "post_turn")
+}
+
+func recordSkippedSessionPreviewPrewarm(ctx context.Context, stores *Stores, logger zerolog.Logger, session models.Session, mode models.PreviewSessionPrewarmMode, status, reason, explanation string) {
+	if stores == nil || stores.Previews == nil || session.RepositoryID == nil {
+		return
+	}
+	decision := models.PreviewSpeculativeDecisionNone
+	if mode == models.PreviewSessionPrewarmModeCache {
+		decision = models.PreviewSpeculativeDecisionCache
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Mode:              mode,
+		Decision:          decision,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            status,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to record skipped session preview prewarm")
+	}
+}
+
+func enqueueSessionPreviewCachePrewarmForDecision(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, mode models.PreviewSessionPrewarmMode, decision models.PreviewSpeculativeDecision, confidence float64, reason, explanation string, priorJobID *uuid.UUID) {
+	if stores == nil || services == nil || stores.Jobs == nil || stores.Previews == nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	userID := uuid.Nil
+	if session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	payload := previewsvc.PreviewCachePrewarmJobPayload{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		UserID:            userID,
+		Source:            previewsvc.PreviewCachePrewarmSourceSession,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Reason:            "session_started",
+	}
+	dedupeKey := previewsvc.PreviewCachePrewarmScopeKey(payload)
+	if dedupeKey == "" {
+		return
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      payload.ConfigDigest,
+		Mode:              mode,
+		Decision:          decision,
+		Confidence:        confidence,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            "queued",
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("config_digest", payload.ConfigDigest).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to reserve session preview prewarm decision")
+		return
+	}
+
+	targetNodeID := models.SessionWorkerTarget(&session)
+	if targetNodeID == nil {
+		if workerNodeID, ok := jobctx.WorkerNodeIDFromContext(ctx); ok && strings.TrimSpace(workerNodeID) != "" {
+			workerNodeID = strings.TrimSpace(workerNodeID)
+			targetNodeID = &workerNodeID
+		}
+	}
+	var jobID uuid.UUID
+	var err error
+	if targetNodeID != nil {
+		jobID, err = stores.Jobs.EnqueueWithTarget(ctx, session.OrgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey, targetNodeID)
+	} else {
+		jobID, err = stores.Jobs.Enqueue(ctx, session.OrgID, "preview", models.JobTypePreviewCachePrewarm, payload, services.PreviewCachePrewarmPriority, &dedupeKey)
+	}
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("config_digest", payload.ConfigDigest).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to enqueue session preview cache prewarm")
+		if _, updateErr := stores.Previews.UpdateSessionPreviewPrewarmRunStatus(ctx, session.OrgID, *session.RepositoryID, session.ID, session.WorkspaceRevision, decision, payload.ConfigDigest, "failed", err.Error(), true); updateErr != nil {
+			logger.Warn().Err(updateErr).
+				Str("org_id", session.OrgID.String()).
+				Str("repository_id", session.RepositoryID.String()).
+				Str("session_id", session.ID.String()).
+				Str("decision", string(decision)).
+				Str("reason", reason).
+				Msg("failed to mark session preview prewarm enqueue failure")
+		}
+		return
+	}
+
+	var jobIDPtr *uuid.UUID
+	if jobID != uuid.Nil {
+		jobIDCopy := jobID
+		jobIDPtr = &jobIDCopy
+	} else if priorJobID != nil && *priorJobID != uuid.Nil {
+		jobIDPtr = priorJobID
+	}
+	if _, err := stores.Previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             session.OrgID,
+		RepositoryID:      *session.RepositoryID,
+		SessionID:         session.ID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		ConfigDigest:      payload.ConfigDigest,
+		Mode:              mode,
+		Decision:          decision,
+		Confidence:        confidence,
+		Reason:            reason,
+		Explanation:       explanation,
+		Status:            "queued",
+		JobID:             jobIDPtr,
+		CapacitySnapshot:  json.RawMessage(`{}`),
+	}); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("config_digest", payload.ConfigDigest).
+			Str("decision", string(decision)).
+			Str("reason", reason).
+			Msg("failed to record session preview prewarm decision")
+	}
+}
+
+func enqueueSessionPreviewPrewarmClassifier(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, phase string) {
+	if stores == nil || stores.Jobs == nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil {
+		return
+	}
+	if strings.TrimSpace(phase) == "" {
+		phase = "session_start"
+	}
+	payload := previewsvc.SessionPreviewPrewarmClassifyJobPayload{
+		OrgID:             session.OrgID,
+		SessionID:         session.ID,
+		RepositoryID:      *session.RepositoryID,
+		WorkspaceRevision: session.WorkspaceRevision,
+		Phase:             phase,
+	}
+	dedupeKey := fmt.Sprintf("session_preview_prewarm_classify:%s:%d:%s", session.ID, session.WorkspaceRevision, phase)
+	priority := -51
+	if services != nil && services.PreviewCachePrewarmPriority != 0 {
+		priority = services.PreviewCachePrewarmPriority - 1
+	}
+	if _, err := stores.Jobs.Enqueue(ctx, session.OrgID, "preview", models.JobTypeSessionPreviewPrewarmClassify, payload, priority, &dedupeKey); err != nil {
+		logger.Warn().Err(err).
+			Str("org_id", session.OrgID.String()).
+			Str("repository_id", session.RepositoryID.String()).
+			Str("session_id", session.ID.String()).
+			Int64("workspace_revision", session.WorkspaceRevision).
+			Str("decision", string(models.PreviewSpeculativeDecisionNone)).
+			Str("reason", "classifier_enqueue_failed").
+			Msg("failed to enqueue session preview prewarm classifier")
+	}
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func primaryIssueIDFromSnapshot(snapshot *models.SessionTurnIssueSnapshot) *uuid.UUID {
@@ -5023,6 +8919,32 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 			return err
 		}
 		return nil
+	}
+}
+
+func newSyncPRPreviewSurfacesHandler(services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input ghservice.SyncPRPreviewSurfacesPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal sync_pr_preview_surfaces payload: %w", err)
+		}
+		if input.OrgID == uuid.Nil {
+			orgID, err := parseOrgID("", ctx)
+			if err != nil {
+				return fmt.Errorf("parse org ID: %w", err)
+			}
+			input.OrgID = orgID
+		}
+		if input.RepositoryID == uuid.Nil {
+			return fmt.Errorf("repository_id is required")
+		}
+		logger.Info().
+			Str("org_id", input.OrgID.String()).
+			Str("repository_id", input.RepositoryID.String()).
+			Int("pr_number", input.PRNumber).
+			Str("head_sha", input.HeadSHA).
+			Msg("starting sync_pr_preview_surfaces job")
+		return services.PR.SyncPRPreviewSurfaces(ctx, input)
 	}
 }
 
@@ -5106,11 +9028,13 @@ func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logg
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID       string `json:"session_id"`
-			OrgID           string `json:"org_id"`
-			IssueSnapshotID string `json:"issue_snapshot_id,omitempty"`
-			Draft           *bool  `json:"draft,omitempty"`
-			AuthorMode      string `json:"author_mode,omitempty"`
+			SessionID         string `json:"session_id"`
+			OrgID             string `json:"org_id"`
+			IssueSnapshotID   string `json:"issue_snapshot_id,omitempty"`
+			Draft             *bool  `json:"draft,omitempty"`
+			AuthorMode        string `json:"author_mode,omitempty"`
+			MergeWhenReady    bool   `json:"merge_when_ready,omitempty"`
+			RequestedByUserID string `json:"requested_by_user_id,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
@@ -5201,7 +9125,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
 		}
 
-		_, createErr := services.PR.CreatePR(ctx, &run, params...)
+		pr, createErr := services.PR.CreatePR(ctx, &run, params...)
 		if createErr != nil {
 			// ErrNoChanges is a benign terminal outcome (session ran fine
 			// but produced no diff), so log at info to keep `open_pr failed`
@@ -5239,14 +9163,38 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return createErr
 		}
 
+		if input.MergeWhenReady {
+			if pr == nil {
+				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+				}
+				return fmt.Errorf("open_pr merge_when_ready requested but PRService returned nil pull request")
+			}
+			requestedByUserID, err := uuid.Parse(input.RequestedByUserID)
+			if err != nil {
+				queueErr := fmt.Errorf("parse merge_when_ready requesting user id: %w", err)
+				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+				}
+				return queueErr
+			}
+			if _, err := services.PR.QueueMergeWhenReady(ctx, orgID, pr.ID, requestedByUserID); err != nil {
+				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
+				}
+				return fmt.Errorf("queue merge when ready after open_pr: %w", err)
+			}
+		}
 		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
-			EventKind: "pr.opened",
-			Title:     "Pull request opened",
-			Body:      "A pull request was opened for the session.",
-			SessionID: &runID,
+			EventKind:      string(models.SlackNotificationPROpened),
+			Title:          "Pull request opened",
+			Body:           "A pull request was opened for the session.",
+			SessionID:      &runID,
+			PullRequestID:  &pr.ID,
+			PullRequestURL: pr.GitHubPRURL,
 		})
 		return nil
 	}
@@ -5463,6 +9411,8 @@ func userFacingPRError(err error) string {
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return ghservice.PushRejectedPRMessage
+	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
+		return ghservice.SandboxAuthUnavailablePRMessage
 	default:
 		return "Check GitHub access or repo permissions and try again."
 	}
@@ -5819,6 +9769,35 @@ func newAuditRetentionCleanupHandler(stores *Stores, logger zerolog.Logger) JobH
 	}
 }
 
+// backfill_preview_groups handler links existing preview_targets rows that have
+// no preview_group_id to their correct preview_groups row. The job is safe to
+// run multiple times; targets that are already linked are skipped.
+func newBackfillPreviewGroupsHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var p struct {
+			BatchSize int `json:"batch_size"`
+		}
+		if len(payload) > 0 {
+			if err := json.Unmarshal(payload, &p); err != nil {
+				return &FatalError{Err: fmt.Errorf("unmarshal backfill_preview_groups payload: %w", err)}
+			}
+		}
+		orgID, ok := jobOrgIDFromContext(ctx)
+		if !ok {
+			return &FatalError{Err: fmt.Errorf("backfill_preview_groups: missing org_id in job context")}
+		}
+		total, err := stores.Previews.BackfillPreviewGroups(ctx, orgID, p.BatchSize)
+		if err != nil {
+			return fmt.Errorf("backfill preview groups: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Int("targets_linked", total).
+			Msg("backfill_preview_groups completed")
+		return nil
+	}
+}
+
 // data_retention_cleanup handler deletes expired webhook deliveries, session logs,
 // and completed jobs based on configurable retention periods.
 func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionConfig, logger zerolog.Logger) JobHandler {
@@ -5856,6 +9835,44 @@ func newDataRetentionCleanupHandler(stores *Stores, retentionCfg DataRetentionCo
 			} else {
 				totalDeleted += deleted
 				logger.Info().Int64("deleted", deleted).Int("retention_days", retentionCfg.JobsDays).Msg("completed job cleanup complete")
+			}
+		}
+
+		if stores.SlackInboundEvents != nil && stores.Organizations != nil && retentionCfg.SlackInboundPayloadDays > 0 {
+			batchSize := retentionCfg.SlackInboundPayloadBatch
+			if batchSize <= 0 {
+				batchSize = 1000
+			}
+			cutoff := time.Now().AddDate(0, 0, -retentionCfg.SlackInboundPayloadDays)
+			orgIDs, err := stores.Organizations.ListIDs(ctx)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to list organizations for Slack inbound payload cleanup")
+				errs = append(errs, fmt.Errorf("list organizations for slack payload cleanup: %w", err))
+			} else {
+				var redactedTotal int64
+			outerOrgLoop:
+				for _, orgID := range orgIDs {
+					if ctx.Err() != nil {
+						break
+					}
+					for {
+						redacted, redactErr := stores.SlackInboundEvents.RedactPayloadsOlderThan(ctx, orgID, cutoff, batchSize)
+						if redactErr != nil {
+							logger.Error().Err(redactErr).Str("org_id", orgID.String()).Msg("failed to redact expired Slack inbound payloads")
+							errs = append(errs, fmt.Errorf("redact expired slack payloads for org %s: %w", orgID, redactErr))
+							break
+						}
+						redactedTotal += redacted
+						if redacted < int64(batchSize) {
+							break
+						}
+						if ctx.Err() != nil {
+							break outerOrgLoop
+						}
+					}
+				}
+				totalDeleted += redactedTotal
+				logger.Info().Int64("redacted", redactedTotal).Int("retention_days", retentionCfg.SlackInboundPayloadDays).Msg("Slack inbound payload cleanup complete")
 			}
 		}
 
@@ -5917,839 +9934,6 @@ func publishEvalBootstrapSignal(ctx context.Context, services *Services, orgID, 
 	}); err != nil {
 		logger.Warn().Err(err).Str("bootstrap_run_id", bootstrapRunID.String()).Msg("failed to publish eval bootstrap update event")
 	}
-}
-
-// run_eval handler executes a single eval run: clones repo, runs agent, scores output.
-func newRunEvalHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			EvalRunID string `json:"eval_run_id"`
-			OrgID     string `json:"org_id"`
-			BatchID   string `json:"batch_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal run_eval payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		runID, err := uuid.Parse(input.EvalRunID)
-		if err != nil {
-			return fmt.Errorf("parse eval run ID: %w", err)
-		}
-
-		run, err := stores.EvalRuns.GetByID(ctx, orgID, runID)
-		if err != nil {
-			return fmt.Errorf("fetch eval run: %w", err)
-		}
-
-		task, err := stores.EvalTasks.GetByID(ctx, orgID, run.TaskID)
-		if err != nil {
-			return fmt.Errorf("fetch eval task: %w", err)
-		}
-
-		logger.Info().
-			Str("eval_run_id", runID.String()).
-			Str("eval_task_id", task.ID.String()).
-			Str("model", run.Model).
-			Str("org_id", orgID.String()).
-			Msg("starting run_eval job")
-
-		// Mark run as running
-		if err := stores.EvalRuns.UpdateStatus(ctx, orgID, runID, models.EvalRunStatusRunning); err != nil {
-			return fmt.Errorf("update eval run status to running: %w", err)
-		}
-		// Wake any batch detail SSE subscribers so the matrix flips this
-		// run's tile to "running" without a polling round-trip. Batch
-		// itself stays "running"; we surface the parent batch's status
-		// rather than the run's so subscribers can ignore stale runs.
-		if run.BatchID != nil {
-			publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, models.EvalBatchStatusRunning, logger)
-		}
-
-		startTime := time.Now()
-
-		// Execute the eval. This is the core eval execution flow:
-		// 1. Create sandbox
-		// 2. Clone repo at base_commit_sha
-		// 3. Optionally overlay config from config_ref
-		// 4. Run the coding agent with the issue_description
-		// 5. Collect the agent's diff
-		// 6. Score using each criterion
-		// 7. Compute final weighted score
-		//
-		// For now, the orchestrator integration is wired up as a placeholder.
-		// The full implementation will use the sandbox and agent adapter infrastructure
-		// once the eval-specific orchestrator flow is built.
-
-		result := executeEvalRun(ctx, stores, services, &run, &task, logger)
-		duration := int(time.Since(startTime).Seconds())
-		result.DurationSeconds = &duration
-
-		if err := stores.EvalRuns.UpdateResult(ctx, orgID, runID, result); err != nil {
-			return fmt.Errorf("update eval run result: %w", err)
-		}
-
-		// If this run is part of a batch, atomically complete the batch if all runs are done
-		if run.BatchID != nil && stores.EvalBatches != nil {
-			if err := stores.EvalBatches.CompleteBatchIfDone(ctx, orgID, *run.BatchID); err != nil {
-				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to check/complete batch")
-			}
-			// Re-fetch so the published event carries the post-CompleteBatchIfDone
-			// status. CompleteBatchIfDone only flips the batch when all runs are
-			// terminal, so most signals here will still be `running` — that's
-			// fine: the event is a "something changed" wake, the client fetches
-			// the full detail to see which run completed.
-			//
-			// Concurrency note: Redis pub/sub is at-most-once and unordered.
-			// Two runs in the same batch finishing nearly simultaneously can
-			// publish their "running" / "completed" events out of order — A
-			// re-reads `running`, B then flips to `completed` and publishes,
-			// A's earlier `running` arrives last. Subscribers must NOT read
-			// the Status field from the event; the event is a wake signal
-			// and the canonical state lives in Postgres. The frontend
-			// invalidate-and-refetch pattern in batch/[id]/page.tsx is what
-			// makes this self-healing — every event triggers a fresh GET on
-			// /evals/batch/{id}, so the worst case is one extra round-trip
-			// before the UI converges.
-			batchStatus := models.EvalBatchStatusRunning
-			if batch, err := stores.EvalBatches.GetByID(ctx, orgID, *run.BatchID); err == nil {
-				batchStatus = batch.Status
-			} else {
-				logger.Warn().Err(err).Str("batch_id", run.BatchID.String()).Msg("failed to re-read batch after run completion; publishing with running status")
-			}
-			publishEvalBatchSignal(ctx, services, orgID, *run.BatchID, batchStatus, logger)
-		}
-
-		logger.Info().
-			Str("eval_run_id", runID.String()).
-			Str("status", string(result.Status)).
-			Msg("completed run_eval job")
-
-		return nil
-	}
-}
-
-// executeEvalRun performs the actual eval execution. Returns the result to store.
-// This is separated from the handler for testability and to keep the handler focused on job lifecycle.
-//
-// Flow:
-//  1. Resolve repository (clone URL + GitHub token)
-//  2. Create sandbox, clone repo at base_commit_sha
-//  3. Apply config overlay from run.ConfigRef if set
-//  4. Run the coding agent with the issue description
-//  5. Collect the agent's diff
-//  6. Grade each criterion (code_check or llm_judge)
-//  7. Compute weighted final score
-func executeEvalRun(ctx context.Context, stores *Stores, services *Services, run *models.EvalRun, task *models.EvalTask, logger zerolog.Logger) *models.EvalRunResult {
-	// Parse scoring criteria
-	var criteria []models.ScoringCriterion
-	if err := json.Unmarshal(task.ScoringCriteria, &criteria); err != nil {
-		return evalFailed("failed to parse scoring criteria: %v", err)
-	}
-
-	// 1. Resolve repository
-	if stores.Repositories == nil {
-		return evalFailed("repository store not configured")
-	}
-	repo, err := stores.Repositories.GetByID(ctx, task.OrgID, task.RepoID)
-	if err != nil {
-		return evalFailed("fetch repository: %v", err)
-	}
-
-	if services == nil || services.SandboxProvider == nil {
-		return evalFailed("sandbox provider not configured")
-	}
-	if services.GitHub == nil {
-		return evalFailed("github token provider not configured")
-	}
-
-	ghToken, err := services.GitHub.GetInstallationToken(ctx, repo.InstallationID)
-	if err != nil {
-		return evalFailed("get installation token: %v", err)
-	}
-
-	// 2. Create sandbox
-	sandboxCfg := agent.DefaultSandboxConfig()
-	sandboxCfg.Timeout = 10 * time.Minute // evals may take longer than default 5min
-	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
-	if err != nil {
-		return evalFailed("create sandbox: %v", err)
-	}
-	defer func() {
-		if destroyErr := services.SandboxProvider.Destroy(ctx, sb); destroyErr != nil {
-			logger.Warn().Err(destroyErr).Msg("failed to destroy eval sandbox")
-		}
-	}()
-
-	// Clone repo and checkout base commit
-	if err := services.SandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, ghToken); err != nil {
-		return evalFailed("clone repo: %v", err)
-	}
-
-	// Validate BaseCommitSHA as defense-in-depth (API layer also validates)
-	if !validGitSHA.MatchString(task.BaseCommitSHA) {
-		return evalFailed("invalid base commit SHA format: %s", task.BaseCommitSHA)
-	}
-
-	var stderr bytes.Buffer
-	exitCode, err := services.SandboxProvider.Exec(ctx, sb, fmt.Sprintf("git checkout %s", task.BaseCommitSHA), io.Discard, &stderr)
-	if err != nil || exitCode != 0 {
-		// Mark the task as snapshot_broken so the UI can surface it
-		if stores.EvalTasks != nil {
-			if markErr := stores.EvalTasks.MarkSnapshotBroken(ctx, task.OrgID, task.ID, true); markErr != nil {
-				logger.Warn().Err(markErr).Msg("failed to mark eval task as snapshot_broken")
-			}
-		}
-		return evalFailed("checkout base commit %s: exit=%d err=%v stderr=%s", task.BaseCommitSHA, exitCode, err, stderr.String())
-	}
-
-	// 3. Apply config overlay from run.ConfigRef if set
-	if run.ConfigRef != nil && *run.ConfigRef != "" {
-		applyConfigOverlay(ctx, services.SandboxProvider, sb, *run.ConfigRef, logger)
-	}
-
-	// 4. Run the coding agent
-	agentDiff, agentTrace, tokenUsage := runCodingAgent(ctx, services, sb, run.Model, task.IssueDescription, logger)
-
-	// 5. If agent produced no diff, collect it explicitly
-	if agentDiff == "" {
-		var diffBuf bytes.Buffer
-		_, _ = services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
-		agentDiff = diffBuf.String()
-	}
-
-	// 6. Grade each criterion
-	criterionResults := make([]models.CriterionResult, 0, len(criteria))
-	for _, c := range criteria {
-		var result models.CriterionResult
-		switch c.GraderType {
-		case models.GraderTypeCodeCheck:
-			result = gradeCodeCheck(ctx, services.SandboxProvider, sb, c, logger)
-		case models.GraderTypeLLMJudge:
-			result = gradeLLMJudge(ctx, services.LLM, c, agentDiff, task, logger)
-		default:
-			result = models.CriterionResult{
-				Name:    c.Name,
-				Score:   0,
-				Pass:    false,
-				Details: fmt.Sprintf("unknown grader type: %s", c.GraderType),
-			}
-		}
-		criterionResults = append(criterionResults, result)
-	}
-
-	// 7. Compute weighted final score
-	finalScore, passed := computeWeightedScore(criteria, criterionResults, task.PassThreshold)
-
-	// Build input manifest
-	manifest := buildEvalManifest(task, run)
-	manifestJSON, _ := json.Marshal(manifest)
-
-	criterionJSON, _ := json.Marshal(criterionResults)
-	traceJSON, _ := json.Marshal(agentTrace)
-	usageJSON, _ := json.Marshal(tokenUsage)
-	sandboxID := sb.ID
-
-	return &models.EvalRunResult{
-		Status:           models.EvalRunStatusCompleted,
-		AgentDiff:        &agentDiff,
-		AgentTrace:       traceJSON,
-		TokenUsage:       usageJSON,
-		CriterionResults: criterionJSON,
-		FinalScore:       &finalScore,
-		Passed:           &passed,
-		SandboxID:        &sandboxID,
-		InputManifest:    manifestJSON,
-	}
-}
-
-// evalFailed returns an EvalRunResult with failed status and a formatted error message.
-func evalFailed(format string, args ...any) *models.EvalRunResult {
-	errMsg := fmt.Sprintf(format, args...)
-	return &models.EvalRunResult{
-		Status:       models.EvalRunStatusFailed,
-		ErrorMessage: &errMsg,
-	}
-}
-
-// validGitSHA matches short and full hex SHA hashes.
-var validGitSHA = regexp.MustCompile(`^[0-9a-fA-F]{4,40}$`)
-
-// validConfigRef matches branch names, tags, and SHAs safe for shell use.
-var validConfigRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
-
-// applyConfigOverlay overlays repo config files from a branch/SHA onto the sandbox.
-// Config paths: AGENTS.md, CLAUDE.md, .claude/, .143/
-func applyConfigOverlay(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, configRef string, logger zerolog.Logger) {
-	// Validate configRef to prevent shell injection
-	if !validConfigRef.MatchString(configRef) {
-		logger.Warn().Str("config_ref", configRef).Msg("invalid config_ref, skipping overlay")
-		return
-	}
-
-	// Fetch the config ref first
-	var stderr bytes.Buffer
-	if _, err := provider.Exec(ctx, sb, fmt.Sprintf("git fetch origin %s", configRef), io.Discard, &stderr); err != nil {
-		logger.Debug().Err(err).Str("config_ref", configRef).Msg("git fetch for config overlay failed (non-fatal)")
-	}
-
-	// Overlay individual config files — failures are non-fatal (file may not exist on branch)
-	configFiles := []string{"AGENTS.md", "CLAUDE.md"}
-	for _, f := range configFiles {
-		cmd := fmt.Sprintf("git show %s:%s > %s 2>/dev/null || true", configRef, f, f)
-		if _, err := provider.Exec(ctx, sb, cmd, io.Discard, io.Discard); err != nil {
-			logger.Debug().Err(err).Str("config_file", f).Msg("config file overlay failed (non-fatal)")
-		}
-	}
-
-	// Overlay config directories
-	configDirs := []string{".claude", ".143"}
-	for _, d := range configDirs {
-		// Remove existing dir and recreate from config ref
-		cmd := fmt.Sprintf("rm -rf %s && git checkout %s -- %s 2>/dev/null || true", d, configRef, d)
-		if _, err := provider.Exec(ctx, sb, cmd, io.Discard, io.Discard); err != nil {
-			logger.Debug().Err(err).Str("config_dir", d).Msg("config dir overlay failed (non-fatal)")
-		}
-	}
-
-	logger.Debug().Str("config_ref", configRef).Msg("applied config overlay")
-}
-
-// validModelName matches alphanumeric model identifiers with dashes and dots (no shell metacharacters).
-var validModelName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-
-// runCodingAgent executes the coding agent CLI in the sandbox and returns the diff, trace, and token usage.
-func runCodingAgent(ctx context.Context, services *Services, sb *agent.Sandbox, model, issueDescription string, logger zerolog.Logger) (diff string, trace map[string]any, tokenUsage map[string]any) {
-	// Validate model name to prevent shell injection
-	if !validModelName.MatchString(model) {
-		return "", map[string]any{"error": "invalid model name"}, nil
-	}
-
-	// Write issue description to a temp file to avoid shell injection via interpolation
-	var writeStderr bytes.Buffer
-	writeCmd := fmt.Sprintf("cat > /tmp/issue_description.txt << 'ISSUE_EOF'\n%s\nISSUE_EOF", strings.ReplaceAll(issueDescription, "'", "'\\''"))
-	if _, writeErr := services.SandboxProvider.Exec(ctx, sb, writeCmd, io.Discard, &writeStderr); writeErr != nil {
-		return "", map[string]any{"error": fmt.Sprintf("write issue description: %v", writeErr)}, nil
-	}
-
-	// Run Claude Code CLI with --print flag, reading issue from file
-	cmd := fmt.Sprintf("claude --model %s --print \"$(cat /tmp/issue_description.txt)\" 2>&1", model)
-
-	var stdout, stderr bytes.Buffer
-	exitCode, err := services.SandboxProvider.Exec(ctx, sb, cmd, &stdout, &stderr)
-
-	trace = map[string]any{
-		"agent_stdout": truncateString(stdout.String(), 50000),
-		"agent_stderr": truncateString(stderr.String(), 10000),
-		"exit_code":    exitCode,
-	}
-	if err != nil {
-		trace["exec_error"] = err.Error()
-	}
-
-	logger.Info().
-		Int("exit_code", exitCode).
-		Int("stdout_len", stdout.Len()).
-		Msg("agent execution completed")
-
-	// Collect the diff produced by the agent
-	var diffBuf bytes.Buffer
-	_, _ = services.SandboxProvider.Exec(ctx, sb, "git diff HEAD", &diffBuf, io.Discard)
-
-	return diffBuf.String(), trace, nil
-}
-
-// gradeCodeCheck runs a code_check criterion command in the sandbox.
-// Exit code 0 = pass (score 1.0), non-zero = fail (score 0.0).
-// If stdout contains valid JSON with a "score" field, that numeric score is used instead.
-func gradeCodeCheck(ctx context.Context, provider agent.SandboxProvider, sb *agent.Sandbox, criterion models.ScoringCriterion, logger zerolog.Logger) models.CriterionResult {
-	var config models.CodeCheckConfig
-	if err := json.Unmarshal(criterion.GraderConfig, &config); err != nil {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: fmt.Sprintf("invalid code_check config: %v", err),
-		}
-	}
-	if config.Command == "" {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: "code_check config is missing required 'command' field",
-		}
-	}
-
-	timeout := time.Duration(config.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-
-	gradeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	var stdout, stderr bytes.Buffer
-	exitCode, execErr := provider.Exec(gradeCtx, sb, config.Command, &stdout, &stderr)
-
-	pass := exitCode == 0 && execErr == nil
-	score := 0.0
-	if pass {
-		score = 1.0
-	}
-
-	// Try to parse optional JSON score from stdout
-	var jsonResult struct {
-		Score *float64 `json:"score"`
-	}
-	if json.Unmarshal(stdout.Bytes(), &jsonResult) == nil && jsonResult.Score != nil {
-		score = *jsonResult.Score
-		pass = score >= 0.5
-	}
-
-	details := fmt.Sprintf("exit_code=%d\nstdout:\n%s\nstderr:\n%s",
-		exitCode, truncateString(stdout.String(), 5000), truncateString(stderr.String(), 5000))
-
-	if execErr != nil {
-		details += fmt.Sprintf("\nexec_error: %v", execErr)
-	}
-
-	logger.Debug().
-		Str("criterion", criterion.Name).
-		Int("exit_code", exitCode).
-		Float64("score", score).
-		Bool("pass", pass).
-		Msg("code_check graded")
-
-	return models.CriterionResult{
-		Name:    criterion.Name,
-		Score:   score,
-		Pass:    pass,
-		Details: details,
-	}
-}
-
-// gradeLLMJudge evaluates a criterion using an LLM judge.
-// The criterion's Notes field is the rubric. The judge returns pass/fail + reasoning.
-func gradeLLMJudge(ctx context.Context, llm llmClient, criterion models.ScoringCriterion, agentDiff string, task *models.EvalTask, logger zerolog.Logger) models.CriterionResult {
-	if llm == nil {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: "LLM client not configured — cannot run llm_judge grader",
-		}
-	}
-
-	var config models.LLMJudgeConfig
-	if err := json.Unmarshal(criterion.GraderConfig, &config); err != nil {
-		// Default config is fine — just use pass_fail output mode
-		config.Output = "pass_fail"
-	}
-	if config.Output == "" {
-		config.Output = "pass_fail"
-	}
-
-	systemPrompt := prompts.EvalJudgePrompt(prompts.EvalJudgePromptData{
-		OutputMode: config.Output,
-	})
-
-	var solutionDiff string
-	if task.SolutionDiff != nil {
-		solutionDiff = *task.SolutionDiff
-	}
-
-	userPrompt := prompts.EvalJudgeUserPrompt(prompts.EvalJudgeUserPromptData{
-		IssueDescription: task.IssueDescription,
-		AgentDiff:        agentDiff,
-		CriterionName:    criterion.Name,
-		CriterionNotes:   criterion.Notes,
-		SolutionDiff:     solutionDiff,
-	})
-
-	judgeCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
-	response, err := llm.Complete(judgeCtx, systemPrompt, userPrompt)
-	if err != nil {
-		return models.CriterionResult{
-			Name:    criterion.Name,
-			Score:   0,
-			Pass:    false,
-			Details: fmt.Sprintf("LLM judge call failed: %v", err),
-		}
-	}
-
-	// Parse structured response
-	var judgment struct {
-		Pass      bool    `json:"pass"`
-		Score     float64 `json:"score"`
-		Reasoning string  `json:"reasoning"`
-	}
-	if err := json.Unmarshal([]byte(response), &judgment); err != nil {
-		// Try to extract JSON from markdown-fenced response
-		cleaned := extractJSON(response)
-		if err2 := json.Unmarshal([]byte(cleaned), &judgment); err2 != nil {
-			return models.CriterionResult{
-				Name:      criterion.Name,
-				Score:     0,
-				Pass:      false,
-				Details:   fmt.Sprintf("failed to parse judge response: %v", err),
-				Reasoning: truncateString(response, 5000),
-			}
-		}
-	}
-
-	// For pass_fail mode, score is binary
-	if config.Output != "score" {
-		if judgment.Pass {
-			judgment.Score = 1.0
-		} else {
-			judgment.Score = 0.0
-		}
-	}
-
-	logger.Debug().
-		Str("criterion", criterion.Name).
-		Float64("score", judgment.Score).
-		Bool("pass", judgment.Pass).
-		Msg("llm_judge graded")
-
-	return models.CriterionResult{
-		Name:      criterion.Name,
-		Score:     judgment.Score,
-		Pass:      judgment.Pass,
-		Reasoning: judgment.Reasoning,
-	}
-}
-
-// computeWeightedScore calculates the final weighted score and pass/fail status.
-// If any required criterion fails, the eval fails regardless of score.
-func computeWeightedScore(criteria []models.ScoringCriterion, results []models.CriterionResult, passThreshold float64) (float64, bool) {
-	if len(results) == 0 {
-		return 0, false
-	}
-
-	// Build a lookup from criterion name to result
-	resultMap := make(map[string]models.CriterionResult, len(results))
-	for _, r := range results {
-		resultMap[r.Name] = r
-	}
-
-	// Check required criteria first
-	for _, c := range criteria {
-		if c.Required {
-			if r, ok := resultMap[c.Name]; ok && !r.Pass {
-				// Required criterion failed — compute score but force fail
-				score := weightedAverage(criteria, resultMap)
-				return score, false
-			}
-		}
-	}
-
-	score := weightedAverage(criteria, resultMap)
-	passed := score >= passThreshold
-	return score, passed
-}
-
-// weightedAverage computes a normalized weighted average score.
-func weightedAverage(criteria []models.ScoringCriterion, results map[string]models.CriterionResult) float64 {
-	var totalWeight, weightedSum float64
-	for _, c := range criteria {
-		w := c.Weight
-		if w <= 0 {
-			w = 1.0 // default weight
-		}
-		totalWeight += w
-		if r, ok := results[c.Name]; ok {
-			weightedSum += w * r.Score
-		}
-	}
-	if totalWeight == 0 {
-		return 0
-	}
-	return weightedSum / totalWeight
-}
-
-// buildEvalManifest constructs the input manifest for an eval run.
-func buildEvalManifest(task *models.EvalTask, run *models.EvalRun) *models.InputManifest {
-	manifest := &models.InputManifest{
-		ServerDeploySHA:   version.BuildSHA,
-		RepoBaseCommitSHA: task.BaseCommitSHA,
-		Model:             run.Model,
-	}
-	if task.PMDocumentSetPinID != nil {
-		manifest.PMDocumentSetPinID = task.PMDocumentSetPinID
-	}
-	if task.OrgSettingsVersionID != nil {
-		manifest.OrgSettingsVersionID = task.OrgSettingsVersionID
-	}
-	if task.SandboxImageDigest != nil {
-		manifest.SandboxImageDigest = *task.SandboxImageDigest
-	}
-	if task.MemorySnapshot != nil {
-		var memSnap models.MemorySnapshot
-		if json.Unmarshal(task.MemorySnapshot, &memSnap) == nil {
-			manifest.MemorySnapshot = &memSnap
-		}
-	}
-	return manifest
-}
-
-// extractJSON attempts to extract a JSON object from a string that may contain
-// markdown code fences or other wrapper text.
-func extractJSON(s string) string {
-	// Find the first { and last }
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start >= 0 && end > start {
-		return s[start : end+1]
-	}
-	return s
-}
-
-// truncateString shortens a string to maxLen characters.
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "...(truncated)"
-}
-
-// bootstrapLogWriter is a helper that writes session log entries for a bootstrap run.
-type bootstrapLogWriter struct {
-	store     *db.SessionLogStore
-	sessionID uuid.UUID
-	orgID     uuid.UUID
-}
-
-func (w *bootstrapLogWriter) log(ctx context.Context, level, message string) {
-	if w.store == nil || w.sessionID == uuid.Nil {
-		return
-	}
-	entry := &models.SessionLog{
-		SessionID:  w.sessionID,
-		OrgID:      w.orgID,
-		Level:      models.SessionLogLevel(level),
-		Message:    message,
-		TurnNumber: 0,
-	}
-	// Best-effort: don't fail the bootstrap if logging fails.
-	_ = w.store.Create(ctx, entry)
-}
-
-// run_eval_bootstrap handler scans PR history to discover eval task candidates.
-func newRunEvalBootstrapHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		var input struct {
-			BootstrapRunID string `json:"bootstrap_run_id"`
-			OrgID          string `json:"org_id"`
-			RepoID         string `json:"repo_id"`
-		}
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return fmt.Errorf("unmarshal bootstrap payload: %w", err)
-		}
-
-		orgID, err := parseOrgID(input.OrgID, ctx)
-		if err != nil {
-			return fmt.Errorf("parse org ID: %w", err)
-		}
-		bootstrapRunID, err := uuid.Parse(input.BootstrapRunID)
-		if err != nil {
-			return fmt.Errorf("parse bootstrap run ID: %w", err)
-		}
-		repoID, err := uuid.Parse(input.RepoID)
-		if err != nil {
-			return fmt.Errorf("parse repo ID: %w", err)
-		}
-
-		logger.Info().
-			Str("bootstrap_run_id", bootstrapRunID.String()).
-			Str("repo_id", repoID.String()).
-			Msg("starting eval bootstrap scan")
-
-		// Create a lightweight session to store bootstrap logs.
-		title := "Bootstrap: scanning PR history"
-		session := &models.Session{
-			OrgID:         orgID,
-			AgentType:     models.AgentTypeClaudeCode,
-			Status:        models.SessionStatusRunning,
-			AutonomyLevel: models.SessionAutonomyFull,
-			TokenMode:     models.SessionTokenModeLow,
-			Title:         &title,
-			RepositoryID:  &repoID,
-		}
-		if err := stores.Sessions.Create(ctx, session); err != nil {
-			logger.Warn().Err(err).Msg("failed to create bootstrap session for logging, continuing without logs")
-		}
-
-		// Mark as running and link the session.
-		var sessionIDPtr *uuid.UUID
-		if session.ID != uuid.Nil {
-			sessionIDPtr = &session.ID
-		}
-		if err := stores.EvalBootstraps.UpdateStatus(ctx, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr); err != nil {
-			return fmt.Errorf("update bootstrap status to running: %w", err)
-		}
-		publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusRunning, sessionIDPtr, logger)
-
-		logWriter := &bootstrapLogWriter{
-			store:     stores.SessionLogs,
-			sessionID: session.ID,
-			orgID:     orgID,
-		}
-
-		candidates, scanErr := executeBootstrapScan(ctx, stores, services, orgID, repoID, logWriter, logger)
-
-		if scanErr != nil {
-			errMsg := scanErr.Error()
-			logWriter.log(ctx, "error", fmt.Sprintf("Bootstrap scan failed: %s", errMsg))
-			if session.ID != uuid.Nil {
-				_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusFailed)
-			}
-			if updateErr := stores.EvalBootstraps.UpdateResult(ctx, orgID, bootstrapRunID,
-				models.EvalBootstrapStatusFailed, nil, &errMsg); updateErr != nil {
-				logger.Warn().Err(updateErr).Msg("failed to update bootstrap run with error")
-			}
-			publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusFailed, sessionIDPtr, logger)
-			return fmt.Errorf("bootstrap scan failed: %w", scanErr)
-		}
-
-		candidatesJSON, _ := json.Marshal(candidates)
-		if err := stores.EvalBootstraps.UpdateResult(ctx, orgID, bootstrapRunID,
-			models.EvalBootstrapStatusCompleted, candidatesJSON, nil); err != nil {
-			return fmt.Errorf("update bootstrap result: %w", err)
-		}
-		publishEvalBootstrapSignal(ctx, services, orgID, bootstrapRunID, models.EvalBootstrapStatusCompleted, sessionIDPtr, logger)
-
-		logWriter.log(ctx, "info", fmt.Sprintf("Bootstrap scan completed successfully. Found %d candidates.", len(candidates)))
-		if session.ID != uuid.Nil {
-			_ = stores.Sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusCompleted)
-		}
-
-		logger.Info().
-			Int("candidates", len(candidates)).
-			Msg("eval bootstrap scan completed")
-
-		return nil
-	}
-}
-
-// executeBootstrapScan runs the PR history scan using an agent in a sandbox.
-func executeBootstrapScan(ctx context.Context, stores *Stores, services *Services, orgID, repoID uuid.UUID, logWriter *bootstrapLogWriter, logger zerolog.Logger) ([]models.EvalBootstrapCandidate, error) {
-	if stores.Repositories == nil {
-		return nil, fmt.Errorf("repository store not configured")
-	}
-	logWriter.log(ctx, "info", "Fetching repository details...")
-	repo, err := stores.Repositories.GetByID(ctx, orgID, repoID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch repository: %w", err)
-	}
-	logWriter.log(ctx, "info", fmt.Sprintf("Repository: %s", repo.FullName))
-
-	if services.GitHub == nil {
-		return nil, fmt.Errorf("github token provider not configured")
-	}
-	logWriter.log(ctx, "info", "Obtaining GitHub access token...")
-	ghToken, err := services.GitHub.GetInstallationToken(ctx, repo.InstallationID)
-	if err != nil {
-		return nil, fmt.Errorf("get installation token: %w", err)
-	}
-
-	// Create sandbox with longer timeout for bootstrap
-	logWriter.log(ctx, "info", "Creating sandbox environment...")
-	sandboxCfg := agent.DefaultSandboxConfig()
-	sandboxCfg.Timeout = 15 * time.Minute
-	sb, err := services.SandboxProvider.Create(ctx, sandboxCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create sandbox: %w", err)
-	}
-	defer func() {
-		if destroyErr := services.SandboxProvider.Destroy(ctx, sb); destroyErr != nil {
-			logger.Warn().Err(destroyErr).Msg("failed to destroy bootstrap sandbox")
-		}
-	}()
-
-	// Clone repo at HEAD (need full history for git log analysis)
-	logWriter.log(ctx, "info", fmt.Sprintf("Cloning repository %s (full history for git log analysis)...", repo.FullName))
-	if err := services.SandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, repo.DefaultBranch, ghToken); err != nil {
-		return nil, fmt.Errorf("clone repo: %w", err)
-	}
-	logWriter.log(ctx, "info", "Repository cloned successfully.")
-
-	// Run the bootstrap agent using Claude Code CLI
-	logWriter.log(ctx, "info", "Starting bootstrap analysis — scanning merged PRs for eval candidates...")
-	bootstrapPrompt := prompts.EvalBootstrapPrompt(prompts.EvalBootstrapPromptData{
-		RepoFullName: repo.FullName,
-	})
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd := bootstrapAgentCommand(bootstrapPrompt)
-	exitCode, execErr := services.SandboxProvider.ExecStream(ctx, sb, cmd, func(line []byte) {
-		trimmed := strings.TrimSpace(string(line))
-		if trimmed == "" {
-			return
-		}
-		// Write each output line as a log entry so the user can follow along.
-		logWriter.log(ctx, "assistant", trimmed)
-		// Also accumulate the full output for JSON parsing.
-		stdout.Write(line)
-		stdout.WriteByte('\n')
-	}, &stderr)
-	if execErr != nil {
-		return nil, fmt.Errorf("execute bootstrap agent: %w", execErr)
-	}
-	if exitCode != 0 {
-		return nil, fmt.Errorf("bootstrap agent failed with exit code %d, stderr: %s", exitCode, truncateString(stderr.String(), 1000))
-	}
-
-	logger.Info().
-		Int("exit_code", exitCode).
-		Int("stdout_len", stdout.Len()).
-		Msg("bootstrap agent execution completed")
-
-	logWriter.log(ctx, "info", "Analysis complete. Parsing candidates...")
-
-	// Parse the agent's structured output
-	var candidates []models.EvalBootstrapCandidate
-	output := stdout.String()
-
-	// Try to extract JSON array from agent output
-	jsonStr := extractJSON(output)
-	// Try array first
-	if err := json.Unmarshal([]byte(jsonStr), &candidates); err != nil {
-		// Try to find a JSON array within the output
-		start := strings.Index(output, "[")
-		end := strings.LastIndex(output, "]")
-		if start >= 0 && end > start {
-			if err2 := json.Unmarshal([]byte(output[start:end+1]), &candidates); err2 != nil {
-				return nil, fmt.Errorf("failed to parse bootstrap output as candidate array: %w (raw output: %s)", err2, truncateString(output, 1000))
-			}
-		} else {
-			return nil, fmt.Errorf("no JSON array found in bootstrap output: %s", truncateString(output, 1000))
-		}
-	}
-
-	return candidates, nil
-}
-
-// shellSingleQuote wraps s in single quotes so the shell treats it as a
-// literal. Embedded single quotes are closed, escaped, and reopened
-// ('\”). This is safe for strings containing backticks, $, backslashes,
-// or other shell metacharacters.
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// bootstrapAgentCommand builds the sh command that runs Claude Code with
-// the bootstrap prompt. The prompt is single-quoted so the triple-backtick
-// JSON fence in the template is not interpreted as command substitution.
-func bootstrapAgentCommand(prompt string) string {
-	return fmt.Sprintf("claude --print %s 2>&1", shellSingleQuote(prompt))
 }
 
 // prepare_linear_primary handler resolves the primary Linear issue for a
@@ -7137,4 +10321,120 @@ func newRefreshLinearTeamKeysHandler(svc *linear.Service, logger zerolog.Logger)
 		svc.ClearIntegrationUnauthorized(ctx, orgID)
 		return nil
 	}
+}
+
+type syncGitHubOrgRosterPayload struct {
+	OrgID          string `json:"org_id"`
+	InstallationID int64  `json:"installation_id"`
+	AccountLogin   string `json:"account_login"`
+}
+
+func newSyncGitHubOrgRosterHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var p syncGitHubOrgRosterPayload
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return fmt.Errorf("unmarshal sync_github_org_roster payload: %w", err)
+		}
+		orgID, err := uuid.Parse(p.OrgID)
+		if err != nil {
+			return fmt.Errorf("parse sync_github_org_roster org_id: %w", err)
+		}
+		if p.InstallationID <= 0 {
+			return fmt.Errorf("sync_github_org_roster installation_id is required")
+		}
+		if strings.TrimSpace(p.AccountLogin) == "" {
+			links, err := stores.GitHubInstallations.ListEnabledAutoJoinLinksByInstallation(ctx, p.InstallationID)
+			if err != nil {
+				return &RetryableError{Err: fmt.Errorf("load github org auto-join link: %w", err)}
+			}
+			if len(links) == 0 {
+				logger.Info().Int64("installation_id", p.InstallationID).Msg("github org roster sync skipped; auto-join no longer enabled")
+				return nil
+			}
+			p.AccountLogin = links[0].AccountLogin
+			orgID = links[0].OrgID
+		}
+		members, err := services.GitHubOrgRoster.ListOrgMembers(ctx, p.InstallationID, p.AccountLogin)
+		if err != nil {
+			if httpStatus(err) == http.StatusForbidden {
+				return disableGitHubOrgAutoJoinAfterPermissionLoss(ctx, stores, logger, orgID, p.InstallationID, p.AccountLogin)
+			}
+			return &RetryableError{Err: fmt.Errorf("list github org members: %w", err)}
+		}
+		rows := make([]models.GitHubOrgMember, 0, len(members))
+		for _, member := range members {
+			rows = append(rows, models.GitHubOrgMember{
+				InstallationID: p.InstallationID,
+				GitHubUserID:   member.ID,
+				GitHubLogin:    member.Login,
+			})
+		}
+		if err := stores.GitHubInstallations.ReplaceRosterForInstallation(ctx, p.InstallationID, rows); err != nil {
+			return &RetryableError{Err: fmt.Errorf("replace github org roster: %w", err)}
+		}
+		logger.Info().
+			Str("job_type", jobType).
+			Str("org_id", orgID.String()).
+			Int64("installation_id", p.InstallationID).
+			Int("member_count", len(rows)).
+			Msg("github org roster synced")
+		return nil
+	}
+}
+
+type httpStatusError interface {
+	HTTPStatus() int
+}
+
+func httpStatus(err error) int {
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.HTTPStatus()
+	}
+	return 0
+}
+
+func disableGitHubOrgAutoJoinAfterPermissionLoss(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, installationID int64, accountLogin string) error {
+	link, err := stores.GitHubInstallations.DisableOrgLinkAutoJoin(ctx, orgID, installationID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Link already disabled (e.g. a previous attempt succeeded up to this
+			// point). Still clear the roster — if the previous attempt failed after
+			// the disable but before the clear, this retry must finish the job.
+			if clearErr := stores.GitHubInstallations.ClearRosterForInstallation(ctx, installationID); clearErr != nil {
+				return &RetryableError{Err: fmt.Errorf("clear github org roster after permission loss (retry): %w", clearErr)}
+			}
+			return nil
+		}
+		return &RetryableError{Err: fmt.Errorf("disable github org auto-join: %w", err)}
+	}
+	if err := stores.GitHubInstallations.ClearRosterForInstallation(ctx, installationID); err != nil {
+		return &RetryableError{Err: fmt.Errorf("clear github org roster after permission loss: %w", err)}
+	}
+	if accountLogin == "" {
+		accountLogin = link.AccountLogin
+	}
+	if stores.AuditLogs != nil {
+		audit := db.NewAuditEmitter(stores.AuditLogs, logger)
+		resourceID := fmt.Sprintf("%d", installationID)
+		details, _ := json.Marshal(map[string]any{
+			"account_login":   accountLogin,
+			"installation_id": installationID,
+			"reason":          "members_permission_revoked",
+		})
+		audit.EmitSystemAction(ctx, db.SystemActionParams{
+			OrgID:        orgID,
+			ActorID:      "github_org_auto_join",
+			Action:       models.AuditActionTeamGitHubOrgAutoJoinDisabled,
+			ResourceType: models.AuditResourceIntegration,
+			ResourceID:   &resourceID,
+			Details:      details,
+		})
+	}
+	logger.Warn().
+		Str("org_id", orgID.String()).
+		Int64("installation_id", installationID).
+		Str("account_login", accountLogin).
+		Msg("disabled github org auto-join after GitHub returned 403 for roster sync")
+	return nil
 }

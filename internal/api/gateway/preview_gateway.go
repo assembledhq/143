@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -35,18 +36,64 @@ import (
 // sessionCacheEntry caches access session validation results to avoid
 // hitting the database on every proxied request (including static assets).
 type sessionCacheEntry struct {
-	validUntil time.Time // when this cache entry expires
-	revokedAt  *time.Time
-	expiresAt  time.Time
+	validUntil        time.Time // when this cache entry expires
+	orgID             uuid.UUID
+	hostID            uuid.UUID
+	previewInstanceID uuid.UUID
+	revokedAt         *time.Time
+	expiresAt         time.Time
 }
 
 // sessionCache is a simple TTL cache for access session lookups.
 const sessionCacheTTL = 10 * time.Second
 
+// accessSessionTTL is the sliding lifetime of a preview access session. Each
+// extension pushes expires_at this far out. The initial (bootstrap-token)
+// expiry minted by the manager is intentionally shorter; the first proxied
+// request after exchange extends it to the full sliding window.
+const accessSessionTTL = 30 * time.Minute
+
 // expiryExtendThreshold controls how often we extend the DB session expiry.
 // We only extend when the remaining time is below this threshold, avoiding
 // a DB write on every single request.
-const expiryExtendThreshold = 2 * time.Minute
+const expiryExtendThreshold = 10 * time.Minute
+
+// runtimeCacheEntry caches the active preview runtime so an asset burst does
+// not issue a DB query per proxied request. Entries are evicted on upstream
+// proxy errors and runtime mismatches so a recycled preview re-resolves
+// promptly.
+type runtimeCacheEntry struct {
+	validUntil time.Time
+	runtime    *models.PreviewRuntime
+}
+
+// runtimeCacheTTL bounds how long a cached runtime is trusted. Kept short so
+// a recycle (new runtime epoch) is picked up within one TTL even if no
+// eviction signal fires.
+const runtimeCacheTTL = 5 * time.Second
+
+// accessRecordInterval throttles preview last-access writes. Idle-timeout
+// tracking only needs coarse granularity; without the throttle every proxied
+// asset request issued an UPDATE on preview_instances.
+const accessRecordInterval = 15 * time.Second
+
+// previewProxyTokenTTL bounds the lifetime of the bearer token the gateway
+// mints for each proxied worker request. A fresh token is minted on every
+// request, so it only needs to outlive a single in-flight request — but we size
+// it to comfortably span an interactive preview's working window so that
+// long-lived connections (WebSocket/HMR, SSE) authorized once at handshake time
+// never trip on an expired token, even on a slow or busy worker.
+//
+// We deliberately keep it bounded rather than effectively infinite (e.g.
+// weeks): the token is a static, unrevocable bearer whose only early
+// invalidation is a runtime epoch bump on recycle, so a finite TTL caps the
+// replay window if a token ever leaks (logs, worker memory, a compromised hop).
+// 60 minutes is far longer than any single request or handshake yet still a
+// tight blast radius. Previously this was 30s, which let a slow worker response
+// outlive the token: the worker then rejected the in-flight request as "invalid
+// preview token", and the gateway mistook that auth failure for an unreachable
+// endpoint and tore down a perfectly healthy preview.
+const previewProxyTokenTTL = 60 * time.Minute
 
 // Gateway serves the preview origin (e.g., <preview-id>.preview.143.dev).
 // It validates preview access, proxies HTTP and WebSocket traffic, and
@@ -59,13 +106,27 @@ type Gateway struct {
 	logger       zerolog.Logger
 	appOrigin    string
 	cookieSecret []byte
-	tokenSecret  string
+	tokenKeyring auth.PreviewTokenKeyring
 	secureCookie bool   // true when preview origin uses https
 	cspHeader    string // pre-computed CSP header value
 
 	// sessionCache avoids a DB round-trip on every proxied request.
 	sessionCacheMu sync.RWMutex
 	sessionCache   map[uuid.UUID]*sessionCacheEntry
+
+	// runtimeCache avoids resolving the active runtime per proxied request.
+	runtimeCacheMu sync.RWMutex
+	runtimeCache   map[uuid.UUID]*runtimeCacheEntry
+
+	// accessRecordedAt throttles last-access writes per preview.
+	accessRecordMu   sync.Mutex
+	accessRecordedAt map[uuid.UUID]time.Time
+
+	// proxyTransport is shared across proxied requests so upstream worker
+	// connections are kept alive and reused. http.DefaultTransport caps idle
+	// connections at 2 per host, which serializes the ~80-request asset burst
+	// of a dev-server page load.
+	proxyTransport http.RoundTripper
 }
 
 // GatewayConfig holds initialization options.
@@ -78,6 +139,7 @@ type GatewayConfig struct {
 	AppOrigin             string // e.g. "https://app.143.dev"
 	CookieSecret          []byte // HMAC key for signing preview session cookies
 	PreviewTokenSecret    string
+	PreviewTokenKeyring   auth.PreviewTokenKeyring
 	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
 }
 
@@ -108,19 +170,98 @@ func (g *Gateway) putCachedSession(id uuid.UUID, entry *sessionCacheEntry) {
 	g.sessionCache[id] = entry
 }
 
+func (g *Gateway) getCachedSession(id, orgID, hostID uuid.UUID, now time.Time) (*sessionCacheEntry, bool) {
+	g.sessionCacheMu.RLock()
+	entry, ok := g.sessionCache[id]
+	g.sessionCacheMu.RUnlock()
+	if !ok || entry == nil {
+		return nil, false
+	}
+	if entry.orgID != orgID || entry.hostID != hostID || now.After(entry.validUntil) {
+		if now.After(entry.validUntil) {
+			g.evictCachedSession(id)
+		}
+		return nil, false
+	}
+	return entry, true
+}
+
+// cachedActiveRuntime resolves the active runtime for a preview through a
+// short TTL cache. The previewID alone is a safe cache key: it is bound to
+// the org by the HMAC-verified session cookie before this is called.
+func (g *Gateway) cachedActiveRuntime(ctx context.Context, orgID, previewID uuid.UUID) (*models.PreviewRuntime, error) {
+	now := time.Now()
+	g.runtimeCacheMu.RLock()
+	entry, ok := g.runtimeCache[previewID]
+	g.runtimeCacheMu.RUnlock()
+	if ok && now.Before(entry.validUntil) {
+		return entry.runtime, nil
+	}
+	runtime, err := g.store.GetActivePreviewRuntime(ctx, orgID, previewID)
+	if err != nil {
+		return nil, err
+	}
+	g.runtimeCacheMu.Lock()
+	if len(g.runtimeCache) > 4096 {
+		// Safety valve against unbounded growth across many short-lived
+		// previews; entries repopulate on the next request.
+		g.runtimeCache = make(map[uuid.UUID]*runtimeCacheEntry)
+	}
+	g.runtimeCache[previewID] = &runtimeCacheEntry{validUntil: now.Add(runtimeCacheTTL), runtime: runtime}
+	g.runtimeCacheMu.Unlock()
+	return runtime, nil
+}
+
+// evictCachedRuntime drops a cached runtime so the next request re-resolves.
+func (g *Gateway) evictCachedRuntime(previewID uuid.UUID) {
+	g.runtimeCacheMu.Lock()
+	defer g.runtimeCacheMu.Unlock()
+	delete(g.runtimeCache, previewID)
+}
+
+// recordAccessThrottled records preview activity for idle-timeout tracking at
+// most once per accessRecordInterval per preview.
+func (g *Gateway) recordAccessThrottled(ctx context.Context, orgID, previewID uuid.UUID) {
+	now := time.Now()
+	g.accessRecordMu.Lock()
+	last, ok := g.accessRecordedAt[previewID]
+	if ok && now.Sub(last) < accessRecordInterval {
+		g.accessRecordMu.Unlock()
+		return
+	}
+	if len(g.accessRecordedAt) > 4096 {
+		g.accessRecordedAt = make(map[uuid.UUID]time.Time)
+	}
+	g.accessRecordedAt[previewID] = now
+	g.accessRecordMu.Unlock()
+
+	if err := g.manager.RecordAccess(ctx, orgID, previewID); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to record access")
+	}
+}
+
 // NewGateway creates a new preview gateway.
 func NewGateway(cfg GatewayConfig) *Gateway {
+	tokenKeyring := cfg.PreviewTokenKeyring
+	if !tokenKeyring.Configured() && cfg.PreviewTokenSecret != "" {
+		if fallback, err := auth.NewPreviewTokenKeyring([]string{cfg.PreviewTokenSecret}); err == nil {
+			tokenKeyring = fallback
+		}
+	}
 	return &Gateway{
-		store:        cfg.Store,
-		manager:      cfg.Manager,
-		workerSelect: cfg.WorkerSelector,
-		hmrWatcher:   cfg.HMRWatcher,
-		logger:       cfg.Logger,
-		appOrigin:    cfg.AppOrigin,
-		cookieSecret: cfg.CookieSecret,
-		tokenSecret:  cfg.PreviewTokenSecret,
-		secureCookie: strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
-		sessionCache: make(map[uuid.UUID]*sessionCacheEntry),
+		store:            cfg.Store,
+		manager:          cfg.Manager,
+		workerSelect:     cfg.WorkerSelector,
+		hmrWatcher:       cfg.HMRWatcher,
+		logger:           cfg.Logger,
+		appOrigin:        cfg.AppOrigin,
+		cookieSecret:     cfg.CookieSecret,
+		tokenKeyring:     tokenKeyring,
+		secureCookie:     strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
+		sessionCache:     make(map[uuid.UUID]*sessionCacheEntry),
+		runtimeCache:     make(map[uuid.UUID]*runtimeCacheEntry),
+		accessRecordedAt: make(map[uuid.UUID]time.Time),
+		proxyTransport:   newGatewayProxyTransport(),
 		cspHeader: strings.Join([]string{
 			"default-src 'self' blob: data:",
 			"script-src 'self' 'unsafe-inline' 'unsafe-eval'",
@@ -132,14 +273,29 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 			"object-src 'none'",
 			"base-uri 'none'",
 			"frame-ancestors " + cfg.AppOrigin,
-			"worker-src 'none'",
+			"worker-src 'self' blob:",
 		}, "; "),
 	}
+}
+
+// newGatewayProxyTransport builds the shared upstream transport for worker
+// proxying with a per-host idle pool sized for dev-server asset bursts.
+func newGatewayProxyTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 128
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
 }
 
 // ServeHTTP implements http.Handler. Each request is routed based on the Host
 // header (preview ID) and the request path.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if isGatewayHealthzRequest(r) && !isPreviewHost(r.Host) {
+		g.serveHealthz(w, r)
+		return
+	}
+
 	previewID, err := extractPreviewID(r.Host)
 	if err != nil {
 		http.Error(w, "invalid preview hostname", http.StatusBadRequest)
@@ -151,8 +307,40 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveBootstrapPage(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/bootstrap/exchange":
 		g.handleBootstrapExchange(w, r, previewID)
+	case r.Method == http.MethodGet && r.URL.Path == previewControlStatusPath:
+		g.servePreviewControlStatus(w, r, previewID)
 	default:
 		g.handleProxy(w, r, previewID)
+	}
+}
+
+func isGatewayHealthzRequest(r *http.Request) bool {
+	return r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+}
+
+func isPreviewHost(host string) bool {
+	normalized := hostWithoutPort(host)
+	if _, err := extractPreviewID(normalized); err == nil {
+		return true
+	}
+	return strings.Contains(normalized, ".preview.")
+}
+
+func hostWithoutPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func (g *Gateway) serveHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := io.WriteString(w, `{"status":"ok"}`); err != nil {
+		g.logger.Warn().Err(err).Msg("failed to write preview gateway health response")
 	}
 }
 
@@ -160,9 +348,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // component of the Host header (e.g., "abc123.preview.143.dev" → abc123).
 func extractPreviewID(host string) (uuid.UUID, error) {
 	// Strip port if present.
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host = hostWithoutPort(host)
 	parts := strings.SplitN(host, ".", 2)
 	if len(parts) == 0 {
 		return uuid.UUID{}, fmt.Errorf("no subdomain in host %q", host)
@@ -297,6 +483,10 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// Read and validate the session cookie.
 	cookie, err := r.Cookie(g.cookieName())
 	if err != nil {
+		if !isNavigationRequest(r) {
+			writePreviewSessionExpired(w)
+			return
+		}
 		g.servePreviewControlOverlay(w, r, previewID)
 		return
 	}
@@ -314,62 +504,53 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 		return
 	}
 
-	// Re-check the access session in the database before honoring the cookie.
-	// The local cache is only a short-lived mirror of the latest DB state; we
-	// do not trust it across requests for revocation decisions.
 	now := time.Now()
-	sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
-	if err != nil {
-		g.evictCachedSession(accessSessionID)
-		http.Error(w, "preview session not found", http.StatusUnauthorized)
-		return
+	cached, ok := g.getCachedSession(accessSessionID, orgID, previewID, now)
+	if !ok {
+		sess, err := g.store.GetAccessSessionByID(r.Context(), orgID, accessSessionID)
+		if err != nil {
+			g.evictCachedSession(accessSessionID)
+			http.Error(w, "preview session not found", http.StatusUnauthorized)
+			return
+		}
+		cached = &sessionCacheEntry{
+			validUntil:        now.Add(sessionCacheTTL),
+			orgID:             orgID,
+			hostID:            previewID,
+			previewInstanceID: sess.PreviewInstanceID,
+			revokedAt:         sess.RevokedAt,
+			expiresAt:         sess.ExpiresAt,
+		}
+		g.putCachedSession(accessSessionID, cached)
 	}
-	cached := &sessionCacheEntry{
-		validUntil: now.Add(sessionCacheTTL),
-		revokedAt:  sess.RevokedAt,
-		expiresAt:  sess.ExpiresAt,
-	}
-	g.putCachedSession(accessSessionID, cached)
 
 	if cached.revokedAt != nil {
 		g.evictCachedSession(accessSessionID)
-		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-			return
-		}
-		http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
 	if now.After(cached.expiresAt) {
 		g.evictCachedSession(accessSessionID)
-		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-			return
-		}
-		http.Error(w, "preview session has expired", http.StatusUnauthorized)
+		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
-	runtimePreviewID := sess.PreviewInstanceID
-	if runtimePreviewID != previewID && !g.accessSessionMatchesTargetHost(r, sess, previewID) {
+	runtimePreviewID := cached.previewInstanceID
+	if runtimePreviewID != previewID && !g.accessSessionMatchesTargetHostIDs(r, orgID, runtimePreviewID, previewID) {
 		g.evictCachedSession(accessSessionID)
-		if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-			return
-		}
-		http.Error(w, "preview session no longer matches this preview", http.StatusForbidden)
+		g.serveStaleSessionOverlay(w, r, previewID)
 		return
 	}
 
 	// Only extend the DB session expiry when close to expiration, avoiding
 	// a DB write on every single request.
 	if time.Until(cached.expiresAt) < expiryExtendThreshold {
-		newExpiry := now.Add(5 * time.Minute)
+		newExpiry := now.Add(accessSessionTTL)
 		if err := g.store.ExtendAccessSessionExpiry(r.Context(), orgID, accessSessionID, newExpiry); err != nil {
 			if errors.Is(err, db.ErrSessionRevoked) {
 				// Session was revoked between cache fill and extend — evict
-				// the stale cache entry and deny access immediately.
+				// the stale cache entry and stop honoring it immediately.
 				g.evictCachedSession(accessSessionID)
-				if g.handleStaleTargetSession(w, r, previewID, sess, accessSessionID) {
-					return
-				}
-				http.Error(w, "preview session has been revoked", http.StatusUnauthorized)
+				g.serveStaleSessionOverlay(w, r, previewID)
 				return
 			}
 			g.logger.Warn().Err(err).Str("access_session_id", accessSessionID.String()).Msg("failed to extend access session expiry")
@@ -378,9 +559,12 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 			http.SetCookie(w, previewSessionCookie(refreshedCookie, newExpiry, g.secureCookie))
 			// Update the cache with the new expiry.
 			g.putCachedSession(accessSessionID, &sessionCacheEntry{
-				validUntil: now.Add(sessionCacheTTL),
-				revokedAt:  cached.revokedAt,
-				expiresAt:  newExpiry,
+				validUntil:        now.Add(sessionCacheTTL),
+				orgID:             orgID,
+				hostID:            previewID,
+				previewInstanceID: runtimePreviewID,
+				revokedAt:         cached.revokedAt,
+				expiresAt:         newExpiry,
 			})
 		}
 	}
@@ -389,17 +573,13 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	// URL does not overwrite last_path (which is used for navigation restore).
 	if r.URL.Path == previewHeartbeatPath {
 		// Still record access for idle timeout tracking.
-		if err := g.manager.RecordAccess(r.Context(), orgID, runtimePreviewID); err != nil {
-			g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record access")
-		}
+		g.recordAccessThrottled(r.Context(), orgID, runtimePreviewID)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	// Record activity for idle timeout tracking.
-	if err := g.manager.RecordAccess(r.Context(), orgID, runtimePreviewID); err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record access")
-	}
+	g.recordAccessThrottled(r.Context(), orgID, runtimePreviewID)
 	if shouldRecordPreviewLastPath(r) {
 		if err := g.manager.RecordLastPath(r.Context(), orgID, runtimePreviewID, r.URL.Path); err != nil {
 			g.logger.Warn().Err(err).Str("preview_id", runtimePreviewID.String()).Msg("failed to record last path")
@@ -409,14 +589,50 @@ func (g *Gateway) handleProxy(w http.ResponseWriter, r *http.Request, previewID 
 	g.proxyToWorker(w, r, orgID, runtimePreviewID)
 }
 
-func (g *Gateway) handleStaleTargetSession(w http.ResponseWriter, r *http.Request, previewID uuid.UUID, sess *models.PreviewAccessSession, accessSessionID uuid.UUID) bool {
-	if sess == nil || sess.PreviewInstanceID == previewID {
+// serveStaleSessionOverlay handles a cookie whose signature verified but whose
+// access session is no longer honorable (expired, revoked, or pointing at a
+// stale instance): clear the cookie and fall back to the control overlay so
+// the visitor can relaunch or restart the preview instead of seeing a raw
+// auth error.
+func (g *Gateway) serveStaleSessionOverlay(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
+	g.clearPreviewSessionCookie(w)
+	if !isNavigationRequest(r) {
+		// Fetch/XHR and asset loads can neither render the overlay nor follow
+		// a cross-origin redirect to it; HTML-instead-of-JSON silently wedges
+		// SPAs. Fail loudly so the app (or its error handling) reloads.
+		writePreviewSessionExpired(w)
+		return
+	}
+	g.servePreviewControlOverlay(w, r, previewID)
+}
+
+// isNavigationRequest reports whether a request is a browser navigation
+// (top-level document or frame) that can meaningfully receive the HTML
+// control overlay or follow a redirect to the launcher.
+func isNavigationRequest(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Dest") {
+	case "document", "iframe", "frame":
+		return true
+	case "":
+		// Non-browser clients and very old browsers: sniff the Accept header.
+		return acceptsHTMLDocument(r.Header.Get("Accept"))
+	default:
 		return false
 	}
-	g.evictCachedSession(accessSessionID)
-	g.clearPreviewSessionCookie(w)
-	g.servePreviewControlOverlay(w, r, previewID)
-	return true
+}
+
+// writePreviewSessionExpired responds with a JSON 401 for non-navigation
+// requests whose preview access session is missing or no longer honorable.
+func writePreviewSessionExpired(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(models.ErrorResponse{
+		Error: models.ErrorDetail{
+			Code:    "PREVIEW_SESSION_EXPIRED",
+			Message: "preview session is no longer valid; reload the page to reconnect",
+		},
+	})
 }
 
 func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {
@@ -432,14 +648,14 @@ func (g *Gateway) clearPreviewSessionCookie(w http.ResponseWriter) {
 	})
 }
 
-func (g *Gateway) accessSessionMatchesTargetHost(r *http.Request, sess *models.PreviewAccessSession, hostID uuid.UUID) bool {
+func (g *Gateway) accessSessionMatchesTargetHostIDs(r *http.Request, orgID, runtimePreviewID, hostID uuid.UUID) bool {
 	if g.store == nil {
 		return false
 	}
-	instance, err := g.store.GetPreviewInstance(r.Context(), sess.OrgID, sess.PreviewInstanceID)
+	instance, err := g.store.GetPreviewInstance(r.Context(), orgID, runtimePreviewID)
 	if err != nil {
 		g.logger.Warn().Err(err).
-			Str("preview_id", sess.PreviewInstanceID.String()).
+			Str("preview_id", runtimePreviewID.String()).
 			Str("host_id", hostID.String()).
 			Msg("failed to resolve target-host preview session")
 		return false
@@ -449,12 +665,25 @@ func (g *Gateway) accessSessionMatchesTargetHost(r *http.Request, sess *models.P
 
 func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
 	data := g.previewControlOverlayData(r, previewID)
-	controlURL := g.previewControlURL(previewID)
+	controlURL := data.ControlURL
+	if controlURL == "" {
+		controlURL = g.previewControlURL(previewID)
+	}
 	if data.AutoLaunch {
 		http.Redirect(w, r, controlURL, http.StatusFound)
 		return
 	}
 	statusURL := g.previewStatusURL(previewID)
+	cfg, err := json.Marshal(map[string]any{
+		"appOrigin":     g.resolvedAppOrigin(),
+		"controlUrl":    controlURL,
+		"statusPath":    previewControlStatusPath,
+		"restartable":   data.Restartable,
+		"initialStatus": string(data.Status),
+	})
+	if err != nil {
+		cfg = []byte("null")
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -468,9 +697,36 @@ func (g *Gateway) servePreviewControlOverlay(w http.ResponseWriter, r *http.Requ
 		stdhtml.EscapeString(controlURL),
 		stdhtml.EscapeString(data.ActionLabel),
 		stdhtml.EscapeString(statusURL),
+		cfg,
 	); err != nil {
 		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to write preview control overlay")
 	}
+}
+
+func (g *Gateway) previewRuntimeUnavailableOverlayBody(previewID uuid.UUID) []byte {
+	controlURL := g.previewControlURL(previewID)
+	statusURL := g.previewStatusURL(previewID)
+	cfg, err := json.Marshal(map[string]any{
+		"appOrigin":     g.resolvedAppOrigin(),
+		"controlUrl":    controlURL,
+		"statusPath":    previewControlStatusPath,
+		"restartable":   true,
+		"initialStatus": string(models.PreviewStatusUnavailable),
+	})
+	if err != nil {
+		cfg = []byte("null")
+	}
+	return []byte(fmt.Sprintf(
+		previewControlOverlayHTML,
+		"Preview not connected",
+		"Preview not connected",
+		"Restart it from 143 to reconnect this preview.",
+		"Connection lost",
+		stdhtml.EscapeString(controlURL),
+		"Restart preview",
+		stdhtml.EscapeString(statusURL),
+		cfg,
+	))
 }
 
 type previewControlOverlayData struct {
@@ -478,15 +734,19 @@ type previewControlOverlayData struct {
 	Description string
 	StatusLine  string
 	ActionLabel string
+	ControlURL  string
 	AutoLaunch  bool
+	Restartable bool
+	Status      models.PreviewStatus
 }
 
 func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID) previewControlOverlayData {
 	fallback := previewControlOverlayData{
-		Title:       "Start preview",
-		Description: "This preview is not connected in this browser yet. Start it from 143; when it is ready, the preview opens here.",
-		StatusLine:  "Status: Not connected",
+		Title:       "Preview not connected",
+		Description: "Start the preview from 143 and it will open here.",
+		StatusLine:  "Not connected",
 		ActionLabel: "Start preview",
+		ControlURL:  g.previewControlURL(previewID),
 	}
 	if g.store == nil {
 		return fallback
@@ -498,24 +758,98 @@ func (g *Gateway) previewControlOverlayData(r *http.Request, previewID uuid.UUID
 		}
 		return fallback
 	}
-	statusLine := "Status: " + previewStatusLabel(instance.Status)
+	label := previewStatusLabel(instance.Status)
+	statusLine := label
 	if instance.StoppedAt != nil {
-		statusLine += " · stopped " + instance.StoppedAt.UTC().Format("Jan 2, 2006 15:04 MST")
+		statusLine += " · " + instance.StoppedAt.UTC().Format("Jan 2, 2006 15:04 MST")
 	}
 	if instance.Status.IsActive() {
 		return previewControlOverlayData{
 			Title:       "Open preview",
-			Description: "This preview is running, but this browser is not connected yet. 143 will connect it and open the preview here.",
+			Description: "This preview is running — opening it through 143.",
 			StatusLine:  statusLine,
 			ActionLabel: "Open preview",
+			ControlURL:  fallback.ControlURL,
 			AutoLaunch:  true,
+			Status:      instance.Status,
 		}
 	}
+	controlURL := fallback.ControlURL
+	if instance.PreviewTargetID != nil {
+		controlURL = g.previewControlURLForStoppedTarget(r.Context(), instance.OrgID, *instance.PreviewTargetID, previewID)
+	}
 	return previewControlOverlayData{
-		Title:       "Restart preview",
-		Description: "This preview is stopped. Restart it from 143; when it is ready, the preview opens here.",
+		Title:       "Preview " + strings.ToLower(label),
+		Description: "Restart it to pick up where you left off — this page reconnects automatically.",
 		StatusLine:  statusLine,
 		ActionLabel: "Restart preview",
+		ControlURL:  controlURL,
+		Restartable: true,
+		Status:      instance.Status,
+	}
+}
+
+func (g *Gateway) previewControlURLForStoppedTarget(ctx context.Context, orgID, targetID, fallbackHostID uuid.UUID) string {
+	if g.store == nil {
+		return g.previewControlURL(fallbackHostID)
+	}
+	link, err := g.store.GetPreviewLinkByTarget(ctx, orgID, targetID, models.PreviewLinkTypePullRequest)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			g.logger.Warn().Err(err).Str("preview_target_id", targetID.String()).Msg("failed to load PR preview control link")
+		}
+		return g.previewControlURL(fallbackHostID)
+	}
+	slug := strings.Trim(link.Slug, "/")
+	if slug == "" {
+		return g.previewControlURL(fallbackHostID)
+	}
+	return g.resolvedAppOrigin() + "/previews/" + slug + "?launch=1"
+}
+
+// previewControlStatusResponse is the unauthenticated status payload polled by
+// the control overlay while a restart is in flight. It exposes only what the
+// overlay itself already renders without auth: the status and stop time.
+type previewControlStatusResponse struct {
+	Status    string  `json:"status"`
+	Label     string  `json:"label"`
+	Active    bool    `json:"active"`
+	StoppedAt *string `json:"stopped_at,omitempty"`
+}
+
+func (g *Gateway) servePreviewControlStatus(w http.ResponseWriter, r *http.Request, previewID uuid.UUID) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	writeNotFound := func() {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(models.ErrorResponse{
+			Error: models.ErrorDetail{Code: "PREVIEW_NOT_FOUND", Message: "preview not found"},
+		})
+	}
+	if g.store == nil {
+		writeNotFound()
+		return
+	}
+	instance, err := g.store.GetPreviewForPublicHost(r.Context(), previewID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to load preview control status")
+		}
+		writeNotFound()
+		return
+	}
+	resp := previewControlStatusResponse{
+		Status: string(instance.Status),
+		Label:  previewStatusLabel(instance.Status),
+		Active: instance.Status.IsActive(),
+	}
+	if instance.StoppedAt != nil {
+		stoppedAt := instance.StoppedAt.UTC().Format(time.RFC3339)
+		resp.StoppedAt = &stoppedAt
+	}
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to write preview control status")
 	}
 }
 
@@ -545,11 +879,15 @@ func (g *Gateway) previewControlURL(previewID uuid.UUID) string {
 }
 
 func (g *Gateway) previewStatusURL(previewID uuid.UUID) string {
+	return g.resolvedAppOrigin() + "/previews/" + previewID.String()
+}
+
+func (g *Gateway) resolvedAppOrigin() string {
 	appOrigin := strings.TrimRight(g.appOrigin, "/")
 	if appOrigin == "" {
-		appOrigin = "https://143.dev"
+		return "https://143.dev"
 	}
-	return appOrigin + "/previews/" + previewID.String()
+	return appOrigin
 }
 
 const previewControlOverlayHTML = `<!DOCTYPE html>
@@ -569,26 +907,151 @@ p { margin: 10px 0 0; font-size: 14px; line-height: 1.5; color: color-mix(in srg
 .actions { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
 a { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; border-radius: 8px; padding: 0 14px; font-size: 14px; font-weight: 600; text-decoration: none; }
 .primary { background: CanvasText; color: Canvas; }
+.primary[aria-disabled="true"] { opacity: 0.6; pointer-events: none; }
 .secondary { border: 1px solid color-mix(in srgb, CanvasText 16%%, transparent); color: CanvasText; }
 </style>
 </head>
 <body>
 <main class="panel">
 <p class="eyebrow">143 preview</p>
-<h1>%s</h1>
-<p>%s</p>
-<p class="status">%s</p>
+<h1 id="pv-title">%s</h1>
+<p id="pv-desc">%s</p>
+<p class="status" id="pv-status">%s</p>
 <div class="actions">
-<a class="primary" href="%s">%s</a>
+<a class="primary" id="pv-action" href="%s">%s</a>
 <a class="secondary" href="%s">View status and logs</a>
 </div>
 </main>
+<script>window.__143PreviewControl = %s;</script>
+<script>
+(function() {
+  "use strict";
+  var cfg = window.__143PreviewControl;
+  if (!cfg || !cfg.restartable) return;
+  var titleEl = document.getElementById("pv-title");
+  var descEl = document.getElementById("pv-desc");
+  var statusEl = document.getElementById("pv-status");
+  var actionEl = document.getElementById("pv-action");
+  var original = {
+    title: titleEl.textContent,
+    desc: descEl.textContent,
+    status: statusEl.textContent,
+    action: actionEl.textContent
+  };
+  var restarting = false;
+  var popup = null;
+  var pollTimer = null;
+  var activeSince = 0;
+
+  function setPanel(title, desc, status) {
+    titleEl.textContent = title;
+    descEl.textContent = desc;
+    statusEl.textContent = status;
+    document.title = title;
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function enableAction() {
+    restarting = false;
+    actionEl.textContent = original.action;
+    actionEl.removeAttribute("aria-disabled");
+  }
+
+  function resetPanel() {
+    stopPolling();
+    enableAction();
+    setPanel(original.title, original.desc, original.status);
+  }
+
+  function fallbackLaunch() {
+    stopPolling();
+    window.location.href = cfg.controlUrl;
+  }
+
+  // The popup posts this once it has connected the browser to the restarted
+  // preview (the session cookie is set at that point). The cookie is scoped
+  // to the host in data.url; when this overlay is on an alias host (runtime
+  // instance ID vs stable target ID) we must navigate there instead of
+  // reloading in place.
+  window.addEventListener("message", function(event) {
+    if (event.origin !== cfg.appOrigin) return;
+    var data = event.data;
+    if (!data || data.type !== "preview_launch_complete") return;
+    stopPolling();
+    statusEl.textContent = "Connected";
+    var dest = null;
+    try { dest = new URL(data.url); } catch (e) {}
+    if (dest && (dest.protocol === "https:" || dest.protocol === "http:") && dest.origin !== window.location.origin) {
+      window.location.href = dest.href;
+      return;
+    }
+    window.location.reload();
+  });
+
+  function poll() {
+    fetch(cfg.statusPath, {cache: "no-store"}).then(function(resp) {
+      return resp.ok ? resp.json() : null;
+    }).then(function(state) {
+      if (!state || !restarting) return;
+      if (state.status === cfg.initialStatus) {
+        // The restart has not been picked up yet. If the popup was closed
+        // without starting anything, put the panel back.
+        if (popup && popup.closed) resetPanel();
+        return;
+      }
+      if (state.status === "failed") {
+        stopPolling();
+        enableAction();
+        setPanel("Preview failed to start", "Check status and logs for details, then try restarting again.", state.label);
+        return;
+      }
+      if (state.active && state.status !== "starting") {
+        // Ready. The popup finishes the browser handshake and notifies us;
+        // if it is gone or stuck, fall back to the full launch flow.
+        if (!activeSince) activeSince = Date.now();
+        if (!popup || popup.closed || Date.now() - activeSince > 15000) {
+          fallbackLaunch();
+          return;
+        }
+        statusEl.textContent = "Connecting this browser…";
+        return;
+      }
+      statusEl.textContent = state.label + "…";
+    }).catch(function() {});
+  }
+
+  actionEl.addEventListener("click", function(event) {
+    event.preventDefault();
+    if (restarting) return;
+    popup = window.open(cfg.controlUrl + "&popup=1", "143-preview-launch", "popup=yes,width=440,height=400");
+    if (!popup) {
+      // Popup blocked: fall back to the full-page launch flow.
+      window.location.href = cfg.controlUrl;
+      return;
+    }
+    restarting = true;
+    activeSince = 0;
+    setPanel("Restarting preview", "Keep this tab open — the preview opens here when it is ready.", "Restart requested…");
+    actionEl.textContent = "Restarting…";
+    actionEl.setAttribute("aria-disabled", "true");
+    pollTimer = setInterval(poll, 2500);
+    poll();
+  });
+})();
+</script>
 </body>
 </html>`
 
 const (
 	previewPlatformPathPrefix = "/__143_"
 	previewHeartbeatPath      = previewPlatformPathPrefix + "heartbeat"
+	previewControlStatusPath  = previewPlatformPathPrefix + "control/status"
 )
 
 func shouldRecordPreviewLastPath(r *http.Request) bool {
@@ -624,45 +1087,84 @@ func acceptsHTMLDocument(accept string) bool {
 }
 
 func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, previewID uuid.UUID) {
-	runtime, err := g.store.GetActivePreviewRuntime(r.Context(), orgID, previewID)
+	originalReq := r
+	runtime, err := g.cachedActiveRuntime(r.Context(), orgID, previewID)
 	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to resolve active preview runtime")
+		if errors.Is(err, pgx.ErrNoRows) && isNavigationRequest(r) {
+			// The session cookie outlives the preview's idle timeout: a
+			// returning visitor with a valid session can land on a stopped
+			// preview. Serve the control overlay (restart/relaunch) instead
+			// of a raw runtime-unavailable error.
+			g.servePreviewControlOverlay(w, r, previewID)
+			return
+		}
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, nil, "").
+			Msg("failed to resolve active preview runtime")
 		writeRuntimeUnavailable(w)
 		return
 	}
+	upstreamPath := previewWorkerProxyPath(previewID, r.URL.Path)
 	targetURL, err := url.Parse(runtime.EndpointURL)
 	if err != nil || targetURL.Scheme == "" || targetURL.Host == "" || (targetURL.Scheme != "http" && targetURL.Scheme != "https") {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Str("endpoint_url", runtime.EndpointURL).Msg("failed to parse preview runtime endpoint url")
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
+			Msg("failed to parse preview runtime endpoint url")
 		writeRuntimeUnavailable(w)
 		return
 	}
-	token, err := auth.GeneratePreviewToken(g.tokenSecret, auth.PreviewTokenClaims{
+	token, err := g.tokenKeyring.Generate(auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: runtime.WorkerNodeID,
 		RuntimeID:    &runtime.ID,
 		RuntimeEpoch: runtime.RuntimeEpoch,
 		PreviewID:    &previewID,
 		Action:       "proxy",
-		ExpiresAt:    time.Now().Add(30 * time.Second),
+		ExpiresAt:    time.Now().Add(previewProxyTokenTTL),
 	})
 	if err != nil {
-		g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to sign preview worker token")
+		addPreviewProxyLogFields(g.logger.Warn().Err(err), r, orgID, previewID, runtime, upstreamPath).
+			Msg("failed to sign preview worker token")
 		http.Error(w, "preview unavailable", http.StatusBadGateway)
 		return
 	}
 
 	proxy := &httputil.ReverseProxy{
+		Transport: g.proxyTransport,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = targetURL.Scheme
 			req.URL.Host = targetURL.Host
-			req.URL.Path = fmt.Sprintf("/internal/preview/%s/proxy%s", previewID.String(), req.URL.Path)
+			req.URL.Path = upstreamPath
 			req.Host = targetURL.Host
 			req.RequestURI = ""
 			stripPreviewCookie(req)
 			req.Header.Set("Authorization", "Bearer "+token)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			if translateWorkerRuntimeMismatch(resp) {
+			if failure := g.translateWorkerPreviewFailure(resp, previewID, isNavigationRequest(originalReq)); failure.translated {
+				// Always drop the cached runtime so the next request
+				// re-resolves and re-mints a fresh token.
+				g.evictCachedRuntime(previewID)
+				// A routing mismatch (the worker recycled the epoch or no
+				// longer owns this runtime) is genuine evidence the cached
+				// runtime is stale, so mark it lost. A token-level auth
+				// failure ("invalid preview token") is NOT — an expired or
+				// mis-signed proxy token says nothing about runtime health,
+				// and marking it lost would kill a working preview. Evict and
+				// let the next request retry with a new token instead.
+				markedLost := previewWorkerFailureMarksRuntimeLost(failure.code)
+				if markedLost {
+					g.markRuntimeEndpointUnreachable(r.Context(), orgID, previewID, runtime, previewWorkerFailureReason(failure.code, failure.message, failure.authDetail))
+				}
+				// worker_auth_detail carries the coarse token-failure class
+				// (bad_signature/expired/...) so an auth failure stays
+				// diagnosable from the app-side logs even when it is transient
+				// and the runtime is deliberately left healthy.
+				addPreviewProxyLogFields(g.logger.Warn(), originalReq, orgID, previewID, runtime, upstreamPath).
+					Str("worker_error_code", failure.code).
+					Str("worker_error_message", failure.message).
+					Str("worker_auth_detail", failure.authDetail).
+					Int("worker_status", failure.status).
+					Bool("runtime_marked_lost", markedLost).
+					Msg("translated preview worker auth/routing failure")
 				return nil
 			}
 
@@ -684,51 +1186,260 @@ func (g *Gateway) proxyToWorker(w http.ResponseWriter, r *http.Request, orgID, p
 
 			return nil
 		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			g.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("proxy error")
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			g.evictCachedRuntime(previewID)
+			if shouldMarkRuntimeLostOnProxyError(err) {
+				g.markRuntimeEndpointUnreachable(originalReq.Context(), orgID, previewID, runtime, previewProxyErrorReason(err))
+			}
+			addPreviewProxyLogFields(g.logger.Warn().Err(err), originalReq, orgID, previewID, runtime, upstreamPath).
+				Msg("proxy error")
 			http.Error(w, "preview unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
 }
 
-func translateWorkerRuntimeMismatch(resp *http.Response) bool {
-	if resp.StatusCode != http.StatusForbidden {
+func (g *Gateway) markRuntimeEndpointUnreachable(ctx context.Context, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, reason string) {
+	if g.store == nil || runtime == nil {
+		return
+	}
+	updated, err := g.store.MarkPreviewRuntimeLostIfCurrent(ctx, orgID, previewID, runtime.ID, runtime.RuntimeEpoch, reason, models.PreviewUnavailableReasonEndpointUnreachable)
+	if err != nil {
+		g.logger.Warn().Err(err).
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Msg("failed to mark unreachable preview runtime lost")
+		return
+	}
+	if updated {
+		g.logger.Warn().
+			Str("preview_id", previewID.String()).
+			Str("runtime_id", runtime.ID.String()).
+			Str("worker_node_id", runtime.WorkerNodeID).
+			Str("endpoint_url", runtime.EndpointURL).
+			Msg("marked preview runtime lost after endpoint became unreachable")
+	}
+}
+
+func shouldMarkRuntimeLostOnProxyError(err error) bool {
+	if err == nil {
 		return false
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"connection reset by peer",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"no such host",
+		"eof",
+		// Worker tore down the connection without responding: a dead pooled
+		// keep-alive conn, or a write racing the worker's close.
+		"server closed idle connection",
+		"broken pipe",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// previewWorkerFailureMarksRuntimeLost reports whether a translated worker
+// failure code is evidence that the cached runtime is genuinely stale — a
+// recycled epoch or a worker that no longer owns it — and should be marked
+// lost. Token-level auth failures (UNAUTHORIZED / "invalid preview token") are
+// transient: an expired or mis-signed proxy token does not mean the runtime is
+// unreachable, so those only evict the cache and let the next request retry
+// with a freshly minted token rather than tearing down a healthy preview.
+func previewWorkerFailureMarksRuntimeLost(workerCode string) bool {
+	switch workerCode {
+	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
+		return true
+	default:
+		return false
+	}
+}
+
+func previewProxyErrorReason(err error) string {
+	msg := "unknown error"
+	if err != nil {
+		msg = strings.ReplaceAll(err.Error(), "\n", " ")
+		msg = strings.ReplaceAll(msg, "\r", " ")
+	}
+	const maxReasonLen = 320
+	reason := "preview runtime endpoint unreachable: " + msg
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
+}
+
+func previewWorkerProxyPath(previewID uuid.UUID, requestPath string) string {
+	return fmt.Sprintf("/internal/preview/%s/proxy%s", previewID.String(), requestPath)
+}
+
+func addPreviewProxyLogFields(event *zerolog.Event, r *http.Request, orgID, previewID uuid.UUID, runtime *models.PreviewRuntime, upstreamPath string) *zerolog.Event {
+	requestPath := ""
+	requestHost := ""
+	requestMethod := ""
+	queryPresent := false
+	secFetchDest := ""
+	if r != nil {
+		requestHost = r.Host
+		requestMethod = r.Method
+		secFetchDest = r.Header.Get("Sec-Fetch-Dest")
+		if r.URL != nil {
+			requestPath = r.URL.Path
+			queryPresent = r.URL.RawQuery != ""
+		}
+	}
+
+	event = event.
+		Str("org_id", orgID.String()).
+		Str("preview_id", previewID.String()).
+		Str("request_method", requestMethod).
+		Str("request_host", requestHost).
+		Str("request_path", requestPath).
+		Bool("query_present", queryPresent).
+		Str("sec_fetch_dest", secFetchDest).
+		Str("upstream_path", upstreamPath)
+
+	if runtime == nil {
+		return event
+	}
+
+	return event.
+		Str("runtime_id", runtime.ID.String()).
+		Int("runtime_epoch", runtime.RuntimeEpoch).
+		Str("runtime_status", string(runtime.Status)).
+		Str("worker_node_id", runtime.WorkerNodeID).
+		Str("endpoint_url", runtime.EndpointURL).
+		Str("preview_handle", runtime.PreviewHandle).
+		Int("primary_port", runtime.PrimaryPort).
+		Time("runtime_lease_expires_at", runtime.LeaseExpiresAt).
+		Time("runtime_last_heartbeat_at", runtime.LastHeartbeatAt).
+		Str("runtime_unavailable_reason", string(runtime.UnavailableReason))
+}
+
+// workerPreviewFailure describes a worker-originated auth/routing rejection that
+// the gateway translated into a runtime-unavailable response.
+type workerPreviewFailure struct {
+	translated bool
+	code       string
+	message    string
+	authDetail string
+	status     int
+}
+
+func (g *Gateway) translateWorkerPreviewFailure(resp *http.Response, previewID uuid.UUID, navigation bool) workerPreviewFailure {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+		return workerPreviewFailure{status: resp.StatusCode}
+	}
+	originalStatus := resp.StatusCode
 	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
 
 	var parsed models.ErrorResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
+	workerMarked := resp.Header.Get(auth.PreviewWorkerErrorHeader) == "1"
+	// Capture the worker's coarse auth-failure class before we replace the
+	// response headers below; the worker only sets it on token rejections.
+	authDetail := sanitizeWorkerPreviewFailureMessage(resp.Header.Get(auth.PreviewWorkerAuthDetailHeader))
+	workerCode := parsed.Error.Code
+	workerMessage := parsed.Error.Message
+	shouldTranslate := false
 	switch parsed.Error.Code {
 	case "WRONG_PREVIEW_WORKER", "PREVIEW_RUNTIME_MISMATCH":
-	default:
+		shouldTranslate = originalStatus == http.StatusForbidden && workerMarked
+	case "UNAUTHORIZED":
+		shouldTranslate = originalStatus == http.StatusUnauthorized &&
+			workerMarked &&
+			(workerMessage == "invalid preview token" || workerMessage == "missing authorization token")
+	}
+	if !shouldTranslate {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return false
+		return workerPreviewFailure{status: originalStatus}
 	}
 
-	replacement, _ := json.Marshal(models.ErrorResponse{
-		Error: models.ErrorDetail{
-			Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
-			Message: "preview runtime is unavailable; restart the preview",
-		},
-	})
-	resp.StatusCode = http.StatusServiceUnavailable
-	resp.Status = fmt.Sprintf("%d %s", http.StatusServiceUnavailable, http.StatusText(http.StatusServiceUnavailable))
+	var replacement []byte
+	statusCode := http.StatusServiceUnavailable
+	contentType := "application/json"
+	if navigation {
+		replacement = g.previewRuntimeUnavailableOverlayBody(previewID)
+		statusCode = http.StatusOK
+		contentType = "text/html; charset=utf-8"
+	} else {
+		var err error
+		replacement, err = json.Marshal(models.ErrorResponse{
+			Error: models.ErrorDetail{
+				Code:    "PREVIEW_RUNTIME_UNAVAILABLE",
+				Message: "preview runtime is unavailable; restart the preview",
+			},
+		})
+		if err != nil {
+			replacement = []byte(`{"error":{"code":"PREVIEW_RUNTIME_UNAVAILABLE","message":"preview runtime is unavailable; restart the preview"}}`)
+		}
+	}
+
+	resp.StatusCode = statusCode
+	resp.Status = fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode))
 	resp.Header = make(http.Header)
-	resp.Header.Set("Content-Type", "application/json")
+	resp.Header.Set("Content-Type", contentType)
 	resp.Header.Set("Cache-Control", "no-store")
 	resp.ContentLength = int64(len(replacement))
 	resp.Body = io.NopCloser(bytes.NewReader(replacement))
-	return true
+	return workerPreviewFailure{
+		translated: true,
+		code:       workerCode,
+		message:    sanitizeWorkerPreviewFailureMessage(workerMessage),
+		authDetail: authDetail,
+		status:     originalStatus,
+	}
+}
+
+func sanitizeWorkerPreviewFailureMessage(message string) string {
+	message = strings.ReplaceAll(message, "\n", " ")
+	message = strings.ReplaceAll(message, "\r", " ")
+	message = strings.TrimSpace(message)
+	if len(message) > 240 {
+		return message[:240]
+	}
+	return message
+}
+
+func previewWorkerFailureReason(code, message, authDetail string) string {
+	reason := "preview worker auth/routing failure"
+	if code != "" {
+		reason += ": " + code
+	}
+	if message != "" {
+		reason += " " + sanitizeWorkerPreviewFailureMessage(message)
+	}
+	if authDetail != "" {
+		reason += " (" + sanitizeWorkerPreviewFailureMessage(authDetail) + ")"
+	}
+	const maxReasonLen = 320
+	if len(reason) > maxReasonLen {
+		return reason[:maxReasonLen]
+	}
+	return reason
 }
 
 func writeRuntimeUnavailable(w http.ResponseWriter) {
@@ -750,6 +1461,16 @@ func writeRuntimeUnavailable(w http.ResponseWriter) {
 // activity heartbeats while the preview tab is visible. This keeps the
 // idle timeout tracker accurate even when the user is just viewing (not
 // navigating) the preview.
+//
+// The heartbeat doubles as a session watchdog: it is sent with fetch (not a
+// fire-and-forget Image) so we can observe a 401 PREVIEW_SESSION_EXPIRED. A
+// running SPA whose preview session has lapsed (idle past the sliding window,
+// or the instance was recycled) would otherwise just see every fetch/asset
+// 401 and render a blank screen with no way to recover. When we detect that
+// 401 we surface an in-app reconnect overlay (a Reconnect button plus a short
+// auto-reconnect countdown). Reconnecting is a top-level reload, which re-issues
+// a navigation request — the gateway then serves the full control overlay
+// (status, logs, Restart + auto-reconnect handshake) defined above.
 const activityHeartbeatScript = `
 (function() {
   "use strict";
@@ -757,17 +1478,111 @@ const activityHeartbeatScript = `
   window.__143_heartbeat = true;
 
   var INTERVAL_MS = 30000; // 30 seconds
+  var RECONNECT_SECONDS = 5; // auto-reconnect countdown once expiry is detected
   var timer = null;
+  var expired = false;
+  var countdownTimer = null;
+
+  // Capture the native fetch at init, before the previewed app's bundles run.
+  // Apps that wrap window.fetch with an auth interceptor often throw or redirect
+  // on 401, which would hide the expiry signal from us; binding it now keeps the
+  // watchdog reading the real response status.
+  var nativeFetch = (window.fetch && window.fetch.bind(window)) || null;
+
+  function reconnect() {
+    // A top-level reload re-issues a navigation request, so the gateway serves
+    // the full control overlay (status, logs, Restart + auto-reconnect).
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    window.location.reload();
+  }
 
   function sendHeartbeat() {
-    var img = new Image();
-    img.src = "/__143_heartbeat?t=" + Date.now();
+    if (expired) return;
+    var url = "/__143_heartbeat?t=" + Date.now();
+    if (!nativeFetch) {
+      // Pre-fetch browsers: keep the idle timer alive but we cannot read a
+      // status, so expiry recovery is unavailable (a reload still works).
+      new Image().src = url;
+      return;
+    }
+    nativeFetch(url, {
+      cache: "no-store",
+      credentials: "same-origin"
+    }).then(function(resp) {
+      // 401 is the gateway's PREVIEW_SESSION_EXPIRED signal. Network errors are
+      // transient (offline, proxy blip) and must not trigger a recovery loop.
+      if (resp && resp.status === 401) onExpired();
+    }).catch(function() {});
+  }
+
+  function onExpired() {
+    if (expired) return;
+    expired = true;
+    if (timer) { clearInterval(timer); timer = null; }
+    renderOverlay();
+  }
+
+  function renderOverlay() {
+    if (document.getElementById("__143-preview-reconnect")) return;
+    var host = document.createElement("div");
+    host.id = "__143-preview-reconnect";
+    host.style.cssText = "position:fixed;inset:0;z-index:2147483647;";
+    // Shadow DOM isolates our styles from the previewed app's CSS.
+    var root = host.attachShadow ? host.attachShadow({mode: "open"}) : host;
+    root.innerHTML =
+      "<style>" +
+      ":host,*{box-sizing:border-box}" +
+      ".scrim{position:fixed;inset:0;display:grid;place-items:center;" +
+      "background:color-mix(in srgb, black 55%, transparent);" +
+      "font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}" +
+      ".panel{color-scheme:light dark;width:min(92vw,380px);border-radius:12px;padding:24px;" +
+      "background:Canvas;color:CanvasText;border:1px solid color-mix(in srgb,CanvasText 14%,transparent);" +
+      "box-shadow:0 18px 60px color-mix(in srgb,black 45%,transparent)}" +
+      ".eyebrow{margin:0 0 8px;font-size:12px;color:color-mix(in srgb,CanvasText 56%,transparent)}" +
+      "h1{margin:0;font-size:20px;line-height:1.2}" +
+      "p{margin:10px 0 0;font-size:14px;line-height:1.5;color:color-mix(in srgb,CanvasText 68%,transparent)}" +
+      ".count{margin-top:14px;font-weight:600;color:CanvasText;font-size:13px}" +
+      "button{margin-top:20px;width:100%;min-height:38px;border-radius:8px;border:0;cursor:pointer;" +
+      "font-size:14px;font-weight:600;background:CanvasText;color:Canvas}" +
+      "</style>" +
+      "<div class='scrim'><div class='panel'>" +
+      "<p class='eyebrow'>143 preview</p>" +
+      "<h1>Preview disconnected</h1>" +
+      "<p>This preview's session expired — it may have been idle or restarted. Reconnect to pick up where you left off.</p>" +
+      "<p class='count' id='pv-count'></p>" +
+      "<button id='pv-reconnect' type='button'>Reconnect now</button>" +
+      "</div></div>";
+    (document.body || document.documentElement).appendChild(host);
+
+    var btn = root.querySelector("#pv-reconnect");
+    var countEl = root.querySelector("#pv-count");
+    if (btn) btn.addEventListener("click", reconnect);
+
+    var remaining = RECONNECT_SECONDS;
+    function paint() {
+      if (!countEl) return;
+      countEl.textContent = remaining > 0
+        ? "Reconnecting in " + remaining + "s…"
+        : "Reconnecting…";
+    }
+    paint();
+    countdownTimer = setInterval(function() {
+      // Only count down while the tab is visible so a backgrounded tab does not
+      // silently reload itself out from under the user.
+      if (document.visibilityState !== "visible") return;
+      remaining -= 1;
+      paint();
+      if (remaining <= 0) {
+        clearInterval(countdownTimer);
+        reconnect();
+      }
+    }, 1000);
   }
 
   function onVisibilityChange() {
     if (document.visibilityState === "visible") {
       sendHeartbeat();
-      if (!timer) {
+      if (!expired && !timer) {
         timer = setInterval(sendHeartbeat, INTERVAL_MS);
       }
     } else {

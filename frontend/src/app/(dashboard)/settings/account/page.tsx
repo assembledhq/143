@@ -1,14 +1,15 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type PersonalProvider } from "@/lib/coding-auth-metadata";
+import { apiKeyHelp, OPENCODE_BACKING_PROVIDER_OPTIONS, openCodeAgentDefaults, openCodeDefaultModelForBackingProvider, openCodeModelsForBackingProvider, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type OpenCodeBackingProvider, type PersonalProvider } from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
+import { CLISessionsCard } from "@/components/cli-sessions-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { EmptyState } from "@/components/empty-state";
@@ -39,7 +40,7 @@ import type {
 } from "@/lib/types";
 
 // agentLabel renders the human-readable agent name. The unified API exposes
-// rows tagged by agent (codex / claude_code / gemini_cli / amp / pi) so the
+// rows tagged by agent (codex / claude_code / amp / pi / opencode) so the
 // translation from provider strings the legacy personal page used is no
 // longer needed.
 function agentLabel(agent: CodingAuthAgent | string) {
@@ -48,12 +49,12 @@ function agentLabel(agent: CodingAuthAgent | string) {
       return "Codex";
     case "claude_code":
       return "Claude Code";
-    case "gemini_cli":
-      return "Gemini CLI";
     case "amp":
       return "Amp";
     case "pi":
       return "Pi";
+    case "opencode":
+      return "OpenCode";
     default:
       return agent;
   }
@@ -206,6 +207,11 @@ function CredentialList({
 // (Codex + Claude Code today).
 type PersonalAuthType = "subscription" | "api_key";
 
+// Local display map of reasoning defaults (no nulls) vs the wire patch sent
+// to the merge-patch settings endpoint (null clears an agent's entry).
+type ReasoningDefaults = ReturnType<typeof getCodingAgentReasoningDefaultsFromSettings>;
+type ReasoningDefaultsPatch = NonNullable<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]>;
+
 export default function AccountPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -214,15 +220,19 @@ export default function AccountPage() {
   const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
   const [apiKey, setApiKey] = useState("");
   const [authLabel, setAuthLabel] = useState("");
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
+  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(openCodeBackingProvider), [openCodeBackingProvider]);
   // Subscription OAuth modal dispatch — only one is open at a time.
   // The dialog itself closes when these open so the OAuth modal owns the
   // user's attention during the device-code or paste-back flow.
   const [showCodexModal, setShowCodexModal] = useState(false);
   const [showClaudeModal, setShowClaudeModal] = useState(false);
   const [pendingDefaultModel, setPendingDefaultModel] = useState<string | null>(null);
-  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const [pendingReasoningDefaults, setPendingReasoningDefaults] = useState<ReasoningDefaults | null>(null);
   const reasoningSaveInFlightRef = useRef(false);
-  const queuedReasoningDefaultsRef = useRef<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"] | null>(null);
+  const queuedReasoningDefaultsRef = useRef<ReasoningDefaultsPatch | null>(null);
 
   // Personal stack — the user's own credentials, ordered by priority.
   const { data: personalResp } = useQuery<ListResponse<CodingCredentialSummary>>({
@@ -241,7 +251,6 @@ export default function AccountPage() {
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
   const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
-  const hasEffectiveReasoningDefaults = Object.keys(effectiveReasoningDefaults).length > 0;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -251,14 +260,11 @@ export default function AccountPage() {
         auth_type: "api_key",
         label: authLabel.trim() || undefined,
         api_key: apiKey,
+        ...(provider === "opencode" ? { api_type: openCodeBackingProvider } : {}),
+        ...(provider === "opencode" ? { agent_defaults: openCodeAgentDefaults(openCodeModel, openCodeCustomModel) } : {}),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-      // TODO(unified-credentials cleanup PR): drop the legacy invalidations
-      // once /settings/agent and other surfaces stop reading user-credentials
-      // / credentials.resolved.
-      void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       setApiKey("");
       setAuthLabel("");
       setAddOpen(false);
@@ -274,9 +280,6 @@ export default function AccountPage() {
     mutationFn: (id: string) => api.codingCredentials.delete(id, "personal"),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-      // TODO(unified-credentials cleanup PR): drop the legacy invalidations.
-      void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-      void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
       toast.success("Personal auth removed");
     },
     onError: (error) => {
@@ -290,14 +293,13 @@ export default function AccountPage() {
   });
 
   const updateReasoningDefaultsMutation = useMutation({
-    mutationFn: (defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) =>
-      api.auth.updateSettings({
-        ...(effectiveDefaultModel ? { coding_agent_model_default: effectiveDefaultModel } : {}),
-        ...(defaults && Object.keys(defaults).length > 0 ? { coding_agent_reasoning_defaults: defaults } : {}),
-      }),
-    onMutate: (defaults) => {
+    // The settings endpoint is a JSON merge patch, so each save carries only
+    // the per-agent entries that changed (null clears an entry back to the
+    // built-in default).
+    mutationFn: (patch: ReasoningDefaultsPatch) =>
+      api.auth.updateSettings({ coding_agent_reasoning_defaults: patch }),
+    onMutate: () => {
       reasoningSaveInFlightRef.current = true;
-      setPendingReasoningDefaults(defaults);
     },
     onSuccess: (response) => {
       queryClient.setQueryData(["auth", "me"], { data: response.data });
@@ -325,21 +327,28 @@ export default function AccountPage() {
     },
   });
 
-  function saveReasoningDefaults(defaults: UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]) {
-    setPendingReasoningDefaults(defaults);
+  function saveReasoningDefault(agentType: keyof ReasoningDefaultsPatch, effort: ReasoningDefaults[keyof ReasoningDefaults] | null) {
+    const nextDefaults = { ...effectiveReasoningDefaults };
+    if (effort) {
+      nextDefaults[agentType] = effort;
+    } else {
+      delete nextDefaults[agentType];
+    }
+    setPendingReasoningDefaults(nextDefaults);
     if (reasoningSaveInFlightRef.current) {
-      queuedReasoningDefaultsRef.current = defaults;
+      // Merge queued entries per agent so rapid edits to different agents
+      // all land instead of the last patch replacing the queue.
+      queuedReasoningDefaultsRef.current = { ...queuedReasoningDefaultsRef.current, [agentType]: effort };
       return;
     }
-    updateReasoningDefaultsMutation.mutate(defaults);
+    updateReasoningDefaultsMutation.mutate({ [agentType]: effort });
   }
 
   const updateDefaultModelMutation = useMutation({
+    // Merge-patch endpoint: send just the model, with null clearing the
+    // stored default when the user picks "Default".
     mutationFn: (model: string) =>
-      api.auth.updateSettings({
-        ...(model ? { coding_agent_model_default: model } : {}),
-        ...(hasEffectiveReasoningDefaults ? { coding_agent_reasoning_defaults: effectiveReasoningDefaults } : {}),
-      }),
+      api.auth.updateSettings({ coding_agent_model_default: model || null }),
     onMutate: (model) => {
       setPendingDefaultModel(model);
     },
@@ -357,7 +366,7 @@ export default function AccountPage() {
 
   // The selected provider's metadata drives whether the auth-type selector
   // is visible. For providers that don't ship a subscription OAuth flow
-  // (Gemini CLI / Amp / Pi), we coerce auth_type to "api_key" so the modal
+  // (Amp / Pi / OpenCode), we coerce auth_type to "api_key" so the modal
   // doesn't render a dead radio group.
   const selectedProviderOption = PERSONAL_PROVIDER_OPTIONS.find((o) => o.key === provider) ?? PERSONAL_PROVIDER_OPTIONS[0];
   const showAuthTypeSelector = selectedProviderOption.supportsSubscription;
@@ -370,9 +379,9 @@ export default function AccountPage() {
     const agent = personalProviderToAgent(p);
     const base = agent === "codex" ? "Codex"
       : agent === "claude_code" ? "Claude Code"
-      : agent === "gemini_cli" ? "Gemini CLI"
       : agent === "amp" ? "Amp"
       : agent === "pi" ? "Pi"
+      : agent === "opencode" ? "OpenCode"
       : agent;
     return type === "subscription" ? `${base} subscription` : `${base} API key`;
   }
@@ -383,6 +392,15 @@ export default function AccountPage() {
     setAuthLabel("");
     setProvider("openai");
     setAuthType("subscription");
+    setOpenCodeBackingProvider("opencode");
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeCustomModel("");
+  }
+
+  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider) {
+    setOpenCodeBackingProvider(value);
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(value));
+    setOpenCodeCustomModel("");
   }
 
   function closeAddModal() {
@@ -469,6 +487,8 @@ export default function AccountPage() {
           </CardContent>
         </Card>
 
+        <CLISessionsCard />
+
         <Card>
           <CardHeader>
             <CardTitle>Coding agent defaults</CardTitle>
@@ -513,13 +533,7 @@ export default function AccountPage() {
                       value={defaultReasoning || "__default__"}
                       onValueChange={(value) => {
                         const nextValue = value === "__default__" ? "" : toCodingAgentReasoningEffort(value);
-                        const nextDefaults = { ...effectiveReasoningDefaults };
-                        if (nextValue) {
-                          nextDefaults[agentType as "codex" | "claude_code"] = nextValue;
-                        } else {
-                          delete nextDefaults[agentType as "codex" | "claude_code"];
-                        }
-                        saveReasoningDefaults(nextDefaults);
+                        saveReasoningDefault(agentType as "codex" | "claude_code", nextValue || null);
                       }}
                     >
                       <SelectTrigger
@@ -626,34 +640,75 @@ export default function AccountPage() {
         </div>
 
         {effectiveAuthType === "api_key" ? (
-          <div className="space-y-2">
-            <Label htmlFor="personal-api-key" className="flex items-center gap-2">
-              API key
-              <APIKeyHelpTooltip
-                ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
-                description={apiKeyHelp(provider).description}
-                href={apiKeyHelp(provider).href}
-                linkLabel={apiKeyHelp(provider).linkLabel}
+          <>
+            {provider === "opencode" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="personal-opencode-backing-provider">OpenCode provider</Label>
+                  <Select value={openCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
+                    <SelectTrigger id="personal-opencode-backing-provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {OPENCODE_BACKING_PROVIDER_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="personal-opencode-model">Default model</Label>
+                  <Select value={openCodeModel} onValueChange={setOpenCodeModel}>
+                    <SelectTrigger id="personal-opencode-model">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {openCodeModelOptions.map((model) => (
+                        <SelectItem key={model} value={model}>{model}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="personal-opencode-model-custom">Custom model override</Label>
+                  <Input
+                    id="personal-opencode-model-custom"
+                    value={openCodeCustomModel}
+                    onChange={(event) => setOpenCodeCustomModel(event.target.value)}
+                    placeholder="provider/model (e.g. xai/grok-code-fast)"
+                  />
+                </div>
+              </>
+            ) : null}
+            <div className="space-y-2">
+              <Label htmlFor="personal-api-key" className="flex items-center gap-2">
+                API key
+                <APIKeyHelpTooltip
+                  ariaLabel={`Where to get a ${apiKeyHelp(provider).label} API key`}
+                  description={apiKeyHelp(provider).description}
+                  href={apiKeyHelp(provider).href}
+                  linkLabel={apiKeyHelp(provider).linkLabel}
+                />
+              </Label>
+              <Input
+                id="personal-api-key"
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+	                placeholder={
+	                  provider === "anthropic"
+	                    ? "sk-ant-..."
+	                    : provider === "amp"
+	                      ? "amp_..."
+	                      : provider === "pi"
+	                        ? "pi_..."
+	                        : provider === "opencode"
+	                          ? "OpenCode or provider key"
+	                          : "sk-..."
+	                }
               />
-            </Label>
-            <Input
-              id="personal-api-key"
-              type="password"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder={
-                provider === "anthropic"
-                  ? "sk-ant-..."
-                  : provider === "gemini"
-                    ? "AIza..."
-                    : provider === "amp"
-                      ? "amp_..."
-                      : provider === "pi"
-                        ? "pi_..."
-                        : "sk-..."
-              }
-            />
-          </div>
+            </div>
+          </>
         ) : null}
       </CodingAuthDialog>
 
@@ -670,10 +725,6 @@ export default function AccountPage() {
             resetModalState();
             // Invalidate the personal stack so the new subscription appears.
             void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-            // Legacy keys that still feed parts of the UI during the
-            // unified-credentials migration window.
-            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
             toast.success("Personal subscription connected");
           }}
         />
@@ -691,8 +742,6 @@ export default function AccountPage() {
             setShowClaudeModal(false);
             resetModalState();
             void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-            void queryClient.invalidateQueries({ queryKey: ["user-credentials"] });
-            void queryClient.invalidateQueries({ queryKey: ["credentials", "resolved"] });
             toast.success("Personal subscription connected");
           }}
         />

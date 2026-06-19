@@ -41,7 +41,7 @@ func (s *SessionThreadStore) SetLogger(logger zerolog.Logger) {
 const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_override,
 	label, instructions, file_scope, status, agent_session_id, current_turn, last_activity_at,
 	result_summary, diff, failure_explanation, failure_category,
-	started_at, completed_at, created_at, archived_at,
+	started_at, completed_at, created_at, created_by_source, created_by_thread_id, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
 	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
 
@@ -53,7 +53,7 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	result_summary,
 	CASE WHEN diff IS NULL THEN NULL ELSE '__diff_present__' END AS diff,
 	failure_explanation, failure_category,
-	started_at, completed_at, created_at, archived_at,
+	started_at, completed_at, created_at, created_by_source, created_by_thread_id, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
 	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
 
@@ -103,6 +103,47 @@ func (s *SessionThreadStore) Create(ctx context.Context, thread *models.SessionT
 	return nil
 }
 
+func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *models.SessionThread, maxThreads int) error {
+	createdBySource := thread.CreatedBySource
+	if createdBySource == "" {
+		createdBySource = models.ThreadCreatedBySourceUser
+	}
+	query := `
+		INSERT INTO session_threads (
+			session_id, org_id, agent_type, model_override,
+			label, instructions, file_scope, status, created_by_source, created_by_thread_id
+		)
+		SELECT @session_id, @org_id, @agent_type, @model_override,
+			@label, @instructions, @file_scope, @status, @created_by_source, @created_by_thread_id
+		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id AND archived_at IS NULL) < @max_threads
+		RETURNING id, created_at`
+
+	args := pgx.NamedArgs{
+		"session_id":           thread.SessionID,
+		"org_id":               thread.OrgID,
+		"agent_type":           thread.AgentType,
+		"model_override":       thread.ModelOverride,
+		"label":                thread.Label,
+		"instructions":         thread.Instructions,
+		"file_scope":           thread.FileScope,
+		"status":               thread.Status,
+		"created_by_source":    createdBySource,
+		"created_by_thread_id": thread.CreatedByThreadID,
+		"max_threads":          maxThreads,
+	}
+
+	row := s.db.QueryRow(ctx, query, args)
+	err := row.Scan(&thread.ID, &thread.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrThreadLimitReached
+		}
+		return err
+	}
+	thread.CreatedBySource = createdBySource
+	return nil
+}
+
 func (s *SessionThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {
 	query := `
 		SELECT ` + sessionThreadSelectColumns + `
@@ -116,7 +157,7 @@ func (s *SessionThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.U
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("query session thread: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 }
 
 func (s *SessionThreadStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionThread, error) {
@@ -133,7 +174,28 @@ func (s *SessionThreadStore) ListBySession(ctx context.Context, orgID, sessionID
 	if err != nil {
 		return nil, fmt.Errorf("query session threads: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThread])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionThread])
+}
+
+func (s *SessionThreadStore) ListBySessionWithOptions(ctx context.Context, orgID, sessionID uuid.UUID, includeArchived bool) ([]models.SessionThread, error) {
+	archivedFilter := "AND archived_at IS NULL"
+	if includeArchived {
+		archivedFilter = ""
+	}
+	query := `
+		SELECT ` + sessionThreadListColumns + `
+		FROM session_threads
+		WHERE org_id = @org_id AND session_id = @session_id ` + archivedFilter + `
+		ORDER BY created_at ASC`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query session threads: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionThread])
 }
 
 func (s *SessionThreadStore) GetRetryTarget(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionThread, error) {
@@ -174,7 +236,7 @@ func (s *SessionThreadStore) GetRetryTarget(ctx context.Context, orgID, sessionI
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("query retry target thread: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 }
 
 func (s *SessionThreadStore) CountBySession(ctx context.Context, orgID, sessionID uuid.UUID) (int, error) {
@@ -217,7 +279,7 @@ func (s *SessionThreadStore) Archive(ctx context.Context, orgID, sessionID, thre
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("archive thread: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 }
 
 func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
@@ -315,7 +377,7 @@ func (s *SessionThreadStore) UpdateEditable(ctx context.Context, thread *models.
 		return fmt.Errorf("update editable thread fields: %w", err)
 	}
 
-	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	updated, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 	if err != nil {
 		return err
 	}
@@ -460,7 +522,7 @@ func (s *SessionThreadStore) ListStuckRunningThreads(ctx context.Context, starte
 	if err != nil {
 		return nil, fmt.Errorf("query stuck running threads: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionThread])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionThread])
 }
 
 // ClaimIdle atomically transitions an idle thread to running. Used when a user
@@ -479,7 +541,7 @@ func (s *SessionThreadStore) ClaimIdle(ctx context.Context, orgID, threadID uuid
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("claim idle thread: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 }
 
 // ErrThreadRunningLimitReached signals that the requested thread is otherwise
@@ -593,7 +655,7 @@ func (s *SessionThreadStore) ClaimNextQueuedForSession(ctx context.Context, orgI
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("claim next queued session thread: %w", err)
 	}
-	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 	if err != nil {
 		return models.SessionThread{}, err
 	}
@@ -696,7 +758,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 	if err != nil {
 		return models.SessionThread{}, fmt.Errorf("claim session thread: %w", err)
 	}
-	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionThread])
+	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 	if err != nil {
 		// pgx.ErrNoRows means the WHERE-with-EXISTS predicate did not match.
 		// Best-effort distinguish "limit reached" from "status not claimable"

@@ -38,6 +38,8 @@ interface ReviewDiffViewProps {
   /** Search query for filtering diff content */
   diffSearchQuery: string;
   onDiffSearchChange: (q: string) => void;
+  isFullScreen?: boolean;
+  onToggleFullScreen?: () => void;
 }
 
 export const ReviewDiffView = memo(function ReviewDiffView({
@@ -59,9 +61,14 @@ export const ReviewDiffView = memo(function ReviewDiffView({
   isMobile = false,
   onOpenFileList,
   onOpenComposer,
+  isFullScreen = false,
+  onToggleFullScreen,
 }: ReviewDiffViewProps) {
   const diffPaneRef = useRef<DiffPaneHandle>(null);
   const skipNextScrollToFileRef = useRef(false);
+  const previousActiveFileIndexRef = useRef(activeFileIndex);
+  const pendingScrollTargetIndexRef = useRef<number | null>(null);
+  const pendingScrollTargetTimeoutRef = useRef<number | null>(null);
   const [showKeyboardHelp, setShowKeyboardHelp] = useState(false);
   const [explorerMode, setExplorerMode] = useState(false);
   const [explorerInitialPath, setExplorerInitialPath] = useState<string | undefined>(undefined);
@@ -101,12 +108,18 @@ export const ReviewDiffView = memo(function ReviewDiffView({
       }
       if (!explorerMode && !activeCommentLine && !showKeyboardHelp) {
         e.preventDefault();
-        onBack();
+        // Full screen is an extra layer on top of review mode, so Escape
+        // peels it off first; a second Escape exits review entirely.
+        if (isFullScreen && onToggleFullScreen) {
+          onToggleFullScreen();
+        } else {
+          onBack();
+        }
       }
     }
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [explorerMode, activeCommentLine, showKeyboardHelp, onBack]);
+  }, [explorerMode, activeCommentLine, showKeyboardHelp, onBack, isFullScreen, onToggleFullScreen]);
 
   const handleViewModeChange = useCallback((mode: ViewMode) => {
     if (isMobile) return;
@@ -125,19 +138,57 @@ export const ReviewDiffView = memo(function ReviewDiffView({
 
   // activeFileIndex can change from outside (sidebar file-tree click), so scroll via effect rather than only inside handleFileSelect.
   useEffect(() => {
+    const previousActiveFileIndex = previousActiveFileIndexRef.current;
+    previousActiveFileIndexRef.current = activeFileIndex;
+
     if (skipNextScrollToFileRef.current) {
       skipNextScrollToFileRef.current = false;
       return;
     }
+
+    if (previousActiveFileIndex !== activeFileIndex) {
+      pendingScrollTargetIndexRef.current = activeFileIndex;
+      if (pendingScrollTargetTimeoutRef.current != null) {
+        window.clearTimeout(pendingScrollTargetTimeoutRef.current);
+      }
+      pendingScrollTargetTimeoutRef.current = window.setTimeout(() => {
+        pendingScrollTargetIndexRef.current = null;
+        pendingScrollTargetTimeoutRef.current = null;
+      }, 2000);
+    }
+
     diffPaneRef.current?.scrollToFile(activeFileIndex);
   }, [activeFileIndex]);
 
+  useEffect(() => {
+    return () => {
+      if (pendingScrollTargetTimeoutRef.current != null) {
+        window.clearTimeout(pendingScrollTargetTimeoutRef.current);
+      }
+    };
+  }, []);
+
   const handleVisibleFileChange = useCallback(
     (index: number) => {
+      const pendingTargetIndex = pendingScrollTargetIndexRef.current;
+      if (pendingTargetIndex != null) {
+        if (index !== pendingTargetIndex) {
+          return;
+        }
+        pendingScrollTargetIndexRef.current = null;
+        if (pendingScrollTargetTimeoutRef.current != null) {
+          window.clearTimeout(pendingScrollTargetTimeoutRef.current);
+          pendingScrollTargetTimeoutRef.current = null;
+        }
+        // Skip: onFileChange would be a no-op, so no effect run to clear skipNextScrollToFileRef.
+        if (index === activeFileIndex) {
+          return;
+        }
+      }
       skipNextScrollToFileRef.current = true;
       onFileChange(index);
     },
-    [onFileChange]
+    [onFileChange, activeFileIndex]
   );
 
   const toggleViewMode = useCallback(() => {
@@ -248,7 +299,7 @@ export const ReviewDiffView = memo(function ReviewDiffView({
   // Explorer mode takes over
   if (explorerMode) {
     return (
-      <div className="flex flex-col h-full">
+      <div className="flex h-full min-w-0 max-w-full flex-col overflow-hidden">
         <RepoExplorer
           sessionId={sessionId}
           diffFiles={allFiles}
@@ -261,13 +312,15 @@ export const ReviewDiffView = memo(function ReviewDiffView({
 
   if (files.length === 0) {
     return (
-      <div className="flex flex-col h-full">
+      <div className="flex h-full min-w-0 max-w-full flex-col overflow-hidden">
         <DiffToolbar
           onBack={onBack}
           viewMode={effectiveViewMode}
           onViewModeChange={handleViewModeChange}
           isMobile={isMobile}
           mobileChromeCollapsed={mobileChromeCollapsed}
+          isFullScreen={isFullScreen}
+          onToggleFullScreen={isMobile ? undefined : onToggleFullScreen}
         />
         <div className="flex-1 flex items-center justify-center py-12">
           <div className="text-center space-y-2 max-w-[280px]">
@@ -285,7 +338,7 @@ export const ReviewDiffView = memo(function ReviewDiffView({
   }
 
   return (
-      <div className="flex flex-col h-full">
+    <div className="flex h-full min-w-0 max-w-full flex-col overflow-hidden">
       <DiffToolbar
         onBack={onBack}
         viewMode={effectiveViewMode}
@@ -303,6 +356,8 @@ export const ReviewDiffView = memo(function ReviewDiffView({
         canGoPrev={isMobile && activeFileIndex > 0}
         canGoNext={isMobile && activeFileIndex < files.length - 1}
         mobileChromeCollapsed={mobileChromeCollapsed}
+        isFullScreen={isFullScreen}
+        onToggleFullScreen={isMobile ? undefined : onToggleFullScreen}
       />
       <DiffPane
         ref={diffPaneRef}

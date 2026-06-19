@@ -342,10 +342,12 @@ When the user clicks "Send to agent", comments are formatted as a chat message:
 Please address the following code review comments:
 
 1. src/components/diff-viewer.tsx:11
-   "This should handle the null case for `foo`. Consider adding a guard clause."
+   Target line: `src/components/diff-viewer.tsx:11` (new side)
+   Requested change: "This should handle the null case for `foo`. Consider adding a guard clause."
 
 2. src/lib/api.ts:45
-   "Use consistent error format here — see the pattern in sessions.ts"
+   Target line: `src/lib/api.ts:45` (new side)
+   Requested change: "Use consistent error format here — see the pattern in sessions.ts"
 ```
 
 This message appears in the chat panel and triggers a new agent turn. The agent can then make changes and produce a new diff, starting the review cycle again.

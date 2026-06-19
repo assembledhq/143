@@ -1,9 +1,23 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
 import { ChatTimeline, formatMessageTime } from "./chat-timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { SessionMessage, SessionLog } from "@/lib/types";
+import { server } from "@/test/mocks/server";
+
+const { canCopyToClipboardMock, copyTextToClipboardMock } = vi.hoisted(() => ({
+  canCopyToClipboardMock: vi.fn(() => true),
+  copyTextToClipboardMock: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/clipboard", () => ({
+  canCopyToClipboard: canCopyToClipboardMock,
+  copyTextToClipboard: copyTextToClipboardMock,
+}));
 
 function makeMessage(overrides: Partial<SessionMessage> & { id: number }): SessionMessage {
   return {
@@ -18,14 +32,31 @@ function makeMessage(overrides: Partial<SessionMessage> & { id: number }): Sessi
 }
 
 function makeLog(overrides: Partial<SessionLog> & { id: number; level: string }): SessionLog {
+  const message = overrides.message ?? "log message";
   return {
     session_id: "s1",
-    message: "log message",
+    message,
     metadata: null,
     turn_number: 1,
     created_at: "2026-01-01T00:00:01Z",
+    message_bytes: message.length,
+    message_chars: message.length,
+    message_truncated: false,
     ...overrides,
   };
+}
+
+function renderWithQueryClient(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+    },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      {ui}
+    </QueryClientProvider>,
+  );
 }
 
 describe("formatMessageTime", () => {
@@ -53,6 +84,12 @@ describe("formatMessageTime", () => {
 });
 
 describe("ChatTimeline", () => {
+  beforeEach(() => {
+    canCopyToClipboardMock.mockReturnValue(true);
+    copyTextToClipboardMock.mockClear();
+    copyTextToClipboardMock.mockResolvedValue(undefined);
+  });
+
   it("renders message bubbles", () => {
     const entries: TimelineEntry[] = [
       { kind: "message", data: makeMessage({ id: 1, content: "User said hi", role: "user" }) },
@@ -61,6 +98,61 @@ describe("ChatTimeline", () => {
     render(<ChatTimeline entries={entries} isRunning={false} />);
     expect(screen.getByText("User said hi")).toBeInTheDocument();
     expect(screen.getByText("Assistant replied")).toBeInTheDocument();
+  });
+
+  it("anchors grouped hidden logs by the first hidden transcript entry", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "log",
+        data: makeLog({ id: 1, level: "info", message: "hidden diagnostic" }),
+        transcriptEntryId: "log_1",
+      },
+      {
+        kind: "log",
+        data: makeLog({ id: 2, level: "info", message: "second hidden diagnostic" }),
+        transcriptEntryId: "log_2",
+      },
+    ];
+
+    const { container } = render(
+      <ChatTimeline
+        entries={entries}
+        isRunning={false}
+        getEntryContainerProps={(entry) => ({
+          "data-session-entry-id": entry.transcriptEntryId,
+        })}
+      />,
+    );
+
+    expect(container.querySelector('[data-session-entry-id="log_1"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-session-entry-id="log_2"]')).toBeNull();
+    expect(screen.getByText("2 log entries")).toBeInTheDocument();
+  });
+
+  it("scopes user message bubbles for readable text selection", () => {
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: makeMessage({ id: 1, content: "Selectable user prompt", role: "user" }) },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    expect(screen.getByText("Selectable user prompt").closest(".chat-user-bubble")).toBeInTheDocument();
+  });
+
+  it("copies user prompts and assistant final responses from transcript message actions", async () => {
+    const entries: TimelineEntry[] = [
+      { kind: "message", data: makeMessage({ id: 1, content: "Original prompt\nwith details", role: "user" }) },
+      { kind: "message", data: makeMessage({ id: 2, content: "Final response\nwith next steps", role: "assistant" }) },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Copy prompt" }));
+    await user.click(screen.getByRole("button", { name: "Copy final response" }));
+
+    expect(copyTextToClipboardMock).toHaveBeenNthCalledWith(1, "Original prompt\nwith details");
+    expect(copyTextToClipboardMock).toHaveBeenNthCalledWith(2, "Final response\nwith next steps");
+    expect(screen.getByRole("button", { name: "Copied prompt" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copied final response" })).toBeInTheDocument();
   });
 
   it("renders tool group collapsed by default, expands on click", async () => {
@@ -88,12 +180,110 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("file contents here")).toBeInTheDocument();
   });
 
+  it("fetches full tool output only when a truncated tool result is expanded", async () => {
+    let detailRequests = 0;
+    let resolveDetail: () => void = () => {};
+    const detailReady = new Promise<void>((resolve) => {
+      resolveDetail = resolve;
+    });
+    server.use(
+      http.get("/api/v1/sessions/:id/logs/:logId", async () => {
+        detailRequests += 1;
+        await detailReady;
+        return HttpResponse.json({
+          data: {
+            id: 2,
+            session_id: "s1",
+            level: "output",
+            message: "full output from detail endpoint",
+            metadata: { type: "tool_result" },
+            turn_number: 1,
+            created_at: "2026-01-01T00:00:01Z",
+            message_bytes: 32,
+            message_chars: 32,
+          },
+        });
+      }),
+    );
+
+    const entries: TimelineEntry[] = [
+      {
+        kind: "tool_group",
+        toolUse: makeLog({
+          id: 1,
+          level: "tool_use",
+          message: "using tool: Bash",
+          metadata: { tool: "Bash", input: { command: "rg something" } },
+        }),
+        toolResult: makeLog({
+          id: 2,
+          level: "output",
+          message: "preview only",
+          metadata: { type: "tool_result" },
+          message_truncated: true,
+          message_bytes: 100_000,
+          message_chars: 100_000,
+        }),
+      },
+    ];
+
+    renderWithQueryClient(<ChatTimeline entries={entries} isRunning={false} />);
+
+    expect(screen.queryByText("preview only")).not.toBeInTheDocument();
+    expect(detailRequests).toBe(0);
+
+    await userEvent.click(screen.getByText("Ran `rg something`"));
+
+    expect(screen.getByText("preview only")).toBeInTheDocument();
+    resolveDetail();
+    await waitFor(() => {
+      expect(screen.getByText("full output from detail endpoint")).toBeInTheDocument();
+    });
+    expect(detailRequests).toBe(1);
+  });
+
   it("renders error entries with error styling", () => {
     const entries: TimelineEntry[] = [
       { kind: "error", data: makeLog({ id: 1, level: "error", message: "Something broke" }) },
     ];
     render(<ChatTimeline entries={entries} isRunning={false} />);
     expect(screen.getByText("Something broke")).toBeInTheDocument();
+  });
+
+  it("fetches full output when a truncated error is expanded", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:id/logs/:logId", () => HttpResponse.json({
+        data: {
+          id: 3,
+          session_id: "s1",
+          level: "error",
+          message: "complete error output",
+          metadata: null,
+          turn_number: 1,
+          created_at: "2026-01-01T00:00:01Z",
+          message_bytes: 21,
+          message_chars: 21,
+        },
+      })),
+    );
+    const entries: TimelineEntry[] = [
+      {
+        kind: "error",
+        data: makeLog({
+          id: 3,
+          level: "error",
+          message: "preview error",
+          message_truncated: true,
+          message_bytes: 90_000,
+          message_chars: 90_000,
+        }),
+      },
+    ];
+
+    renderWithQueryClient(<ChatTimeline entries={entries} isRunning={false} />);
+
+    await userEvent.click(screen.getByText("Show more"));
+    expect(await screen.findByText("complete error output")).toBeInTheDocument();
   });
 
   it("renders hidden logs behind a toggle", async () => {
@@ -111,6 +301,43 @@ describe("ChatTimeline", () => {
     await userEvent.click(screen.getByText(/2 log entries/));
     expect(screen.getByText("Info log one")).toBeInTheDocument();
     expect(screen.getByText("Debug log two")).toBeInTheDocument();
+  });
+
+  it("fetches full output when a truncated hidden log is expanded", async () => {
+    server.use(
+      http.get("/api/v1/sessions/:id/logs/:logId", () => HttpResponse.json({
+        data: {
+          id: 5,
+          session_id: "s1",
+          level: "info",
+          message: "complete hidden output",
+          metadata: null,
+          turn_number: 1,
+          created_at: "2026-01-01T00:00:01Z",
+          message_bytes: 22,
+          message_chars: 22,
+        },
+      })),
+    );
+    const entries: TimelineEntry[] = [
+      {
+        kind: "log",
+        data: makeLog({
+          id: 5,
+          level: "info",
+          message: "hidden preview",
+          message_truncated: true,
+          message_bytes: 75_000,
+          message_chars: 75_000,
+        }),
+      },
+    ];
+
+    renderWithQueryClient(<ChatTimeline entries={entries} isRunning={false} />);
+
+    await userEvent.click(screen.getByText(/1 log entry/));
+    await userEvent.click(screen.getByText("Load full output"));
+    expect(await screen.findByText("complete hidden output")).toBeInTheDocument();
   });
 
   it("shows working indicator when running", () => {

@@ -223,4 +223,16 @@ describe("RunCard click-through", () => {
 
     expect(screen.getByText(/manual run · waiting to start/i)).toBeInTheDocument();
   });
+
+  it("shows GitHub provenance for pending event-triggered runs", () => {
+    const run = makeRun({
+      status: "pending",
+      completed_at: undefined,
+      triggered_by: "github",
+    });
+
+    renderWithProviders(<RunCard run={run} />);
+
+    expect(screen.getByText(/github event · waiting to start/i)).toBeInTheDocument();
+  });
 });

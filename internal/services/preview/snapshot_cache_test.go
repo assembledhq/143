@@ -1,12 +1,21 @@
 package preview
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/google/uuid"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -184,4 +193,78 @@ func TestNewSnapshotCache_RequiresExecutor(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "executor must be non-nil")
+}
+
+type streamingRestoreExecutor struct {
+	writeFromReaderCalled bool
+	writeFileCalled       bool
+	written               []byte
+}
+
+func (e *streamingRestoreExecutor) Exec(_ context.Context, _ *agent.Sandbox, _ string, _, _ io.Writer) (int, error) {
+	return 0, nil
+}
+
+func (e *streamingRestoreExecutor) ReadFile(context.Context, *agent.Sandbox, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (e *streamingRestoreExecutor) WriteFile(context.Context, *agent.Sandbox, string, []byte) error {
+	e.writeFileCalled = true
+	return nil
+}
+
+func (e *streamingRestoreExecutor) WriteFileFromReader(_ context.Context, _ *agent.Sandbox, _ string, reader io.Reader, _ int64) error {
+	e.writeFromReaderCalled = true
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	e.written = append([]byte(nil), body...)
+	return nil
+}
+
+func TestSnapshotCache_RestoreSnapshotStreamsBlobToSandbox(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	cacheDir := t.TempDir()
+	blobPath := filepath.Join(cacheDir, "snapshot.tar.gz")
+	body := []byte("compressed snapshot body")
+	require.NoError(t, os.WriteFile(blobPath, body, 0o600), "snapshot blob should be written")
+	sum := sha256.Sum256(body)
+	require.NoError(t, os.WriteFile(blobPath+".sha256", []byte(hex.EncodeToString(sum[:])), 0o600), "snapshot checksum should be written")
+
+	orgID := uuid.New()
+	entryID := uuid.New()
+	executor := &streamingRestoreExecutor{}
+	sc := &SnapshotCache{
+		store:    db.NewPreviewStore(mock),
+		executor: executor,
+		logger:   zerolog.Nop(),
+	}
+	hit := &CacheHit{
+		Entry: models.PreviewStartupCache{
+			ID:          entryID,
+			OrgID:       orgID,
+			SnapshotKey: "snapshot-key",
+			BlobPath:    blobPath,
+			SizeBytes:   int64(len(body)),
+		},
+		BlobPath: blobPath,
+	}
+
+	mock.ExpectExec("UPDATE preview_startup_cache SET last_used_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = sc.RestoreSnapshot(context.Background(), &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}, hit)
+	require.NoError(t, err, "RestoreSnapshot should restore a valid snapshot")
+	require.True(t, executor.writeFromReaderCalled, "RestoreSnapshot should stream the snapshot blob through WriteFileFromReader")
+	require.False(t, executor.writeFileCalled, "RestoreSnapshot should not materialize the blob through WriteFile")
+	require.Equal(t, body, executor.written, "RestoreSnapshot should stream the exact blob contents")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }

@@ -117,7 +117,7 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
         onClick={(e) => handleLineNumberButtonClick(e, line.oldLineNumber, "L")}
         onKeyDown={handleLineNumberButtonKeyDown}
         className={cn(
-          "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
+          "w-[42px] shrink-0 text-right pr-1 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
           lineNumberStyles[line.type]
         )}
       >
@@ -129,14 +129,14 @@ export function DiffLineRow({ line, filePath, highlightedContent, onAddComment, 
         onClick={(e) => handleLineNumberButtonClick(e, line.newLineNumber, "R")}
         onKeyDown={handleLineNumberButtonKeyDown}
         className={cn(
-          "w-[50px] shrink-0 text-right pr-2 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
+          "w-[42px] shrink-0 text-right pr-1 select-none text-xs text-muted-foreground/60 hover:text-primary cursor-pointer",
           lineNumberStyles[line.type]
         )}
       >
         {line.newLineNumber ?? ""}
       </button>
       {/* Prefix (+/-/space) */}
-      <div className="w-[20px] shrink-0 text-center select-none text-muted-foreground/50">
+      <div className="w-[16px] shrink-0 text-center select-none text-muted-foreground/50">
         {linePrefix[line.type]}
       </div>
       {/* Content */}

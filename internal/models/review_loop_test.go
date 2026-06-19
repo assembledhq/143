@@ -101,9 +101,9 @@ func TestAgentSupportsNativeReview(t *testing.T) {
 	}{
 		{name: "codex", agentType: AgentTypeCodex, expected: true},
 		{name: "claude code", agentType: AgentTypeClaudeCode, expected: true},
-		{name: "gemini hidden", agentType: AgentTypeGeminiCLI, expected: false},
 		{name: "amp", agentType: AgentTypeAmp, expected: true},
 		{name: "pi", agentType: AgentTypePi, expected: true},
+		{name: "opencode", agentType: AgentTypeOpenCode, expected: true},
 	}
 
 	for _, tt := range tests {

@@ -24,7 +24,7 @@ set -euo pipefail
 # normal deploys; existing sandboxes pick up the change on their next
 # create because the bind-mount reads the host file at lookup time.
 #
-# Usage: sudo /opt/143/deploy/scripts/sandbox-resolv-conf.sh
+# Usage: sudo /opt/143/deploy/scripts/sandbox-resolv-conf.sh [dest] [nameserver]
 #
 # Atomic write: tee to a sibling .tmp and rename(2). An in-place truncate-
 # then-write would expose sandboxes to an empty resolv.conf for the few
@@ -38,13 +38,14 @@ set -euo pipefail
 # TestSandboxDNSConfigAlignment in deploy/deploy_config_test.go locks the
 # alignment in CI; update all three together.
 
-DEST=/etc/143/sandbox-resolv.conf
+DEST="${1:-/etc/143/sandbox-resolv.conf}"
+NAMESERVER="${2:-172.30.0.2}"
 TMP="${DEST}.tmp"
 
 mkdir -p "$(dirname "$DEST")"
 
 cat > "$TMP" <<RESOLV
-nameserver 172.30.0.2
+nameserver ${NAMESERVER}
 options edns0 trust-ad ndots:0
 RESOLV
 

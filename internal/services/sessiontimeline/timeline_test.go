@@ -113,6 +113,18 @@ func TestComposeTimeline_CodexApplyPatchVerificationDiagnosticKeepsErrorAsLog(t 
 	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "recoverable Codex apply_patch diagnostics should not be returned as user-visible errors")
 }
 
+func TestComposeTimeline_CodexApplyPatchVerificationDiagnosticWithTopLevelContextKeepsErrorAsLog(t *testing.T) {
+	t.Parallel()
+
+	logs := []models.SessionLog{
+		makeLog(t, nil, "2026-01-01T00:00:01Z", "error", "2026-05-22T05:52:30.204805Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /home/sandbox/143/internal/db/autopilot_queue.go:\nfunc ptrTime(t time.Time) *time.Time {\n\treturn &t\n}"),
+	}
+
+	result := Compose(nil, logs)
+	require.Len(t, result, 1, "recoverable Codex apply_patch diagnostics with top-level context should remain available in the timeline")
+	require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "recoverable Codex apply_patch diagnostics with top-level context should not be returned as user-visible errors")
+}
+
 func TestComposeTimeline_DedupesLegacyRowsWithoutMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -297,6 +309,56 @@ func TestComposeTimeline_EmitsErrorAndGenericLogEntries(t *testing.T) {
 	require.Len(t, result, 2, "error and non-visible logs should both be returned")
 	require.Equal(t, models.SessionTimelineKindError, result[0].Kind, "error logs should render as error entries")
 	require.Equal(t, models.SessionTimelineKindLog, result[1].Kind, "non-visible logs should render as generic log entries")
+}
+
+func TestComposeTimeline_KeepsRecoverableCodexWebsocketDiagnosticsHidden(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "reconnecting retry status",
+			message: "Reconnecting... 2/5 (stream disconnected before completion: failed to lookup address information: Try again)",
+		},
+		{
+			name:    "responses websocket record",
+			message: "2026-06-12T08:54:38.209896Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: IO error: failed to lookup address information: Try again, url: wss://chatgpt.com/backend-api/codex/responses",
+		},
+		{
+			name:    "generic reconnect status",
+			message: "Reconnecting... 4/5 (stream disconnected before completion: An error occurred while processing your request. Please try again.)",
+		},
+		{
+			name:    "tool router argument parse",
+			message: "2026-06-05T22:47:06.079306Z ERROR codex_core::tools::router: error=failed to parse function arguments: missing field `cmd` at line 1 column 125",
+		},
+		{
+			name:    "skills loader missing optional reference",
+			message: "2026-06-07T13:04:57.108170Z ERROR codex_core_skills::loader: failed to stat skills path /home/sandbox/.codex/.tmp/plugins/plugins/google-drive/skills/google-docs/references/reference-foreground-guard.md: No such file or directory",
+		},
+		{
+			name:    "model refresh timeout",
+			message: "2026-06-12T02:31:46.399958Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logs := []models.SessionLog{
+				makeLog(t, func(log *models.SessionLog) {
+					log.ID = 1
+				}, "2026-01-01T00:00:01Z", "error", tt.message),
+			}
+
+			result := Compose(nil, logs)
+			require.Len(t, result, 1, "recoverable Codex websocket diagnostics should remain available as timeline logs")
+			require.Equal(t, models.SessionTimelineKindLog, result[0].Kind, "recoverable Codex websocket diagnostics should not render as visible errors")
+		})
+	}
 }
 
 func TestComposeTimeline_IncludesHumanInputRequests(t *testing.T) {

@@ -25,31 +25,32 @@ Result: the UI briefly shows `Opening repair session…`, then returns to a clic
 
 ### Core rule
 
-For the PR's current `health_version`, if there is a non-terminal active repair run for an action, that action must not render as clickable in the PR health row.
+For the PR's current head SHA, if there is a non-terminal active repair run for an action, that action must not render as clickable in the PR health row. The repair row still records `health_version` as launch provenance, but same-head health-version churn must not re-enable the repair CTA while the repair is still running.
 
 ### Desired steady-state UX
 
-If a `fix_tests` repair run is active for the current `health_version`:
+If a `fix_tests` repair run is active for the current PR head SHA:
 
 - do not render the `Fix tests` button
 - render a non-clickable status surface: `Fix tests running`
 - if the active session is not the session currently being viewed, render `Open repair session`
 
-If a `resolve_conflicts` repair run is active for the current `health_version`:
+If a `resolve_conflicts` repair run is active for the current PR head SHA:
 
 - do not render `Resolve conflicts`
 - do not render `Fix tests`
 - render a non-clickable status surface: `Resolve conflicts running`
 - if the active session is not the session currently being viewed, render `Open repair session`
 
-If there are no active repair runs for the current `health_version`:
+If there are no active repair runs for the current PR head SHA:
 
 - render the normal eligible actions based on PR health (`can_fix_tests`, `can_resolve_conflicts`, `can_merge`)
 
-If the PR advances to a newer `health_version`:
+If the PR advances to a newer head SHA:
 
 - older active repair runs no longer suppress current actions
 - the existing stale-context signal (`newer repair context available`) remains responsible for telling the user an older repair session exists against outdated PR state
+- a newer `health_version` on the same head keeps the running repair visible
 
 ### Why `resolve_conflicts` suppresses both repair CTAs
 
@@ -57,7 +58,7 @@ Conflict resolution is the more fundamental repair action. The existing PR-healt
 
 ### Merge behavior
 
-While any repair run is active for the current `health_version`, the PR health row should not offer `Merge`.
+While any repair run is active for the current PR head SHA, the PR health row should not offer `Merge`.
 
 The goal is to keep the row internally consistent: a PR should not simultaneously present "repair is already running for this state" and "merge now" as peer actions.
 
@@ -116,7 +117,7 @@ frontend shows optimistic "Opening repair session…"
 frontend refetches GET /pull-requests/:id/health
         |
         v
-response includes active_repairs for current health_version
+response includes active_repairs for current head SHA
         |
         v
 banner replaces CTA with "Fix tests running" + optional "Open repair session"
@@ -153,7 +154,7 @@ open clients invalidate/refetch that PR health query
         |
         v
 banner exits "Fix tests running" when the current health response no longer has
-the matching active repair or no longer needs repair for that health_version
+the matching active repair or no longer needs repair for that head SHA
 ```
 
 This keeps the steady-state client cheap:
@@ -173,7 +174,7 @@ Use `pull_request_repair_runs` as the durable record of launched PR repair work.
 The backend should treat a repair run as active for banner purposes only when all of the following are true:
 
 1. `pull_request_id` matches the current PR
-2. `health_version` matches the current PR health response
+2. `head_sha` matches the current PR health response
 3. `active = true`
 4. the linked session is non-terminal
 
@@ -181,23 +182,23 @@ Terminal session statuses should not suppress the CTA. The banner should return 
 
 ### Query shape
 
-Add a store method that lists active repair runs for a PR and health version. The method should be org-scoped and return all active rows, not just one action type.
+Add a store method that lists active repair runs for a PR and head SHA. The method should be org-scoped and return all active rows, not just one action type.
 
 Suggested shape:
 
 ```go
-func (s *PullRequestStore) ListActiveRepairRuns(
+func (s *PullRequestStore) ListActiveRepairRunsByHead(
     ctx context.Context,
     orgID uuid.UUID,
     pullRequestID uuid.UUID,
-    healthVersion int64,
+    headSHA string,
 ) ([]models.PullRequestRepairRun, error)
 ```
 
 `buildPullRequestHealthResponse` should then:
 
 1. build the normal PR health response
-2. load active repair runs for `pr.ID` and the response `HealthVersion`
+2. load active repair runs for `pr.ID` and the response `HeadSHA`
 3. load each linked session status
 4. discard runs whose sessions are terminal
 5. populate `ActiveRepairs`
@@ -209,17 +210,18 @@ We should not add a new frontend polling loop just to clear `Fix tests running`.
 
 Instead, after a repair session changes the PR branch:
 
-1. GitHub webhook events (`pull_request.synchronize`, `check_run`, and `check_suite`) enqueue the normal PR-health sync job
-2. the sync job writes the latest health snapshot and recomputes `ActiveRepairs`
-3. the backend emits the normalized `pull_request.updated` event on the existing org-scoped SSE channel
-4. subscribed clients refetch only the affected PR health query
+1. a successful repair turn marks its repair row inactive and emits `pull_request.updated` on the existing org-scoped SSE channel, so clients can immediately refetch even before GitHub emits a webhook
+2. GitHub webhook events (`pull_request.synchronize`, `check_run`, and `check_suite`) enqueue the normal PR-health sync job
+3. the sync job writes the latest health snapshot and recomputes `ActiveRepairs`
+4. the backend emits the normalized `pull_request.updated` event on the same org-scoped SSE channel
+5. subscribed clients refetch only the affected PR health query
 
 That means the "tests finished" transition is driven by the same event pipeline that already updates mergeability, failing checks, and repair eligibility.
 
 `ActiveRepairs` should be recomputed from the latest DB state on every PR-health sync write. In practice this means:
 
-- when the linked session becomes terminal, the next health response drops the active repair
-- when a new push creates a newer `health_version`, older repair runs stop suppressing current actions
+- when the repair turn completes, the backend deactivates the linked repair row and publishes `pull_request.updated`
+- when a new push creates a newer head SHA, older repair runs stop suppressing current actions
 - when checks turn green, the banner naturally falls back from `Fix tests running` to the next healthy or mergeable state
 
 ### Session terminality
@@ -232,7 +234,7 @@ Keep `ObsoleteActiveRepairSessions` separate from `ActiveRepairs`.
 
 They answer different questions:
 
-- `ActiveRepairs`: is a repair currently running for this exact PR state?
+- `ActiveRepairs`: is a repair currently running for this PR head SHA?
 - `ObsoleteActiveRepairSessions`: is there an older repair session that no longer matches the current PR state?
 
 ## Frontend specification
@@ -313,12 +315,13 @@ Optional supporting copy when space permits:
 
 Add table-driven tests for:
 
-- current-version active `fix_tests` run is returned in `active_repairs`
-- current-version active `resolve_conflicts` run is returned in `active_repairs`
+- same-head active `fix_tests` run is returned in `active_repairs`
+- same-head active `resolve_conflicts` run is returned in `active_repairs`
 - terminal linked sessions are excluded
-- active runs for older health versions are excluded
+- active runs for older health versions on the same head are included
+- active runs for older head SHAs are excluded
 - merge is suppressed when `active_repairs` is non-empty
-- webhook-driven health recomputation clears `active_repairs` after the linked session is terminal or the PR advances to a newer health version
+- repair completion and webhook-driven health recomputation clear `active_repairs` after the linked repair row is inactive or the PR advances to a newer head SHA
 
 ### Frontend
 

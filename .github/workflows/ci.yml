@@ -6,7 +6,10 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "17 10 * * *"
+    # Twice daily: the scheduled run is the only place the full frontend
+    # suite executes with coverage, so cap the exposure window for a
+    # cross-cutting break that affected-test runs missed to ~12 hours.
+    - cron: "17 10,22 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -100,6 +103,10 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+      # Drives DB-backed migration behavior tests (e.g. the coding-credential
+      # versioning test in internal/db). They self-skip when unset, so this
+      # must point at the job's Postgres service or they never run anywhere.
+      TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
       - uses: actions/checkout@v6
         with:
@@ -110,6 +117,9 @@ jobs:
 
       - name: Download Go modules
         run: go mod download
+
+      - name: Wait for Postgres
+        run: go run ./cmd/wait-postgres
 
       - name: Run go vet and migrations
         run: |
@@ -202,6 +212,28 @@ jobs:
           git rev-parse --verify "${PR_BASE_SHA}^{commit}"
           git branch -f pr-base "${PR_BASE_SHA}"
 
+      # Main pushes run affected tests against the previous main SHA instead
+      # of the full suite: the merged PR already ran the same affected set,
+      # and the full suite (~10 min on a 2-core runner) was burning that time
+      # on every merge. The twice-daily scheduled run still executes the full
+      # suite with coverage as the backstop. github.event.before is all
+      # zeros on branch creation and unreachable after a force push, so fall
+      # back to the full suite when it can't be resolved.
+      - name: Materialize push base ref (main push only)
+        if: github.event_name == 'push'
+        working-directory: ${{ github.workspace }}
+        env:
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          if [ "$PUSH_BASE_SHA" != "0000000000000000000000000000000000000000" ] \
+            && git rev-parse --verify --quiet "${PUSH_BASE_SHA}^{commit}"; then
+            git branch -f push-base "$PUSH_BASE_SHA"
+            echo "FRONTEND_FULL_RUN=false" >> "$GITHUB_ENV"
+          else
+            echo "push base $PUSH_BASE_SHA unavailable; running full suite"
+            echo "FRONTEND_FULL_RUN=true" >> "$GITHUB_ENV"
+          fi
+
       - run: npm ci
 
       - name: Run affected tests (PR)
@@ -209,10 +241,15 @@ jobs:
         timeout-minutes: 10
         run: npx vitest run --changed=pr-base --passWithNoTests
 
-      - name: Run full tests (main)
+      - name: Run affected tests (main)
         if: github.event_name == 'push'
         timeout-minutes: 10
-        run: npx vitest run --reporter=dot
+        run: |
+          if [ "$FRONTEND_FULL_RUN" = "true" ]; then
+            npx vitest run --reporter=dot
+          else
+            npx vitest run --changed=push-base --passWithNoTests --reporter=dot
+          fi
 
       - name: Run full tests with coverage (scheduled/manual)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -268,6 +305,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+
+      - name: Wait for Postgres
+        run: go run ./cmd/wait-postgres
 
       - name: Migrate up
         run: go run cmd/migrate/main.go up

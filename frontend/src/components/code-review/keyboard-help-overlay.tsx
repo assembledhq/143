@@ -19,7 +19,7 @@ const shortcuts = [
   { key: "s", action: "Split diff view" },
   { key: "e", action: "Toggle repository explorer" },
   { key: "m", action: "Back to conversation" },
-  { key: "Esc", action: "Back to conversation" },
+  { key: "Esc", action: "Exit full screen, then back to conversation" },
   { key: "?", action: "Show this help" },
 ];
 

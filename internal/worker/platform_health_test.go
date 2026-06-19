@@ -41,6 +41,15 @@ func (s *stubWorkerHeartbeatStore) WorkerHeartbeatHealth(ctx context.Context, st
 	return s.health, s.err
 }
 
+type stubPreviewHealthStore struct {
+	sample db.PreviewHealthSample
+	err    error
+}
+
+func (s *stubPreviewHealthStore) PreviewHealthSample(ctx context.Context) (db.PreviewHealthSample, error) {
+	return s.sample, s.err
+}
+
 func TestRunQueueHealthSamplerEmitsStructuredSamples(t *testing.T) {
 	t.Parallel()
 
@@ -80,6 +89,51 @@ func TestRunQueueHealthSamplerEmitsStructuredSamples(t *testing.T) {
 	require.Equal(t, float64(1), event["running"], "queue sampler should include running count")
 	require.Equal(t, float64(0), event["dead_letter"], "queue sampler should include dead-letter count")
 	require.Equal(t, float64(42), event["oldest_runnable_age_seconds"], "queue sampler should include oldest runnable age")
+}
+
+func TestRunPreviewHealthSamplerEmitsStructuredSample(t *testing.T) {
+	t.Parallel()
+
+	store := &stubPreviewHealthStore{sample: db.PreviewHealthSample{
+		ActivePreviews:              4,
+		PreviewsStarted:             8,
+		PreviewsReady:               7,
+		PreviewsFailedOrUnavailable: 1,
+		StartupP50Seconds:           23,
+		StartupP95Seconds:           61,
+		SessionPrewarmQueued:        2,
+		SessionPrewarmRunning:       1,
+		SessionPrewarmSkipped:       3,
+		SessionPrewarmFailed:        4,
+	}}
+	logs := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		RunPreviewHealthSampler(ctx, store, zerolog.New(logs), time.Hour)
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		return bytes.Contains(logs.Bytes(), []byte("preview health: lifecycle sample"))
+	}, time.Second, 10*time.Millisecond, "preview health sampler should emit an initial lifecycle sample")
+	cancel()
+	<-done
+
+	var event map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event), "preview health sample should be valid JSON")
+	require.Equal(t, "preview health: lifecycle sample", event["message"], "preview health sampler should use the canonical log message")
+	require.Equal(t, float64(4), event["active_previews"], "preview health sampler should include active preview count")
+	require.Equal(t, float64(8), event["previews_started"], "preview health sampler should include preview starts")
+	require.Equal(t, float64(7), event["previews_ready"], "preview health sampler should include ready previews")
+	require.Equal(t, float64(1), event["previews_failed_unavailable"], "preview health sampler should include failed or unavailable previews")
+	require.Equal(t, float64(23), event["startup_p50_seconds"], "preview health sampler should include startup p50")
+	require.Equal(t, float64(61), event["startup_p95_seconds"], "preview health sampler should include startup p95")
+	require.Equal(t, float64(2), event["session_prewarm_queued"], "preview health sampler should include queued session prewarm count")
+	require.Equal(t, float64(1), event["session_prewarm_running"], "preview health sampler should include running session prewarm count")
+	require.Equal(t, float64(3), event["session_prewarm_skipped"], "preview health sampler should include skipped session prewarm count")
+	require.Equal(t, float64(4), event["session_prewarm_failed"], "preview health sampler should include failed session prewarm count")
 }
 
 func TestRunControlPlaneHealthAlertsEmitsQueueAndWorkerHeartbeatWarnings(t *testing.T) {

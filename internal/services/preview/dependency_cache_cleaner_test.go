@@ -21,7 +21,7 @@ func TestDependencyCacheCleaner_RunOnceDeletesExpiredLocationHints(t *testing.T)
 	mock.ExpectQuery("SELECT .+ FROM preview_dependency_cache").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repo_id", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key", "blob_key", "size_bytes", "metadata", "last_used_at", "created_at",
 		}))
 	mock.ExpectExec("DELETE FROM preview_dependency_cache_locations").
 		WithArgs(pgxmock.AnyArg()).

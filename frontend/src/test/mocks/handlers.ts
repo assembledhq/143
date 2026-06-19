@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse } from '@/lib/types';
+import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -55,6 +55,10 @@ export const mockSessions: Session[] = [
     current_turn: 0,
     sandbox_state: 'none',
     pr_creation_state: 'idle',
+    repository_id: 'repo-1',
+    repository_full_name: 'assembledhq/143',
+    target_branch: 'main',
+    working_branch: '143/feature-session-details',
     last_activity_at: '2026-02-17T07:05:30Z',
     created_at: '2026-02-17T07:00:00Z',
   },
@@ -276,7 +280,46 @@ export const mockMembers: User[] = [
   },
 ];
 
+export const mockAPIClients: APIClient[] = [
+  {
+    id: 'api-client-1',
+    org_id: 'org-1',
+    name: 'CI automation',
+    description: 'Runs external API workflows from CI',
+    status: 'enabled',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+];
+
+export const mockAPITokens: APIToken[] = [
+  {
+    id: 'api-token-1',
+    org_id: 'org-1',
+    api_client_id: 'api-client-1',
+    name: 'production',
+    token_prefix: '143_live_abc123',
+    scopes: ['sessions:read', 'sessions:create'],
+    repository_ids: [],
+    allowed_ip_cidrs: [],
+    last_used_at: '2026-02-17T08:00:00Z',
+    last_used_ip: '203.0.113.10',
+    last_used_user_agent: 'curl/8.7.1',
+    created_at: '2026-01-02T00:00:00Z',
+  },
+];
+
 export const handlers = [
+  http.get('/api/v1/auth/providers', () => {
+    return HttpResponse.json({
+      data: {
+        github: true,
+        google: true,
+        email: true,
+      },
+    } satisfies SingleResponse<AuthProviders>);
+  }),
+
   http.get('/api/v1/auth/me', () => {
     return HttpResponse.json({
       data: mockMembers[0],
@@ -545,6 +588,33 @@ export const handlers = [
     } satisfies ListResponse<SessionLog>);
   }),
 
+  http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {
+        position: 'latest',
+        has_older: false,
+        has_newer: false,
+        anchor_found: false,
+        thread_status: 'idle',
+      },
+    } satisfies SessionTranscriptWindowResponse);
+  }),
+
+  http.get('/api/v1/session-composer/files', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/sessions/:id/composer/files', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/sessions/:id/thread-file-events', () => {
     return HttpResponse.json({
       data: [] as SessionThreadFileEvent[],
@@ -714,6 +784,111 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/api-keys', () => {
+    return HttpResponse.json({
+      data: mockAPIClients,
+      meta: {},
+    } satisfies ListResponse<APIClient>);
+  }),
+
+  http.post('/api/v1/api-keys', async ({ request }) => {
+    const body = await request.json() as {
+      integration_name?: string;
+      description?: string;
+      token_name?: string;
+      scopes?: string[];
+      repository_ids?: string[];
+      allowed_ip_cidrs?: string[];
+      expires_at?: string | null;
+    };
+    const client: APIClient = {
+      id: 'api-client-new',
+      org_id: 'org-1',
+      name: body.integration_name ?? 'New integration',
+      description: body.description,
+      status: 'enabled',
+      created_at: '2026-02-17T08:00:00Z',
+      updated_at: '2026-02-17T08:00:00Z',
+    };
+    return HttpResponse.json({
+      data: {
+        client,
+        token: {
+          id: 'api-token-new',
+          org_id: 'org-1',
+          api_client_id: client.id,
+          name: body.token_name ?? 'production',
+          token_prefix: '143_live_new',
+          token: '143_live_new_secret',
+          scopes: body.scopes ?? [],
+          repository_ids: body.repository_ids ?? [],
+          allowed_ip_cidrs: body.allowed_ip_cidrs ?? [],
+          expires_at: body.expires_at ?? undefined,
+          created_at: '2026-02-17T08:00:00Z',
+        },
+      },
+    }, { status: 201 });
+  }),
+
+  http.get('/api/v1/api-keys/:id/tokens', ({ params }) => {
+    return HttpResponse.json({
+      data: mockAPITokens.filter((token) => token.api_client_id === params.id),
+      meta: {},
+    } satisfies ListResponse<APIToken>);
+  }),
+
+  http.post('/api/v1/api-keys/:id/tokens', async ({ request, params }) => {
+    const body = await request.json() as {
+      name?: string;
+      scopes?: string[];
+      repository_ids?: string[];
+      allowed_ip_cidrs?: string[];
+      expires_at?: string | null;
+    };
+    return HttpResponse.json({
+      data: {
+        id: 'api-token-new',
+        org_id: 'org-1',
+        api_client_id: params.id as string,
+        name: body.name ?? 'rotation',
+        token_prefix: '143_live_rot',
+        token: '143_live_rot_secret',
+        scopes: body.scopes ?? [],
+        repository_ids: body.repository_ids ?? [],
+        allowed_ip_cidrs: body.allowed_ip_cidrs ?? [],
+        expires_at: body.expires_at ?? undefined,
+        created_at: '2026-02-17T08:00:00Z',
+      },
+    }, { status: 201 });
+  }),
+
+  http.patch('/api/v1/api-keys/:id', async ({ request, params }) => {
+    const body = await request.json() as { name?: string; description?: string };
+    return HttpResponse.json({
+      data: {
+        ...mockAPIClients[0],
+        id: params.id as string,
+        name: body.name ?? mockAPIClients[0].name,
+        description: body.description,
+      },
+    } satisfies SingleResponse<APIClient>);
+  }),
+
+  http.delete('/api/v1/api-keys/:id', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.delete('/api/v1/api-keys/:id/tokens/:tokenId', () => {
+    return new HttpResponse(null, { status: 204 });
+  }),
+
+  http.get('/api/v1/auth/cli-tokens', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<CliToken>);
+  }),
+
   http.get('/api/v1/settings', () => {
     return HttpResponse.json({
       data: {
@@ -742,12 +917,33 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/agent-capabilities', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<AgentCapabilityDefinition>);
+  }),
+
+  http.get('/api/v1/automations/:id/capabilities', () => {
+    return HttpResponse.json({
+      data: {
+        capabilities: [],
+      },
+    } satisfies SingleResponse<AgentCapabilityPolicyResponse>);
+  }),
+
   // Default to no pending invites — the org-switcher polls this on mount, so
   // every test rendering the switcher would otherwise hit an unhandled-request
   // warning. Tests that want to exercise the pending-invites surface override
   // this with server.use(...).
   http.get('/api/v1/invitations/pending', () => {
     return HttpResponse.json({ data: [], meta: {} });
+  }),
+
+  // Same rationale: the org-switcher polls the domain-joinable surface on
+  // mount. Default to nothing joinable and no verification prompt.
+  http.get('/api/v1/orgs/joinable', () => {
+    return HttpResponse.json({ data: [], email_verification_required: false });
   }),
 
   http.patch('/api/v1/settings', () => {
@@ -758,6 +954,13 @@ export const handlers = [
         settings: {},
       },
     });
+  }),
+
+  http.get('/api/v1/evals/release-gates', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<EvalReleaseGate>);
   }),
 
   http.get('/api/v1/settings/codex-auth/status', () => {
@@ -871,31 +1074,24 @@ export const handlers = [
     });
   }),
 
-  http.get('/api/v1/settings/credentials/resolved', () => {
+  http.get('/api/v1/settings/network', () => {
     return HttpResponse.json({
-      data: [],
-      meta: {},
+      data: {
+        static_egress_available: true,
+        static_egress_enabled: false,
+        static_egress_public_ip: '203.0.113.10',
+      },
     });
   }),
 
-  http.get('/api/v1/settings/credentials/team', () => {
+  // Default unified coding-credentials handler. Returns an empty stack for
+  // every scope (org / personal / resolved); the scope is echoed back in
+  // meta so failing tests are easier to diagnose.
+  http.get('/api/v1/coding-credentials', ({ request }) => {
+    const url = new URL(request.url);
     return HttpResponse.json({
       data: [],
-      meta: {},
-    });
-  }),
-
-  http.get('/api/v1/settings/coding-auths', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
-    });
-  }),
-
-  http.get('/api/v1/coding-credentials', () => {
-    return HttpResponse.json({
-      data: [],
-      meta: {},
+      meta: { scope: url.searchParams.get('scope') },
     });
   }),
 

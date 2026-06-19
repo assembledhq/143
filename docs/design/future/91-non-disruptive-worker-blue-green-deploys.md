@@ -1,6 +1,6 @@
 # Non-Disruptive Worker Blue/Green Deploys
 
-> **Status:** Implemented v1 foundation with durable fleet-control primitives | **Last reviewed:** 2026-05-28
+> **Status:** Implemented v1 foundation with durable fleet-control primitives | **Last reviewed:** 2026-06-13
 >
 > **Related docs:** [overall.md](../overall.md), [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md), [82-durable-session-executors.md](../implemented/82-durable-session-executors.md), [88-preview-runtime-ownership-drain.md](88-preview-runtime-ownership-drain.md), [60-agent-runtime-timeouts-and-checkpointed-shutdown.md](60-agent-runtime-timeouts-and-checkpointed-shutdown.md)
 
@@ -54,9 +54,19 @@ changing runtime ownership semantics.
   of sending a routine SIGTERM.
 - Routine worker deploys fail closed when no safe blue/green worker port is
   available.
+- Manual routine worker deploys use the same port-range contract as CI. Run
+  `make deploy-worker-preflight`, then deploy with
+  `make deploy-fleet ROLES=app,worker`; Make defaults the worker blue/green
+  range to `8080-8087`.
 - Routine worker deploys skip support-service recreation and block Docker/runsc
   mutation paths unless the operator explicitly chooses maintenance-style
   behavior.
+- App deploys run a preview RPC auth compatibility check from the candidate API
+  container. Workers that answer and reject the signed auth-check token remain
+  hard blockers, and fresh active workers that time out or cannot be reached
+  also block deploy. Unreachable stale or draining workers are reported as
+  skipped liveness failures so app deploys do not race-fail against concurrent
+  worker generation drains.
 - Maintenance/emergency drains require reason/operator metadata and refuse to
   proceed across active runtime ownership unless `--force` or
   `FORCE_INTERRUPT_ACTIVE_RUNTIMES=1` is supplied.
@@ -229,6 +239,9 @@ Before starting green on a host, deploy preflight checks:
 - The host is healthy enough to run another worker generation.
 - A free worker endpoint exists in the configured blue/green port range.
 - No active preview runtime currently leases the candidate endpoint.
+- Endpoint ownership queries can reach Postgres with the worker's `DB_HOST` and
+  `DB_PASSWORD`; synchronous manual deploys load those values from
+  `/opt/143/.env` before selecting a routine port.
 - Docker daemon config is already compatible; the deploy will not need to
   restart Docker.
 - Shared support service config changes are either absent or classified as

@@ -229,12 +229,14 @@ type PullRequestMergeWhenReadyStatus struct {
 type PullRequestActiveRepair struct {
 	ActionType    PullRequestRepairActionType `json:"action_type"`
 	SessionID     uuid.UUID                   `json:"session_id"`
+	ThreadID      *uuid.UUID                  `json:"thread_id,omitempty"`
 	SessionStatus SessionStatus               `json:"session_status"`
 	HealthVersion int64                       `json:"health_version"`
 }
 
 type PullRequestRepairResponse struct {
 	SessionID        uuid.UUID                   `json:"session_id"`
+	ThreadID         *uuid.UUID                  `json:"thread_id,omitempty"`
 	Mode             string                      `json:"mode"`
 	ReusedInFlight   bool                        `json:"reused_in_flight"`
 	HeadSHA          string                      `json:"head_sha"`
@@ -280,8 +282,11 @@ type PullRequestRepairRun struct {
 	OrgID              uuid.UUID                      `db:"org_id" json:"org_id"`
 	PullRequestID      uuid.UUID                      `db:"pull_request_id" json:"pull_request_id"`
 	SessionID          uuid.UUID                      `db:"session_id" json:"session_id"`
+	ThreadID           *uuid.UUID                     `db:"thread_id" json:"thread_id,omitempty"`
 	ActionType         PullRequestRepairActionType    `db:"action_type" json:"action_type"`
 	HealthVersion      int64                          `db:"health_version" json:"health_version"`
+	HeadSHA            string                         `db:"head_sha" json:"head_sha,omitempty"`
+	BaseSHA            string                         `db:"base_sha" json:"base_sha,omitempty"`
 	WorkspaceMode      PullRequestRepairWorkspaceMode `db:"workspace_mode" json:"workspace_mode"`
 	Active             bool                           `db:"active" json:"active"`
 	ObsoletedByVersion *int64                         `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`

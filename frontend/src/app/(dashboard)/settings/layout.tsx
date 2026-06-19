@@ -11,7 +11,9 @@ const ADMIN_ONLY_PATHS = new Set([
   "/settings",
   "/settings/llm",
   "/settings/autopilot",
+  "/settings/runtime",
   "/settings/previews",
+  "/settings/api-keys",
   "/settings/usage",
   "/settings/audit-log",
 ]);
@@ -66,7 +68,10 @@ export default function SettingsLayout({
   const pathname = usePathname();
   const { user, isLoading } = useAuth();
 
-  const roleGuardedPath = isAdminOnlyPath(pathname) || isViewerBlockedPath(pathname) || isBuilderBlockedPath(pathname);
+  const roleGuardedPath =
+    isAdminOnlyPath(pathname) ||
+    isViewerBlockedPath(pathname) ||
+    isBuilderBlockedPath(pathname);
   const role = user?.role;
   let restricted = false;
   if (!isLoading && role !== undefined) {

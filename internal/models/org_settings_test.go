@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,7 +29,32 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
+	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
 	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
+	require.False(t, s.SandboxNetwork.StaticEgressEnabled, "static egress should be disabled by default")
+}
+
+func TestOrgSettings_EffectiveCodingAgentTabToolsEnabled(t *testing.T) {
+	t.Parallel()
+
+	f := false
+	tVal := true
+	tests := []struct {
+		name     string
+		settings OrgSettings
+		expected bool
+	}{
+		{name: "missing defaults on", settings: OrgSettings{}, expected: true},
+		{name: "explicit false disables", settings: OrgSettings{CodingAgentTabToolsEnabled: &f}, expected: false},
+		{name: "explicit true enables", settings: OrgSettings{CodingAgentTabToolsEnabled: &tVal}, expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.settings.EffectiveCodingAgentTabToolsEnabled(), "effective tab-tool setting should match expected value")
+		})
+	}
 }
 
 func TestParseOrgSettings_EmptyJSON(t *testing.T) {
@@ -39,6 +65,18 @@ func TestParseOrgSettings_EmptyJSON(t *testing.T) {
 
 	require.Equal(t, DefaultAutonomyLevel, s.AutonomyLevel, "should default autonomy_level for empty JSON")
 	require.Equal(t, DefaultMaxConcurrentRuns, s.MaxConcurrentRuns, "should default max_concurrent_runs for empty JSON")
+}
+
+func TestParseOrgSettings_DefaultWorkRepositoryID(t *testing.T) {
+	t.Parallel()
+
+	repoID := uuid.New()
+	raw := json.RawMessage(`{"default_work_repository_id":"` + repoID.String() + `"}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should accept the shared default work repository")
+	require.NotNil(t, s.DefaultWorkRepositoryID, "shared default work repository should parse when configured")
+	require.Equal(t, repoID, *s.DefaultWorkRepositoryID, "shared default work repository should round-trip from JSON")
 }
 
 func TestParseOrgSettings_OverrideValues(t *testing.T) {
@@ -68,6 +106,9 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 		},
 		"builder_permissions": {
 			"require_review_before_pr": false
+		},
+		"sandbox_network": {
+			"static_egress_enabled": true
 		}
 	}`)
 
@@ -93,6 +134,7 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
 	require.Equal(t, 0.15, s.PriorityWeights.RevenueRisk, "should override revenue_risk")
 	require.False(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "should allow admins to disable builder review requirement")
+	require.True(t, s.SandboxNetwork.StaticEgressEnabled, "should parse sandbox_network.static_egress_enabled")
 }
 
 func TestParseOrgSettings_PartialOverride(t *testing.T) {
@@ -127,7 +169,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	raw := json.RawMessage(`{
 		"agent_config": {
 			"claude_code": {"ANTHROPIC_MODEL": "claude-opus-4-7", "ANTHROPIC_API_KEY": "sk-ant-org"},
-			"gemini_cli": {"GEMINI_MODEL": "gemini-2.5-pro"}
+			"opencode": {"OPENCODE_MODEL": "google/gemini-2.5-flash"}
 		}
 	}`)
 
@@ -137,7 +179,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	require.NotNil(t, s.AgentConfig, "should parse agent_config")
 	require.Equal(t, "claude-opus-4-7", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
 	require.Equal(t, "sk-ant-org", s.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"])
-	require.Equal(t, "gemini-2.5-pro", s.AgentConfig["gemini_cli"]["GEMINI_MODEL"])
+	require.Equal(t, "google/gemini-2.5-flash", s.AgentConfig["opencode"]["OPENCODE_MODEL"])
 	require.NotContains(t, s.AgentConfig, "codex", "codex should not be present when not configured")
 }
 
@@ -172,10 +214,10 @@ func TestAgentType_Validate(t *testing.T) {
 	t.Parallel()
 
 	require.NoError(t, AgentTypeClaudeCode.Validate())
-	require.NoError(t, AgentTypeGeminiCLI.Validate())
 	require.NoError(t, AgentTypeCodex.Validate())
 	require.NoError(t, AgentTypeAmp.Validate())
 	require.NoError(t, AgentTypePi.Validate())
+	require.NoError(t, AgentTypeOpenCode.Validate())
 	// pm_agent is intentionally rejected: it's an internal agent type used by
 	// the PM service for its own scheduled runs, never a user-selectable
 	// default_agent_type on OrgSettings.
@@ -220,7 +262,7 @@ func TestAgentType_SupportsReasoningEffort(t *testing.T) {
 
 	require.True(t, AgentTypeCodex.SupportsReasoningEffort(), "Codex should support explicit reasoning overrides")
 	require.True(t, AgentTypeClaudeCode.SupportsReasoningEffort(), "Claude Code should support explicit reasoning overrides")
-	require.False(t, AgentTypeGeminiCLI.SupportsReasoningEffort(), "Gemini CLI should not report reasoning override support")
+	require.False(t, AgentTypeOpenCode.SupportsReasoningEffort(), "OpenCode should not report reasoning override support")
 }
 
 func TestOrgSize_Validate(t *testing.T) {
@@ -472,6 +514,232 @@ func TestParseOrgSettings_PreviewMaxPreviewsPerUser(t *testing.T) {
 			s, err := ParseOrgSettings(tt.raw)
 			require.NoError(t, err, "ParseOrgSettings should accept preview capacity settings")
 			require.Equal(t, tt.expected, s.PreviewMaxPreviewsPerUser, "preview capacity should be normalized")
+		})
+	}
+}
+
+func TestParseOrgSettings_PreviewAutoPoolMaxActive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected int
+	}{
+		{
+			name:     "zero defaults",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":0}`),
+			expected: DefaultPreviewAutoPoolMaxActive,
+		},
+		{
+			name:     "custom value passes through",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":7}`),
+			expected: 7,
+		},
+		{
+			name:     "below minimum clamps up",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":-1}`),
+			expected: MinPreviewAutoPoolMaxActive,
+		},
+		{
+			name:     "above maximum clamps down",
+			raw:      json.RawMessage(`{"preview_auto_pool_max_active":999}`),
+			expected: MaxPreviewAutoPoolMaxActive,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept auto-preview pool settings")
+			require.Equal(t, tt.expected, s.PreviewAutoPoolMaxActive, "auto-preview pool capacity should be normalized")
+		})
+	}
+}
+
+func TestParseOrgSettings_PreviewSessionPrewarmMaxActive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected int
+	}{
+		{
+			name:     "zero stays disabled",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":0}`),
+			expected: DefaultPreviewSessionPrewarmMaxActive,
+		},
+		{
+			name:     "custom value passes through",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":10}`),
+			expected: 10,
+		},
+		{
+			name:     "below minimum clamps up",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":-1}`),
+			expected: MinPreviewSessionPrewarmMaxActive,
+		},
+		{
+			name:     "above maximum clamps down",
+			raw:      json.RawMessage(`{"preview_session_prewarm_max_active":999}`),
+			expected: MaxPreviewSessionPrewarmMaxActive,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept session prewarm capacity settings")
+			require.Equal(t, tt.expected, s.PreviewSessionPrewarmMaxActive, "session prewarm capacity should be normalized")
+		})
+	}
+}
+
+func TestParseOrgSettings_SandboxLifecycleDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		raw                  json.RawMessage
+		expectedRetention    int
+		expectedIdlePreview  int
+		expectedPreviewHolds bool
+	}{
+		{
+			name:                 "defaults",
+			raw:                  json.RawMessage(`{}`),
+			expectedRetention:    DefaultCompletedSessionRetentionMinutes,
+			expectedIdlePreview:  DefaultIdlePreviewTTLMinutes,
+			expectedPreviewHolds: true,
+		},
+		{
+			name:                 "custom values pass through",
+			raw:                  json.RawMessage(`{"sandbox_lifecycle":{"completed_session_retention_minutes":120,"idle_preview_ttl_minutes":300,"preview_holds_sandbox":false}}`),
+			expectedRetention:    120,
+			expectedIdlePreview:  300,
+			expectedPreviewHolds: false,
+		},
+		{
+			name:                 "values clamp to supported bounds",
+			raw:                  json.RawMessage(`{"sandbox_lifecycle":{"completed_session_retention_minutes":-1,"idle_preview_ttl_minutes":99999}}`),
+			expectedRetention:    MinCompletedSessionRetentionMinutes,
+			expectedIdlePreview:  MaxIdlePreviewTTLMinutes,
+			expectedPreviewHolds: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should accept sandbox lifecycle settings")
+			require.Equal(t, tt.expectedRetention, s.SandboxLifecycle.CompletedSessionRetentionMinutes, "completed-session retention should be normalized")
+			require.Equal(t, tt.expectedIdlePreview, s.SandboxLifecycle.IdlePreviewTTLMinutes, "idle-preview ttl should be normalized")
+			require.Equal(t, tt.expectedPreviewHolds, s.SandboxLifecycle.EffectivePreviewHoldsSandbox(), "preview hold policy should be effective")
+		})
+	}
+}
+
+func TestParseOrgSettings_SandboxResourceDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{"sandbox_resources":{"agent_default_tier":"large","preview_default_tier":"small","allow_repo_resource_requests":false,"preview_max_tier":"standard","preview_max_cpu_millis":1500,"preview_max_memory_mib":4096,"preview_max_ephemeral_disk_mib":6144}}`)
+
+	s, err := ParseOrgSettings(raw)
+	require.NoError(t, err, "ParseOrgSettings should accept sandbox resource settings")
+	require.Equal(t, SandboxResourceTierLarge, s.SandboxResources.AgentDefaultTier, "agent default tier should pass through")
+	require.Equal(t, SandboxResourceTierSmall, s.SandboxResources.PreviewDefaultTier, "preview default tier should pass through")
+	require.False(t, s.SandboxResources.EffectiveAllowRepoResourceRequests(), "explicit false should be preserved")
+	require.Equal(t, SandboxResourceTierStandard, s.SandboxResources.PreviewMaxTier, "preview max tier should pass through")
+	require.Equal(t, 1500, s.SandboxResources.PreviewMaxCPUMillis, "preview CPU max should pass through")
+	require.Equal(t, 4096, s.SandboxResources.PreviewMaxMemoryMiB, "preview memory max should pass through")
+	require.Equal(t, 6144, s.SandboxResources.PreviewMaxEphemeralDiskMiB, "preview disk max should pass through")
+}
+
+func TestParseOrgSettings_SandboxResourceLimitDefaultsAndClamps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		raw               json.RawMessage
+		expectedCPUMillis int
+		expectedMemoryMiB int
+		expectedDiskMiB   int
+	}{
+		{
+			name:              "missing values default to platform caps",
+			raw:               json.RawMessage(`{}`),
+			expectedCPUMillis: DefaultPreviewMaxCPUMillis,
+			expectedMemoryMiB: DefaultPreviewMaxMemoryMiB,
+			expectedDiskMiB:   DefaultPreviewMaxEphemeralDiskMiB,
+		},
+		{
+			name:              "zero values default to platform caps",
+			raw:               json.RawMessage(`{"sandbox_resources":{"preview_max_cpu_millis":0,"preview_max_memory_mib":0,"preview_max_ephemeral_disk_mib":0}}`),
+			expectedCPUMillis: DefaultPreviewMaxCPUMillis,
+			expectedMemoryMiB: DefaultPreviewMaxMemoryMiB,
+			expectedDiskMiB:   DefaultPreviewMaxEphemeralDiskMiB,
+		},
+		{
+			name:              "below minimum clamps up",
+			raw:               json.RawMessage(`{"sandbox_resources":{"preview_max_cpu_millis":-1,"preview_max_memory_mib":-1,"preview_max_ephemeral_disk_mib":-1}}`),
+			expectedCPUMillis: MinPreviewMaxCPUMillis,
+			expectedMemoryMiB: MinPreviewMaxMemoryMiB,
+			expectedDiskMiB:   MinPreviewMaxEphemeralDiskMiB,
+		},
+		{
+			name:              "above maximum clamps down",
+			raw:               json.RawMessage(`{"sandbox_resources":{"preview_max_cpu_millis":99999,"preview_max_memory_mib":99999,"preview_max_ephemeral_disk_mib":99999}}`),
+			expectedCPUMillis: MaxPreviewMaxCPUMillis,
+			expectedMemoryMiB: MaxPreviewMaxMemoryMiB,
+			expectedDiskMiB:   MaxPreviewMaxEphemeralDiskMiB,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s, err := ParseOrgSettings(tt.raw)
+			require.NoError(t, err, "ParseOrgSettings should normalize preview resource caps")
+			require.Equal(t, tt.expectedCPUMillis, s.SandboxResources.PreviewMaxCPUMillis, "preview CPU max should be normalized")
+			require.Equal(t, tt.expectedMemoryMiB, s.SandboxResources.PreviewMaxMemoryMiB, "preview memory max should be normalized")
+			require.Equal(t, tt.expectedDiskMiB, s.SandboxResources.PreviewMaxEphemeralDiskMiB, "preview disk max should be normalized")
+		})
+	}
+}
+
+func TestSandboxResourceTierValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		tier    SandboxResourceTier
+		wantErr bool
+	}{
+		{name: "empty valid", tier: "", wantErr: false},
+		{name: "small valid", tier: SandboxResourceTierSmall, wantErr: false},
+		{name: "standard valid", tier: SandboxResourceTierStandard, wantErr: false},
+		{name: "large valid", tier: SandboxResourceTierLarge, wantErr: false},
+		{name: "invalid", tier: SandboxResourceTier("xlarge"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.tier.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should reject invalid sandbox resource tiers")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known sandbox resource tiers")
 		})
 	}
 }

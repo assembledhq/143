@@ -95,6 +95,156 @@ describe('api client', () => {
     });
   });
 
+  describe('Slack integrations', () => {
+    it('fetches Slack health', async () => {
+      const health = {
+        data: {
+          installation: {
+            id: 'install-1',
+            org_id: 'org-1',
+            integration_id: 'integration-1',
+            team_id: 'T123',
+            team_name: 'Acme',
+            api_app_id: 'A123',
+            bot_user_id: 'U143',
+            bot_id: 'B143',
+            scope: ['chat:write'],
+            status: 'active',
+            installed_at: '2026-06-01T00:00:00Z',
+            created_at: '2026-06-01T00:00:00Z',
+            updated_at: '2026-06-01T00:00:00Z',
+          },
+          required_scopes: ['chat:write'],
+          missing_scopes: [],
+          auth_ok: true,
+          symptoms: [],
+        },
+      };
+
+      server.use(http.get('/api/v1/integrations/slack/health', () => HttpResponse.json(health)));
+
+      const result = await api.integrations.getSlackHealth();
+
+      expect(result.data.installation.team_id).toBe('T123');
+      expect(result.data.auth_ok).toBe(true);
+    });
+
+    it('patches Slack settings', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.patch('/api/v1/integrations/slack/settings', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'settings-1',
+              org_id: 'org-1',
+              slack_installation_id: 'install-1',
+              default_repository_id: null,
+              default_branch: 'main',
+              routing_mode: 'start_work',
+              response_visibility: 'thread',
+              allowed_actions: ['session'],
+              notification_preset: 'balanced',
+              notification_subscriptions: {},
+              active: true,
+              created_at: '2026-06-01T00:00:00Z',
+              updated_at: '2026-06-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      const result = await api.integrations.updateSlackSettings({ routing_mode: 'start_work', default_branch: 'main' });
+
+      expect(capturedBody).toEqual({ routing_mode: 'start_work', default_branch: 'main' });
+      expect(result.data.routing_mode).toBe('start_work');
+    });
+
+    it('lists and patches Slack channels', async () => {
+      let capturedChannelPatch: unknown;
+      server.use(
+        http.get('/api/v1/integrations/slack/channels', () =>
+          HttpResponse.json({
+            data: [
+              {
+                id: 'C123',
+                name: 'eng',
+                is_member: true,
+                is_private: false,
+                effective_settings: {
+                  org_id: 'org-1',
+                  slack_installation_id: 'install-1',
+                  slack_team_id: 'T123',
+                  slack_channel_id: 'C123',
+                  default_repository_id: null,
+                  default_branch: null,
+                  routing_mode: 'auto',
+                  response_visibility: 'thread',
+                  allowed_actions: ['session'],
+                  notification_preset: 'balanced',
+                  notification_subscriptions: {},
+                  has_channel_override: false,
+                },
+              },
+            ],
+          }),
+        ),
+        http.patch('/api/v1/integrations/slack/channels/:channelId', async ({ params, request }) => {
+          capturedChannelPatch = { channelId: params.channelId, body: await request.json() };
+          return HttpResponse.json({ data: { ok: true } });
+        }),
+      );
+
+      const channels = await api.integrations.listSlackChannels();
+      await api.integrations.updateSlackChannelSettings('C123', { routing_mode: 'answer_only' });
+
+      expect(channels.data[0].id).toBe('C123');
+      expect(capturedChannelPatch).toEqual({ channelId: 'C123', body: { routing_mode: 'answer_only' } });
+    });
+
+    it('lists upserts and deletes Slack user links', async () => {
+      let capturedUpsert: unknown;
+      let deletedID: string | undefined;
+      server.use(
+        http.get('/api/v1/integrations/slack/user-links', () =>
+          HttpResponse.json({
+            data: [
+              {
+                id: 'link-1',
+                org_id: 'org-1',
+                slack_installation_id: 'install-1',
+                user_id: 'user-1',
+                slack_team_id: 'T123',
+                slack_user_id: 'U123',
+                slack_display_name: 'Ada',
+                source: 'admin_linked',
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          }),
+        ),
+        http.post('/api/v1/integrations/slack/user-links', async ({ request }) => {
+          capturedUpsert = await request.json();
+          return HttpResponse.json({ data: { id: 'link-2', slack_user_id: 'U456' } });
+        }),
+        http.delete('/api/v1/integrations/slack/user-links/:id', ({ params }) => {
+          deletedID = String(params.id);
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      const links = await api.integrations.listSlackUserLinks();
+      await api.integrations.upsertSlackUserLink({ user_id: 'user-2', slack_user_id: 'U456' });
+      await api.integrations.deleteSlackUserLink('link-1');
+
+      expect(links.data[0].slack_user_id).toBe('U123');
+      expect(capturedUpsert).toEqual({ user_id: 'user-2', slack_user_id: 'U456' });
+      expect(deletedID).toBe('link-1');
+    });
+  });
+
   describe('sessions', () => {
     it('fetches sessions list', async () => {
       const mockData = {
@@ -226,60 +376,35 @@ describe('api client', () => {
       expect(result.data.status).toBe('running');
     });
 
-    it('fetches a thread message window with cursor params', async () => {
+    it('fetches session log detail by log id', async () => {
       let capturedUrl: string | undefined;
-      const mockWindow = {
-        data: [{ id: 21, role: 'assistant', content: 'latest' }],
-        meta: {
-          next_older_cursor: '21',
-          has_older: true,
-          latest_assistant_message_id: 21,
-          live_edge_message_id: 21,
-          thread_status: 'idle',
+      const mockDetail = {
+        data: {
+          id: 42,
+          session_id: 'session-abc',
+          level: 'output',
+          message: 'full output',
+          metadata: { type: 'tool_result' },
+          turn_number: 7,
+          created_at: '2026-01-01T00:00:00Z',
+          message_bytes: 11,
+          message_chars: 11,
+          message_truncated: false,
         },
       };
 
       server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/messages', ({ request }) => {
+        http.get('/api/v1/sessions/:id/logs/:logId', ({ request }) => {
           capturedUrl = request.url;
-          return HttpResponse.json(mockWindow);
+          return HttpResponse.json(mockDetail);
         }),
       );
 
-      const result = await api.sessions.getThreadMessageWindow('session-abc', 'thread-1', {
-        before: '30',
-        limit: 25,
-      });
+      const result = await api.sessions.getLogDetail('session-abc', 42);
 
-      expect(result).toEqual(mockWindow);
+      expect(result).toEqual(mockDetail);
       expect(capturedUrl).toBeDefined();
-      const url = new URL(capturedUrl!);
-      expect(url.searchParams.get('before')).toBe('30');
-      expect(url.searchParams.get('limit')).toBe('25');
-    });
-
-    it('fetches thread logs only for loaded message turns', async () => {
-      let capturedUrl: string | undefined;
-      const mockLogs = {
-        data: [{ id: 101, level: 'output', message: 'latest turn', turn_number: 7 }],
-        meta: {},
-      };
-
-      server.use(
-        http.get('/api/v1/sessions/:id/threads/:threadId/logs', ({ request }) => {
-          capturedUrl = request.url;
-          return HttpResponse.json(mockLogs);
-        }),
-      );
-
-      const result = await api.sessions.getThreadLogs('session-abc', 'thread-1', {
-        turnNumbers: [7, 6, 7, 5],
-      });
-
-      expect(result).toEqual(mockLogs);
-      expect(capturedUrl).toBeDefined();
-      const url = new URL(capturedUrl!);
-      expect(url.searchParams.get('turn_numbers')).toBe('5,6,7');
+      expect(new URL(capturedUrl!).pathname).toBe('/api/v1/sessions/session-abc/logs/42');
     });
 
     it('fetches recoverable thread inbox entries', async () => {
@@ -923,10 +1048,10 @@ describe('api client', () => {
         }),
       );
 
-      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123' });
+      const result = await api.sessions.createPR('session-abc', { draft: true, authorMode: 'user', resumeToken: 'resume-123', mergeWhenReady: true });
       expect(result.status).toBe('queued');
       expect(capturedUrl).toContain('/api/v1/sessions/session-abc/pr');
-      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123' });
+      expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123', merge_when_ready: true });
     });
 
     it('throws on conflict when PR already exists', async () => {
@@ -1003,8 +1128,16 @@ describe('api client', () => {
         }),
       );
 
-      await api.issues.triggerFix('issue-1', { agent_type: 'codex', autonomy_level: 'full' });
-      expect(capturedBody).toEqual({ agent_type: 'codex', autonomy_level: 'full' });
+      await api.issues.triggerFix('issue-1', {
+        agent_type: 'codex',
+        autonomy_level: 'full',
+        message: 'Prioritize the mobile checkout notes.',
+      });
+      expect(capturedBody).toEqual({
+        agent_type: 'codex',
+        autonomy_level: 'full',
+        message: 'Prioritize the mobile checkout notes.',
+      });
     });
   });
 
@@ -1168,10 +1301,11 @@ describe('api client', () => {
       try {
         await api.issues.list();
       } catch (err: unknown) {
-        const error = err as { name: string; code: string; message: string };
+        const error = err as { name: string; code: string; message: string; status: number };
         expect(error.name).toBe('ApiError');
         expect(error.code).toBe('BAD_REQUEST');
         expect(error.message).toBe('bad request');
+        expect(error.status).toBe(400);
       }
     });
 
@@ -1197,133 +1331,112 @@ describe('api client', () => {
     });
   });
 
-  describe('userCredentials', () => {
-    it('lists personal credentials', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/personal', () => {
-          return HttpResponse.json({
-            data: [{ provider: 'anthropic', configured: true, masked_key: 'sk-ant-...abc' }],
-            meta: {},
-          });
-        }),
-      );
-
-      const result = await api.userCredentials.listPersonal();
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].provider).toBe('anthropic');
-      expect(result.data[0].configured).toBe(true);
-    });
-
-    it('upserts personal credential', async () => {
-      let capturedBody: unknown;
-      let capturedUrl: string | undefined;
+  describe('codingCredentials', () => {
+    it('lists credentials for the requested scope', async () => {
+      let capturedScope: string | null = null;
 
       server.use(
-        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request, params }) => {
-          capturedBody = await request.json();
-          capturedUrl = params.provider as string;
-          return HttpResponse.json({ data: { provider: 'anthropic', configured: true } });
-        }),
-      );
-
-      await api.userCredentials.upsertPersonal('anthropic', { api_key: 'sk-ant-test' });
-      expect(capturedUrl).toBe('anthropic');
-      expect(capturedBody).toEqual({ config: { api_key: 'sk-ant-test' }, is_team_default: false });
-    });
-
-    it('upserts personal credential with team default flag', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.put('/api/v1/settings/credentials/personal/:provider', async ({ request }) => {
-          capturedBody = await request.json();
-          return HttpResponse.json({ data: { provider: 'openai', configured: true } });
-        }),
-      );
-
-      await api.userCredentials.upsertPersonal('openai', { api_key: 'sk-test' }, true);
-      expect(capturedBody).toEqual({ config: { api_key: 'sk-test' }, is_team_default: true });
-    });
-
-    it('deletes personal credential', async () => {
-      let deleteCalled = false;
-
-      server.use(
-        http.delete('/api/v1/settings/credentials/personal/:provider', ({ params }) => {
-          deleteCalled = true;
-          expect(params.provider).toBe('anthropic');
-          return new HttpResponse(null, { status: 204 });
-        }),
-      );
-
-      await api.userCredentials.deletePersonal('anthropic');
-      expect(deleteCalled).toBe(true);
-    });
-
-    it('lists team defaults', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/team', () => {
-          return HttpResponse.json({
-            data: [{ provider: 'anthropic', configured: true, is_team_default: true, set_by_user_name: 'Alice' }],
-            meta: {},
-          });
-        }),
-      );
-
-      const result = await api.userCredentials.listTeamDefaults();
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].is_team_default).toBe(true);
-    });
-
-    it('sets team default', async () => {
-      let capturedBody: unknown;
-
-      server.use(
-        http.put('/api/v1/settings/credentials/team/:provider', async ({ request, params }) => {
-          capturedBody = await request.json();
-          expect(params.provider).toBe('anthropic');
-          return HttpResponse.json({});
-        }),
-      );
-
-      await api.userCredentials.setTeamDefault('anthropic', 'user-1');
-      expect(capturedBody).toEqual({ user_id: 'user-1' });
-    });
-
-    it('removes team default', async () => {
-      let deleteCalled = false;
-
-      server.use(
-        http.delete('/api/v1/settings/credentials/team/:provider', ({ params }) => {
-          deleteCalled = true;
-          expect(params.provider).toBe('openai');
-          return new HttpResponse(null, { status: 204 });
-        }),
-      );
-
-      await api.userCredentials.removeTeamDefault('openai');
-      expect(deleteCalled).toBe(true);
-    });
-
-    it('lists resolved credentials', async () => {
-      server.use(
-        http.get('/api/v1/settings/credentials/resolved', () => {
+        http.get('/api/v1/coding-credentials', ({ request }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
           return HttpResponse.json({
             data: [
-              { provider: 'anthropic', source: 'personal', masked_key: 'sk-ant-...abc' },
-              { provider: 'openai', source: 'team_default', masked_key: 'sk-...def' },
-              { provider: 'gemini', source: 'none' },
+              {
+                id: 'cc-1',
+                org_id: 'org-1',
+                user_id: 'user-1',
+                scope: 'personal',
+                priority: 1,
+                agent: 'claude_code',
+                auth_type: 'subscription',
+                provider: 'anthropic_subscription',
+                label: 'Personal Claude',
+                status: 'healthy',
+                is_default: true,
+                created_at: '2026-03-20T00:00:00Z',
+                updated_at: '2026-03-20T00:00:00Z',
+              },
             ],
             meta: {},
           });
         }),
       );
 
-      const result = await api.userCredentials.listResolved();
-      expect(result.data).toHaveLength(3);
-      expect(result.data[0].source).toBe('personal');
-      expect(result.data[1].source).toBe('team_default');
-      expect(result.data[2].source).toBe('none');
+      const result = await api.codingCredentials.list('resolved');
+      expect(capturedScope).toBe('resolved');
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].provider).toBe('anthropic_subscription');
+      expect(result.data[0].scope).toBe('personal');
+    });
+
+    it('creates a credential and returns the unwrapped row', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.post('/api/v1/coding-credentials', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({
+            id: 'cc-2',
+            org_id: 'org-1',
+            scope: 'org',
+            priority: 1,
+            agent: 'codex',
+            auth_type: 'api_key',
+            provider: 'openai',
+            label: 'Codex API key',
+            status: 'healthy',
+            is_default: true,
+            created_at: '2026-03-20T00:00:00Z',
+            updated_at: '2026-03-20T00:00:00Z',
+          });
+        }),
+      );
+
+      const created = await api.codingCredentials.create({
+        scope: 'org',
+        agent: 'codex',
+        auth_type: 'api_key',
+        label: 'Codex API key',
+        api_key: 'sk-test',
+      });
+      expect(capturedBody).toEqual({
+        scope: 'org',
+        agent: 'codex',
+        auth_type: 'api_key',
+        label: 'Codex API key',
+        api_key: 'sk-test',
+      });
+      expect(created.id).toBe('cc-2');
+    });
+
+    it('deletes a credential within the requested scope', async () => {
+      let capturedScope: string | null = null;
+      let capturedId: string | undefined;
+
+      server.use(
+        http.delete('/api/v1/coding-credentials/:id', ({ request, params }) => {
+          capturedScope = new URL(request.url).searchParams.get('scope');
+          capturedId = params.id as string;
+          return new HttpResponse(null, { status: 204 });
+        }),
+      );
+
+      await api.codingCredentials.delete('cc-1', 'org');
+      expect(capturedId).toBe('cc-1');
+      expect(capturedScope).toBe('org');
+    });
+
+    it('reorders a scope stack with ordered ids', async () => {
+      let capturedBody: unknown;
+
+      server.use(
+        http.patch('/api/v1/coding-credentials/reorder', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { reordered: true } });
+        }),
+      );
+
+      await api.codingCredentials.reorder('org', ['cc-2', 'cc-1']);
+      expect(capturedBody).toEqual({ scope: 'org', ordered_ids: ['cc-2', 'cc-1'] });
     });
   });
 
@@ -1411,7 +1524,7 @@ describe('api client', () => {
       expect(loc.href).toBe('/api/v1/auth/google/login?invitation=inv-456&return_to=%2Fintegrations');
     });
 
-    it('loginSentry redirects to Sentry OAuth', () => {
+    it('loginSentry redirects to backend Sentry OAuth start', () => {
       const loc = { href: '' };
       Object.defineProperty(window, 'location', {
         value: loc,
@@ -1420,7 +1533,19 @@ describe('api client', () => {
       });
 
       api.auth.loginSentry();
-      expect(loc.href).toContain('https://sentry.io/oauth/authorize/');
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
+    });
+
+    it('integration loginSentry redirects to backend Sentry OAuth start', () => {
+      const loc = { href: '' };
+      Object.defineProperty(window, 'location', {
+        value: loc,
+        writable: true,
+        configurable: true,
+      });
+
+      api.integrations.loginSentry();
+      expect(loc.href).toBe('/api/v1/integrations/sentry/login');
     });
 
     it('loginLinear redirects to backend Linear OAuth start', () => {
@@ -1655,6 +1780,25 @@ describe('api client', () => {
       });
       expect(result.data).toHaveLength(1);
     });
+
+    it('reviews a bootstrap candidate', async () => {
+      let capturedBody: unknown;
+      server.use(
+        http.patch('/api/v1/evals/bootstrap/candidates/cand-1', async ({ request }) => {
+          capturedBody = await request.json();
+          return HttpResponse.json({ data: { candidate_id: 'cand-1', status: 'needs_revision' } });
+        }),
+      );
+      const result = await api.evals.reviewBootstrapCandidate('cand-1', {
+        status: 'needs_revision',
+        rejection_reason: 'Needs deterministic scoring.',
+      });
+      expect(capturedBody).toEqual({
+        status: 'needs_revision',
+        rejection_reason: 'Needs deterministic scoring.',
+      });
+      expect(result.data.status).toBe('needs_revision');
+    });
   });
 
   describe('repository preview secret bundles', () => {
@@ -1827,6 +1971,129 @@ describe('api client', () => {
 
       await expect(api.repositories.previewSecretBundles.delete('repo-1', 'staging')).resolves.toBeUndefined();
       expect(capturedUrl).toContain('/api/v1/repositories/repo-1/preview-secret-bundles/staging');
+    });
+  });
+
+  describe('sessions.getThreadTranscriptWindow', () => {
+    it('fetches latest window with no extra params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { position: 'latest' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.pathname).toBe('/api/v1/sessions/sess-1/threads/thread-1/transcript');
+      expect(url.searchParams.get('position')).toBe('latest');
+      expect(url.searchParams.get('before')).toBeNull();
+      expect(url.searchParams.get('after')).toBeNull();
+    });
+
+    it('sends before cursor for older page', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'older', has_older: false, has_newer: true, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { before: 'cursor-abc' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('before')).toBe('cursor-abc');
+      expect(url.searchParams.get('after')).toBeNull();
+    });
+
+    it('sends after cursor for newer page', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'newer', has_older: true, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { after: 'cursor-xyz' });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('after')).toBe('cursor-xyz');
+      expect(url.searchParams.get('before')).toBeNull();
+    });
+
+    it('sends all anchor params for around position', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'around', has_older: true, has_newer: true, anchor_found: true, anchor_entry_id: 'msg_42', thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', {
+        position: 'around',
+        anchorEntryId: 'msg_42',
+        anchorMessageId: 42,
+        anchorTurnNumber: 3,
+      });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('position')).toBe('around');
+      expect(url.searchParams.get('anchor_entry_id')).toBe('msg_42');
+      expect(url.searchParams.get('anchor_message_id')).toBe('42');
+      expect(url.searchParams.get('anchor_turn_number')).toBe('3');
+    });
+
+    it('sends limit_turns when specified', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { limitTurns: 5 });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('limit_turns')).toBe('5');
+    });
+
+    it('sends include filters when specified', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', { include: ['messages', 'tools'] });
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('include')).toBe('messages,tools');
+    });
+
+    it('omits null/undefined optional params', async () => {
+      let capturedUrl: string | undefined;
+      server.use(
+        http.get('/api/v1/sessions/:id/threads/:tid/transcript', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ data: [], meta: { position: 'latest', has_older: false, has_newer: false, anchor_found: false, thread_status: 'idle' } });
+        }),
+      );
+
+      await api.sessions.getThreadTranscriptWindow('sess-1', 'thread-1', {});
+
+      const url = new URL(capturedUrl!);
+      expect(url.searchParams.get('anchor_entry_id')).toBeNull();
+      expect(url.searchParams.get('anchor_message_id')).toBeNull();
+      expect(url.searchParams.get('anchor_turn_number')).toBeNull();
+      expect(url.searchParams.get('limit_turns')).toBeNull();
     });
   });
 });

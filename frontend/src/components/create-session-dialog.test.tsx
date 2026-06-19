@@ -617,12 +617,29 @@ describe("CreateSessionDialog", () => {
           },
         });
       }),
-      // Gemini must be available in the model picker for this test to be able
-      // to select "gemini-2.5-pro"; the composer hides agents the user has no
+      // OpenCode must be available in the model picker for this test to be able
+      // to select an OpenCode model; the composer hides agents the user has no
       // credentials for.
-      http.get("/api/v1/settings/credentials/resolved", () => {
+      http.get("/api/v1/coding-credentials", () => {
         return HttpResponse.json({
-          data: [{ provider: "gemini", source: "personal" }],
+          data: [
+            {
+              id: "cc-opencode",
+              org_id: "org-1",
+              user_id: "user-1",
+              scope: "personal",
+              priority: 1,
+              agent: "opencode",
+              auth_type: "api_key",
+              provider: "opencode",
+              label: "OpenCode API key",
+              status: "healthy",
+              is_default: true,
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+          meta: {},
         });
       }),
       http.post("/api/v1/sessions/manual", async ({ request }) => {
@@ -631,7 +648,7 @@ describe("CreateSessionDialog", () => {
           data: {
             id: "session-new-123",
             status: "pending",
-            agent_type: "gemini_cli",
+            agent_type: "opencode",
             created_at: "2026-04-09T00:00:00Z",
           },
         });
@@ -643,7 +660,7 @@ describe("CreateSessionDialog", () => {
     );
 
     await user.click(screen.getByRole("combobox", { name: /Model/i }));
-    await user.click(screen.getByRole("option", { name: "gemini-2.5-pro" }));
+    await user.click(screen.getByRole("option", { name: "openai/gpt-5.4-mini" }));
     await user.type(
       screen.getByPlaceholderText("Tell the agent what to do..."),
       "Fix the login bug",
@@ -656,8 +673,8 @@ describe("CreateSessionDialog", () => {
 
     expect(requestBody).toMatchObject({
       message: "Fix the login bug",
-      model: "gemini-2.5-pro",
-      agent_type: "gemini_cli",
+      model: "openai/gpt-5.4-mini",
+      agent_type: "opencode",
     });
     expect(requestBody).not.toHaveProperty("reasoning_effort");
   });

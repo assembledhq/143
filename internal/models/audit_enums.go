@@ -10,11 +10,12 @@ const (
 	AuditActorAgent   AuditActorType = "agent"
 	AuditActorSystem  AuditActorType = "system"
 	AuditActorWebhook AuditActorType = "webhook"
+	AuditActorAPI     AuditActorType = "api_client"
 )
 
 func (t AuditActorType) Validate() error {
 	switch t {
-	case AuditActorUser, AuditActorAgent, AuditActorSystem, AuditActorWebhook:
+	case AuditActorUser, AuditActorAgent, AuditActorSystem, AuditActorWebhook, AuditActorAPI:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditActorType: %q", t)
@@ -52,7 +53,9 @@ const (
 	// forces an unknown_delivery inbox entry back into the delivery loop —
 	// the entry may already have reached the runtime, so the replay is a
 	// dual-write decision worth a paper trail.
-	AuditActionSessionThreadInboxReplayed AuditAction = "session.thread.inbox_replayed"
+	AuditActionSessionThreadInboxReplayed       AuditAction = "session.thread.inbox_replayed"
+	AuditActionSessionThreadCreatedByAgentTool  AuditAction = "session.thread.created_by_agent_tool"
+	AuditActionSessionThreadMessagedByAgentTool AuditAction = "session.thread.messaged_by_agent_tool"
 
 	// Project actions
 	AuditActionProjectCreated        AuditAction = "project.created"
@@ -70,12 +73,17 @@ const (
 	AuditActionProjectTaskRetried    AuditAction = "project.task.retried"
 
 	// Automation actions
-	AuditActionAutomationCreated      AuditAction = "automation.created"
-	AuditActionAutomationUpdated      AuditAction = "automation.updated"
-	AuditActionAutomationDeleted      AuditAction = "automation.deleted"
-	AuditActionAutomationPaused       AuditAction = "automation.paused"
-	AuditActionAutomationResumed      AuditAction = "automation.resumed"
-	AuditActionAutomationRunTriggered AuditAction = "automation.run_triggered"
+	AuditActionAutomationCreated                  AuditAction = "automation.created"
+	AuditActionAutomationUpdated                  AuditAction = "automation.updated"
+	AuditActionAutomationDeleted                  AuditAction = "automation.deleted"
+	AuditActionAutomationPaused                   AuditAction = "automation.paused"
+	AuditActionAutomationResumed                  AuditAction = "automation.resumed"
+	AuditActionAutomationRunTriggered             AuditAction = "automation.run_triggered"
+	AuditActionAutomationGoalImprovementRequested AuditAction = "automation.goal_improvement.requested"
+	AuditActionAutomationGoalImprovementCompleted AuditAction = "automation.goal_improvement.completed"
+	AuditActionAutomationGoalImprovementFailed    AuditAction = "automation.goal_improvement.failed"
+	AuditActionAutomationGoalImprovementApplied   AuditAction = "automation.goal_improvement.applied"
+	AuditActionAutomationGoalImprovementCanceled  AuditAction = "automation.goal_improvement.canceled"
 
 	// Issue actions
 	AuditActionIssueCreated       AuditAction = "issue.created"
@@ -103,6 +111,15 @@ const (
 	AuditActionTeamInvitationDeclined    AuditAction = "team.invitation_declined"
 	AuditActionTeamInvitationClaimFailed AuditAction = "team.invitation_claim_failed"
 
+	// Verified-domain / auto-join actions
+	AuditActionTeamDomainAdded               AuditAction = "team.domain_added"
+	AuditActionTeamDomainVerified            AuditAction = "team.domain_verified"
+	AuditActionTeamDomainUpdated             AuditAction = "team.domain_updated"
+	AuditActionTeamDomainRemoved             AuditAction = "team.domain_removed"
+	AuditActionTeamMemberAutoJoined          AuditAction = "team.member_auto_joined"
+	AuditActionTeamGitHubOrgAutoJoinEnabled  AuditAction = "team.github_org_auto_join_enabled"
+	AuditActionTeamGitHubOrgAutoJoinDisabled AuditAction = "team.github_org_auto_join_disabled"
+
 	// Organization actions
 	AuditActionOrganizationCreated AuditAction = "organization.created"
 
@@ -117,11 +134,20 @@ const (
 	AuditActionPreviewSecretBundleRevealed AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
 	AuditActionPreviewSecretBundleResolved AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
 	AuditActionPreviewSecretBundleFailed   AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
+	AuditActionPreviewPolicyUpdated        AuditAction = "preview_policy.updated"
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
 	AuditActionAuthLogout   AuditAction = "auth.logout"
 	AuditActionAuthRegister AuditAction = "auth.register"
+
+	// CLI auth + local agent gateway actions
+	AuditActionAuthCLILogin        AuditAction = "auth.cli_login"
+	AuditActionAuthCLILogout       AuditAction = "auth.cli_logout"
+	AuditActionOrgJoinTokenCreated AuditAction = "org.join_token_created" // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenRevoked AuditAction = "org.join_token_revoked" // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenUsed    AuditAction = "org.join_token_used"    // #nosec G101 -- audit action name
+	AuditActionCLIToolInvoked      AuditAction = "cli.tool_invoked"
 
 	// Eval actions
 	AuditActionEvalTaskCreated  AuditAction = "eval_task.created"
@@ -130,6 +156,14 @@ const (
 	AuditActionEvalRunStarted   AuditAction = "eval_run.started"
 	AuditActionEvalRunCompleted AuditAction = "eval_run.completed"
 	AuditActionEvalBatchStarted AuditAction = "eval_batch.started"
+
+	// API client and token actions
+	AuditActionAPIClientCreated  AuditAction = "api_client.created"
+	AuditActionAPIClientUpdated  AuditAction = "api_client.updated"
+	AuditActionAPIClientDisabled AuditAction = "api_client.disabled"
+	AuditActionAPITokenCreated   AuditAction = "api_token.created" // #nosec G101 -- audit action name
+	AuditActionAPITokenRevoked   AuditAction = "api_token.revoked" // #nosec G101 -- audit action name
+	AuditActionAPITokenUsed      AuditAction = "api_token.used"    // #nosec G101 -- audit action name
 )
 
 // Validate checks that the action is a known value.
@@ -143,6 +177,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
 		AuditActionSessionPRRequested, AuditActionSessionBranchRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived, AuditActionSessionPreviewLifetimeSet,
+		AuditActionSessionThreadInboxReplayed, AuditActionSessionThreadCreatedByAgentTool, AuditActionSessionThreadMessagedByAgentTool,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
 		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectArchived,
 		AuditActionProjectUnarchived, AuditActionProjectRunTriggered,
@@ -150,6 +185,8 @@ func (a AuditAction) Validate() error {
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
 		AuditActionAutomationCreated, AuditActionAutomationUpdated, AuditActionAutomationDeleted,
 		AuditActionAutomationPaused, AuditActionAutomationResumed, AuditActionAutomationRunTriggered,
+		AuditActionAutomationGoalImprovementRequested, AuditActionAutomationGoalImprovementCompleted,
+		AuditActionAutomationGoalImprovementFailed, AuditActionAutomationGoalImprovementApplied, AuditActionAutomationGoalImprovementCanceled,
 		AuditActionIssueCreated, AuditActionIssueReprioritized,
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
 		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,
@@ -158,13 +195,22 @@ func (a AuditAction) Validate() error {
 		AuditActionSettingsUpdated, AuditActionTeamMemberInvited, AuditActionTeamMemberRoleChanged,
 		AuditActionTeamMemberRemoved, AuditActionTeamInvitationRevoked, AuditActionTeamInvitationAccepted,
 		AuditActionTeamInvitationDeclined, AuditActionTeamInvitationClaimFailed,
+		AuditActionTeamDomainAdded, AuditActionTeamDomainVerified, AuditActionTeamDomainUpdated,
+		AuditActionTeamDomainRemoved, AuditActionTeamMemberAutoJoined,
+		AuditActionTeamGitHubOrgAutoJoinEnabled, AuditActionTeamGitHubOrgAutoJoinDisabled,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
+		AuditActionPreviewPolicyUpdated,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
+		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
+		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
+		AuditActionCLIToolInvoked,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
-		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted:
+		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted,
+		AuditActionAPIClientCreated, AuditActionAPIClientUpdated, AuditActionAPIClientDisabled,
+		AuditActionAPITokenCreated, AuditActionAPITokenRevoked, AuditActionAPITokenUsed:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditAction: %q", a)
@@ -196,6 +242,13 @@ const (
 	AuditResourceAutomation           AuditResourceType = "automation"
 	AuditResourceOrganization         AuditResourceType = "organization"
 	AuditResourcePreviewSecretBundle  AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
+	AuditResourcePreviewPolicy        AuditResourceType = "preview_policy"
+	AuditResourceAPIClient            AuditResourceType = "api_client"
+	AuditResourceAPIToken             AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
+	AuditResourceCLIToken             AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
+	AuditResourceOrgJoinToken         AuditResourceType = "org_join_token" // #nosec G101 -- audit resource type
+	AuditResourceCLITool              AuditResourceType = "cli_tool"
+	AuditResourceOrgDomain            AuditResourceType = "organization_domain"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -206,7 +259,10 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceIntegration, AuditResourceCredential, AuditResourceUser,
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
-		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle:
+		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy,
+		AuditResourceAPIClient, AuditResourceAPIToken,
+		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,
+		AuditResourceOrgDomain:
 		return nil
 	default:
 		return fmt.Errorf("invalid AuditResourceType: %q", t)

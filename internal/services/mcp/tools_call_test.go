@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/assembledhq/143/internal/services/integration"
 )
 
@@ -121,6 +123,42 @@ func (m *mockPullRequestCreator) CreatePullRequest(_ context.Context, params int
 	}, nil
 }
 
+type mockSessionTabManager struct {
+	name string
+}
+
+func (m *mockSessionTabManager) Name() string { return m.name }
+func (m *mockSessionTabManager) ListTabs(_ context.Context, _ integration.ListSessionTabsParams) (json.RawMessage, error) {
+	return json.RawMessage(`{"data":[{"id":"tab-1","label":"Codex"}],"meta":{}}`), nil
+}
+func (m *mockSessionTabManager) GetTab(_ context.Context, params integration.GetSessionTabParams) (json.RawMessage, error) {
+	return json.RawMessage(fmt.Sprintf(`{"data":{"thread":{"id":%q},"recent_files":[]}}`, params.TabID)), nil
+}
+func (m *mockSessionTabManager) CreateTab(_ context.Context, params integration.CreateSessionTabParams) (json.RawMessage, error) {
+	return json.RawMessage(fmt.Sprintf(`{"data":{"id":"tab-new","label":%q}}`, params.Label)), nil
+}
+func (m *mockSessionTabManager) SendTabMessage(_ context.Context, params integration.SendSessionTabMessageParams) (json.RawMessage, error) {
+	return json.RawMessage(fmt.Sprintf(`{"data":{"message":{"id":1,"content":%q},"delivery_state":"pending"}}`, params.Message)), nil
+}
+func (m *mockSessionTabManager) ListTabMessages(_ context.Context, _ integration.ListSessionTabMessagesParams) (json.RawMessage, error) {
+	return json.RawMessage(`{"data":[{"id":1,"role":"assistant","content":"done"}],"meta":{"next_cursor":"0"}}`), nil
+}
+
+type mockAutomationGoalImprovementCompleter struct {
+	name string
+}
+
+func (m *mockAutomationGoalImprovementCompleter) Name() string {
+	return m.name
+}
+
+func (m *mockAutomationGoalImprovementCompleter) CompleteGoalImprovement(_ context.Context, params integration.CompleteAutomationGoalImprovementParams) (*integration.CompleteAutomationGoalImprovementResult, error) {
+	return &integration.CompleteAutomationGoalImprovementResult{
+		ImprovementID: params.ImprovementID,
+		Status:        "completed",
+	}, nil
+}
+
 // --------------------------------------------------------------------------
 // Mock: CITestInsights
 // --------------------------------------------------------------------------
@@ -176,7 +214,9 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
 	reg.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
 	reg.RegisterPullRequestCreator(&mockPullRequestCreator{name: "session"})
+	reg.RegisterSessionTabManager(&mockSessionTabManager{name: "session_tabs"})
 	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
+	reg.RegisterAutomationGoalImprovementCompleter(&mockAutomationGoalImprovementCompleter{name: "automation_goal_improvement"})
 	reg.RegisterCITestInsights(&mockCITestInsights{name: "circleci"})
 	return reg
 }
@@ -196,6 +236,43 @@ func TestCallToolCITestInsights_ListFlakyTests(t *testing.T) {
 	if len(got) != 1 || got[0].TestName != "TestFlaky" {
 		t.Errorf("unexpected list_flaky_tests result: %+v", got)
 	}
+}
+
+func TestCallToolSessionTabsList(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "session_tabs_list", json.RawMessage(`{}`))
+	require.False(t, result.IsError, "session_tabs_list should dispatch without error")
+	require.JSONEq(t, `[{"id":"tab-1","label":"Codex"}]`, result.Content[0].Text, "session_tabs_list should unwrap the API envelope for CLI output")
+}
+
+func TestCallToolSessionTabsCreateUnwrapsCreatedTab(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "session_tabs_create", json.RawMessage(`{"label":"Review"}`))
+	require.False(t, result.IsError, "session_tabs_create should dispatch without error")
+	require.JSONEq(t, `{"id":"tab-new","label":"Review"}`, result.Content[0].Text, "session_tabs_create should return the created tab JSON without the API envelope")
+}
+
+func TestCallToolSessionTabsSendRequiresMessageOrFile(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "session_tabs_send", json.RawMessage(`{"tab_id":"tab-1"}`))
+	require.True(t, result.IsError, "session_tabs_send should reject calls without message or message_file")
+	require.Contains(t, result.Content[0].Text, "message is required", "session_tabs_send should explain the missing message")
+}
+
+func TestCallToolSessionTabsSendUnwrapsResponse(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "session_tabs_send", json.RawMessage(`{"tab_id":"tab-1","message":"run tests"}`))
+	require.False(t, result.IsError, "session_tabs_send should dispatch without error")
+	require.JSONEq(t, `{"message":{"id":1,"content":"run tests"},"delivery_state":"pending"}`, result.Content[0].Text,
+		"session_tabs_send should unwrap the API data envelope so agents access delivery_state directly")
 }
 
 func TestCallToolCITestInsights_GetJobTestResults(t *testing.T) {
@@ -509,28 +586,34 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 1 project proposer + 3 ci test insights = 21
-	if len(tools) != 21 {
+	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 27
+	if len(tools) != 27 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 21 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 27 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
-		"github_list_recent_prs":            false,
-		"github_get_pr_reviews":             false,
-		"notion_search_documents":           false,
-		"notion_get_document":               false,
-		"slack_search_messages":             false,
-		"slack_get_thread":                  false,
-		"issue_create":                      false,
-		"create_pr":                         false,
-		"project_propose":                   false,
-		"circleci_list_flaky_tests":         false,
-		"circleci_get_job_test_results":     false,
-		"circleci_get_recent_test_failures": false,
+		"github_list_recent_prs":               false,
+		"github_get_pr_reviews":                false,
+		"notion_search_documents":              false,
+		"notion_get_document":                  false,
+		"slack_search_messages":                false,
+		"slack_get_thread":                     false,
+		"issue_create":                         false,
+		"create_pr":                            false,
+		"session_tabs_list":                    false,
+		"session_tabs_get":                     false,
+		"session_tabs_create":                  false,
+		"session_tabs_send":                    false,
+		"session_tabs_messages":                false,
+		"automation_goal_improvement_complete": false,
+		"project_propose":                      false,
+		"circleci_list_flaky_tests":            false,
+		"circleci_get_job_test_results":        false,
+		"circleci_get_recent_test_failures":    false,
 	}
 	for _, tool := range tools {
 		if _, ok := expected[tool.Name]; ok {

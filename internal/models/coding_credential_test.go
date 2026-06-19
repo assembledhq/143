@@ -147,6 +147,24 @@ func TestAnthropicSubscriptionConfigMetadata(t *testing.T) {
 
 func TestParseCodingProviderConfig(t *testing.T) {
 	t.Parallel()
+	t.Run("opencode", func(t *testing.T) {
+		t.Parallel()
+
+		original := OpenCodeConfig{
+			APIKey:          "oc-key",
+			BackingProvider: ProviderOpenAI,
+			Model:           OpenCodeModelGPT54Mini,
+		}
+		data, err := json.Marshal(original)
+		require.NoError(t, err, "test should marshal OpenCode config")
+
+		got, err := ParseCodingProviderConfig(ProviderOpenCode, data)
+		require.NoError(t, err, "ParseCodingProviderConfig should accept OpenCode coding credentials")
+		cfg, ok := got.(OpenCodeConfig)
+		require.True(t, ok, "parsed config should be OpenCodeConfig")
+		require.Equal(t, original, cfg, "parsed OpenCode config should match expected")
+	})
+
 	t.Run("openai_subscription", func(t *testing.T) {
 		t.Parallel()
 
@@ -230,10 +248,9 @@ func TestParseCodingProviderConfig(t *testing.T) {
 			ProviderLinear,
 			ProviderSlack,
 			ProviderNotion,
-			// ProviderOpenAIChatGPT is renamed to ProviderOpenAISubscription
-			// by the SQL data-copy migration, so it must never appear in a
-			// coding_credentials row either.
-			ProviderOpenAIChatGPT,
+			// The retired legacy provider spelling must never round-trip
+			// through the coding store either.
+			ProviderName("openai_chatgpt"),
 		}
 		for _, p := range nonCoding {
 			_, err := ParseCodingProviderConfig(p, []byte("{}"))
@@ -271,17 +288,27 @@ func TestFromAnthropicSubscription(t *testing.T) {
 	}
 }
 
-func TestOpenAISubscriptionConfigRoundTrip(t *testing.T) {
+func TestAnthropicSubscriptionConfigRoundTrip(t *testing.T) {
 	t.Parallel()
-	src := OpenAIChatGPTConfig{
-		AccessToken:  "a",
-		RefreshToken: "r",
-		IDToken:      "id",
-		ExpiresAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		AccountType:  "pro",
+	src := AnthropicSubscription{
+		AccessToken:   "a",
+		RefreshToken:  "r",
+		ExpiresAt:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		AccountType:   "claude_max",
+		RateLimitTier: "default_claude_max_20x",
+		State:         "st",
+		CodeVerifier:  "cv",
+		AuthorizeURL:  "https://example",
 	}
-	round := FromOpenAIChatGPTConfig(src).AsOpenAIChatGPTConfig()
-	if round != src {
+	round := FromAnthropicSubscription(src).AsAnthropicSubscription()
+	if round.AccessToken != src.AccessToken ||
+		round.RefreshToken != src.RefreshToken ||
+		!round.ExpiresAt.Equal(src.ExpiresAt) ||
+		round.AccountType != src.AccountType ||
+		round.RateLimitTier != src.RateLimitTier ||
+		round.State != src.State ||
+		round.CodeVerifier != src.CodeVerifier ||
+		round.AuthorizeURL != src.AuthorizeURL {
 		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", round, src)
 	}
 }
@@ -343,6 +370,20 @@ func TestCreateCodingCredentialInputValidate(t *testing.T) {
 		{
 			"valid amp defaults",
 			CreateCodingCredentialInput{Scope: CodingCredentialScopeOrg, Agent: AgentTypeAmp, AuthType: CodingAuthTypeAPIKey, APIKey: "amp", AgentDefaults: validDefaults},
+			true,
+		},
+		{
+			"valid opencode defaults",
+			CreateCodingCredentialInput{
+				Scope:    CodingCredentialScopeOrg,
+				Agent:    AgentTypeOpenCode,
+				AuthType: CodingAuthTypeAPIKey,
+				APIKey:   "oc-key",
+				AgentDefaults: map[string]string{
+					"OPENCODE_MODEL":        "not-in-curated-list",
+					"OPENCODE_MODEL_CUSTOM": "xai/grok-code-fast",
+				},
+			},
 			true,
 		},
 		{

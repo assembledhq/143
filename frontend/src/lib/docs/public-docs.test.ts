@@ -40,14 +40,16 @@ function readPublicMdx(filePath: string) {
   const description = match[1]
     .match(/^description:\s*(.+)$/m)?.[1]
     .replace(/^"|"$/g, "");
+  const status = match[1].match(/^status:\s*(.+)$/m)?.[1].replace(/^"|"$/g, "");
 
-  if (!title || !description) {
-    throw new Error(`${filePath} is missing title or description`);
+  if (!title || !description || !status) {
+    throw new Error(`${filePath} is missing title, description, or status`);
   }
 
   return {
     body: match[2].trimStart(),
     description,
+    status,
     title,
   };
 }
@@ -96,6 +98,14 @@ describe("public docs source", () => {
     }
   });
 
+  it("marks every public docs page as generally available", () => {
+    for (const filePath of publicMdxFiles()) {
+      const page = readPublicMdx(filePath);
+
+      expect(page.status).toBe("stable");
+    }
+  });
+
   it("documents the public docs authoring model for future pages", () => {
     const agentsPath = join(publicDocsPath, "AGENTS.md");
 
@@ -128,6 +138,20 @@ describe("public docs source", () => {
     expect(raw.content).not.toContain("Design: Public Docs");
   });
 
+  it("keeps the homepage benefits bullets with team-level automation wording", () => {
+    const raw = getRawPublicDocBySlug([]);
+
+    expect(raw.content).toContain("built for engineering teams");
+    expect(raw.content).toContain("defaults to team-level workflows");
+    expect(raw.content).toContain("**A shared execution layer:**");
+    expect(raw.content).toContain("**Team-level automation:**");
+    expect(raw.content).toContain("Linear or an API");
+    expect(raw.content).toContain("self-host");
+    expect(raw.content).not.toContain("**Repo-specific contracts:**");
+    expect(raw.content).not.toContain("## Why teams use it");
+    expect(raw.content).not.toContain("**Controlled automation:**");
+  });
+
   it("keeps preview setup and secret guidance in the public preview docs", () => {
     const raw = getRawPublicDocBySlug(["guides", "previews"]);
 
@@ -135,6 +159,19 @@ describe("public docs source", () => {
     expect(raw.content).toContain("## Secrets and config");
     expect(raw.content).toContain("`preview.credentials`");
     expect(raw.content).toContain("admin-managed values");
+  });
+
+  it("publishes an agent-facing 143-tools CLI reference", () => {
+    expect(referenceMeta.pages).toContain("agent-tools");
+
+    const raw = getRawPublicDocBySlug(["reference", "agent-tools"]);
+
+    expect(raw.content).toContain("## CLI contract");
+    expect(raw.content).toContain("### `linear list_tasks`");
+    expect(raw.content).toContain("`--team`");
+    expect(raw.content).toContain("### `pr create`");
+    expect(raw.content).toContain("### `circleci get_recent_test_failures`");
+    expect(raw.content).toContain("### `logs query`");
   });
 
   it("generates llms.txt from the public docs index", () => {

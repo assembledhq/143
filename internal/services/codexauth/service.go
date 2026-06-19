@@ -43,13 +43,19 @@ const (
 
 	// refreshWindow is how far before expiry we proactively refresh.
 	refreshWindow = 5 * time.Minute
+
+	// maxResponseBytes bounds how much data we read from the OAuth token
+	// endpoint on the refresh path. Defense-in-depth against an unexpected
+	// large payload from a trusted but unvetted upstream; mirrors
+	// claudecodeauth's cap.
+	maxResponseBytes = 1 << 20 // 1 MiB
 )
 
 // CredentialStore defines the credential operations needed by the auth
 // service. Every method takes models.Scope so a single Service instance can
 // drive both org-scoped (admin) and personal-scoped (per-user) subscription
-// flows. Production wires *db.ScopedCredentialStore, which routes org scope
-// to OrgCredentialStore and personal scope to CodingCredentialStore.
+// flows. Production wires *db.ScopedCredentialStore, which targets the
+// unified coding_credentials table for both scopes.
 type CredentialStore interface {
 	Disable(ctx context.Context, scope models.Scope, provider models.ProviderName) error
 
@@ -211,11 +217,11 @@ func (s *Service) restorePendingFromDB(ctx context.Context, scope models.Scope, 
 	if s.credentials == nil {
 		return nil, nil
 	}
-	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderOpenAIChatGPT, label)
+	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderOpenAISubscription, label)
 	if err != nil {
 		return nil, nil
 	}
-	cfg, cfgOk := cred.Config.(models.OpenAIChatGPTConfig)
+	cfg, cfgOk := cred.Config.(models.OpenAISubscriptionConfig)
 	switch cred.Status {
 	case "active":
 		if !cfgOk {
@@ -247,7 +253,7 @@ func (s *Service) activeSubscriptionStatus(ctx context.Context, scope models.Sco
 	if s.credentials == nil {
 		return nil, nil
 	}
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAIChatGPT)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAISubscription)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
@@ -255,7 +261,7 @@ func (s *Service) activeSubscriptionStatus(ctx context.Context, scope models.Sco
 		if cred.Status != "active" {
 			continue
 		}
-		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
 			continue
 		}
@@ -268,9 +274,8 @@ func (s *Service) activeSubscriptionStatus(ctx context.Context, scope models.Sco
 // The label distinguishes multiple subscriptions (e.g. "Team A", "Team B").
 // createdBy records which user added the subscription; pass nil if unknown.
 //
-// Scope determines where the pending row is persisted: org scope writes to
-// org_credentials (mirrored to coding_credentials), personal scope writes
-// directly to coding_credentials with user_id set.
+// Both scopes persist the pending row to coding_credentials; personal scope
+// sets user_id on the row.
 func (s *Service) InitiateDeviceAuth(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string) (*DeviceAuthResponse, error) {
 	// Serialize concurrent init calls for the same (scope, label). Otherwise
 	// two racing initiations could both reach InsertPendingAuth, with the
@@ -356,7 +361,7 @@ func (s *Service) InitiateDeviceAuth(ctx context.Context, scope models.Scope, cr
 	// real access token, so an in-progress re-auth flow can never wipe a working
 	// subscription.
 	if s.credentials != nil {
-		pendingCfg := models.OpenAIChatGPTConfig{
+		pendingCfg := models.OpenAISubscriptionConfig{
 			DeviceAuthID:    result.DeviceAuthID,
 			UserCode:        result.UserCode,
 			VerificationURI: result.VerificationURI,
@@ -513,7 +518,7 @@ func (s *Service) PollForToken(ctx context.Context, scope models.Scope, label st
 		return &AuthStatus{Status: "error", Message: fmt.Sprintf("token exchange failed: %s", err)}, nil
 	}
 
-	storedCfg := models.OpenAIChatGPTConfig{
+	storedCfg := models.OpenAISubscriptionConfig{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		IDToken:      tokenResp.IDToken,
@@ -634,107 +639,210 @@ func (s *Service) credRefreshMu(credID uuid.UUID) *sync.Mutex {
 	return val.(*sync.Mutex)
 }
 
+// RefreshLocker is optionally implemented by the credential store to
+// serialize token refreshes across processes. The in-process refreshMu only
+// protects a single process; ChatGPT refresh tokens are single-use, so two
+// worker hosts refreshing the same credential concurrently make the loser
+// look revoked (401/403) and would nuke an otherwise healthy credential.
+// Production wires *db.ScopedCredentialStore, which implements this via a
+// Postgres advisory lock. Mirrors claudecodeauth.RefreshLocker.
+type RefreshLocker interface {
+	WithRefreshLock(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error
+}
+
+// maxRefreshAttempts bounds the refresh loop in refreshTokenLocked. A second
+// attempt happens only when OpenAI rejects the refresh token but the stored
+// token has rotated since this attempt loaded it — i.e. the rejection is
+// stale, not a revocation.
+const maxRefreshAttempts = 2
+
+// runUnderRefreshLocks runs fn while holding the per-credential in-process
+// mutex and, when the store supports it, the cross-host advisory lock. Every
+// writer of a credential's token material must go through here so single-use
+// refresh tokens are never double-spent.
+func (s *Service) runUnderRefreshLocks(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error {
+	mu := s.credRefreshMu(credID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if locker, ok := s.credentials.(RefreshLocker); ok {
+		return locker.WithRefreshLock(ctx, credID, fn)
+	}
+	return fn(ctx)
+}
+
 // RefreshTokenByID refreshes an expired access token for a specific credential.
-// It serializes refreshes per-credential to prevent concurrent calls from consuming
-// the same refresh token at OpenAI (which causes refresh_token_reused errors).
+// It serializes refreshes per-credential — in-process and, when the store
+// supports it, across hosts — to prevent concurrent calls from consuming the
+// same refresh token at OpenAI (which causes refresh_token_reused errors).
 //
 // Scope must match the credential's owner — personal credentials require a
 // scope with the matching UserID. The unified runtime path constructs scope
 // from the picked credential's UserID (orchestrator.go); the legacy
 // org-fallback GetValidToken path constructs an org scope.
-func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
-	mu := s.credRefreshMu(credID)
-	mu.Lock()
-	defer mu.Unlock()
-
-	cred, err := s.credentials.GetByID(ctx, scope, credID)
+func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
+	var refreshed *models.OpenAISubscriptionConfig
+	err := s.runUnderRefreshLocks(ctx, credID, func(ctx context.Context) error {
+		cfg, err := s.refreshTokenLocked(ctx, scope, credID)
+		refreshed = cfg
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get credential: %w", err)
+		return nil, err
 	}
+	return refreshed, nil
+}
 
-	cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
-	if !ok {
-		return nil, fmt.Errorf("credential is not OpenAIChatGPTConfig")
+// refreshTokenLocked does the actual refresh. Callers must hold the
+// per-credential in-process mutex and, when the store supports it, the
+// cross-host refresh lock — the re-read at the top of the loop is what turns
+// "another refresher beat us" into a cheap early return instead of a
+// double-spend of the single-use refresh token.
+func (s *Service) refreshTokenLocked(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
+	for attempt := 1; ; attempt++ {
+		cred, err := s.credentials.GetByID(ctx, scope, credID)
+		if err != nil {
+			return nil, fmt.Errorf("get credential: %w", err)
+		}
+
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
+		if !ok {
+			return nil, fmt.Errorf("credential is not OpenAISubscriptionConfig")
+		}
+
+		// After acquiring the locks, check if another refresher (goroutine
+		// or host) already rotated the token.
+		if !cfg.NeedsRefresh(refreshWindow) && cfg.AccessToken != "" {
+			return &cfg, nil
+		}
+
+		if cfg.RefreshToken == "" {
+			return nil, wrapAuthInvalid(fmt.Errorf("no refresh token available — user must re-authenticate"))
+		}
+
+		statusCode, body, err := s.postRefresh(ctx, cfg.RefreshToken)
+		if err != nil {
+			return nil, err
+		}
+
+		reused := strings.Contains(string(body), "refresh_token_reused")
+		rejected := statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
+
+		// A reuse/rejection only proves the token we SENT is dead. If the
+		// stored token rotated while this request was in flight (another
+		// writer landed), the verdict is stale — retry once with the
+		// rotated token before acting on it.
+		if (reused || rejected) && attempt < maxRefreshAttempts && s.storedRefreshTokenRotated(ctx, scope, credID, cfg.RefreshToken) {
+			s.logger.Warn().
+				Str("cred_id", credID.String()).
+				Int("status", statusCode).
+				Int("attempt", attempt).
+				Msg("refresh verdict was for a stale refresh token; retrying with the rotated token")
+			continue
+		}
+
+		if reused {
+			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
+			return nil, wrapAuthInvalid(fmt.Errorf("refresh token already used by another client"))
+		}
+
+		if rejected {
+			s.markCredentialInvalid(ctx, scope, credID,
+				fmt.Sprintf("token endpoint rejected refresh (status %d)", statusCode))
+			return nil, wrapAuthInvalid(fmt.Errorf("refresh token revoked (status %d)", statusCode))
+		}
+
+		if statusCode != http.StatusOK {
+			return nil, fmt.Errorf("refresh failed (status %d): %s", statusCode, string(body))
+		}
+
+		var tokenResp struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			IDToken      string `json:"id_token"`
+			ExpiresIn    int    `json:"expires_in"`
+		}
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			return nil, fmt.Errorf("parse refresh response: %w", err)
+		}
+		if tokenResp.AccessToken == "" {
+			return nil, fmt.Errorf("refresh response returned empty access_token")
+		}
+
+		newCfg := models.OpenAISubscriptionConfig{
+			AccessToken:  tokenResp.AccessToken,
+			RefreshToken: tokenResp.RefreshToken,
+			IDToken:      tokenResp.IDToken,
+			ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+			AccountType:  cfg.AccountType,
+		}
+		// Guard against a refresh response that omits the refresh token:
+		// clobbering the stored value with "" would leave the next refresh
+		// with nothing to send. Mirrors claudecodeauth.
+		if newCfg.RefreshToken == "" {
+			newCfg.RefreshToken = cfg.RefreshToken
+		}
+
+		if err := s.credentials.UpsertByID(ctx, scope, credID, newCfg); err != nil {
+			return nil, fmt.Errorf("store refreshed credential: %w", err)
+		}
+
+		s.logger.Debug().
+			Str("cred_id", credID.String()).
+			Msg("ChatGPT OAuth token refreshed")
+
+		return &newCfg, nil
 	}
+}
 
-	// After acquiring the lock, check if another goroutine already refreshed.
-	if !cfg.NeedsRefresh(refreshWindow) && cfg.AccessToken != "" {
-		return &cfg, nil
-	}
-
-	if cfg.RefreshToken == "" {
-		return nil, wrapAuthInvalid(fmt.Errorf("no refresh token available — user must re-authenticate"))
-	}
-
+// postRefresh POSTs a refresh_token grant to the token endpoint and returns
+// the raw status + bounded body for the caller to classify.
+func (s *Service) postRefresh(ctx context.Context, refreshToken string) (int, []byte, error) {
 	endpoint := s.issuer + "/oauth/token"
 	reqBody, err := json.Marshal(map[string]string{
 		"client_id":     s.clientID,
 		"grant_type":    refreshGrantType,
-		"refresh_token": cfg.RefreshToken,
+		"refresh_token": refreshToken,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal refresh request: %w", err)
+		return 0, nil, fmt.Errorf("marshal refresh request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("create refresh request: %w", err)
+		return 0, nil, fmt.Errorf("create refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("refresh request: %w", err)
+		return 0, nil, fmt.Errorf("refresh request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read refresh response: %w", err)
+		return 0, nil, fmt.Errorf("read refresh response: %w", err)
 	}
+	return resp.StatusCode, body, nil
+}
 
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		if strings.Contains(string(body), "refresh_token_reused") {
-			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
-			return nil, wrapAuthInvalid(fmt.Errorf("refresh token already used by another client"))
-		}
-		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); err != nil {
-			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
-		}
-		return nil, wrapAuthInvalid(fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode))
+// storedRefreshTokenRotated re-reads the credential and reports whether its
+// stored refresh token differs from the one a just-rejected refresh sent.
+// True means another writer rotated the token mid-flight, so the rejection
+// says nothing about the credential's health. Read errors report false: when
+// we can't prove rotation, the caller falls through to its normal rejection
+// handling.
+func (s *Service) storedRefreshTokenRotated(ctx context.Context, scope models.Scope, credID uuid.UUID, sentToken string) bool {
+	cred, err := s.credentials.GetByID(ctx, scope, credID)
+	if err != nil {
+		return false
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh failed (status %d): %s", resp.StatusCode, string(body))
+	cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
+	if !ok {
+		return false
 	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		IDToken      string `json:"id_token"`
-		ExpiresIn    int    `json:"expires_in"`
-	}
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parse refresh response: %w", err)
-	}
-
-	newCfg := models.OpenAIChatGPTConfig{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		IDToken:      tokenResp.IDToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-		AccountType:  cfg.AccountType,
-	}
-
-	if err := s.credentials.UpsertByID(ctx, scope, credID, newCfg); err != nil {
-		return nil, fmt.Errorf("store refreshed credential: %w", err)
-	}
-
-	s.logger.Debug().
-		Str("cred_id", credID.String()).
-		Msg("ChatGPT OAuth token refreshed")
-
-	return &newCfg, nil
+	return cfg.RefreshToken != "" && cfg.RefreshToken != sentToken
 }
 
 // maxRoundRobinAttempts caps how many distinct credentials GetValidToken
@@ -749,7 +857,7 @@ const maxRoundRobinAttempts = 5
 // when a credential's refresh fails AND its cached token has already
 // expired, marks that credential invalid and tries the next one in the
 // rotation. Returns nil, nil if no usable ChatGPT credential exists.
-func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	if s.credentials == nil {
 		return nil, nil
 	}
@@ -759,7 +867,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 	var lastErr error
 
 	for attempt := 0; attempt < maxRoundRobinAttempts; attempt++ {
-		cred, err := s.credentials.ClaimNextRoundRobin(ctx, scope, models.ProviderOpenAIChatGPT)
+		cred, err := s.credentials.ClaimNextRoundRobin(ctx, scope, models.ProviderOpenAISubscription)
 		if err != nil {
 			if isNotFoundError(err) {
 				if lastErr != nil {
@@ -778,14 +886,23 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		}
 		tried[cred.ID] = struct{}{}
 
-		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
-			lastErr = fmt.Errorf("credential %s is not OpenAIChatGPTConfig", cred.ID)
+			// A corrupt config under provider=openai_subscription can never be
+			// used. Mark it invalid so the unified resolver stops returning it;
+			// otherwise PickRunnable keeps handing back this same top-priority
+			// row and the tried-map below breaks the loop before lower-priority
+			// healthy credentials are reached.
+			lastErr = fmt.Errorf("credential %s is not OpenAISubscriptionConfig", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "stored config is not OpenAISubscriptionConfig")
 			continue
 		}
 
 		if cfg.AccessToken == "" {
+			// An active row with no access token is unusable; same rotation
+			// hazard as the wrong-type case above.
 			lastErr = fmt.Errorf("credential %s has empty access token", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "empty access token")
 			continue
 		}
 
@@ -809,16 +926,35 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.O
 		// credential invalid so it stops being claimed in the rotation,
 		// then try the next one. RefreshTokenByID may have already done
 		// this for some HTTP error paths; the second update is a no-op.
-		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
-			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
-		}
+		s.markCredentialInvalid(ctx, scope, cred.ID, "token refresh failed and cached token expired")
 	}
 
 	if lastErr != nil {
 		return nil, fmt.Errorf("no usable codex credential after %d attempts: %w", len(tried), lastErr)
 	}
 	return nil, nil
+}
+
+// markCredentialInvalid durably removes a credential from the round-robin by
+// flipping its runtime status to invalid, which busts the unified resolver
+// cache so the next ClaimNextRoundRobin (PickRunnable) skips it. Without this,
+// PickRunnable re-returns the same top-priority row every iteration and the
+// caller's tried-map breaks the loop before lower-priority healthy
+// credentials are reached. Best-effort: a failed update is logged, not fatal.
+func (s *Service) markCredentialInvalid(ctx context.Context, scope models.Scope, credID uuid.UUID, reason string) {
+	// Error-level on purpose: invalidation takes the credential out of
+	// rotation, so every session that depended on it starts failing. This
+	// line is the breadcrumb operators search for when a user reports
+	// "Codex auth suddenly stopped working".
+	s.logger.Error().
+		Str("org_id", scope.OrgID.String()).
+		Bool("personal", scope.IsPersonal()).
+		Str("cred_id", credID.String()).
+		Str("reason", reason).
+		Msg("marking codex credential invalid")
+	if statusErr := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); statusErr != nil {
+		s.logger.Error().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
+	}
 }
 
 // Disconnect removes a specific ChatGPT OAuth credential by ID at the given
@@ -866,7 +1002,7 @@ func (s *Service) DisconnectForOrg(ctx context.Context, scope models.Scope, cred
 	// Anthropic API key) from "already disconnected". The provider filter
 	// prevents the codex-auth DELETE endpoint from disabling unrelated
 	// credentials.
-	exists, err := s.credentials.ExistsForProviderByID(ctx, scope, credID, models.ProviderOpenAIChatGPT)
+	exists, err := s.credentials.ExistsForProviderByID(ctx, scope, credID, models.ProviderOpenAISubscription)
 	if err != nil {
 		return fmt.Errorf("check credential ownership: %w", err)
 	}
@@ -902,7 +1038,7 @@ func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	})
 	// Clean up refresh mutexes for all credentials in this scope.
 	if s.credentials != nil {
-		creds, _ := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAIChatGPT)
+		creds, _ := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAISubscription)
 		for _, cred := range creds {
 			s.refreshMu.Delete(cred.ID.String())
 		}
@@ -911,7 +1047,7 @@ func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	if s.credentials == nil {
 		return nil
 	}
-	return s.credentials.Disable(ctx, scope, models.ProviderOpenAIChatGPT)
+	return s.credentials.Disable(ctx, scope, models.ProviderOpenAISubscription)
 }
 
 // ListSubscriptions returns all connected Codex subscriptions at the given scope.
@@ -920,14 +1056,14 @@ func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]
 		return nil, nil
 	}
 
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAIChatGPT)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderOpenAISubscription)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
 
 	var subs []SubscriptionInfo
 	for _, cred := range creds {
-		cfg, ok := cred.Config.(models.OpenAIChatGPTConfig)
+		cfg, ok := cred.Config.(models.OpenAISubscriptionConfig)
 		if !ok {
 			continue
 		}

@@ -1,4 +1,4 @@
-import type { HumanInputRequest, SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry } from "./types";
+import type { HumanInputRequest, SessionMessage, SessionLog, SessionTimelineEntry as SessionTimelineResponseEntry, SessionTranscriptTurn } from "./types";
 
 /** Prefix added by the backend when a message is sent in plan mode. */
 export const PLAN_MODE_PREFIX = "[PLAN_MODE]\n";
@@ -11,14 +11,23 @@ export function applyPlanModePrefix(content: string, planMode: boolean): string 
 }
 
 export type TimelineEntry =
-  | { kind: "message"; data: SessionMessage }
-  | { kind: "assistant_output"; data: SessionLog }
-  | { kind: "tool_group"; toolUse: SessionLog; toolResult?: SessionLog }
-  | { kind: "error"; data: SessionLog }
-  | { kind: "log"; data: SessionLog }
-  | { kind: "plan_output"; data: SessionLog; turnNumber: number }
-  | { kind: "plan_message"; data: SessionMessage; turnNumber: number }
-  | { kind: "human_input"; data: HumanInputRequest };
+  | ({ kind: "message"; data: SessionMessage } & TimelineEntryAnchor)
+  | ({ kind: "assistant_output"; data: SessionLog } & TimelineEntryAnchor)
+  | ({ kind: "tool_group"; toolUse: SessionLog; toolResult?: SessionLog } & TimelineEntryAnchor)
+  | ({ kind: "error"; data: SessionLog } & TimelineEntryAnchor)
+  | ({ kind: "log"; data: SessionLog } & TimelineEntryAnchor)
+  | ({ kind: "plan_output"; data: SessionLog; turnNumber: number } & TimelineEntryAnchor)
+  | ({ kind: "plan_message"; data: SessionMessage; turnNumber: number } & TimelineEntryAnchor)
+  | ({ kind: "human_input"; data: HumanInputRequest } & TimelineEntryAnchor);
+
+interface TimelineEntryAnchor {
+  transcriptEntryId?: string;
+}
+
+export interface TimelineTranscriptEntryIds {
+  messageEntryIds?: ReadonlyMap<number, string>;
+  logEntryIds?: ReadonlyMap<number, string>;
+}
 
 type TaggedTimelineItem =
   | { source: "message"; ts: string; data: SessionMessage }
@@ -37,15 +46,8 @@ function metadataString(metadata: SessionLog["metadata"] | null | undefined, key
   return typeof value === "string" ? value : undefined;
 }
 
-function isRecoverableCodexRouterDiagnostic(message: string): boolean {
-  return message.includes("codex_core::tools::router:") && (
-    message.includes("write_stdin failed: stdin is closed for this session") ||
-    message.includes("apply_patch verification failed: Failed to find expected lines")
-  );
-}
-
 function isHiddenLog(log: SessionLog): boolean {
-  return metadataString(log.metadata, "visibility") === "hidden" || isRecoverableCodexRouterDiagnostic(log.message);
+  return metadataString(log.metadata, "visibility") === "hidden";
 }
 
 function isToolResultLog(item: TaggedTimelineItem | undefined): item is Extract<TaggedTimelineItem, { source: "log" }> {
@@ -95,7 +97,8 @@ function duplicateOutputLogIds(messages: SessionMessage[], logs: SessionLog[]): 
  */
 export function buildTimeline(
   messages: SessionMessage[],
-  logs: SessionLog[]
+  logs: SessionLog[],
+  transcriptEntryIds: TimelineTranscriptEntryIds = {},
 ): TimelineEntry[] {
   const suppressedLogIds = duplicateOutputLogIds(messages, logs);
 
@@ -137,10 +140,11 @@ export function buildTimeline(
       const msg = item.data;
       // If this is an assistant message responding to a plan mode turn,
       // mark it as a plan_message so the UI can show approve/adjust buttons.
+      const transcriptEntryId = transcriptEntryIds.messageEntryIds?.get(msg.id);
       if (msg.role === "assistant" && planModeTurns.has(msg.turn_number)) {
-        entries.push({ kind: "plan_message", data: msg, turnNumber: msg.turn_number });
+        entries.push({ kind: "plan_message", data: msg, turnNumber: msg.turn_number, transcriptEntryId });
       } else {
-        entries.push({ kind: "message", data: msg });
+        entries.push({ kind: "message", data: msg, transcriptEntryId });
       }
       i++;
       continue;
@@ -175,22 +179,23 @@ export function buildTimeline(
           kind: "tool_group",
           toolUse: log,
           toolResult,
+          transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id),
         });
       } else {
-        entries.push({ kind: "tool_group", toolUse: log });
+        entries.push({ kind: "tool_group", toolUse: log, transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id) });
       }
       i++;
       continue;
     }
 
     if (isHiddenLog(log)) {
-      entries.push({ kind: "log", data: log });
+      entries.push({ kind: "log", data: log, transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id) });
       i++;
       continue;
     }
 
     if (log.level === "error") {
-      entries.push({ kind: "error", data: log });
+      entries.push({ kind: "error", data: log, transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id) });
       i++;
       continue;
     }
@@ -200,16 +205,16 @@ export function buildTimeline(
     if (isVisibleAssistantOutput(log)) {
       // If this output belongs to a plan mode turn, mark it as plan output.
       if (planModeTurns.has(log.turn_number)) {
-        entries.push({ kind: "plan_output", data: log, turnNumber: log.turn_number });
+        entries.push({ kind: "plan_output", data: log, turnNumber: log.turn_number, transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id) });
       } else {
-        entries.push({ kind: "assistant_output", data: log });
+        entries.push({ kind: "assistant_output", data: log, transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id) });
       }
       i++;
       continue;
     }
 
     // debug, info, remaining output with metadata — hidden by default.
-    entries.push({ kind: "log", data: log });
+    entries.push({ kind: "log", data: log, transcriptEntryId: transcriptEntryIds.logEntryIds?.get(log.id) });
     i++;
   }
 
@@ -302,4 +307,54 @@ export function flattenTimelineResponse(entries: SessionTimelineResponseEntry[])
   }
 
   return { messages, logs, humanInputs };
+}
+
+/**
+ * Flattens the turn/entry structure returned by the `/transcript` window
+ * endpoint into the {messages, logs, humanInputs} arrays that buildTimeline()
+ * consumes. Each transcript entry embeds the full underlying record
+ * (`message`/`log`/`human_input`), so this is a pure unwrap-and-dedupe. The
+ * embedded `log` is already a SessionLogResponse (preview-truncated with a
+ * `message_truncated` flag), matching what the legacy `/logs` endpoint
+ * returned, so downstream rendering and "Load full output" behave identically.
+ */
+export function flattenTranscriptWindows(turns: SessionTranscriptTurn[] | undefined): {
+  messages: SessionMessage[];
+  logs: SessionLog[];
+  humanInputs: HumanInputRequest[];
+  messageEntryIds: Map<number, string>;
+  logEntryIds: Map<number, string>;
+  humanInputEntryIds: Map<string, string>;
+} {
+  const messages: SessionMessage[] = [];
+  const logs: SessionLog[] = [];
+  const humanInputs: HumanInputRequest[] = [];
+  const messageEntryIds = new Map<number, string>();
+  const logEntryIds = new Map<number, string>();
+  const humanInputEntryIds = new Map<string, string>();
+  const seenMessageIds = new Set<number>();
+  const seenLogIds = new Set<number>();
+  const seenHumanInputIds = new Set<string>();
+
+  for (const turn of turns ?? []) {
+    for (const entry of turn.entries) {
+      if (entry.message && !seenMessageIds.has(entry.message.id)) {
+        seenMessageIds.add(entry.message.id);
+        messages.push(entry.message);
+        messageEntryIds.set(entry.message.id, entry.id);
+      }
+      if (entry.log && !seenLogIds.has(entry.log.id)) {
+        seenLogIds.add(entry.log.id);
+        logs.push(entry.log);
+        logEntryIds.set(entry.log.id, entry.id);
+      }
+      if (entry.human_input && !seenHumanInputIds.has(entry.human_input.id)) {
+        seenHumanInputIds.add(entry.human_input.id);
+        humanInputs.push(entry.human_input);
+        humanInputEntryIds.set(entry.human_input.id, entry.id);
+      }
+    }
+  }
+
+  return { messages, logs, humanInputs, messageEntryIds, logEntryIds, humanInputEntryIds };
 }

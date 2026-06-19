@@ -14,12 +14,13 @@
 //     active.
 //
 // Design notes:
-//   - Subscription credentials live under ProviderAnthropic with a non-empty
-//     label. An Anthropic API-key credential (if any) uses label="" and is
-//     stored in the same provider; the two are mutually exclusive per row, so
-//     one org can hold an API key alongside N labeled subscriptions.
-//   - Round-robin selection uses ClaimNextLabeledRoundRobin which filters
-//     `label != ”`, so the API-key row is never claimed for subscription use.
+//   - Subscription credentials live under ProviderAnthropicSubscription with
+//     a non-empty label. Anthropic API-key credentials live in a separate
+//     provider partition (ProviderAnthropic), so this service never sees
+//     them; one org can hold an API key alongside N labeled subscriptions.
+//   - Round-robin selection uses ClaimNextLabeledRoundRobin scoped to the
+//     subscription provider, so API-key rows are never claimed for
+//     subscription use.
 //   - The OAuth endpoints, client ID, and redirect URI below are Anthropic's
 //     public Claude Code CLI values. If Anthropic changes these, update
 //     only these constants — the service shape is stable.
@@ -106,6 +107,10 @@ const (
 	// the flow (or the row was resurrected by a replay attempt), so we
 	// force them to re-initiate and get a fresh verifier + state.
 	pendingAuthTTL = 10 * time.Minute
+
+	// harvestedTokenMaxLifetime bounds sandbox-originated Claude Code tokens
+	// before they are persisted back to the credential store.
+	harvestedTokenMaxLifetime = 24 * time.Hour
 )
 
 // defaultScopes is the minimum set of OAuth scopes the Claude Code CLI
@@ -124,10 +129,9 @@ var defaultScopes = []string{
 // drive both org-scoped (admin) and personal-scoped (per-user) subscription
 // flows. Production wires *db.ScopedCredentialStore.
 //
-// Subscription credentials live under ProviderAnthropic with a non-empty
-// label. An Anthropic API-key credential uses label="" and shares the same
-// provider; the two are mutually exclusive per row, so one scope can hold
-// an API key alongside N labeled subscriptions.
+// Subscription credentials live under ProviderAnthropicSubscription with a
+// non-empty label. Anthropic API-key credentials live in a separate provider
+// partition (ProviderAnthropic) and are never touched by this service.
 type CredentialStore interface {
 	UpsertWithLabel(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
 	InsertPendingAuth(ctx context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error)
@@ -143,10 +147,9 @@ type CredentialStore interface {
 	// exists for (scope, provider). Backs HasActiveSubscription with a cheap
 	// EXISTS probe instead of listing every row.
 	HasActiveLabeled(ctx context.Context, scope models.Scope, provider models.ProviderName) (bool, error)
-	// DisableLabeled disables all subscription rows (label != '') at (scope,
-	// provider) while leaving the API-key row (label='') intact. Used by
-	// DisconnectAll so the caller doesn't lose their Anthropic API key when
-	// disconnecting every Claude subscription.
+	// DisableLabeled disables all labeled rows (label != '') at (scope,
+	// provider). Used by DisconnectAll; API-key credentials live under a
+	// different provider (ProviderAnthropic) and are untouched.
 	DisableLabeled(ctx context.Context, scope models.Scope, provider models.ProviderName) error
 }
 
@@ -333,12 +336,10 @@ func (s *Service) InitiateOAuth(ctx context.Context, scope models.Scope, created
 	challenge := codeChallenge(verifier)
 	authURL := s.buildAuthorizeURL(challenge, state)
 
-	pendingCfg := models.AnthropicConfig{
-		Subscription: &models.AnthropicSubscription{
-			State:        state,
-			CodeVerifier: verifier,
-			AuthorizeURL: authURL,
-		},
+	pendingCfg := models.AnthropicSubscriptionConfig{
+		State:        state,
+		CodeVerifier: verifier,
+		AuthorizeURL: authURL,
 	}
 
 	if s.credentials != nil {
@@ -386,7 +387,7 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 	if s.credentials == nil {
 		return nil, fmt.Errorf("credential store not configured")
 	}
-	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderAnthropic, label)
+	cred, err := s.credentials.GetByProviderAndLabel(ctx, scope, models.ProviderAnthropicSubscription, label)
 	if err != nil {
 		// Only "no row" should surface as ErrPendingAuthNotFound (→ 404).
 		// Transient DB errors must bubble up as 500s so operators can see them.
@@ -395,11 +396,11 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 		}
 		return nil, fmt.Errorf("lookup pending subscription: %w", err)
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok || cfg.Subscription == nil {
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok {
 		return nil, fmt.Errorf("pending row has unexpected config")
 	}
-	if cfg.Subscription.State == "" || cfg.Subscription.CodeVerifier == "" {
+	if cfg.State == "" || cfg.CodeVerifier == "" {
 		return nil, ErrPendingAuthNotFound
 	}
 	// Only pending_auth rows should be completable. If the row is already
@@ -417,11 +418,11 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 	}
 	// Constant-time compare on the CSRF state to avoid leaking it via timing
 	// side channels. ConstantTimeCompare also returns 0 for length mismatches.
-	if subtle.ConstantTimeCompare([]byte(returnedState), []byte(cfg.Subscription.State)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(returnedState), []byte(cfg.State)) != 1 {
 		return nil, ErrInvalidPaste
 	}
 
-	tokens, err := s.exchangeAuthCode(ctx, code, returnedState, cfg.Subscription.CodeVerifier)
+	tokens, err := s.exchangeAuthCode(ctx, code, returnedState, cfg.CodeVerifier)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +446,7 @@ func (s *Service) CompleteOAuth(ctx context.Context, scope models.Scope, label, 
 		sub.RateLimitTier = profile.Organization.RateLimitTier
 	}
 
-	if err := s.credentials.UpsertByID(ctx, scope, cred.ID, models.AnthropicConfig{Subscription: sub}); err != nil {
+	if err := s.credentials.UpsertByID(ctx, scope, cred.ID, models.FromAnthropicSubscription(*sub)); err != nil {
 		return nil, fmt.Errorf("store credential: %w", err)
 	}
 
@@ -613,6 +614,38 @@ func (s *Service) credRefreshMu(credID uuid.UUID) *sync.Mutex {
 	return val.(*sync.Mutex)
 }
 
+// RefreshLocker is optionally implemented by the credential store to
+// serialize token refreshes across processes. The in-process refreshMu only
+// protects a single process; Anthropic refresh tokens are single-use, so two
+// worker hosts refreshing the same credential concurrently make the loser
+// look revoked (invalid_grant) and would nuke an otherwise healthy
+// credential. Production wires *db.ScopedCredentialStore, which implements
+// this via a Postgres advisory lock.
+type RefreshLocker interface {
+	WithRefreshLock(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error
+}
+
+// maxRefreshAttempts bounds the refresh loop in refreshTokenLocked. A second
+// attempt happens only when Anthropic rejects the refresh token but the
+// stored token has rotated since this attempt loaded it — i.e. the rejection
+// is stale, not a revocation.
+const maxRefreshAttempts = 2
+
+// runUnderRefreshLocks runs fn while holding the per-credential in-process
+// mutex and, when the store supports it, the cross-host advisory lock. Every
+// writer of a credential's token material (refresh, harvest write-back) must
+// go through here so single-use refresh tokens are never double-spent.
+func (s *Service) runUnderRefreshLocks(ctx context.Context, credID uuid.UUID, fn func(ctx context.Context) error) error {
+	mu := s.credRefreshMu(credID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if locker, ok := s.credentials.(RefreshLocker); ok {
+		return locker.WithRefreshLock(ctx, credID, fn)
+	}
+	return fn(ctx)
+}
+
 // RefreshTokenByID refreshes an expired access token for a specific credential.
 //
 // Scope must match the credential's owner — personal credentials require a
@@ -620,114 +653,259 @@ func (s *Service) credRefreshMu(credID uuid.UUID) *sync.Mutex {
 // from the picked credential's UserID (orchestrator.go); the legacy
 // org-fallback GetValidToken path constructs an org scope.
 func (s *Service) RefreshTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error) {
-	mu := s.credRefreshMu(credID)
-	mu.Lock()
-	defer mu.Unlock()
-
-	cred, err := s.credentials.GetByID(ctx, scope, credID)
+	var refreshed *models.AnthropicSubscription
+	err := s.runUnderRefreshLocks(ctx, credID, func(ctx context.Context) error {
+		sub, err := s.refreshTokenLocked(ctx, scope, credID)
+		refreshed = sub
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get credential: %w", err)
+		return nil, err
 	}
+	return refreshed, nil
+}
 
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if !ok || cfg.Subscription == nil {
-		return nil, fmt.Errorf("credential is not an Anthropic subscription")
+// refreshTokenLocked does the actual refresh. Callers must hold the
+// per-credential in-process mutex and, when the store supports it, the
+// cross-host refresh lock — the re-read at the top of the loop is what turns
+// "another refresher beat us" into a cheap early return instead of a
+// double-spend of the single-use refresh token.
+func (s *Service) refreshTokenLocked(ctx context.Context, scope models.Scope, credID uuid.UUID) (*models.AnthropicSubscription, error) {
+	for attempt := 1; ; attempt++ {
+		cred, err := s.credentials.GetByID(ctx, scope, credID)
+		if err != nil {
+			return nil, fmt.Errorf("get credential: %w", err)
+		}
+
+		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+		if !ok {
+			return nil, fmt.Errorf("credential is not an Anthropic subscription")
+		}
+
+		sub := cfg.AsAnthropicSubscription()
+
+		// After acquiring the locks, check if another refresher (goroutine,
+		// host, or a sandbox-harvest write-back) already rotated the token.
+		if !sub.NeedsRefresh(refreshWindow) && sub.AccessToken != "" {
+			return &sub, nil
+		}
+
+		if sub.RefreshToken == "" {
+			return nil, fmt.Errorf("no refresh token available — user must re-authenticate")
+		}
+
+		statusCode, body, err := s.postRefresh(ctx, sub.RefreshToken)
+		if err != nil {
+			return nil, err
+		}
+
+		reused := isClaudeRefreshTokenReused(body)
+		rejected := statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || isClaudeInvalidGrant(body)
+
+		// A reuse/rejection only proves the token we SENT is dead. If the
+		// stored token rotated while this request was in flight (a sandbox
+		// harvest or another writer landed), the verdict is stale — retry
+		// once with the rotated token before acting on it.
+		if (reused || rejected) && attempt < maxRefreshAttempts && s.storedRefreshTokenRotated(ctx, scope, credID, sub.RefreshToken) {
+			s.logger.Warn().
+				Str("cred_id", credID.String()).
+				Int("status", statusCode).
+				Int("attempt", attempt).
+				Msg("refresh verdict was for a stale refresh token; retrying with the rotated token")
+			continue
+		}
+
+		if reused {
+			s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
+			return nil, fmt.Errorf("refresh token already used by another client")
+		}
+
+		if rejected {
+			s.markCredentialInvalid(ctx, scope, credID,
+				fmt.Sprintf("token endpoint rejected refresh (status %d): %s", statusCode, redactedBody(body)))
+			return nil, fmt.Errorf("refresh token revoked (status %d)", statusCode)
+		}
+
+		if statusCode != http.StatusOK {
+			return nil, fmt.Errorf("refresh failed (status %d): %s", statusCode, redactedBody(body))
+		}
+
+		var tokenResp tokenExchangeResponse
+		if err := json.Unmarshal(body, &tokenResp); err != nil {
+			return nil, fmt.Errorf("parse refresh response: %w", err)
+		}
+		if tokenResp.AccessToken == "" {
+			return nil, fmt.Errorf("refresh response returned empty access_token")
+		}
+
+		newSub := &models.AnthropicSubscription{
+			AccessToken:   tokenResp.AccessToken,
+			RefreshToken:  tokenResp.RefreshToken,
+			ExpiresAt:     time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+			AccountType:   sub.AccountType,
+			RateLimitTier: sub.RateLimitTier,
+			Scopes:        sub.Scopes,
+		}
+		// If the refresh response carries a fresh scope string, prefer it so
+		// scope changes (e.g. an added scope) are reflected.
+		if refreshed := parseScopes(tokenResp.Scope); len(refreshed) > 0 {
+			newSub.Scopes = refreshed
+		}
+		// Anthropic's refresh sometimes returns an empty refresh_token string,
+		// meaning "keep the old one". Avoid clobbering the stored value in that
+		// case — otherwise the next refresh has nothing to send.
+		if newSub.RefreshToken == "" {
+			newSub.RefreshToken = sub.RefreshToken
+		}
+
+		if err := s.credentials.UpsertByID(ctx, scope, credID, models.FromAnthropicSubscription(*newSub)); err != nil {
+			return nil, fmt.Errorf("store refreshed credential: %w", err)
+		}
+
+		s.logger.Info().
+			Str("cred_id", credID.String()).
+			Msg("Claude Code OAuth token refreshed")
+
+		return newSub, nil
 	}
+}
 
-	sub := *cfg.Subscription
-
-	// After acquiring the lock, check if another goroutine already refreshed.
-	if !sub.NeedsRefresh(refreshWindow) && sub.AccessToken != "" {
-		return &sub, nil
-	}
-
-	if sub.RefreshToken == "" {
-		return nil, fmt.Errorf("no refresh token available — user must re-authenticate")
-	}
-
+// postRefresh POSTs a refresh_token grant to the token endpoint and returns
+// the raw status + bounded body for the caller to classify.
+func (s *Service) postRefresh(ctx context.Context, refreshToken string) (int, []byte, error) {
 	reqBody, err := json.Marshal(map[string]string{
 		"grant_type":    refreshGrantType,
-		"refresh_token": sub.RefreshToken,
+		"refresh_token": refreshToken,
 		"client_id":     s.clientID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal refresh request: %w", err)
+		return 0, nil, fmt.Errorf("marshal refresh request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.tokenURL, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("create refresh request: %w", err)
+		return 0, nil, fmt.Errorf("create refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("refresh request: %w", err)
+		return 0, nil, fmt.Errorf("refresh request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("read refresh response: %w", err)
+		return 0, nil, fmt.Errorf("read refresh response: %w", err)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// storedRefreshTokenRotated re-reads the credential and reports whether its
+// stored refresh token differs from the one a just-rejected refresh sent.
+// True means another writer rotated the token mid-flight, so the rejection
+// says nothing about the credential's health. Read errors report false: when
+// we can't prove rotation, the caller falls through to its normal rejection
+// handling.
+func (s *Service) storedRefreshTokenRotated(ctx context.Context, scope models.Scope, credID uuid.UUID, sentToken string) bool {
+	cred, err := s.credentials.GetByID(ctx, scope, credID)
+	if err != nil {
+		return false
+	}
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok {
+		return false
+	}
+	return cfg.RefreshToken != "" && cfg.RefreshToken != sentToken
+}
+
+// StoreTokenByID persists a Claude Code OAuth token that was refreshed by an
+// external Claude Code CLI process. Scope must match the credential owner.
+func (s *Service) StoreTokenByID(ctx context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error) {
+	if s.credentials == nil {
+		return false, errors.New("credential store is not configured")
+	}
+	if sub.AccessToken == "" {
+		return false, errors.New("access_token is required")
+	}
+	if sub.RefreshToken == "" {
+		return false, errors.New("refresh_token is required")
+	}
+	if sub.ExpiresAt.IsZero() {
+		return false, errors.New("expires_at is required")
+	}
+	if sub.IsExpired() {
+		return false, errors.New("expires_at must be in the future")
+	}
+	if time.Until(sub.ExpiresAt) > harvestedTokenMaxLifetime {
+		return false, errors.New("expires_at is implausibly far in the future")
 	}
 
-	if isClaudeRefreshTokenReused(body) {
-		s.logger.Warn().Str("cred_id", credID.String()).Msg("refresh token already used by another client; access token may still be valid")
-		return nil, fmt.Errorf("refresh token already used by another client")
-	}
-
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || isClaudeInvalidGrant(body) {
-		if err := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); err != nil {
-			s.logger.Warn().Err(err).Str("cred_id", credID.String()).Msg("failed to update credential status")
+	// Harvest write-backs rotate the stored refresh token, so they take the
+	// same locks as RefreshTokenByID — otherwise a harvest landing while
+	// another host's refresh is mid-flight gets silently overwritten.
+	var stored bool
+	err := s.runUnderRefreshLocks(ctx, credID, func(ctx context.Context) error {
+		cred, err := s.credentials.GetByID(ctx, scope, credID)
+		if err != nil {
+			return fmt.Errorf("get credential: %w", err)
 		}
-		// Drop the per-credential refresh mutex so sync.Map doesn't grow
-		// indefinitely as credentials churn through the "invalid" state.
-		s.refreshMu.Delete(credID.String())
-		return nil, fmt.Errorf("refresh token revoked (status %d)", resp.StatusCode)
-	}
+		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+		if !ok {
+			return fmt.Errorf("credential is not an Anthropic subscription")
+		}
+		if !harvestedSubscriptionIsNewer(cfg.AsAnthropicSubscription(), sub) {
+			return nil
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh failed (status %d): %s", resp.StatusCode, redactedBody(body))
-	}
+		if s.profileURL == "" {
+			return errors.New("profile URL is required to validate harvested Claude token")
+		}
+		profile, err := s.fetchProfile(ctx, sub.AccessToken)
+		if err != nil {
+			return fmt.Errorf("validate harvested Claude token: %w", err)
+		}
+		if profile != nil {
+			if profile.Organization.OrganizationType != "" {
+				sub.AccountType = profile.Organization.OrganizationType
+			}
+			if profile.Organization.RateLimitTier != "" {
+				sub.RateLimitTier = profile.Organization.RateLimitTier
+			}
+		}
 
-	var tokenResp tokenExchangeResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parse refresh response: %w", err)
-	}
-	if tokenResp.AccessToken == "" {
-		return nil, fmt.Errorf("refresh response returned empty access_token")
-	}
+		if err := s.credentials.UpsertByID(ctx, scope, credID, models.FromAnthropicSubscription(sub)); err != nil {
+			return fmt.Errorf("store claude subscription credential: %w", err)
+		}
+		stored = true
+		return nil
+	})
+	return stored, err
+}
 
-	newSub := &models.AnthropicSubscription{
-		AccessToken:   tokenResp.AccessToken,
-		RefreshToken:  tokenResp.RefreshToken,
-		ExpiresAt:     time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-		AccountType:   sub.AccountType,
-		RateLimitTier: sub.RateLimitTier,
-		Scopes:        sub.Scopes,
+func harvestedSubscriptionIsNewer(current, harvested models.AnthropicSubscription) bool {
+	if !harvested.ExpiresAt.After(current.ExpiresAt) {
+		return false
 	}
-	// If the refresh response carries a fresh scope string, prefer it so
-	// scope changes (e.g. an added scope) are reflected.
-	if refreshed := parseScopes(tokenResp.Scope); len(refreshed) > 0 {
-		newSub.Scopes = refreshed
-	}
-	// Anthropic's refresh sometimes returns an empty refresh_token string,
-	// meaning "keep the old one". Avoid clobbering the stored value in that
-	// case — otherwise the next refresh has nothing to send.
-	if newSub.RefreshToken == "" {
-		newSub.RefreshToken = sub.RefreshToken
-	}
+	return current.AccessToken != harvested.AccessToken ||
+		current.RefreshToken != harvested.RefreshToken ||
+		current.ExpiresAt.UnixMilli() != harvested.ExpiresAt.UnixMilli() ||
+		current.AccountType != harvested.AccountType ||
+		current.RateLimitTier != harvested.RateLimitTier ||
+		!stringSlicesEqual(current.Scopes, harvested.Scopes)
+}
 
-	if err := s.credentials.UpsertByID(ctx, scope, credID, models.AnthropicConfig{Subscription: newSub}); err != nil {
-		return nil, fmt.Errorf("store refreshed credential: %w", err)
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-
-	s.logger.Debug().
-		Str("cred_id", credID.String()).
-		Msg("Claude Code OAuth token refreshed")
-
-	return newSub, nil
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isClaudeRefreshTokenReused(body []byte) bool {
@@ -765,7 +943,7 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 	var lastErr error
 
 	for attempt := 0; attempt < maxRoundRobinAttempts; attempt++ {
-		cred, err := s.credentials.ClaimNextLabeledRoundRobin(ctx, scope, models.ProviderAnthropic)
+		cred, err := s.credentials.ClaimNextLabeledRoundRobin(ctx, scope, models.ProviderAnthropicSubscription)
 		if err != nil {
 			if isNotFoundError(err) {
 				if lastErr != nil {
@@ -789,16 +967,25 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 		}
 		tried[cred.ID] = struct{}{}
 
-		cfg, ok := cred.Config.(models.AnthropicConfig)
-		if !ok || cfg.Subscription == nil {
+		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+		if !ok {
+			// A corrupt config under provider=anthropic_subscription can never
+			// be used. Mark it invalid so the unified resolver stops returning
+			// it; otherwise PickRunnable keeps handing back this same
+			// top-priority row and the tried-map below breaks the loop before
+			// lower-priority healthy credentials are reached.
 			lastErr = fmt.Errorf("credential %s is not an Anthropic subscription", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "stored config is not AnthropicSubscriptionConfig")
 			continue
 		}
 
-		sub := *cfg.Subscription
+		sub := cfg.AsAnthropicSubscription()
 
 		if sub.AccessToken == "" {
+			// An active row with no access token is unusable; same rotation
+			// hazard as the wrong-type case above.
 			lastErr = fmt.Errorf("credential %s has empty access token", cred.ID)
+			s.markCredentialInvalid(ctx, scope, cred.ID, "empty access token")
 			continue
 		}
 
@@ -820,20 +1007,59 @@ func (s *Service) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.A
 			return &sub, &credID, nil
 		}
 
-		s.logger.Warn().Err(refreshErr).Str("cred_id", cred.ID.String()).Msg("token refresh failed and cached token expired; marking invalid")
-		if statusErr := s.credentials.UpdateStatusByID(ctx, scope, cred.ID, models.CodingCredentialStatusInvalid); statusErr != nil {
-			s.logger.Warn().Err(statusErr).Str("cred_id", cred.ID.String()).Msg("failed to mark credential invalid")
-		}
-		// Drop the per-credential refresh mutex — the credential is out of
-		// rotation now, and keeping the entry around would leak sync.Map
-		// memory across the process lifetime.
-		s.refreshMu.Delete(cred.ID.String())
+		s.markCredentialInvalid(ctx, scope, cred.ID, "token refresh failed and cached token expired")
 	}
 
 	if lastErr != nil {
 		return nil, nil, fmt.Errorf("no usable Claude subscription after %d attempts: %w", len(tried), lastErr)
 	}
 	return nil, nil, nil
+}
+
+// markCredentialInvalid durably removes a credential from the round-robin by
+// flipping its runtime status to invalid, which busts the unified resolver
+// cache so the next ClaimNextLabeledRoundRobin (PickRunnable) skips it.
+// Without this, PickRunnable re-returns the same top-priority row every
+// iteration and the caller's tried-map breaks the loop before lower-priority
+// healthy credentials are reached. Also drops the per-credential refresh mutex
+// (the credential is out of rotation now, so keeping the entry would leak
+// sync.Map memory across the process lifetime). Best-effort: a failed update
+// is logged, not fatal.
+func (s *Service) markCredentialInvalid(ctx context.Context, scope models.Scope, credID uuid.UUID, reason string) {
+	// Error-level on purpose: invalidation takes the credential out of
+	// rotation, so every session that depended on it starts failing. This
+	// line is the breadcrumb operators search for when a user reports
+	// "Claude auth suddenly stopped working".
+	s.logger.Error().
+		Str("org_id", scope.OrgID.String()).
+		Bool("personal", scope.IsPersonal()).
+		Str("cred_id", credID.String()).
+		Str("reason", reason).
+		Msg("marking claude subscription credential invalid")
+	if statusErr := s.credentials.UpdateStatusByID(ctx, scope, credID, models.CodingCredentialStatusInvalid); statusErr != nil {
+		s.logger.Error().Err(statusErr).Str("cred_id", credID.String()).Msg("failed to mark credential invalid")
+	}
+	s.refreshMu.Delete(credID.String())
+}
+
+// HasInvalidSubscription reports whether the scope holds at least one labeled
+// subscription row whose status is invalid. The orchestrator uses this to
+// tell "you never connected a credential" apart from "your credential was
+// invalidated after a rejected refresh" when failing a Claude Code run.
+func (s *Service) HasInvalidSubscription(ctx context.Context, scope models.Scope) (bool, error) {
+	if s.credentials == nil {
+		return false, nil
+	}
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropicSubscription)
+	if err != nil {
+		return false, fmt.Errorf("list anthropic subscriptions: %w", err)
+	}
+	for _, cred := range creds {
+		if cred.Label != "" && cred.Status == models.CredentialStatusInvalid {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // HasActiveSubscription reports whether the org has at least one active
@@ -846,7 +1072,7 @@ func (s *Service) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (b
 	if s.credentials == nil {
 		return false, nil
 	}
-	exists, err := s.credentials.HasActiveLabeled(ctx, orgScope(orgID), models.ProviderAnthropic)
+	exists, err := s.credentials.HasActiveLabeled(ctx, orgScope(orgID), models.ProviderAnthropicSubscription)
 	if err != nil {
 		return false, fmt.Errorf("check anthropic subscription: %w", err)
 	}
@@ -883,15 +1109,16 @@ func (s *Service) DisconnectForOrg(ctx context.Context, scope models.Scope, cred
 		}
 		return fmt.Errorf("get credential: %w", err)
 	}
-	cfg, ok := cred.Config.(models.AnthropicConfig)
-	if cred.Provider != models.ProviderAnthropic || cred.Label == "" || !ok || cfg.Subscription == nil {
+	_, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if cred.Provider != models.ProviderAnthropicSubscription || cred.Label == "" || !ok {
 		return ErrCredentialNotFound
 	}
 	return s.Disconnect(ctx, scope, credID)
 }
 
-// DisconnectAll removes every Claude subscription at the given scope,
-// leaving any Anthropic API-key row (label="") in place. Ordering matches
+// DisconnectAll removes every Claude subscription at the given scope.
+// Anthropic API-key rows live under a separate provider partition
+// (ProviderAnthropic) and are untouched. Ordering matches
 // Disconnect: the DB rows are disabled first so a concurrent refresh cannot
 // resurrect a credential after we've dropped its mutex; only then do we
 // clean up the in-memory maps.
@@ -907,18 +1134,18 @@ func (s *Service) DisconnectAll(ctx context.Context, scope models.Scope) error {
 	// refresh mutexes afterwards. ListByProvider errors are non-fatal here:
 	// the DisableLabeled call below is the source of truth, but log the miss
 	// so operators can correlate any leaked refresh mutexes.
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropic)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropicSubscription)
 	if err != nil {
 		s.logger.Warn().Err(err).Str("org_id", scope.OrgID.String()).Msg("failed to list claude subscriptions before disconnect cleanup")
 	}
 
-	if err := s.credentials.DisableLabeled(ctx, scope, models.ProviderAnthropic); err != nil {
+	if err := s.credentials.DisableLabeled(ctx, scope, models.ProviderAnthropicSubscription); err != nil {
 		return err
 	}
 
 	for _, cred := range creds {
 		if cred.Label == "" {
-			continue // leave the API-key row alone
+			continue // unlabeled rows are never disabled by DisableLabeled
 		}
 		s.refreshMu.Delete(cred.ID.String())
 	}
@@ -948,15 +1175,14 @@ func (s *Service) clearInitMutexesForScope(scope models.Scope) {
 }
 
 // ListSubscriptions returns all connected Claude subscriptions at the given
-// scope. Skips the label="" row (which is the Anthropic API-key credential,
-// not a subscription) so the subscriptions list doesn't leak an API key
-// summary.
+// scope. Skips any label="" row defensively — subscription rows always carry
+// a label, so an unlabeled row is malformed and not worth surfacing.
 func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]SubscriptionInfo, error) {
 	if s.credentials == nil {
 		return nil, nil
 	}
 
-	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropic)
+	creds, err := s.credentials.ListByProvider(ctx, scope, models.ProviderAnthropicSubscription)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}
@@ -966,14 +1192,14 @@ func (s *Service) ListSubscriptions(ctx context.Context, scope models.Scope) ([]
 		if cred.Label == "" {
 			continue
 		}
-		cfg, ok := cred.Config.(models.AnthropicConfig)
-		if !ok || cfg.Subscription == nil {
+		cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+		if !ok {
 			continue
 		}
 		subs = append(subs, SubscriptionInfo{
 			ID:          cred.ID,
 			Label:       cred.Label,
-			AccountType: cfg.Subscription.AccountType,
+			AccountType: cfg.AccountType,
 			Status:      SubscriptionStatus(cred.Status),
 			LastUsedAt:  cred.LastUsedAt,
 			CreatedBy:   cred.CreatedBy,

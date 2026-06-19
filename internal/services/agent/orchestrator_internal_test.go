@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
@@ -109,6 +111,56 @@ func TestWarmMentionIndexFromSandboxAsyncDoesNotBlockCaller(t *testing.T) {
 		return
 	}
 	close(release)
+}
+
+func TestPrepareSandboxRepositoryRunsBootstrapCommandsFromWorkDir(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/home/sandbox/backend"
+	provider := &testInternalSandboxProvider{
+		readFiles: map[string][]byte{
+			path.Join(workDir, repoconfig.ConfigPath): []byte(`{
+				"bootstrap": {
+					"commands": ["npm install", "npm run lint:js -w assets"]
+				}
+			}`),
+		},
+	}
+	o := &Orchestrator{provider: provider}
+	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
+
+	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+
+	require.NoError(t, err, "prepareSandboxRepository should run configured bootstrap commands successfully")
+	require.Equal(t, []string{
+		"cd '/home/sandbox/backend' && npm install",
+		"cd '/home/sandbox/backend' && npm run lint:js -w assets",
+	}, provider.execCalls, "bootstrap commands should run in order from the repository workdir")
+}
+
+func TestPrepareSandboxRepositoryReturnsBootstrapCommandFailure(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/home/sandbox/backend"
+	provider := &testInternalSandboxProvider{
+		execExit:   127,
+		execStderr: "sh: eslint: not found",
+		readFiles: map[string][]byte{
+			path.Join(workDir, repoconfig.ConfigPath): []byte(`{
+				"bootstrap": {
+					"commands": ["npm run lint:js -w assets"]
+				}
+			}`),
+		},
+	}
+	o := &Orchestrator{provider: provider}
+	sandbox := &Sandbox{ID: "sandbox-1", WorkDir: workDir}
+
+	err := o.prepareSandboxRepository(context.Background(), sandbox, workDir, zerolog.Nop())
+
+	require.Error(t, err, "prepareSandboxRepository should fail when a configured bootstrap command exits non-zero")
+	require.Contains(t, err.Error(), "npm run lint:js -w assets", "bootstrap setup error should identify the command that failed")
+	require.Contains(t, err.Error(), "sh: eslint: not found", "bootstrap setup error should include stderr so missing tool failures are actionable")
 }
 
 type blockingMentionIndexFileReader struct {
@@ -234,6 +286,8 @@ type testInternalSandboxProvider struct {
 	execErr    error
 	execStderr string
 	execCalls  []string
+	readFiles  map[string][]byte
+	readErr    error
 	writes     map[string][]byte
 }
 
@@ -255,7 +309,16 @@ func (p *testInternalSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd st
 	return p.execExit, p.execErr
 }
 
-func (p *testInternalSandboxProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+func (p *testInternalSandboxProvider) ReadFile(_ context.Context, _ *Sandbox, path string) ([]byte, error) {
+	if p.readErr != nil {
+		return nil, p.readErr
+	}
+	if data, ok := p.readFiles[path]; ok {
+		return append([]byte(nil), data...), nil
+	}
+	if data, ok := p.writes[path]; ok {
+		return append([]byte(nil), data...), nil
+	}
 	return nil, nil
 }
 
@@ -318,8 +381,12 @@ func (p *testInternalQueuedCodingCredentialProvider) PickRunnableMulti(_ context
 }
 
 type testInternalClaudeCodeAuthProvider struct {
-	sub *models.AnthropicSubscription
-	id  uuid.UUID
+	sub         *models.AnthropicSubscription
+	id          uuid.UUID
+	storedScope models.Scope
+	storedID    uuid.UUID
+	storedSub   *models.AnthropicSubscription
+	storeErr    error
 }
 
 func (p testInternalClaudeCodeAuthProvider) HasActiveSubscription(context.Context, uuid.UUID) (bool, error) {
@@ -332,6 +399,16 @@ func (p testInternalClaudeCodeAuthProvider) GetValidToken(context.Context, uuid.
 	}
 	id := p.id
 	return p.sub, &id, nil
+}
+
+func (p *testInternalClaudeCodeAuthProvider) StoreTokenByID(_ context.Context, scope models.Scope, credID uuid.UUID, sub models.AnthropicSubscription) (bool, error) {
+	if p.storeErr != nil {
+		return false, p.storeErr
+	}
+	p.storedScope = scope
+	p.storedID = credID
+	p.storedSub = &sub
+	return true, nil
 }
 
 type testInternalOrgStore struct {
@@ -392,19 +469,24 @@ func TestSetupFreshSandbox_CodexAPIKeyUsesResolvedEnv(t *testing.T) {
 	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the selected unified credential is an API key")
 }
 
-func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
+func TestSetupFreshSandbox_CodexOrgAPIKeyFallbackUsesResolvedEnv(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.MustParse("10101010-1111-2222-3333-444444444444")
 	userID := uuid.MustParse("55555555-6666-7777-8888-999999999999")
 	provider := &testInternalSandboxProvider{}
 	env := NewAgentEnv(AgentEnvDeps{
-		Credentials: &envCredentialProvider{
-			creds: map[models.ProviderName]*models.DecryptedCredential{
+		CodingCredentials: testInternalCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
 				models.ProviderOpenAI: {
-					OrgID:  orgID,
-					Status: models.CredentialStatusActive,
-					Config: models.OpenAIConfig{APIKey: "sk-legacy-openai"},
+					{
+						ID:       uuid.New(),
+						OrgID:    orgID,
+						Provider: models.ProviderOpenAI,
+						Priority: 1,
+						Status:   models.CodingCredentialStatusActive,
+						Config:   models.OpenAIConfig{APIKey: "sk-org-openai"},
+					},
 				},
 			},
 		},
@@ -426,9 +508,9 @@ func TestSetupFreshSandbox_CodexLegacyAPIKeyFallbackUsesResolvedEnv(t *testing.T
 
 	_, _, billingMode, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-legacy", HomeDir: "/home/sandbox", WorkDir: "/home/sandbox/work"}, envVars, nil)
 
-	require.NoError(t, err, "setupFreshSandbox should continue to honor the documented legacy OpenAI API-key fallback")
-	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the legacy OpenAI credential as an API-key billing mode")
-	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the legacy fallback resolved an OpenAI API key")
+	require.NoError(t, err, "setupFreshSandbox should honor the org-scoped OpenAI API-key fallback")
+	require.Equal(t, TokenBillingModeAPIKey, billingMode, "setupFreshSandbox should classify the org OpenAI credential as an API-key billing mode")
+	require.NotContains(t, provider.writes, "/home/sandbox/.codex/auth.json", "setupFreshSandbox should not require Codex auth.json when the resolved unified credential is an API key")
 }
 
 func TestBuildTokenUsageHint_PreservesExplicitClaudeSubscriptionBillingMode(t *testing.T) {
@@ -456,7 +538,7 @@ func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *tes
 
 	orgID := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
 	userID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
-	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"gemini_cli":{"GEMINI_MODEL":"gemini-2.5-pro"}}}`)
+	orgSettings := json.RawMessage(`{"agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.4"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-6"},"opencode":{"OPENCODE_MODEL":"google/gemini-2.5-flash"}}}`)
 	env := NewAgentEnv(AgentEnvDeps{
 		Orgs: testInternalOrgStore{
 			org: models.Organization{
@@ -478,7 +560,7 @@ func TestBuildTokenUsageHint_UsesAgentConfigModelDefaultsWhenEnvOmitsThem(t *tes
 	}{
 		{name: "codex", agentType: models.AgentTypeCodex, expected: models.CodexModelGPT54},
 		{name: "claude", agentType: models.AgentTypeClaudeCode, expected: models.ClaudeCodeModelSonnet46},
-		{name: "gemini", agentType: models.AgentTypeGeminiCLI, expected: models.GeminiCLIModelGemini25Pro},
+		{name: "opencode", agentType: models.AgentTypeOpenCode, expected: models.OpenCodeModelGemini25Flash},
 	}
 
 	for _, tt := range tests {
@@ -810,6 +892,146 @@ func TestSetupFreshSandbox_ReturnsResolvedAuthBillingMode(t *testing.T) {
 
 	require.NoError(t, err, "setupFreshSandbox should succeed for a fresh Claude subscription run")
 	require.Equal(t, TokenBillingModeSubscription, billingMode, "setupFreshSandbox should return the auth-selected billing mode for fresh runs")
+}
+
+func TestHarvestClaudeCodeCredentials_StoresSandboxRefreshedToken(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("19191919-1919-1919-1919-191919191919")
+	userID := uuid.MustParse("29292929-2929-2929-2929-292929292929")
+	credID := uuid.MustParse("39393939-3939-3939-3939-393939393939")
+	expiresAt := time.Now().Add(2 * time.Hour).Truncate(time.Millisecond)
+	credsPath := "/home/sandbox/.claude/.credentials.json"
+	credsJSON, err := json.Marshal(map[string]interface{}{
+		"claudeAiOauth": map[string]interface{}{
+			"accessToken":      "refreshed-access",
+			"refreshToken":     "refreshed-refresh",
+			"expiresAt":        expiresAt.UnixMilli(),
+			"scopes":           []string{"user:profile", "user:inference", "user:sessions:claude_code"},
+			"subscriptionType": "claude_max",
+			"rateLimitTier":    "default_claude_max_20x",
+		},
+	})
+	require.NoError(t, err, "test credentials JSON should marshal")
+
+	provider := &testInternalSandboxProvider{readFiles: map[string][]byte{credsPath: credsJSON}}
+	auth := &testInternalClaudeCodeAuthProvider{}
+	env := NewAgentEnv(AgentEnvDeps{
+		Provider: provider,
+		Logger:   zerolog.Nop(),
+	})
+	picked := models.DecryptedCodingCredential{
+		ID:       credID,
+		OrgID:    orgID,
+		UserID:   &userID,
+		Provider: models.ProviderAnthropicSubscription,
+		Status:   models.CodingCredentialStatusActive,
+		Config: models.AnthropicSubscriptionConfig{
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	}
+	env.recordCredentialPick(orgID, &userID, models.ProviderAnthropic, picked)
+	orch := &Orchestrator{
+		env:            env,
+		provider:       provider,
+		logger:         zerolog.Nop(),
+		claudeCodeAuth: auth,
+	}
+	session := &models.Session{
+		ID:                uuid.MustParse("49494949-4949-4949-4949-494949494949"),
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeClaudeCode,
+		TriggeredByUserID: &userID,
+	}
+
+	stored, err := orch.harvestClaudeCodeCredentials(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox"}, TokenBillingModeSubscription, zerolog.Nop())
+
+	require.NoError(t, err, "harvesting refreshed Claude credentials should not fail")
+	require.True(t, stored, "harvesting should report that refreshed credentials were persisted")
+	require.Equal(t, models.Scope{OrgID: orgID, UserID: &userID}, auth.storedScope, "harvesting should store against the selected credential scope")
+	require.Equal(t, credID, auth.storedID, "harvesting should store against the selected credential id")
+	require.NotNil(t, auth.storedSub, "harvesting should persist the refreshed subscription")
+	require.Equal(t, "refreshed-access", auth.storedSub.AccessToken, "harvesting should persist the refreshed access token")
+	require.Equal(t, "refreshed-refresh", auth.storedSub.RefreshToken, "harvesting should persist the refreshed refresh token")
+	require.Equal(t, expiresAt, auth.storedSub.ExpiresAt, "harvesting should persist the refreshed expiration")
+	require.Equal(t, "claude_max", auth.storedSub.AccountType, "harvesting should persist the refreshed account type")
+	require.Equal(t, "default_claude_max_20x", auth.storedSub.RateLimitTier, "harvesting should persist the refreshed rate limit tier")
+	require.Equal(t, []string{"user:profile", "user:inference", "user:sessions:claude_code"}, auth.storedSub.Scopes, "harvesting should persist refreshed scopes")
+}
+
+func TestHarvestClaudeCodeCredentials_RejectsAbsurdFutureExpiration(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("59595959-5959-5959-5959-595959595959")
+	userID := uuid.MustParse("69696969-6969-6969-6969-696969696969")
+	credID := uuid.MustParse("79797979-7979-7979-7979-797979797979")
+	credsPath := "/home/sandbox/.claude/.credentials.json"
+	credsJSON, err := json.Marshal(map[string]interface{}{
+		"claudeAiOauth": map[string]interface{}{
+			"accessToken":  "fake-access",
+			"refreshToken": "fake-refresh",
+			"expiresAt":    time.Now().Add(10 * 365 * 24 * time.Hour).UnixMilli(),
+		},
+	})
+	require.NoError(t, err, "test credentials JSON should marshal")
+
+	provider := &testInternalSandboxProvider{readFiles: map[string][]byte{credsPath: credsJSON}}
+	auth := &testInternalClaudeCodeAuthProvider{}
+	env := NewAgentEnv(AgentEnvDeps{Provider: provider, Logger: zerolog.Nop()})
+	env.recordCredentialPick(orgID, &userID, models.ProviderAnthropic, models.DecryptedCodingCredential{
+		ID:       credID,
+		OrgID:    orgID,
+		UserID:   &userID,
+		Provider: models.ProviderAnthropicSubscription,
+		Status:   models.CodingCredentialStatusActive,
+		Config: models.AnthropicSubscriptionConfig{
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		},
+	})
+	orch := &Orchestrator{env: env, provider: provider, logger: zerolog.Nop(), claudeCodeAuth: auth}
+	session := &models.Session{ID: uuid.New(), OrgID: orgID, AgentType: models.AgentTypeClaudeCode, TriggeredByUserID: &userID}
+
+	stored, err := orch.harvestClaudeCodeCredentials(context.Background(), session, &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox"}, TokenBillingModeSubscription, zerolog.Nop())
+
+	require.Error(t, err, "harvesting should reject implausibly long-lived sandbox credentials")
+	require.False(t, stored, "harvesting should not persist implausible credentials")
+	require.Nil(t, auth.storedSub, "harvesting should not store rejected credentials")
+}
+
+func TestHarvestClaudeCodeCredentials_LegacyInjectedUnchangedTokenNoOps(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("89898989-8989-8989-8989-898989898989")
+	userID := uuid.MustParse("99999999-9999-9999-9999-999999999999")
+	credID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+	sub := &models.AnthropicSubscription{
+		AccessToken:   "legacy-access",
+		RefreshToken:  "legacy-refresh",
+		ExpiresAt:     time.Now().Add(time.Hour).Truncate(time.Millisecond),
+		AccountType:   "claude_pro",
+		RateLimitTier: "default",
+		Scopes:        []string{"user:profile", "user:inference"},
+	}
+	provider := &testInternalSandboxProvider{}
+	auth := &testInternalClaudeCodeAuthProvider{sub: sub, id: credID}
+	env := NewAgentEnv(AgentEnvDeps{Provider: provider, Logger: zerolog.Nop()})
+	orch := &Orchestrator{env: env, provider: provider, logger: zerolog.Nop(), claudeCodeAuth: auth}
+	sandbox := &Sandbox{ID: "sandbox-1", HomeDir: "/home/sandbox"}
+
+	injected, _, err := orch.injectClaudeCodeAuth(context.Background(), orgID, &userID, sandbox)
+	require.NoError(t, err, "legacy Claude auth injection should succeed")
+	require.True(t, injected, "legacy Claude auth injection should write sandbox credentials")
+
+	session := &models.Session{ID: uuid.New(), OrgID: orgID, AgentType: models.AgentTypeClaudeCode, TriggeredByUserID: &userID}
+	stored, err := orch.harvestClaudeCodeCredentials(context.Background(), session, sandbox, TokenBillingModeSubscription, zerolog.Nop())
+
+	require.NoError(t, err, "harvesting unchanged legacy credentials should not fail")
+	require.False(t, stored, "harvesting unchanged legacy credentials should no-op")
+	require.Nil(t, auth.storedSub, "harvesting should not store unchanged legacy credentials")
 }
 
 func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {

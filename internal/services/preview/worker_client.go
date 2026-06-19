@@ -76,6 +76,66 @@ type StartBranchPreviewJobPayload struct {
 	PreviewConfigName string                `json:"preview_config_name,omitempty"`
 	Config            *models.PreviewConfig `json:"config,omitempty"`
 	ProfileName       string                `json:"profile_name,omitempty"`
+	Initiator         string                `json:"initiator,omitempty"`
+	StopAfterReady    bool                  `json:"stop_after_ready,omitempty"`
+}
+
+// AutoPreviewDeferredPayload is the payload for a deferred auto-preview
+// start job, enqueued when the auto-preview pool is full at webhook time.
+// The job re-attempts the start once capacity is available, retrying with
+// backoff rather than silently dropping the webhook event.
+type AutoPreviewDeferredPayload struct {
+	OrgID        uuid.UUID              `json:"org_id"`
+	UserID       uuid.UUID              `json:"user_id"`
+	RepositoryID uuid.UUID              `json:"repository_id"`
+	PRNumber     int                    `json:"pr_number"`
+	HeadRef      string                 `json:"head_ref"`
+	HeadSHA      string                 `json:"head_sha"`
+	HTMLURL      string                 `json:"html_url"`
+	Mode         models.PreviewAutoMode `json:"mode"`
+}
+
+type PreviewCachePrewarmSource string
+
+const (
+	PreviewCachePrewarmSourceSession PreviewCachePrewarmSource = "session"
+	PreviewCachePrewarmSourceBranch  PreviewCachePrewarmSource = "branch"
+)
+
+type PreviewCachePrewarmJobPayload struct {
+	JobID             uuid.UUID                 `json:"job_id,omitempty"`
+	OrgID             uuid.UUID                 `json:"org_id"`
+	RepositoryID      uuid.UUID                 `json:"repository_id"`
+	UserID            uuid.UUID                 `json:"user_id,omitempty"`
+	Source            PreviewCachePrewarmSource `json:"source"`
+	SessionID         uuid.UUID                 `json:"session_id,omitempty"`
+	PreviewTargetID   uuid.UUID                 `json:"preview_target_id,omitempty"`
+	Branch            string                    `json:"branch,omitempty"`
+	CommitSHA         string                    `json:"commit_sha,omitempty"`
+	PreviewConfigName string                    `json:"preview_config_name,omitempty"`
+	WorkspaceRevision int64                     `json:"workspace_revision,omitempty"`
+	ConfigDigest      string                    `json:"config_digest,omitempty"`
+	Reason            string                    `json:"reason,omitempty"`
+}
+
+type SessionPreviewPrewarmClassifyJobPayload struct {
+	JobID             uuid.UUID `json:"job_id,omitempty"`
+	OrgID             uuid.UUID `json:"org_id"`
+	SessionID         uuid.UUID `json:"session_id"`
+	RepositoryID      uuid.UUID `json:"repository_id"`
+	WorkspaceRevision int64     `json:"workspace_revision"`
+	Phase             string    `json:"phase,omitempty"`
+}
+
+type SessionPreviewWarmBuildJobPayload struct {
+	JobID             uuid.UUID `json:"job_id,omitempty"`
+	OrgID             uuid.UUID `json:"org_id"`
+	UserID            uuid.UUID `json:"user_id,omitempty"`
+	SessionID         uuid.UUID `json:"session_id"`
+	RepositoryID      uuid.UUID `json:"repository_id"`
+	WorkspaceRevision int64     `json:"workspace_revision"`
+	ConfigDigest      string    `json:"config_digest,omitempty"`
+	Reason            string    `json:"reason,omitempty"`
 }
 
 // RemoteStopActivePreviewForSessionRequest targets preview teardown by session.
@@ -85,7 +145,8 @@ type RemoteStopActivePreviewForSessionRequest struct {
 }
 
 type RemoteRecyclePreviewRequest struct {
-	Config *models.PreviewConfig `json:"config,omitempty"`
+	Config     *models.PreviewConfig `json:"config,omitempty"`
+	ResumeWarm bool                  `json:"resume_warm,omitempty"`
 }
 
 type RemoteCancelSessionRequest struct {
@@ -127,13 +188,23 @@ type RemoteStopActivePreviewForSessionResponse struct {
 // WorkerPreviewClient is the signed app->worker preview control-plane client.
 type WorkerPreviewClient struct {
 	httpClient *http.Client
-	secret     string
+	keyring    auth.PreviewTokenKeyring
 }
 
 // NewWorkerPreviewClient creates a worker preview client.
 func NewWorkerPreviewClient(secret string) *WorkerPreviewClient {
+	keyring, err := auth.NewPreviewTokenKeyring([]string{secret})
+	if err != nil {
+		keyring = auth.PreviewTokenKeyring{}
+	}
+	return NewWorkerPreviewClientWithKeyring(keyring)
+}
+
+// NewWorkerPreviewClientWithKeyring creates a worker preview client backed by
+// the ordered preview RPC keyring.
+func NewWorkerPreviewClientWithKeyring(keyring auth.PreviewTokenKeyring) *WorkerPreviewClient {
 	return &WorkerPreviewClient{
-		secret: secret,
+		keyring: keyring,
 		httpClient: &http.Client{
 			Timeout: previewWorkerHTTPTimeout,
 		},
@@ -161,7 +232,7 @@ func (c *WorkerPreviewClient) newRequest(
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	token, err := auth.GeneratePreviewToken(c.secret, claims)
+	token, err := c.keyring.Generate(claims)
 	if err != nil {
 		return nil, fmt.Errorf("sign preview token: %w", err)
 	}
@@ -264,13 +335,21 @@ func (c *WorkerPreviewClient) StopPreview(ctx context.Context, worker WorkerNode
 }
 
 func (c *WorkerPreviewClient) RecyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, cfg *models.PreviewConfig) error {
+	return c.recyclePreview(ctx, worker, orgID, previewID, RemoteRecyclePreviewRequest{Config: cfg})
+}
+
+func (c *WorkerPreviewClient) ResumeWarmPreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID) error {
+	return c.recyclePreview(ctx, worker, orgID, previewID, RemoteRecyclePreviewRequest{ResumeWarm: true})
+}
+
+func (c *WorkerPreviewClient) recyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, body RemoteRecyclePreviewRequest) error {
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/recycle", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
 		PreviewID:    &previewID,
 		Action:       "recycle",
 		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
-	}, RemoteRecyclePreviewRequest{Config: cfg})
+	}, body)
 	if err != nil {
 		return err
 	}

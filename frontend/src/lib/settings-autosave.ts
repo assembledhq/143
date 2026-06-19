@@ -8,31 +8,21 @@ export type SettingsPatch = {
   settings?: Partial<OrgSettings>;
 };
 
-/**
- * Keys inside `OrgSettings` whose values are nested objects. Patching any of
- * these through `applyOrgSettingsPatch` REPLACES the entire nested object
- * (shallow spread), so callers must build the full merged nested value before
- * dispatching. In dev builds we warn when a partial nested object is passed,
- * since this is the most common autosave footgun.
- */
 const NESTED_OBJECT_KEYS: ReadonlySet<keyof OrgSettings> = new Set([
   "agent_config",
   "product_context",
+  "sandbox_network",
+  "sandbox_lifecycle",
+  "sandbox_resources",
 ]);
 
 /**
  * Apply an `api.settings.update` patch to the React Query cache entry for
- * `queryKeys.settings.all`. Merges at the `data.settings.<key>` level;
- * callers that need to update nested objects (e.g. `agent_config`) must
- * pre-merge the nested object before passing it in — see
- * `saveAgentConfigField` in `/settings/agent/page.tsx` for the canonical
- * pattern.
+ * `queryKeys.settings.all`. Known nested object settings are deep-merged one
+ * level to match the server's `mergeSettingsJSON` behavior.
  */
 export function applyOrgSettingsPatch(prev: unknown, patch: SettingsPatch): unknown {
   const previous = prev as SingleResponse<Organization> | undefined;
-  if (process.env.NODE_ENV !== "production") {
-    warnIfPartialNestedPatch(previous, patch);
-  }
   if (!previous?.data) {
     // The save still fires, but we have nothing to optimistically apply —
     // the user will see the indicator cycle without the value flipping
@@ -52,35 +42,29 @@ export function applyOrgSettingsPatch(prev: unknown, patch: SettingsPatch): unkn
     data: {
       ...previous.data,
       ...(patch.name !== undefined ? { name: patch.name } : {}),
-      settings: { ...previous.data.settings, ...patch.settings },
+      settings: mergeSettings(previous.data.settings, patch.settings),
     },
   };
 }
 
-function warnIfPartialNestedPatch(
-  previous: SingleResponse<Organization> | undefined,
-  patch: SettingsPatch,
-): void {
-  if (!patch.settings) return;
-  const existing = previous?.data?.settings ?? ({} as Partial<OrgSettings>);
-  for (const key of Object.keys(patch.settings) as (keyof OrgSettings)[]) {
-    if (!NESTED_OBJECT_KEYS.has(key)) continue;
-    const incoming = patch.settings[key];
-    const current = existing[key];
-    if (!isPlainObject(incoming) || !isPlainObject(current)) continue;
-    const currentKeys = Object.keys(current);
-    const incomingKeys = new Set(Object.keys(incoming));
-    const missing = currentKeys.filter((k) => !incomingKeys.has(k));
-    if (missing.length > 0) {
-      console.warn(
-        `applyOrgSettingsPatch: shallow-merging "${String(key)}" will drop existing keys [${missing.join(", ")}]. Pass the full merged object instead.`,
-      );
-    }
-  }
-}
-
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function mergeSettings(
+  base: Organization["settings"] | Partial<OrgSettings> | undefined,
+  patch: Partial<OrgSettings> | undefined,
+): Organization["settings"] {
+  if (!patch) return { ...(base ?? {}) };
+  const merged = { ...(base ?? {}), ...patch };
+  for (const key of Object.keys(patch) as (keyof OrgSettings)[]) {
+    if (!NESTED_OBJECT_KEYS.has(key)) continue;
+    const current = base?.[key];
+    const incoming = patch[key];
+    if (!isPlainObject(current) || !isPlainObject(incoming)) continue;
+    merged[key] = { ...current, ...incoming } as never;
+  }
+  return merged;
 }
 
 /**
@@ -92,6 +76,6 @@ export function coalesceSettingsPatch(a: SettingsPatch, b: SettingsPatch): Setti
   return {
     ...(a.name !== undefined ? { name: a.name } : {}),
     ...(b.name !== undefined ? { name: b.name } : {}),
-    settings: { ...a.settings, ...b.settings },
+    settings: mergeSettings(a.settings, b.settings),
   };
 }

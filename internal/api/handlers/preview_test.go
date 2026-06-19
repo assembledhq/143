@@ -34,12 +34,16 @@ func TestComputePreviewFreshness(t *testing.T) {
 
 	now := time.Date(2026, 5, 28, 16, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name            string
-		sessionRevision int64
-		previewRevision *int64
-		status          models.PreviewStatus
-		expectedState   models.PreviewFreshnessState
-		expectedReason  string
+		name                  string
+		sessionRevision       int64
+		previewRevision       *int64
+		runtimeRevision       *int64
+		runtimeRevisionSource models.PreviewRuntimeRevisionSource
+		status                models.PreviewStatus
+		restartReasons        []models.PreviewRestartReason
+		expectedState         models.PreviewFreshnessState
+		expectedReason        string
+		expectedRestart       bool
 	}{
 		{
 			name:            "current when revisions match",
@@ -47,6 +51,28 @@ func TestComputePreviewFreshness(t *testing.T) {
 			previewRevision: int64Ptr(4),
 			status:          models.PreviewStatusReady,
 			expectedState:   models.PreviewFreshnessCurrent,
+		},
+		{
+			name:                  "live updated when runtime revision is current",
+			sessionRevision:       5,
+			previewRevision:       int64Ptr(4),
+			runtimeRevision:       int64Ptr(5),
+			runtimeRevisionSource: models.PreviewRuntimeRevisionSourceHMR,
+			status:                models.PreviewStatusReady,
+			expectedState:         models.PreviewFreshnessLiveUpdated,
+			expectedReason:        "preview_live_updated",
+		},
+		{
+			name:            "restart required when session is newer and restart-triggering paths changed",
+			sessionRevision: 5,
+			previewRevision: int64Ptr(4),
+			status:          models.PreviewStatusReady,
+			restartReasons: []models.PreviewRestartReason{
+				{Kind: models.PreviewRestartReasonDependencyChanged, Path: "frontend/package.json"},
+			},
+			expectedState:   models.PreviewFreshnessRestartRequired,
+			expectedReason:  "restart_required",
+			expectedRestart: true,
 		},
 		{
 			name:            "out of date when session is newer",
@@ -90,14 +116,18 @@ func TestComputePreviewFreshness(t *testing.T) {
 				WorkspaceRevisionUpdatedAt: now,
 			}
 			preview := &models.PreviewInstance{
-				Status:                           tt.status,
-				SourceWorkspaceRevision:          tt.previewRevision,
-				SourceWorkspaceRevisionUpdatedAt: &now,
+				Status:                            tt.status,
+				SourceWorkspaceRevision:           tt.previewRevision,
+				SourceWorkspaceRevisionUpdatedAt:  &now,
+				RuntimeWorkspaceRevision:          tt.runtimeRevision,
+				RuntimeWorkspaceRevisionUpdatedAt: &now,
+				RuntimeWorkspaceRevisionSource:    tt.runtimeRevisionSource,
 			}
 
-			freshness := computePreviewFreshness(session, preview)
+			freshness := computePreviewFreshness(session, preview, tt.restartReasons)
 			require.Equal(t, tt.expectedState, freshness.State, "freshness state should match revision comparison")
 			require.Equal(t, tt.expectedReason, freshness.Reason, "freshness reason should explain non-current states")
+			require.Equal(t, tt.expectedRestart, freshness.RestartRequired, "freshness should report whether restart is required")
 		})
 	}
 }
@@ -544,7 +574,7 @@ var previewInstanceTestCols = []string{
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
 var handlerPreviewServiceTestCols = []string{
@@ -580,7 +610,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		previewID, sessionID, nil, orgID, userID, "bootstrap", "default", "starting",
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil,
+		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil, nil, nil, "",
 		"",
 		false,
 	}
@@ -615,8 +645,8 @@ func expectReserveSuccess(mock pgxmock.PgxPoolIface, sessionID, orgID, userID uu
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
-	// CreatePreviewInstance: 24 bound args.
-	insertArgs := make([]any, 24)
+	// CreatePreviewInstance: 27 bound args.
+	insertArgs := make([]any, 27)
 	for i := range insertArgs {
 		insertArgs[i] = pgxmock.AnyArg()
 	}
@@ -654,6 +684,41 @@ func newHandlerPreviewRuntimeRow(runtimeID, orgID, previewID uuid.UUID, now time
 		"http://worker-a.internal", "", 0, string(models.PreviewRuntimeStatusStarting), now.Add(90 * time.Second),
 		now, nil, nil, "", "", now, now,
 	}
+}
+
+func expectWorkerRoutedReserveAndEnqueue(mock pgxmock.PgxPoolIface, sessionID, orgID, userID, previewID uuid.UUID, now time.Time) {
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM preview_instances WHERE org_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COUNT\\(DISTINCT preview_instance_id\\) FROM preview_runtimes WHERE worker_node_id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO preview_instances").
+		WithArgs(previewAnyArgs(27)...).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+	mock.ExpectQuery("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(previewAnyArgs(9)...).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
+				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
+		)
+	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
+		WithArgs(previewAnyArgs(7)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 }
 
 // expectAbortReservationNoDestroy emits the pgxmock sequence for an Abort that
@@ -711,7 +776,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, recycleConfig, recycleSandbox, "ready", strPtr("req-1"), "", now, now, now, nil,
-		(*int64)(nil), (*time.Time)(nil), "",
+		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 		false,
 	}
 }
@@ -1022,7 +1087,7 @@ var sessionRowColumns = []string{
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *string, sandboxState string) []interface{} {
@@ -1074,6 +1139,7 @@ func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *st
 		"linear_identifier_hint":         (*string)(nil),
 		"linear_prepare_state":           string(models.LinearPrepareStateNone),
 		"deleted_at":                     nil,
+		"capability_snapshot":            nil,
 		"git_identity_source":            nil,
 		"git_identity_user_id":           nil,
 		"created_at":                     now,
@@ -1114,6 +1180,17 @@ func sessionRowReuseWithSnapshot(id, orgID uuid.UUID, containerID string, snapsh
 	return previewSessionRow(id, orgID, &containerID, snapshotKey, "running")
 }
 
+func sessionRowReuseWithSnapshotOnWorker(id, orgID uuid.UUID, containerID, workerNodeID string, snapshotKey *string) []interface{} {
+	row := sessionRowReuseWithSnapshot(id, orgID, containerID, snapshotKey)
+	for i, name := range sessionRowColumns {
+		if name == "worker_node_id" {
+			row[i] = &workerNodeID
+			return row
+		}
+	}
+	panic("worker_node_id column missing from sessionRowColumns")
+}
+
 // sessionRowForHydrate builds a session row with no live container but a
 // configurable snapshot key and sandbox state — used to exercise the three
 // acquireSandbox branches (SNAPSHOT_EXPIRED, hydrate, NO_SANDBOX).
@@ -1143,6 +1220,14 @@ func (f *fakeHydrateSnapshotStore) Load(_ context.Context, _ string, w io.Writer
 }
 
 func (f *fakeHydrateSnapshotStore) Delete(context.Context, string) error { return nil }
+
+type previewStaticEgressOrgStore struct {
+	settings json.RawMessage
+}
+
+func (s previewStaticEgressOrgStore) GetByID(_ context.Context, orgID uuid.UUID) (models.Organization, error) {
+	return models.Organization{ID: orgID, Settings: s.settings}, nil
+}
 
 // TestPreviewHandler_StartPreview_NoWorkspaceConfig covers the common path where
 // the user clicks Start Preview on a repo that has no .143/config.json
@@ -1540,6 +1625,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1577,7 +1663,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(previewAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1610,6 +1696,231 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewHandler_StartPreview_WorkerRoutedClearsDeadLiveSessionOwner(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snapshots/session.tar.zst"
+	staleContainerID := "container-on-dead-worker"
+	deadWorkerID := "worker-dead"
+
+	sessionStore := db.NewSessionStore(mock)
+	previewStore := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+	jobStore := db.NewJobStore(mock)
+
+	mgr := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "api-node",
+	})
+	h := NewPreviewHandler(mgr, previewStore, sessionStore, nil, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
+	h.jobStore = jobStore
+	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
+
+	deadMeta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
+		PreviewInternalBaseURL: "http://worker-dead.internal",
+	})
+	require.NoError(t, err, "dead worker metadata should marshal")
+	healthyMeta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
+		PreviewInternalBaseURL: "http://worker-a.internal",
+	})
+	require.NoError(t, err, "healthy worker metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowReuseWithSnapshotOnWorker(sessionID, orgID, staleContainerID, deadWorkerID, &snapshotKey)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow(deadWorkerID, "worker", "worker-dead", "dead", deadMeta, now, now),
+		)
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL,\\s+worker_node_id = NULL,\\s+turn_holding_container = FALSE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, &snapshotKey, "running")...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-a", "worker", "worker-a", "active", healthyMeta, now, now),
+		)
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}).
+			AddRow("worker-a", 0))
+	expectWorkerRoutedReserveAndEnqueue(mock, sessionID, orgID, userID, previewID, now)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, "worker-routed start should recover stale dead-worker ownership and enqueue startup: %s", w.Body.String())
+	var resp models.SingleResponse[*models.PreviewInstance]
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode as a preview instance")
+	require.Equal(t, previewID, resp.Data.ID, "response should return the reserved preview")
+	require.Equal(t, models.PreviewStatusStarting, resp.Data.Status, "response should show startup in progress")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewHandler_StartPreview_WorkerRoutedDeadLiveSessionOwnerClearFailure(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snapshots/session.tar.zst"
+	staleContainerID := "container-on-dead-worker"
+	deadWorkerID := "worker-dead"
+
+	sessionStore := db.NewSessionStore(mock)
+	previewStore := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+
+	mgr := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "api-node",
+	})
+	h := NewPreviewHandler(mgr, previewStore, sessionStore, nil, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
+	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
+
+	deadMeta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
+		PreviewInternalBaseURL: "http://worker-dead.internal",
+	})
+	require.NoError(t, err, "dead worker metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowReuseWithSnapshotOnWorker(sessionID, orgID, staleContainerID, deadWorkerID, &snapshotKey)...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE id = @id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow(deadWorkerID, "worker", "worker-dead", "dead", deadMeta, now, now),
+		)
+	mock.ExpectExec("UPDATE sessions\\s+SET container_id = NULL,\\s+worker_node_id = NULL,\\s+turn_holding_container = FALSE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("db unavailable"))
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code, "clear failures should return a stable 5xx preview error")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode as an error response")
+	require.Equal(t, "PREVIEW_STALE_SANDBOX_CLEAR_FAILED", resp.Error.Code, "clear failures should use a stable API code")
+	require.Equal(t, "failed to clear stale preview sandbox ownership", resp.Error.Message, "clear failures should explain the stale ownership operation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewHandler_StartPreview_WorkerRoutedStaticEgressNoCapableWorkers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	sessionStore := db.NewSessionStore(mock)
+	previewStore := db.NewPreviewStore(mock)
+	nodeStore := db.NewNodeStore(mock)
+
+	mgr := preview.NewManager(preview.ManagerConfig{
+		Store:        previewStore,
+		Logger:       zerolog.Nop(),
+		WorkerNodeID: "api-node",
+	})
+	h := NewPreviewHandler(mgr, previewStore, sessionStore, nil, sandbox.NoOpFileReader{}, nil, nil, zerolog.Nop())
+	h.SetWorkerRuntime(preview.NewWorkerSelector(nodeStore, previewStore), preview.NewWorkerPreviewClient("test-secret"), "api-node")
+	h.SetStaticEgressRuntime(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}, agent.StaticEgressRuntimeConfig{PublicIP: "203.0.113.10"})
+
+	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
+		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
+		PreviewInternalBaseURL: "http://worker-a.internal",
+	})
+	require.NoError(t, err, "should marshal worker metadata")
+
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(sessionRowColumns).
+				AddRow(sessionRowForHydrate(sessionID, orgID, nil, "none")...),
+		)
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(
+			pgxmock.NewRows(handlerNodeTestCols).
+				AddRow("worker-a", "worker", "worker-a", "active", workerMeta, now, now),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(""))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	w := httptest.NewRecorder()
+
+	h.StartPreview(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "worker-routed start should fail when static egress has no eligible workers")
+	var resp models.ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp), "response should decode as an error response")
+	require.Equal(t, "PREVIEW_NO_WORKERS", resp.Error.Code, "static-egress worker selection should keep the stable no-workers code")
+	require.Equal(t, "Static egress is enabled, but no preview workers are verified for 203.0.113.10. Disable static egress or provision workers.", resp.Error.Message, "static-egress worker selection should explain the real eligibility blocker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing.T) {
 	t.Parallel()
 
@@ -1639,6 +1950,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1646,6 +1958,9 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}))
 	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
@@ -1678,7 +1993,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(previewAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -1800,6 +2115,9 @@ func TestPreviewHandler_EnsurePreview_RecycleStampsWorkspaceRevision(t *testing.
 	mock.ExpectExec("UPDATE preview_instances\\s+SET source_workspace_revision").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances\\s+SET runtime_workspace_revision").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -1898,6 +2216,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 
 	workerMeta, err := json.Marshal(preview.WorkerNodeMetadata{
 		PreviewCapable:         true,
+		PreviewRPCAuthCheck:    true,
 		PreviewInternalBaseURL: "http://worker-a.internal",
 	})
 	require.NoError(t, err, "should marshal worker metadata")
@@ -1937,7 +2256,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO preview_instances").
-		WithArgs(previewAnyArgs(24)...).
+		WithArgs(previewAnyArgs(27)...).
 		WillReturnRows(
 			pgxmock.NewRows(previewInstanceTestCols).
 				AddRow(newReservedPreviewRow(previewID, sessionID, orgID, userID, now)...),
@@ -2264,12 +2583,27 @@ func TestPreviewHandler_StartPreview_PublishLosesRace(t *testing.T) {
 	mock.ExpectQuery("UPDATE sessions\\s+SET container_id = COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"coalesce"}).AddRow("orch-winner"))
+	// The handler retries the acquire against the winner before giving up:
+	// each retry re-reads the session row, and the pre-hydrate peek then
+	// short-circuits on the published winner without another hydrate.
+	for range [3]struct{}{} {
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionRowColumns).
+					AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+			)
+		mock.ExpectQuery("SELECT COALESCE\\(container_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	}
 	// Handler passes hydratedID="" to Abort because acquireSandbox already
 	// destroyed the local container on the race-loss branch.
 	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.sandboxBusyRetryDelay = time.Millisecond
 	sp := testutil.NewMockSandboxProvider()
 	sp.RestoreFn = func(_ context.Context, _ *agent.Sandbox, r io.Reader) error {
 		_, _ = io.Copy(io.Discard, r)
@@ -2324,11 +2658,25 @@ func TestPreviewHandler_StartPreview_PrehydratePeekShortCircuit(t *testing.T) {
 	mock.ExpectQuery("SELECT COALESCE\\(container_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	// The handler retries the acquire before giving up: each retry re-reads
+	// the session row and short-circuits on the same peek.
+	for range [3]struct{}{} {
+		mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(
+				pgxmock.NewRows(sessionRowColumns).
+					AddRow(sessionRowForHydrate(sessionID, orgID, &key, "snapshotted")...),
+			)
+		mock.ExpectQuery("SELECT COALESCE\\(container_id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows([]string{"container_id"}).AddRow("orch-winner"))
+	}
 	// hydratedID="" because we never created a container.
 	expectAbortReservationNoDestroy(mock)
 
 	h := newPreviewHandlerWithMock(mock)
 	h.sessionStore = db.NewSessionStore(mock)
+	h.sandboxBusyRetryDelay = time.Millisecond
 	counter := &previewFakeLiveSandboxCounter{count: 99}
 	h.sandboxCapacity = agent.NewSandboxCapacityGate(agent.SandboxCapacityGateConfig{
 		Counter:   counter,
@@ -2535,6 +2883,90 @@ func TestPreviewHandler_StartPreview_ReuseAttachesWhenContainerAlive(t *testing.
 	require.Equal(t, http.StatusUnprocessableEntity, w.Code, "launch failure surfaces as 422 PREVIEW_START_FAILED")
 	require.Equal(t, 0, sp.GetDestroyCalls(), "live-reuse must never destroy the attached container")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewHandlerAcquireSandboxRejectsLiveContainerOnWrongStaticEgressNetwork(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	containerID := "direct-container"
+	h := newPreviewTestHandler()
+	h.SetStaticEgressRuntime(previewStaticEgressOrgStore{
+		settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}, agent.StaticEgressRuntimeConfig{
+		Enabled:     true,
+		Capable:     true,
+		NetworkName: "143-sandbox-static-egress",
+		PublicIP:    "203.0.113.10",
+	})
+	sp := testutil.NewMockSandboxProvider()
+	sp.IsAliveFn = func(_ context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sb.ID, "liveness check should inspect the recorded container")
+		return true, nil
+	}
+	sp.ConnInfoFn = func(_ context.Context, _ *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+		return &agent.SandboxConnectionInfo{
+			Environment: map[string]string{"DOCKER_HOST": "143-sandbox"},
+		}, nil
+	}
+	h.sandboxProvider = sp
+
+	result := h.acquireSandbox(context.Background(), orgID, &models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		ContainerID:  &containerID,
+		SandboxState: models.SandboxStateRunning,
+	}, nil)
+
+	require.Nil(t, result.Sandbox, "live container on the direct bridge should not be reused for static egress")
+	require.Equal(t, "NETWORK_SETTING_RESTART_REQUIRED", result.ErrCode, "network mismatch should return a restart-required error code")
+	require.Error(t, result.Err, "network mismatch should surface an actionable error")
+}
+
+func TestClassifyAcquireSandboxErrorPreservesNetworkErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		result         acquireSandboxResult
+		expectedStatus int
+		expectedCode   string
+		expectedMsg    string
+	}{
+		{
+			name: "restart required",
+			result: acquireSandboxResult{
+				ErrCode: "NETWORK_SETTING_RESTART_REQUIRED",
+				Err:     errors.New("restart environment to apply network setting"),
+			},
+			expectedStatus: http.StatusConflict,
+			expectedCode:   "NETWORK_SETTING_RESTART_REQUIRED",
+			expectedMsg:    "restart environment to apply network setting",
+		},
+		{
+			name: "static egress unavailable",
+			result: acquireSandboxResult{
+				ErrCode: "STATIC_EGRESS_UNAVAILABLE",
+				Err:     errors.New("static egress is enabled for this org, but this worker is not static-egress capable"),
+			},
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedCode:   "STATIC_EGRESS_UNAVAILABLE",
+			expectedMsg:    "static egress is enabled for this org, but this worker is not static-egress capable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := classifyAcquireSandboxError(tt.result)
+
+			require.Equal(t, tt.expectedStatus, actual.status, "network acquisition errors should use actionable HTTP statuses")
+			require.Equal(t, tt.expectedCode, actual.code, "network acquisition errors should preserve their specific codes")
+			require.Equal(t, tt.expectedMsg, actual.message, "network acquisition errors should preserve the actionable message")
+		})
+	}
 }
 
 // TestClassifyLaunchError verifies the error-code mapping that turns
@@ -3284,6 +3716,9 @@ func TestPreviewHandler_RestartPreview_Success(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_instances\\s+SET source_workspace_revision").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances\\s+SET runtime_workspace_revision").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

@@ -40,24 +40,24 @@ const variantClassNames: Record<
 > = {
   success: {
     container:
-      "border-emerald-500/20 bg-background/96 shadow-[0_18px_50px_-28px_rgba(16,185,129,0.35)]",
+      "border-success/20 bg-background/96 shadow-[0_18px_50px_-28px_rgba(16,185,129,0.35)]",
     iconWrap:
-      "border-emerald-500/20 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-300",
-    icon: "text-emerald-600 dark:text-emerald-300",
+      "border-success/20 bg-success/[0.08] text-success",
+    icon: "text-success",
   },
   info: {
     container:
-      "border-sky-500/20 bg-background/96 shadow-[0_18px_50px_-28px_rgba(14,165,233,0.3)]",
+      "border-info/20 bg-background/96 shadow-[0_18px_50px_-28px_rgba(14,165,233,0.3)]",
     iconWrap:
-      "border-sky-500/20 bg-sky-500/[0.08] text-sky-600 dark:text-sky-300",
-    icon: "text-sky-600 dark:text-sky-300",
+      "border-info/20 bg-info/[0.08] text-info",
+    icon: "text-info",
   },
   warning: {
     container:
-      "border-amber-500/25 bg-background/96 shadow-[0_18px_50px_-28px_rgba(245,158,11,0.32)]",
+      "border-warning/25 bg-background/96 shadow-[0_18px_50px_-28px_rgba(245,158,11,0.32)]",
     iconWrap:
-      "border-amber-500/20 bg-amber-500/[0.09] text-amber-700 dark:text-amber-300",
-    icon: "text-amber-700 dark:text-amber-300",
+      "border-warning/20 bg-warning/[0.09] text-warning",
+    icon: "text-warning",
   },
   error: {
     container:

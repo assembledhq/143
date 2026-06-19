@@ -13,6 +13,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -441,6 +442,69 @@ type CreatePullRequestResult struct {
 	SessionID string `json:"session_id"`
 }
 
+// --------------------------------------------------------------------------
+// SessionTabManager — current-session sibling agent tabs
+// --------------------------------------------------------------------------
+
+type SessionTabManager interface {
+	Name() string
+	ListTabs(ctx context.Context, params ListSessionTabsParams) (json.RawMessage, error)
+	GetTab(ctx context.Context, params GetSessionTabParams) (json.RawMessage, error)
+	CreateTab(ctx context.Context, params CreateSessionTabParams) (json.RawMessage, error)
+	SendTabMessage(ctx context.Context, params SendSessionTabMessageParams) (json.RawMessage, error)
+	ListTabMessages(ctx context.Context, params ListSessionTabMessagesParams) (json.RawMessage, error)
+}
+
+type ListSessionTabsParams struct {
+	IncludeArchived bool `json:"include_archived,omitempty"`
+}
+
+type GetSessionTabParams struct {
+	TabID string `json:"tab_id"`
+}
+
+type CreateSessionTabParams struct {
+	Label        string `json:"label,omitempty"`
+	Agent        string `json:"agent,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+}
+
+type SendSessionTabMessageParams struct {
+	TabID           string `json:"tab_id"`
+	Message         string `json:"message,omitempty"`
+	MessageFile     string `json:"message_file,omitempty"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+}
+
+type ListSessionTabMessagesParams struct {
+	TabID             string `json:"tab_id"`
+	Limit             int    `json:"limit,omitempty"`
+	Before            string `json:"before,omitempty"`
+	IncludeToolEvents bool   `json:"include_tool_events,omitempty"`
+}
+
+type StubSessionTabManager struct {
+	ProviderName string
+}
+
+func (s *StubSessionTabManager) Name() string { return s.ProviderName }
+func (s *StubSessionTabManager) ListTabs(context.Context, ListSessionTabsParams) (json.RawMessage, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools session_tabs_list) instead of direct API calls")
+}
+func (s *StubSessionTabManager) GetTab(context.Context, GetSessionTabParams) (json.RawMessage, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools session_tabs_get) instead of direct API calls")
+}
+func (s *StubSessionTabManager) CreateTab(context.Context, CreateSessionTabParams) (json.RawMessage, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools session_tabs_create) instead of direct API calls")
+}
+func (s *StubSessionTabManager) SendTabMessage(context.Context, SendSessionTabMessageParams) (json.RawMessage, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools session_tabs_send) instead of direct API calls")
+}
+func (s *StubSessionTabManager) ListTabMessages(context.Context, ListSessionTabMessagesParams) (json.RawMessage, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools session_tabs_messages) instead of direct API calls")
+}
+
 // StubPullRequestCreator is a no-op PullRequestCreator used only for skills
 // doc generation. The real sandbox CLI registers an internal API-backed
 // implementation when INTERNAL_API_TOKEN and INTERNAL_API_URL are present.
@@ -450,7 +514,65 @@ type StubPullRequestCreator struct {
 
 func (s *StubPullRequestCreator) Name() string { return s.ProviderName }
 func (s *StubPullRequestCreator) CreatePullRequest(_ context.Context, _ CreatePullRequestParams) (*CreatePullRequestResult, error) {
-	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools create_pr) instead of direct API calls")
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools pr create) instead of direct API calls")
+}
+
+// --------------------------------------------------------------------------
+// EvalCandidateReporter — eval bootstrap candidate creation
+// --------------------------------------------------------------------------
+
+// EvalCandidateReporter allows a session-backed eval bootstrap agent to add
+// candidate eval tasks discovered during repository history analysis.
+type EvalCandidateReporter interface {
+	Name() string
+	AddCandidate(ctx context.Context, params AddEvalCandidateParams) (*AddEvalCandidateResult, error)
+}
+
+type AddEvalCandidateParams struct {
+	PRNumber          int             `json:"pr_number"`
+	PRTitle           string          `json:"pr_title"`
+	BaseCommitSHA     string          `json:"base_commit_sha"`
+	SolutionCommitSHA string          `json:"solution_commit_sha"`
+	SolutionDiff      string          `json:"solution_diff"`
+	IssueDescription  string          `json:"issue_description"`
+	ScoringCriteria   json.RawMessage `json:"scoring_criteria"`
+	Complexity        string          `json:"complexity"`
+	FitnessScore      float64         `json:"fitness_score"`
+	FitnessReasoning  string          `json:"fitness_reasoning"`
+	Evidence          json.RawMessage `json:"evidence,omitempty"`
+	Warnings          []string        `json:"warnings,omitempty"`
+}
+
+type AddEvalCandidateResult struct {
+	CandidateID    string `json:"candidate_id"`
+	CandidateIndex int    `json:"candidate_index"`
+	BootstrapRunID string `json:"bootstrap_run_id"`
+	Status         string `json:"status"`
+}
+
+// --------------------------------------------------------------------------
+// AutomationGoalImprovementCompleter — deep automation goal proposals
+// --------------------------------------------------------------------------
+
+type AutomationGoalImprovementCompleter interface {
+	Name() string
+	CompleteGoalImprovement(ctx context.Context, params CompleteAutomationGoalImprovementParams) (*CompleteAutomationGoalImprovementResult, error)
+}
+
+type CompleteAutomationGoalImprovementParams struct {
+	ImprovementID string   `json:"improvement_id"`
+	ProposedGoal  string   `json:"proposed_goal"`
+	Rationale     string   `json:"rationale"`
+	Changes       []string `json:"changes,omitempty"`
+	Evidence      []string `json:"evidence,omitempty"`
+	Risks         []string `json:"risks,omitempty"`
+	Confidence    string   `json:"confidence"`
+	Warnings      []string `json:"warnings,omitempty"`
+}
+
+type CompleteAutomationGoalImprovementResult struct {
+	ImprovementID string `json:"improvement_id"`
+	Status        string `json:"status"`
 }
 
 // --------------------------------------------------------------------------

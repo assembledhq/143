@@ -19,6 +19,7 @@ export function formatReviewMessage(
     parts.push("Please address the following code review comments:\n");
     openComments.forEach((c, i) => {
       parts.push(`${i + 1}. **${c.file_path}:${c.line_number}** (${c.diff_side} side)`);
+      parts.push(`   Target line: \`${c.file_path}:${c.line_number}\` (${c.diff_side} side)`);
       const hunk = getDiffHunkContext(diffFiles, c.file_path, c.line_number, c.diff_side as "old" | "new");
       if (hunk) {
         parts.push("   ```");
@@ -26,7 +27,7 @@ export function formatReviewMessage(
         parts.push("   ```");
       }
       const indented = c.body.replace(/\n/g, "\n   ");
-      parts.push(`   Comment: "${indented}"\n`);
+      parts.push(`   Requested change: "${indented}"\n`);
     });
   }
 

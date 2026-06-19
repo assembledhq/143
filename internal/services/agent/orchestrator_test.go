@@ -108,21 +108,21 @@ func (m *mockGitHubTokenProvider) GetInstallationToken(ctx context.Context, inst
 
 // mockCodexAuthProvider implements agent.CodexAuthProvider.
 type mockCodexAuthProvider struct {
-	cfg        *models.OpenAIChatGPTConfig
+	cfg        *models.OpenAISubscriptionConfig
 	err        error
-	refreshCfg *models.OpenAIChatGPTConfig
+	refreshCfg *models.OpenAISubscriptionConfig
 	refreshErr error
 	refreshIDs []uuid.UUID
 }
 
-func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m *mockCodexAuthProvider) GetValidToken(ctx context.Context, orgID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
 	return m.cfg, nil
 }
 
-func (m *mockCodexAuthProvider) RefreshTokenByID(_ context.Context, _ models.Scope, credID uuid.UUID) (*models.OpenAIChatGPTConfig, error) {
+func (m *mockCodexAuthProvider) RefreshTokenByID(_ context.Context, _ models.Scope, credID uuid.UUID) (*models.OpenAISubscriptionConfig, error) {
 	m.refreshIDs = append(m.refreshIDs, credID)
 	if m.refreshErr != nil {
 		return nil, m.refreshErr
@@ -236,11 +236,13 @@ func (m *mockCodingCredentialProvider) MarkAuthRejected(id uuid.UUID) {
 
 // mockClaudeCodeAuthProvider implements agent.ClaudeCodeAuthProvider.
 type mockClaudeCodeAuthProvider struct {
-	sub       *models.AnthropicSubscription
-	credID    *uuid.UUID
-	hasSub    bool
-	hasSubErr error
-	tokenErr  error
+	sub           *models.AnthropicSubscription
+	credID        *uuid.UUID
+	hasSub        bool
+	hasSubErr     error
+	tokenErr      error
+	invalidSub    bool
+	invalidSubErr error
 }
 
 func (m *mockClaudeCodeAuthProvider) HasActiveSubscription(ctx context.Context, orgID uuid.UUID) (bool, error) {
@@ -252,6 +254,10 @@ func (m *mockClaudeCodeAuthProvider) GetValidToken(ctx context.Context, orgID uu
 		return nil, nil, m.tokenErr
 	}
 	return m.sub, m.credID, nil
+}
+
+func (m *mockClaudeCodeAuthProvider) HasInvalidSubscription(ctx context.Context, scope models.Scope) (bool, error) {
+	return m.invalidSub, m.invalidSubErr
 }
 
 type mockCredentialProvider struct {
@@ -295,6 +301,8 @@ type mockSessionStore struct {
 	mu                     sync.Mutex
 	countRunning           int
 	statusUpdates          []string
+	statusUpdateContexts   []statusUpdateContext
+	sandboxStateContexts   []sandboxStateUpdateContext
 	resultUpdates          []resultUpdate
 	workspaceUpdates       []workspaceUpdate
 	turnUpdates            []turnUpdate
@@ -353,6 +361,16 @@ type failureUpdate struct {
 	category     string
 	nextSteps    []string
 	retryAdvised bool
+}
+
+type statusUpdateContext struct {
+	status models.SessionStatus
+	err    error
+}
+
+type sandboxStateUpdateContext struct {
+	state models.SandboxState
+	err   error
 }
 
 type workerOwnershipUpdate struct {
@@ -415,6 +433,10 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.U
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusUpdates = append(m.statusUpdates, string(status))
+	m.statusUpdateContexts = append(m.statusUpdateContexts, statusUpdateContext{
+		status: status,
+		err:    ctx.Err(),
+	})
 	return nil
 }
 
@@ -469,6 +491,13 @@ func (m *mockSessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uu
 		hardDeadline: hardDeadline,
 		observedAt:   observedAt,
 	})
+	if m.beginRuntimeErr == nil {
+		m.statusUpdates = append(m.statusUpdates, string(models.SessionStatusRunning))
+		m.statusUpdateContexts = append(m.statusUpdateContexts, statusUpdateContext{
+			status: models.SessionStatusRunning,
+			err:    ctx.Err(),
+		})
+	}
 	return m.beginRuntimeErr
 }
 
@@ -555,6 +584,12 @@ func (m *mockSessionStore) UpdateRecoveryState(ctx context.Context, orgID, sessi
 }
 
 func (m *mockSessionStore) UpdateSandboxState(ctx context.Context, orgID, sessionID uuid.UUID, state models.SandboxState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sandboxStateContexts = append(m.sandboxStateContexts, sandboxStateUpdateContext{
+		state: state,
+		err:   ctx.Err(),
+	})
 	return nil
 }
 
@@ -722,6 +757,22 @@ func (m *mockSessionStore) getStatusUpdates() []string {
 	defer m.mu.Unlock()
 	out := make([]string, len(m.statusUpdates))
 	copy(out, m.statusUpdates)
+	return out
+}
+
+func (m *mockSessionStore) getStatusUpdateContexts() []statusUpdateContext {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]statusUpdateContext, len(m.statusUpdateContexts))
+	copy(out, m.statusUpdateContexts)
+	return out
+}
+
+func (m *mockSessionStore) getSandboxStateUpdateContexts() []sandboxStateUpdateContext {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]sandboxStateUpdateContext, len(m.sandboxStateContexts))
+	copy(out, m.sandboxStateContexts)
 	return out
 }
 
@@ -1268,6 +1319,10 @@ func strPtr(s string) *string {
 	return &s
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
 type testDeps struct {
 	provider         *testutil.MockSandboxProvider
 	adapter          *mockAgentAdapter
@@ -1297,6 +1352,7 @@ type testDeps struct {
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
 	sandboxCapacity  *agent.SandboxCapacityGate
+	staticEgress     agent.StaticEgressRuntimeConfig
 	users            agent.UserLookup
 	logger           *zerolog.Logger
 }
@@ -1414,6 +1470,51 @@ func defaultDeps() testDeps {
 	}
 }
 
+// codingCredsFromLegacy adapts an org-credential fixture into the unified
+// coding-credential resolver shape. The legacy resolution cascade is gone —
+// agent API keys reach the sandbox env only through CodingCredentials — so
+// tests that seed agent keys via mockCredentialProvider get an equivalent
+// unified view derived from the same fixture.
+func codingCredsFromLegacy(creds *mockCredentialProvider) *mockCodingCredentialProvider {
+	out := &mockCodingCredentialProvider{resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{}}
+	if creds == nil {
+		return out
+	}
+	for provider, cred := range creds.byProvider {
+		if cred == nil || !provider.IsCodingAgentProvider() {
+			continue
+		}
+		id := cred.ID
+		if id == uuid.Nil {
+			id = uuid.New()
+		}
+		out.resolvable[provider] = append(out.resolvable[provider], models.DecryptedCodingCredential{
+			ID:       id,
+			OrgID:    cred.OrgID,
+			Provider: provider,
+			Label:    cred.Label,
+			Status:   models.CodingCredentialStatusActive,
+			Config:   cred.Config,
+		})
+	}
+	return out
+}
+
+// codingCredsForTest picks the unified provider for an orchestrator test rig.
+// Explicit fixtures win; tests that wire the legacy OAuth mocks (codexAuth /
+// claudeCodeAuth) keep CodingCredentials unwired so the legacy injection
+// fallback stays reachable; everything else derives a unified view from the
+// org-credential fixture.
+func codingCredsForTest(d testDeps) agent.CodingCredentialProvider {
+	if d.codingCreds != nil {
+		return d.codingCreds
+	}
+	if d.codexAuth != nil || d.claudeCodeAuth != nil {
+		return nil
+	}
+	return codingCredsFromLegacy(d.creds)
+}
+
 func buildOrchestrator(d testDeps) *agent.Orchestrator {
 	var orgStore agent.OrgStore
 	if d.orgs != nil {
@@ -1449,7 +1550,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		CodexAuth:          d.codexAuth,
 		ClaudeCodeAuth:     d.claudeCodeAuth,
 		Credentials:        d.creds,
-		CodingCredentials:  d.codingCreds,
+		CodingCredentials:  codingCredsForTest(d),
 		Snapshots:          snapshotStore,
 		Uploads:            d.uploads,
 		FileReader:         d.fileReader,
@@ -1459,6 +1560,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		IdentityResolver:   d.identityResolver,
 		SandboxAuth:        d.sandboxAuth,
 		SandboxCapacity:    d.sandboxCapacity,
+		StaticEgress:       d.staticEgress,
 		Users:              d.users,
 		NodeID:             d.nodeID,
 		Logger:             logger,
@@ -1947,24 +2049,25 @@ func TestRunAgent_LogsDuplicateMarkerFailureAndSucceeds(t *testing.T) {
 	buf := &syncBuffer{}
 	logger := zerolog.New(buf)
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		CodexAuth:        d.codexAuth,
-		ClaudeCodeAuth:   d.claudeCodeAuth,
-		Credentials:      d.creds,
-		Snapshots:        d.snapshots,
-		Cancels:          d.cancels,
-		Logger:           logger,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		CodexAuth:         d.codexAuth,
+		ClaudeCodeAuth:    d.claudeCodeAuth,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Snapshots:         d.snapshots,
+		Cancels:           d.cancels,
+		Logger:            logger,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -2106,24 +2209,25 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		CodexAuth:        d.codexAuth,
-		Credentials:      d.creds,
-		Snapshots:        d.snapshots,
-		Cancels:          d.cancels,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    1,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		CodexAuth:         d.codexAuth,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Snapshots:         d.snapshots,
+		Cancels:           d.cancels,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     1,
 	})
 
 	err := orch.RecoverSession(context.Background(), run)
@@ -2167,7 +2271,7 @@ func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T)
 	require.Contains(t, err.Error(), "begin runtime control", "RecoverSession should wrap the runtime initialization failure")
 
 	statuses := d.sessions.getStatusUpdates()
-	require.Equal(t, []string{"running", "running"}, statuses, "recovery should preserve the running status when runtime initialization fails")
+	require.Equal(t, []string{"running"}, statuses, "recovery should preserve the running status when runtime initialization fails")
 }
 
 // TestRunAgent_PreviewHoldsContainerSkipsDestroy covers the branch where
@@ -3374,6 +3478,14 @@ func TestRunAgent_PopulatesPMContext(t *testing.T) {
 				},
 			},
 		},
+		CodingCredentials: codingCredsFromLegacy(&mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-pm-ctx-test"},
+				},
+			},
+		}),
 		Logger: zerolog.Nop(),
 	})
 
@@ -3442,6 +3554,14 @@ func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
 				},
 			},
 		},
+		CodingCredentials: codingCredsFromLegacy(&mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-automation-test"},
+				},
+			},
+		}),
 		Logger: zerolog.Nop(),
 	})
 
@@ -3518,6 +3638,14 @@ func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReference
 				},
 			},
 		},
+		CodingCredentials: codingCredsFromLegacy(&mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-manual-ref-test"},
+				},
+			},
+		}),
 		Snapshots: mockSnapshots,
 		Logger:    zerolog.Nop(),
 	})
@@ -4536,7 +4664,7 @@ func TestContinueSession_FallsBackToFreshCodexExecWhenSnapshotRolloutIsMissing(t
 		resumeMode: agent.ResumeBySessionID,
 	}
 	d.codexAuth = &mockCodexAuthProvider{
-		cfg: &models.OpenAIChatGPTConfig{
+		cfg: &models.OpenAISubscriptionConfig{
 			AccessToken:  "chatgpt-access-token",
 			RefreshToken: "chatgpt-refresh-token",
 			ExpiresAt:    time.Now().Add(time.Hour),
@@ -4715,22 +4843,40 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	session.CurrentTurn = 1
 	session.SnapshotKey = strPtr("snapshots/test/session.tar")
 
-	threadModel := "gemini-2.5-pro"
+	threadModel := models.OpenCodeModelGPT52
 	threadAgentSessionID := ""
 	var createdCfg agent.SandboxConfig
 	var promptSeen *agent.AgentPrompt
 
 	d := defaultDeps()
 	d.adapter = &mockAgentAdapter{
-		name: models.AgentTypeGeminiCLI,
+		name: models.AgentTypeOpenCode,
 		executeFn: func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 			promptSeen = prompt
 			return &agent.AgentResult{
 				Diff:           "--- a/file.go\n+++ b/file.go",
 				Summary:        "Thread result",
-				AgentSessionID: "thread-gemini-session",
+				AgentSessionID: "thread-opencode-session",
 				ExitCode:       0,
 			}, nil
+		},
+	}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenCode: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenCode,
+					Config: models.OpenCodeConfig{
+						APIKey:          "opencode-key",
+						BackingProvider: models.ProviderOpenCode,
+						Model:           models.OpenCodeModelGPT52,
+					},
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+				},
+			},
 		},
 	}
 	d.issues.issue = issue
@@ -4741,11 +4887,11 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 		ThreadID:   &threadID,
 		TurnNumber: 2,
 		Role:       models.MessageRoleUser,
-		Content:    "Continue in the Gemini tab.",
+		Content:    "Continue in the OpenCode tab.",
 	}}
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
 		createdCfg = cfg
-		return &agent.Sandbox{ID: "gemini-thread-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
+		return &agent.Sandbox{ID: "opencode-thread-sandbox", Provider: "mock", WorkDir: cfg.WorkDir, HomeDir: cfg.HomeDir}, nil
 	}
 	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
 		_, err := io.ReadAll(reader)
@@ -4759,19 +4905,19 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	}
 
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
-		AgentType:            models.AgentTypeGeminiCLI,
+		AgentType:            models.AgentTypeOpenCode,
 		ModelOverride:        &threadModel,
 		ThreadAgentSessionID: nil,
 		ResultAgentSessionID: &threadAgentSessionID,
 		ThreadID:             &threadID,
 	})
 	require.NoError(t, err, "ContinueSession should execute with the thread-selected adapter")
-	require.Equal(t, threadModel, createdCfg.Env["GEMINI_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
+	require.Equal(t, threadModel, createdCfg.Env["OPENCODE_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
 	require.NotContains(t, createdCfg.Env, "ANTHROPIC_MODEL", "ContinueSession should not apply the parent session model when a thread override is provided")
 	require.NotNil(t, promptSeen, "ContinueSession should execute the thread adapter")
 	require.False(t, promptSeen.Continuation, "first turn in a blank thread should start a fresh agent transcript")
 	require.Empty(t, promptSeen.ResumeSessionID, "blank thread should not resume the parent session's agent session id")
-	require.Equal(t, "thread-gemini-session", threadAgentSessionID, "ContinueSession should report the thread agent session id to the worker")
+	require.Equal(t, "thread-opencode-session", threadAgentSessionID, "ContinueSession should report the thread agent session id to the worker")
 	turnUpdates := d.sessions.getTurnUpdates()
 	require.Len(t, turnUpdates, 1, "ContinueSession should still complete the shared session turn")
 	require.Equal(t, "parent-claude-session", turnUpdates[0].agentSessionID, "thread execution should not overwrite the parent session agent_session_id")
@@ -4965,6 +5111,67 @@ func TestContinueSession_ReusePathBailsOutOnCrossNodeClaim(t *testing.T) {
 	require.ErrorIs(t, err, agent.ErrSandboxOnDifferentNode,
 		"cross-node continue_session claim must return ErrSandboxOnDifferentNode so the worker re-enqueues for the correct node")
 	require.Equal(t, 0, d.sessions.clearContainerIDCalls, "container_id must be untouched on cross-node bail-out")
+}
+
+func TestContinueSession_ReusePathRejectsWrongStaticEgressNetwork(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	containerID := "direct-egress-container"
+	session.ContainerID = &containerID
+	thisNode := "worker-static"
+	session.WorkerNodeID = &thisNode
+	session.SandboxState = models.SandboxStateRunning
+
+	d := defaultDeps()
+	d.nodeID = thisNode
+	d.issues.issue = issue
+	d.orgs = &mockOrgStore{org: models.Organization{
+		ID:       orgID,
+		Settings: json.RawMessage(`{"sandbox_network":{"static_egress_enabled":true}}`),
+	}}
+	d.staticEgress = agent.StaticEgressRuntimeConfig{
+		Enabled:     true,
+		Capable:     true,
+		NetworkName: agent.DefaultStaticEgressNetwork,
+		PublicIP:    "203.0.113.10",
+	}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "follow-up",
+		},
+	}
+	d.provider.IsAliveFn = func(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+		require.Equal(t, containerID, sb.ID, "IsAlive should verify the recorded container before network inspection")
+		return true, nil
+	}
+	d.provider.ConnInfoFn = func(ctx context.Context, sb *agent.Sandbox) (*agent.SandboxConnectionInfo, error) {
+		require.Equal(t, containerID, sb.ID, "network inspection should check the recorded container")
+		return &agent.SandboxConnectionInfo{Environment: map[string]string{"DOCKER_HOST": "143-sandbox"}}, nil
+	}
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		t.Fatalf("provider.Create must not run for a live container whose network no longer matches org settings")
+		return nil, nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatalf("adapter.Execute must not run when the live container is on the wrong egress network")
+		return nil, nil
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(context.Background(), session, nil)
+	require.Error(t, err, "ContinueSession should fail closed when a reused container has the wrong egress network")
+	require.Contains(t, err.Error(), "restart environment to apply network setting", "ContinueSession should return an actionable restart message")
 }
 
 func TestContinueSession_ReusePathClearsContainerForDeadTargetNodeRecovery(t *testing.T) {
@@ -5314,19 +5521,20 @@ func TestRunAgent_AgentCredentialsInjected(t *testing.T) {
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -5347,16 +5555,37 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	d := defaultDeps()
 	credID := uuid.New()
 	expiresAt := time.Now().Add(45 * time.Minute)
-	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{
-		hasSub: true,
-		credID: &credID,
-		sub: &models.AnthropicSubscription{
-			AccessToken:   "sub-access-1",
-			RefreshToken:  "sub-refresh-1",
-			ExpiresAt:     expiresAt,
-			AccountType:   "claude_max",
-			RateLimitTier: "default_claude_max_20x",
-			Scopes:        []string{"user:profile", "user:inference", "user:sessions:claude_code"},
+	// Subscription credentials live in the unified store; the row is picked
+	// ahead of the org API-key row and injected as a credentials file.
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderAnthropicSubscription: {
+				{
+					ID:       credID,
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropicSubscription,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:   "sub-access-1",
+						RefreshToken:  "sub-refresh-1",
+						ExpiresAt:     expiresAt,
+						AccountType:   "claude_max",
+						RateLimitTier: "default_claude_max_20x",
+						Scopes:        []string{"user:profile", "user:inference", "user:sessions:claude_code"},
+					},
+				},
+			},
+			models.ProviderAnthropic: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderAnthropic,
+					Priority: 2,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-default-test"},
+				},
+			},
 		},
 	}
 
@@ -5379,10 +5608,11 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 	err := orch.RunAgent(context.Background(), run)
 	require.NoError(t, err, "run should succeed with a Claude subscription")
 
-	// Keep the API key in env as a fallback if token refresh later fails.
-	// The Claude Code CLI should still prefer the credentials file we wrote.
-	require.Equal(t, "sk-ant-default-test", capturedCfg.Env["ANTHROPIC_API_KEY"],
-		"Anthropic API key should remain available as a fallback when a subscription is present")
+	// When the resolver picks the subscription row, the API-key env var is
+	// deliberately absent — the credentials file is the sole auth path so the
+	// CLI cannot silently bill the API key.
+	require.Empty(t, capturedCfg.Env["ANTHROPIC_API_KEY"],
+		"Anthropic API key env var should not be set when the subscription row is picked")
 
 	// Credentials file was written to the expected path with the CLI's schema.
 	credsPath := "/home/sandbox/.claude/.credentials.json"
@@ -5485,6 +5715,9 @@ func TestRunAgent_ClaudeSubscriptionTokenFailureFallsBackToAPIKey(t *testing.T) 
 		hasSub:   true,
 		tokenErr: errors.New("refresh failed"),
 	}
+	// The unified resolver picks the org API-key row; the failing legacy
+	// subscription provider must not block the run.
+	d.codingCreds = codingCredsFromLegacy(d.creds)
 
 	var capturedCfg agent.SandboxConfig
 	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
@@ -5522,19 +5755,20 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -5557,6 +5791,55 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
 }
 
+func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	// No usable credential anywhere, but the org holds a Claude subscription
+	// row that was marked invalid after a rejected token refresh. The run
+	// must fail with the reconnect guidance, not the misleading "no
+	// credentials are configured".
+	d.creds = &mockCredentialProvider{}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{invalidSub: true}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "claude subscription invalid for claude code agent")
+
+	failures := d.sessions.getFailureUpdates()
+	require.Len(t, failures, 1)
+	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
+	require.Contains(t, failures[0].explanation, "no longer valid",
+		"the explanation should say the subscription was invalidated")
+	require.Contains(t, failures[0].explanation, "Reconnect",
+		"the explanation should tell the user to reconnect")
+	require.NotContains(t, failures[0].explanation, "No Claude Code credentials are configured",
+		"a user who connected a subscription must not be told nothing is configured")
+}
+
+func TestRunAgent_InvalidSubscriptionProbeErrorFallsBackToGenericFailure(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{}
+	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{invalidSubErr: errors.New("db down")}
+
+	orch := buildOrchestrator(d)
+	err := orch.RunAgent(context.Background(), run)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no credentials for claude code agent",
+		"a failed probe should fall back to the generic missing-credentials failure")
+}
+
 func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	t.Parallel()
 
@@ -5568,7 +5851,7 @@ func TestRunAgent_CodexUsesAuthJsonNotEnvVar(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
-		cfg: &models.OpenAIChatGPTConfig{
+		cfg: &models.OpenAISubscriptionConfig{
 			AccessToken:  "chatgpt-access-token",
 			RefreshToken: "chatgpt-refresh-token",
 			ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -5683,7 +5966,7 @@ func TestRunAgent_CodexAuthWritesToSandboxWorkdir(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
-		cfg: &models.OpenAIChatGPTConfig{
+		cfg: &models.OpenAISubscriptionConfig{
 			AccessToken:  "test-access-token",
 			RefreshToken: "test-refresh-token",
 			ExpiresAt:    time.Date(2026, time.February, 23, 12, 0, 0, 0, time.UTC),
@@ -5752,7 +6035,7 @@ func TestRunAgent_CodexSandboxHasHomeEnv(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
-		cfg: &models.OpenAIChatGPTConfig{
+		cfg: &models.OpenAISubscriptionConfig{
 			AccessToken:  "test-token",
 			RefreshToken: "test-refresh",
 			ExpiresAt:    time.Date(2026, time.February, 23, 12, 0, 0, 0, time.UTC),
@@ -6150,6 +6433,54 @@ func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T)
 		"assistant reply must be tagged with the Codex 2 thread, not Main — pre-fix this was the load-bearing assertion that failed in prod")
 }
 
+func TestContinueSession_UsesQueuedMessageIDAsExactCarrier(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	threadID := uuid.New()
+	queuedMessageID := int64(10)
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 3
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 9, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "previous reply"},
+		{ID: queuedMessageID, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 3, Role: models.MessageRoleUser, Content: "change the code from this queued message"},
+		{ID: 11, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 4, Role: models.MessageRoleUser, Content: "newer message that belongs to a later drain"},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.Equal(t, "change the code from this queued message", prompt.UserMessage, "queued_message_id should make ContinueSession use the exact queued message instead of inferring the newest row")
+		return &agent.AgentResult{
+			Summary:  "queued reply",
+			ExitCode: 0,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		ThreadID:        &threadID,
+		QueuedMessageID: &queuedMessageID,
+	})
+	require.NoError(t, err, "ContinueSession should process the exact queued message")
+}
+
 func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testing.T) {
 	t.Parallel()
 
@@ -6184,6 +6515,9 @@ func TestContinueSession_FreshResumeClaudeTokenFailureFallsBackToAPIKey(t *testi
 		hasSub:   true,
 		tokenErr: errors.New("refresh failed"),
 	}
+	// The unified resolver picks the org API-key row; the failing legacy
+	// subscription provider must not block the fresh resume.
+	d.codingCreds = codingCredsFromLegacy(d.creds)
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.False(t, prompt.Continuation, "fresh resume should rebuild context instead of using continuation mode")
 		require.Contains(t, prompt.UserPrompt, "Please keep going without the old snapshot.", "fresh resume should include the latest user message in the rebuilt prompt")
@@ -6299,6 +6633,10 @@ func TestContinueSession_ClaudeTokenFailureRemovesStaleCredentialsBeforeAPIKeyFa
 		hasSub:   true,
 		tokenErr: errors.New("refresh failed"),
 	}
+	// The unified resolver picks the org API-key row; the stale subscription
+	// credentials file from a previous turn must be cleared before the run
+	// proceeds on API-key billing.
+	d.codingCreds = codingCredsFromLegacy(d.creds)
 	d.provider.Files["/home/sandbox/.claude/.credentials.json"] = []byte(`{"stale":true}`)
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 		if cmd == "rm -f '/home/sandbox/.claude/.credentials.json'" {
@@ -7043,6 +7381,72 @@ func TestContinueSession_AuthSocketClosedOnHydrateFailure(t *testing.T) {
 	require.Equal(t, 1, authStub.closeCalls, "auth socket must be closed when hydrate fails after the listener was opened")
 }
 
+func TestContinueSession_HydrateFailureCleanupUsesDetachedContext(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	snapshotKey := "snap-key"
+	session.SnapshotKey = &snapshotKey
+
+	d := defaultDeps()
+	d.creds = &mockCredentialProvider{
+		byProvider: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderAnthropic: {
+				Provider: models.ProviderAnthropic,
+				Config:   models.AnthropicConfig{APIKey: "sk-ant-test"},
+			},
+		},
+	}
+	d.orgs = &mockOrgStore{org: models.Organization{ID: orgID}}
+	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
+	d.users = fakeUserStore{}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{ID: 1, SessionID: session.ID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "retry me"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d.provider.RestoreFn = func(_ context.Context, _ *agent.Sandbox, _ io.Reader) error {
+		cancel()
+		return context.Canceled
+	}
+
+	orch := buildOrchestrator(d)
+	err := orch.ContinueSession(ctx, session, nil)
+	require.Error(t, err, "ContinueSession should propagate the hydrate cancellation")
+	require.Contains(t, err.Error(), "hydrate sandbox", "ContinueSession should surface the hydrate failure")
+
+	var idleRevert *statusUpdateContext
+	for _, update := range d.sessions.getStatusUpdateContexts() {
+		if update.status == models.SessionStatusIdle {
+			updateCopy := update
+			idleRevert = &updateCopy
+			break
+		}
+	}
+	require.NotNil(t, idleRevert, "hydrate failure should revert the session to idle")
+	require.NoError(t, idleRevert.err, "hydrate failure session cleanup should use a detached context")
+
+	var snapshottedRevert *sandboxStateUpdateContext
+	for _, update := range d.sessions.getSandboxStateUpdateContexts() {
+		if update.state == models.SandboxStateSnapshotted {
+			updateCopy := update
+			snapshottedRevert = &updateCopy
+			break
+		}
+	}
+	require.NotNil(t, snapshottedRevert, "hydrate failure should restore the snapshotted sandbox state")
+	require.NoError(t, snapshottedRevert.err, "hydrate failure sandbox-state cleanup should use a detached context")
+}
+
 // TestContinueSession_AcquireHoldErrorFailsTurn covers the branch where
 // AcquireTurnHold errors after fresh sandbox creation: we must destroy the
 // local sandbox and fail the turn rather than leaking a container that
@@ -7555,7 +7959,7 @@ func TestContinueSession_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *test
 			// exercising is the post-token sandbox-side write, not auth
 			// invalidity.
 			d.codexAuth = &mockCodexAuthProvider{
-				cfg: &models.OpenAIChatGPTConfig{
+				cfg: &models.OpenAISubscriptionConfig{
 					AccessToken:  "valid-access",
 					RefreshToken: "valid-refresh",
 					ExpiresAt:    time.Now().Add(time.Hour),
@@ -7773,7 +8177,7 @@ func TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter(t *testing.T) 
 			d.adapter.name = models.AgentTypeCodex
 			d.issues.issue = issue
 			d.codexAuth = &mockCodexAuthProvider{
-				cfg: &models.OpenAIChatGPTConfig{
+				cfg: &models.OpenAISubscriptionConfig{
 					AccessToken:  "valid-access",
 					RefreshToken: "valid-refresh",
 					ExpiresAt:    time.Now().Add(time.Hour),
@@ -7951,7 +8355,7 @@ func TestRunAgent_CodexAuthInjectsTokenFromGetValidToken(t *testing.T) {
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeCodex
 	d.codexAuth = &mockCodexAuthProvider{
-		cfg: &models.OpenAIChatGPTConfig{
+		cfg: &models.OpenAISubscriptionConfig{
 			AccessToken:  "access-token",
 			RefreshToken: "refresh-token",
 			ExpiresAt:    time.Now().Add(1 * time.Hour),
@@ -8237,23 +8641,24 @@ func TestResolveSessionTimeout_UsesOrgOverride(t *testing.T) {
 
 	d := defaultDeps()
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Snapshots:        d.snapshots,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Snapshots:         d.snapshots,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	got := orch.ResolveSessionTimeout(context.Background(), orgID)
@@ -8273,23 +8678,24 @@ func TestResolveSessionTimeout_ClampsBelowFloor(t *testing.T) {
 
 	d := defaultDeps()
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Snapshots:        d.snapshots,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              &mockOrgStore{org: models.Organization{ID: orgID, Settings: settings}},
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Snapshots:         d.snapshots,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	got := orch.ResolveSessionTimeout(context.Background(), orgID)
@@ -8303,23 +8709,24 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreErrors(t *testing.T) {
 
 	d := defaultDeps()
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		SessionMessages:  d.messages,
-		DecisionLog:      d.decisions,
-		ProjectTasks:     d.projects,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             &mockOrgStore{err: errors.New("db down")},
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Snapshots:        d.snapshots,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{d.adapter.Name(): d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		SessionMessages:   d.messages,
+		DecisionLog:       d.decisions,
+		ProjectTasks:      d.projects,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              &mockOrgStore{err: errors.New("db down")},
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Snapshots:         d.snapshots,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	got := orch.ResolveSessionTimeout(context.Background(), orgID)
@@ -8342,12 +8749,13 @@ func TestResolveSessionTimeout_FallsBackWhenOrgStoreNil(t *testing.T) {
 		Issues:           d.issues,
 		Repositories:     d.repos,
 		// Orgs intentionally nil.
-		Jobs:          d.jobs,
-		GitHub:        d.github,
-		Credentials:   d.creds,
-		Snapshots:     d.snapshots,
-		Logger:        zerolog.Nop(),
-		MaxConcurrent: 3,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Snapshots:         d.snapshots,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	got := orch.ResolveSessionTimeout(context.Background(), testOrg())
@@ -9015,7 +9423,7 @@ func TestRunAgent_RevertsToPendingWhenRuntimeInitFails(t *testing.T) {
 	require.Contains(t, err.Error(), "begin runtime control", "RunAgent should wrap the runtime initialization failure")
 
 	statuses := d.sessions.getStatusUpdates()
-	require.Equal(t, []string{"running", "pending"}, statuses, "RunAgent should roll the session back out of running when runtime initialization fails")
+	require.Equal(t, []string{"pending"}, statuses, "RunAgent should not expose a running state when atomic runtime initialization fails")
 }
 
 // TestRunAgent_UserCancelTakesPrecedenceOverDeadline guards the ordering
@@ -9117,20 +9525,21 @@ func TestRunAgent_AmpCredentialEnv(t *testing.T) {
 	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             orgs,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              orgs,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	require.NoError(t, orch.RunAgent(context.Background(), run))
@@ -9174,20 +9583,21 @@ func TestRunAgent_PiDedicatedCredentialEnv(t *testing.T) {
 	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             orgs,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              orgs,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	require.NoError(t, orch.RunAgent(context.Background(), run))
@@ -9231,11 +9641,12 @@ func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		Issues:           d.issues,
 		Repositories:     d.repos,
 		// Orgs intentionally omitted to simulate "no Amp/Pi default settings source".
-		Jobs:          d.jobs,
-		GitHub:        d.github,
-		Credentials:   d.creds,
-		Logger:        zerolog.Nop(),
-		MaxConcurrent: 3,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -9281,25 +9692,82 @@ func TestRunAgent_PiModelOverrideReachesSandbox(t *testing.T) {
 	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             orgs,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypePi: d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              orgs,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	require.NoError(t, orch.RunAgent(context.Background(), run))
 	require.Equal(t, "pi-key", capturedCfg.Env["PI_API_KEY"], "Pi should keep using the dedicated Pi credential")
 	require.Equal(t, models.PiModelGPT54, capturedCfg.Env["PI_MODEL"], "per-run model override should reach the sandbox env")
+}
+
+func TestBuildIntegrationSkills_SessionTabsRespectOrgSetting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		settings     models.OrgSettings
+		settingsErr  error
+		wantTabTools bool
+	}{
+		{
+			name:         "default exposes session tab tools",
+			settings:     models.OrgSettings{},
+			wantTabTools: true,
+		},
+		{
+			name: "disabled hides session tab tools",
+			settings: models.OrgSettings{
+				CodingAgentTabToolsEnabled: boolPtr(false),
+			},
+			wantTabTools: false,
+		},
+		{
+			name:         "settings lookup failure hides session tab tools",
+			settingsErr:  errors.New("settings unavailable"),
+			wantTabTools: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			settingsJSON, err := json.Marshal(tt.settings)
+			require.NoError(t, err, "org settings fixture should marshal")
+
+			orch := agent.NewOrchestrator(agent.OrchestratorConfig{
+				Provider:          testutil.NewMockSandboxProvider(),
+				Orgs:              &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}, err: tt.settingsErr},
+				Credentials:       &mockCredentialProvider{},
+				InternalAPIURL:    "http://internal-api",
+				InternalAPISecret: "secret",
+				Logger:            zerolog.Nop(),
+			})
+
+			doc := orch.BuildIntegrationSkills(context.Background(), orgID)
+			require.Contains(t, doc, "143-tools pr create", "PR creation should remain available when internal API credentials are configured")
+			if tt.wantTabTools {
+				require.Contains(t, doc, "`session-tabs`", "default-enabled orgs should expose session tab tools in sandbox docs")
+				return
+			}
+			require.NotContains(t, doc, "`session-tabs`", "disabled orgs should hide session tab tools from sandbox docs")
+		})
+	}
 }
 
 // TestRunAgent_PiMissingCredentialFailsFast asserts that a Pi run fails fast
@@ -9331,11 +9799,12 @@ func TestRunAgent_PiMissingCredentialFailsFast(t *testing.T) {
 		Issues:           d.issues,
 		Repositories:     d.repos,
 		// Orgs and credentials intentionally empty — no Pi credential anywhere.
-		Jobs:          d.jobs,
-		GitHub:        d.github,
-		Credentials:   d.creds,
-		Logger:        zerolog.Nop(),
-		MaxConcurrent: 3,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	err := orch.RunAgent(context.Background(), run)
@@ -9400,21 +9869,22 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             orgs,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		OrgSettingsCache: cache,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              orgs,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		OrgSettingsCache:  cache,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	// Cache is warm: agent_config must come from the cache, not the org store.
@@ -9493,21 +9963,22 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	}
 
 	orch := agent.NewOrchestrator(agent.OrchestratorConfig{
-		Provider:         d.provider,
-		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
-		Sessions:         d.sessions,
-		SessionLogs:      d.logs,
-		SessionQuestions: d.questions,
-		DecisionLog:      d.decisions,
-		Issues:           d.issues,
-		Repositories:     d.repos,
-		Orgs:             orgs,
-		Jobs:             d.jobs,
-		GitHub:           d.github,
-		Credentials:      d.creds,
-		OrgSettingsCache: cache,
-		Logger:           zerolog.Nop(),
-		MaxConcurrent:    3,
+		Provider:          d.provider,
+		Adapters:          map[models.AgentType]agent.AgentAdapter{models.AgentTypeAmp: d.adapter},
+		Sessions:          d.sessions,
+		SessionLogs:       d.logs,
+		SessionQuestions:  d.questions,
+		DecisionLog:       d.decisions,
+		Issues:            d.issues,
+		Repositories:      d.repos,
+		Orgs:              orgs,
+		Jobs:              d.jobs,
+		GitHub:            d.github,
+		Credentials:       d.creds,
+		CodingCredentials: codingCredsForTest(d),
+		OrgSettingsCache:  cache,
+		Logger:            zerolog.Nop(),
+		MaxConcurrent:     3,
 	})
 
 	// First run: clock is at base, cache is still fresh — must serve the

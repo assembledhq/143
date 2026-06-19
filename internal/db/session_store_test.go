@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ var sessionTestColumns = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
 }
 
 func anyDBArgs(count int) []interface{} {
@@ -46,6 +47,30 @@ func anyDBArgs(count int) []interface{} {
 		args[i] = pgxmock.AnyArg()
 	}
 	return args
+}
+
+func setSessionTestColumnValue(row []interface{}, column string, value interface{}) {
+	for i, col := range sessionTestColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown session test column: " + column)
+}
+
+func sqlFragmentPattern(fragment string) string {
+	fields := strings.Fields(fragment)
+	for i := range fields {
+		fields[i] = regexp.QuoteMeta(fields[i])
+	}
+	return strings.Join(fields, `\s+`)
+}
+
+func claimForResumeQueryPattern() string {
+	return `UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+` +
+		sqlFragmentPattern(sessionResumeRuntimeResetAssignments) +
+		`,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`
 }
 
 // newAgentSessionRow returns a completed-session row for mock queries. The
@@ -116,6 +141,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // linear_identifier_hint
 		"none",         // linear_prepare_state
 		nil,            // deleted_at
+		nil,            // capability_snapshot
 		nil,            // git_identity_source
 		nil,            // git_identity_user_id
 		createdAt,
@@ -335,6 +361,23 @@ func TestSessionStore_QueryColumnsStayInSyncWithSessionModel(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestSessionStore_ResumeRuntimeResetCoversAllRuntimeColumns(t *testing.T) {
+	t.Parallel()
+
+	for _, column := range sessionTestColumns {
+		if !strings.HasPrefix(column, "runtime_") {
+			continue
+		}
+		require.Contains(
+			t,
+			sessionResumeRuntimeResetAssignments,
+			column+" =",
+			"ClaimForResume should reset %s so stale runtime-control fields cannot survive a resume claim",
+			column,
+		)
 	}
 }
 
@@ -1139,7 +1182,7 @@ func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing
 	issueID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
@@ -1153,6 +1196,79 @@ func TestSessionStore_UpdateStatus_PublishesAndQueriesTerminalCleanup(t *testing
 	require.NoError(t, err, "ListTerminalEndedBefore should succeed")
 	require.Len(t, rows, 1, "ListTerminalEndedBefore should return the matching session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateStatusTerminalClearsStaleFailureDetails(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status models.SessionStatus
+	}{
+		{name: "completed clears stale failure details", status: models.SessionStatusCompleted},
+		{name: "pr created clears stale failure details", status: models.SessionStatusPRCreated},
+		{name: "skipped clears stale failure details", status: models.SessionStatusSkipped},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			store.SetLogger(zerolog.Nop())
+			store.SetStreams(nil)
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			issueID := uuid.New()
+			now := time.Now()
+
+			mock.ExpectQuery(`UPDATE sessions SET status = @status, completed_at = now\(\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+			err = store.UpdateStatus(context.Background(), orgID, sessionID, tt.status)
+			require.NoError(t, err, "UpdateStatus should clear stale failure details for successful terminal status")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_SetRepositoryContextScopesToOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	branch := "main"
+	row := newAgentSessionRow(sessionID, uuid.Nil, orgID, now)
+	setSessionTestColumnValue(row, "repository_id", &repoID)
+	setSessionTestColumnValue(row, "target_branch", &branch)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
+
+	got, err := store.SetRepositoryContext(context.Background(), orgID, sessionID, repoID, &branch)
+	require.NoError(t, err, "SetRepositoryContext should update the session repository inside the org")
+	require.NotNil(t, got.RepositoryID, "SetRepositoryContext should return the selected repository")
+	require.Equal(t, repoID, *got.RepositoryID, "SetRepositoryContext should persist the selected repository")
+	require.NotNil(t, got.TargetBranch, "SetRepositoryContext should return the selected branch")
+	require.Equal(t, branch, *got.TargetBranch, "SetRepositoryContext should persist the selected branch")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository context update should be scoped by org_id")
 }
 
 func TestSessionStore_SettersAndUpdateStatusError(t *testing.T) {
@@ -1201,6 +1317,32 @@ func TestSessionStore_UpdateStatusRunningClearsRuntimeControlFields(t *testing.T
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionStore_MarkRunningWithSandboxStateClearsRuntimeControlFields(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	store.SetStreams(nil)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery(`runtime_soft_deadline_at = NULL[\s\S]+runtime_hard_deadline_at = NULL[\s\S]+runtime_last_progress_at = NULL[\s\S]+runtime_last_progress_type = ''[\s\S]+runtime_last_progress_strength = ''[\s\S]+runtime_stop_reason = ''[\s\S]+runtime_graceful_stop_at = NULL`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
+
+	err = store.MarkRunningWithSandboxState(context.Background(), orgID, sessionID, models.SandboxStateRunning)
+
+	require.NoError(t, err, "MarkRunningWithSandboxState should clear stale runtime control fields")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
 	t.Parallel()
 
@@ -1212,7 +1354,7 @@ func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
 	store.SetLogger(zerolog.Nop())
 	store.SetStreams(nil)
 
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
@@ -1262,7 +1404,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 		issueID := uuid.New()
 		orgID := uuid.New()
 
-		mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
+		mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...),
@@ -1364,7 +1506,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			name: "resumes completed session successfully",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(claimForResumeQueryPattern()).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(
@@ -1377,7 +1519,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 		{
 			name: "returns error when no matching row",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(claimForResumeQueryPattern()).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 			},
@@ -1389,7 +1531,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
 				row[4] = models.SessionStatusRunning
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(claimForResumeQueryPattern()).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
@@ -1403,7 +1545,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 				now := time.Now()
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
 				row[4] = models.SessionStatusRunning
-				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', completed_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+RETURNING`).
+				mock.ExpectQuery(claimForResumeQueryPattern()).
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
@@ -1417,7 +1559,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			mock, err := pgxmock.NewPool()
-			require.NoError(t, err)
+			require.NoError(t, err, "should create pgx mock pool")
 			defer mock.Close()
 
 			store := NewSessionStore(mock)
@@ -1425,11 +1567,11 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 
 			_, err = store.ClaimForResume(context.Background(), uuid.New(), uuid.New())
 			if tt.wantErr {
-				require.Error(t, err)
+				require.Error(t, err, "ClaimForResume should return an error when no session can be resumed")
 			} else {
-				require.NoError(t, err)
+				require.NoError(t, err, "ClaimForResume should resume the session")
 			}
-			require.NoError(t, mock.ExpectationsWereMet())
+			require.NoError(t, mock.ExpectationsWereMet(), "all session resume expectations should be met")
 		})
 	}
 }
@@ -1568,6 +1710,9 @@ func TestSessionStore_SoftDelete(t *testing.T) {
 	mock.ExpectExec("UPDATE sessions SET deleted_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("WITH target_runs AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
 	err = store.SoftDelete(context.Background(), uuid.New(), uuid.New())
 	require.NoError(t, err, "SoftDelete should not return an error")
@@ -2670,9 +2815,10 @@ func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
 	store := NewSessionStore(mock)
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	issueID := uuid.New()
 	now := time.Now().UTC()
 
-	mock.ExpectExec(`recovery_state = CASE\s+WHEN recovery_state = 'recovering' THEN recovery_state ELSE '' END`).
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET status = @status[\s\S]+started_at = @runtime_started_at[\s\S]+completed_at = NULL[\s\S]+runtime_soft_deadline_at = @runtime_soft_deadline_at[\s\S]+recovery_state = CASE\s+WHEN recovery_state = 'recovering' THEN recovery_state ELSE '' END[\s\S]+RETURNING`).
 		WithArgs(
 			pgxmock.AnyArg(),
 			pgxmock.AnyArg(),
@@ -2682,8 +2828,10 @@ func TestSessionStore_BeginRuntime_PreservesRecoveringState(t *testing.T) {
 			pgxmock.AnyArg(),
 			pgxmock.AnyArg(),
 			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
 		).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
 	err = store.BeginRuntime(
 		context.Background(),

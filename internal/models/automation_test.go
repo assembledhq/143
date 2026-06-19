@@ -18,6 +18,7 @@ func TestValidateAutomationScheduleType(t *testing.T) {
 	}{
 		{name: "interval is valid", input: AutomationScheduleInterval},
 		{name: "cron is valid", input: AutomationScheduleCron},
+		{name: "none is valid", input: AutomationScheduleNone},
 		{name: "empty is invalid", input: "", expectErr: true},
 		{name: "garbage is invalid", input: "every-5-minutes", expectErr: true},
 	}
@@ -58,6 +59,32 @@ func TestAutomationIdentityScopeValidate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+		})
+	}
+}
+
+func TestAutomationProductTriggerValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		trigger   AutomationProductTrigger
+		expectErr bool
+	}{
+		{name: "pr opened", trigger: AutomationProductTriggerPROpened},
+		{name: "checks completed", trigger: AutomationProductTriggerChecksCompleted},
+		{name: "raw github event is not a valid product trigger", trigger: AutomationProductTrigger("github.check_suite.completed"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.trigger.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "invalid product trigger should fail validation")
+				return
+			}
+			require.NoError(t, err, "known product trigger should pass validation")
 		})
 	}
 }
@@ -203,6 +230,11 @@ func TestComputeNextRunAt(t *testing.T) {
 	got, err = cronNoTz.ComputeNextRunAt(from)
 	require.NoError(t, err)
 	require.Equal(t, time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC), got)
+
+	none := Automation{ScheduleType: AutomationScheduleNone}
+	got, err = none.ComputeNextRunAt(from)
+	require.NoError(t, err)
+	require.True(t, got.IsZero(), "schedule_type=none should not compute a next scheduled run")
 }
 
 func TestValidateAutomationRunStatus(t *testing.T) {
@@ -308,4 +340,38 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"])
 	require.Equal(t, float64(0), decoded["pre_pr_review_loops"], "config snapshot should include disabled pre-PR review by default")
 	require.Equal(t, "develop", decoded["base_branch"])
+}
+
+func TestAutomationGitHubEventValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		event   AutomationGitHubEvent
+		wantErr bool
+	}{
+		{name: "pull request opened", event: AutomationGitHubEventPullRequestOpened},
+		{name: "pull request updated", event: AutomationGitHubEventPullRequestUpdated},
+		{name: "pull request merged", event: AutomationGitHubEventPullRequestMerged},
+		{name: "check suite completed", event: AutomationGitHubEventCheckSuiteCompleted},
+		{name: "check run completed", event: AutomationGitHubEventCheckRunCompleted},
+		{name: "issue comment created", event: AutomationGitHubEventIssueCommentCreated},
+		{name: "pull request review submitted", event: AutomationGitHubEventPullRequestReviewSubmitted},
+		{name: "pull request review comment created", event: AutomationGitHubEventPullRequestReviewCommentCreated},
+		{name: "empty", event: AutomationGitHubEvent(""), wantErr: true},
+		{name: "unknown", event: AutomationGitHubEvent("github.unknown"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.event.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "invalid GitHub automation event should fail validation")
+				return
+			}
+			require.NoError(t, err, "supported GitHub automation event should validate")
+		})
+	}
 }

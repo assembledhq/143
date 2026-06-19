@@ -73,6 +73,16 @@ function formatDeliverySummary(thread: SessionThread): string | null {
   return `Delivery ${stateLabel}${parts.length > 0 ? ` · ${parts.join(" · ")}` : ""}`;
 }
 
+function formatThreadProvenance(thread: SessionThread): string | null {
+  if (thread.created_by_source === "agent_tool") {
+    return "Created by agent via 143-tools";
+  }
+  if (thread.created_by_source === "system") {
+    return "Created by system";
+  }
+  return null;
+}
+
 // Compute per-thread overlap: a path counts as an overlap when at least two
 // distinct active threads have touched it. Computed client-side from the
 // session-wide file events so the tab strip can render a badge without an
@@ -176,6 +186,7 @@ export function AgentTabStrip({
       activeThread.cancel_requested_at != null && isActiveStatus(activeThread.status);
     const queued = activeThread.pending_message_count ?? 0;
     const deliverySummary = formatDeliverySummary(activeThread);
+    const provenance = formatThreadProvenance(activeThread);
     const needsAttention =
       activeThread.status === "awaiting_input" || activeThread.status === "failed";
     const showUnreadDot = shouldShowUnreadDot(activeThread, viewedThreadIds);
@@ -218,13 +229,13 @@ export function AgentTabStrip({
                     )}
                     {needsAttention && (
                       <span
-                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                        className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
                         aria-label="Needs attention"
                       />
                     )}
                     {overlap.length > 0 && (
                       <AlertTriangle
-                        className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                        className="h-3 w-3 shrink-0 text-warning"
                         aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
                       />
                     )}
@@ -240,10 +251,11 @@ export function AgentTabStrip({
                       {statusLabel}
                       {queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}
                     </div>
+                    {provenance && <div className="text-muted-foreground">{provenance}</div>}
                     {deliverySummary && <div className="text-muted-foreground">{deliverySummary}</div>}
                     {overlap.length > 0 && (
                       <div className="pt-1">
-                        <div className="font-medium text-amber-700 dark:text-amber-400">
+                        <div className="font-medium text-warning">
                           Overlap with another tab:
                         </div>
                         <ul className="text-muted-foreground">
@@ -277,6 +289,7 @@ export function AgentTabStrip({
               aria-label="Add agent tab"
               title="Add agent tab (t)"
               onClick={onAddTab}
+              disabled={addTabPending}
             >
               <Plus className="h-3.5 w-3.5" />
             </Button>
@@ -309,6 +322,7 @@ export function AgentTabStrip({
                   const isCancelling = thread.cancel_requested_at != null && isActiveStatus(thread.status);
                   const queued = thread.pending_message_count ?? 0;
                   const deliverySummary = formatDeliverySummary(thread);
+                  const provenance = formatThreadProvenance(thread);
                   const showUnreadDot = shouldShowUnreadDot(thread, viewedThreadIds);
                   const showArchiveButton = canArchiveThread(thread, tabs.length);
                   const isNonInteractive = nonInteractiveThreadIds?.has(thread.id) ?? false;
@@ -350,11 +364,11 @@ export function AgentTabStrip({
                                 </Badge>
                               )}
                               {needsAttention && (
-                                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-label="Needs attention" />
+                                <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-label="Needs attention" />
                               )}
                               {overlap.length > 0 && (
                                 <AlertTriangle
-                                  className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400"
+                                  className="h-3 w-3 shrink-0 text-warning"
                                   aria-label={`Overlaps with another tab on ${overlap.length} file${overlap.length === 1 ? "" : "s"}`}
                                 />
                               )}
@@ -365,10 +379,11 @@ export function AgentTabStrip({
                           <div className="space-y-1">
                             <div className="font-medium">{thread.label} <span className="font-normal text-muted-foreground">- {agentLabel}</span></div>
                             <div className="text-muted-foreground">{statusLabel}{queued > 0 ? ` · ${queued} message${queued === 1 ? "" : "s"} queued` : ""}</div>
+                            {provenance && <div className="text-muted-foreground">{provenance}</div>}
                             {deliverySummary && <div className="text-muted-foreground">{deliverySummary}</div>}
                             {overlap.length > 0 && (
                               <div className="pt-1">
-                                <div className="font-medium text-amber-700 dark:text-amber-400">Overlap with another tab:</div>
+                                <div className="font-medium text-warning">Overlap with another tab:</div>
                                 <ul className="text-muted-foreground">
                                   {overlap.slice(0, 5).map((p) => (
                                     <li key={p} className="truncate">{p}</li>

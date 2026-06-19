@@ -33,8 +33,7 @@ func newPublishTestStreams(t *testing.T) (*cache.EvalBatchStreams, *cache.EvalBo
 func TestPublishEvalBatchSignal_DeliversToBatchSubscriber(t *testing.T) {
 	t.Parallel()
 
-	// Locks in the contract that worker code paths (newRunEvalHandler at
-	// run-start and after CompleteBatchIfDone) call publishEvalBatchSignal
+	// Locks in the contract that session-backed eval worker paths publish
 	// with the right shape and the resulting event lands on the per-batch
 	// channel. Without this test, a future refactor could quietly drop the
 	// publish call and break the SSE detail page without any unit failure.

@@ -8,20 +8,20 @@ import { EmptyState } from "@/components/empty-state";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import { cn } from "@/lib/utils";
-import type { CodingAuth } from "@/lib/types";
+import type { CodingCredentialSummary } from "@/lib/types";
 
 type MoveDirection = "up" | "down";
 export type DropPosition = "before" | "after";
 
-function agentLabel(agent: CodingAuth["agent"]) {
+function agentLabel(agent: CodingCredentialSummary["agent"]) {
   return AGENTS_BY_KEY[agent]?.label ?? agent;
 }
 
-function authTypeLabel(type: CodingAuth["auth_type"]) {
+function authTypeLabel(type: CodingCredentialSummary["auth_type"]) {
   return type === "subscription" ? "Subscription" : "API key";
 }
 
-function statusLabel(status: CodingAuth["status"]) {
+function statusLabel(status: CodingCredentialSummary["status"]) {
   switch (status) {
     case "healthy":
       return "Healthy";
@@ -36,21 +36,21 @@ function statusLabel(status: CodingAuth["status"]) {
   }
 }
 
-function statusBadgeClass(status: CodingAuth["status"]) {
+function statusBadgeClass(status: CodingCredentialSummary["status"]) {
   switch (status) {
     case "healthy":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700";
+      return "border-success/30 bg-success/10 text-success";
     case "rate_limited":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-700";
+      return "border-warning/30 bg-warning/10 text-warning";
     case "needs_reauth":
     case "invalid":
-      return "border-red-500/30 bg-red-500/10 text-red-700";
+      return "border-destructive/30 bg-destructive/10 text-destructive";
     default:
       return "";
   }
 }
 
-function rateLimitNote(row: CodingAuth) {
+function rateLimitNote(row: CodingCredentialSummary) {
   if (row.status !== "rate_limited") return null;
   if (row.rate_limited_until) {
     return `Available again ${new Date(row.rate_limited_until).toLocaleTimeString([], {
@@ -68,7 +68,7 @@ export function CodingAuthStack({
   onMove,
   onReorder,
 }: {
-  rows: CodingAuth[];
+  rows: CodingCredentialSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onMove: (id: string, direction: MoveDirection) => void;

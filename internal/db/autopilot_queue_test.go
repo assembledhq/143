@@ -22,6 +22,8 @@ func TestAutopilotQueueStore_ListQueue(t *testing.T) {
 	repoID := uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	sessionID := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	prID := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	previewTargetID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
+	previewID := uuid.MustParse("77777777-7777-7777-7777-777777777777")
 	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
@@ -41,17 +43,19 @@ func TestAutopilotQueueStore_ListQueue(t *testing.T) {
 				mock.ExpectQuery("FROM issues i").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "limit": 11, "offset": 0, "manual_source": models.IssueSourceManual}).
 					WillReturnRows(pgxmock.NewRows([]string{
-						"id", "rank", "source_type", "source_key", "title", "repo_id", "repo_name", "issue_status",
+						"id", "rank", "source_type", "source_key", "title", "issue_url", "repo_id", "repo_name", "issue_status",
 						"customer_impact_label", "customer_impact_count", "implementation_ease", "low_hanging_fruit_label",
 						"low_hanging_fruit_reasons", "cluster_size", "session_id", "session_title", "session_updated_at",
 						"session_status", "session_origin", "session_started_at", "session_completed_at", "pr_id", "pr_number",
-						"pr_url", "pr_status", "pr_merged_at", "sort_score", "impact_score", "ease_score", "last_seen_at",
+						"pr_url", "pr_status", "pr_merged_at", "pr_head_sha", "preview_target_id", "preview_id",
+						"preview_status", "preview_commit_sha", "sort_score", "impact_score", "ease_score", "last_seen_at",
 					}).AddRow(
 						issueID.String(), int64(1), "sentry", "SENTRY-123", "Auth token expiry causes retry loop",
-						repoID.String(), "acme/api", "triaged", "High", 42, "High", "Very high",
+						"https://sentry.io/organizations/acme/issues/123", repoID.String(), "acme/api", "triaged", "High", 42, "High", "Very high",
 						[]string{"high customer impact", "straightforward implementation", "recent activity"}, int64(1),
 						sessionID.String(), "Fix auth token expiry", now, "running", "automation", now.Add(-10*time.Minute), nil,
 						prID.String(), 12, "https://github.com/acme/api/pull/12", "open", nil,
+						"def456", previewTargetID.String(), previewID.String(), "ready", "abc123",
 						float64(91), float64(80), float64(75), now,
 					))
 			},
@@ -62,6 +66,7 @@ func TestAutopilotQueueStore_ListQueue(t *testing.T) {
 						Rank:        1,
 						Source:      models.AutopilotIssueSource{Type: models.IssueSourceSentry, Key: "SENTRY-123"},
 						Title:       "Auth token expiry causes retry loop",
+						IssueURL:    ptrString("https://sentry.io/organizations/acme/issues/123"),
 						Repo:        &models.AutopilotRepoRef{ID: repoID, Name: "acme/api"},
 						IssueStatus: "triaged",
 						CustomerImpact: models.AutopilotCustomerImpact{
@@ -91,6 +96,14 @@ func TestAutopilotQueueStore_ListQueue(t *testing.T) {
 							Number: 12,
 							URL:    "https://github.com/acme/api/pull/12",
 							Status: "open",
+						},
+						LatestPreview: &models.AutopilotPreviewRef{
+							TargetID:            previewTargetID,
+							PreviewID:           &previewID,
+							Status:              models.AutopilotPreviewStatusReady,
+							CommitSHA:           "abc123",
+							LatestCommitSHA:     "def456",
+							NewCommitsAvailable: true,
 						},
 						AvailableAction: models.AutopilotQueueActionViewRun,
 					},
@@ -189,6 +202,72 @@ func TestAutopilotQueueDisplayStatePrecedence(t *testing.T) {
 	}
 }
 
+func TestAutopilotQueuePreviewProjection(t *testing.T) {
+	t.Parallel()
+
+	targetID := uuid.New()
+	previewID := uuid.New()
+
+	tests := []struct {
+		name     string
+		row      autopilotQueueDBRow
+		expected *models.AutopilotPreviewRef
+	}{
+		{
+			name: "current ready preview is openable",
+			row: autopilotQueueDBRow{
+				ID:               uuid.NewString(),
+				PreviewTargetID:  sql.NullString{String: targetID.String(), Valid: true},
+				PreviewID:        sql.NullString{String: previewID.String(), Valid: true},
+				PreviewStatus:    sql.NullString{String: string(models.PreviewStatusReady), Valid: true},
+				PreviewCommitSHA: sql.NullString{String: "abc123", Valid: true},
+				PRHeadSHA:        sql.NullString{String: "abc123", Valid: true},
+			},
+			expected: &models.AutopilotPreviewRef{
+				TargetID:            targetID,
+				PreviewID:           &previewID,
+				Status:              models.AutopilotPreviewStatusReady,
+				CommitSHA:           "abc123",
+				LatestCommitSHA:     "abc123",
+				NewCommitsAvailable: false,
+			},
+		},
+		{
+			name: "stale preview records latest head",
+			row: autopilotQueueDBRow{
+				ID:               uuid.NewString(),
+				PreviewTargetID:  sql.NullString{String: targetID.String(), Valid: true},
+				PreviewID:        sql.NullString{String: previewID.String(), Valid: true},
+				PreviewStatus:    sql.NullString{String: string(models.PreviewStatusReady), Valid: true},
+				PreviewCommitSHA: sql.NullString{String: "abc123", Valid: true},
+				PRHeadSHA:        sql.NullString{String: "def456", Valid: true},
+			},
+			expected: &models.AutopilotPreviewRef{
+				TargetID:            targetID,
+				PreviewID:           &previewID,
+				Status:              models.AutopilotPreviewStatusReady,
+				CommitSHA:           "abc123",
+				LatestCommitSHA:     "def456",
+				NewCommitsAvailable: true,
+			},
+		},
+		{
+			name:     "row without preview target omits preview ref",
+			row:      autopilotQueueDBRow{ID: uuid.NewString()},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			row := tt.row.toModel()
+			require.Equal(t, tt.expected, row.LatestPreview, "row should project latest preview metadata")
+		})
+	}
+}
+
 func TestBuildAutopilotQueueQuery(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +284,9 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 			expectedSnippets: []string{
 				"SELECT\n\t\t\ti.id,\n\t\t\ti.rank,\n\t\t\ti.source_type",
 				"i.source <> @manual_source",
+				"i.raw_data#>>'{data,url}'",
+				"preview_target_id",
+				"preview_instances pi",
 			},
 			expectedArgs: pgx.NamedArgs{
 				"org_id":        orgID,
@@ -265,5 +347,9 @@ func TestBuildAutopilotQueueQuery(t *testing.T) {
 }
 
 func ptrTime(v time.Time) *time.Time {
+	return &v
+}
+
+func ptrString(v string) *string {
 	return &v
 }

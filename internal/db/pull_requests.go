@@ -204,6 +204,26 @@ func (s *PullRequestStore) GetByOrgRepoAndNumber(ctx context.Context, orgID uuid
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
 }
 
+func (s *PullRequestStore) ListOpenByOrgRepoAndHeadSHA(ctx context.Context, orgID uuid.UUID, repo, headSHA string) ([]models.PullRequest, error) {
+	query := `
+		SELECT ` + prSelectColumns + `
+		FROM pull_requests
+		WHERE org_id = @org_id
+		  AND github_repo = @github_repo
+		  AND head_sha = @head_sha
+		  AND status = 'open'`
+
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":      orgID,
+		"github_repo": repo,
+		"head_sha":    headSHA,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query open pull requests by org, repo, and head SHA: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+}
+
 func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uuid.UUID, reviewStatus models.PullRequestReviewStatus) error {
 	query := `UPDATE pull_requests SET review_status = @review_status, updated_at = now() WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{

@@ -69,6 +69,13 @@ describe("DiffPane", () => {
     expect(scrollContainer).not.toHaveClass("p-3");
   });
 
+  it("prevents horizontal diff overflow from propagating outside the pane", () => {
+    const { container } = render(<DiffPane files={[makeDiffFile("src/a.ts")]} viewMode="unified" />);
+    const scrollContainer = container.firstElementChild;
+
+    expect(scrollContainer).toHaveClass("min-w-0", "max-w-full", "overflow-x-hidden");
+  });
+
   it("renders a single file", () => {
     render(<DiffPane files={[makeDiffFile("index.ts")]} viewMode="split" />);
     expect(screen.getByTestId("file-index.ts")).toBeInTheDocument();

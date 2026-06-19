@@ -28,6 +28,16 @@ function automation(overrides: Partial<Automation>): Automation {
 describe("formatAutomationSchedule", () => {
   it.each([
     {
+      name: "formats event-only automations as having no schedule",
+      input: automation({
+        schedule_type: "none",
+        interval_value: undefined,
+        interval_unit: undefined,
+        interval_run_at: undefined,
+      }),
+      expected: "No schedule",
+    },
+    {
       name: "hides the anchor time for hourly automations",
       input: automation({
         interval_value: 1,

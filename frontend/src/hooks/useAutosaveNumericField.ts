@@ -22,6 +22,10 @@ export interface UseAutosaveNumericFieldResult {
   value: string;
   onChange: (event: ChangeEvent<HTMLInputElement>) => void;
   onBlur: () => void;
+  /** Atomically update the displayed value and save without going through the
+   *  debounce path. Useful for programmatic steps (e.g. +/− buttons) where the
+   *  caller has already computed the desired final value. */
+  setValueAndSave: (n: number) => void;
 }
 
 /**
@@ -158,5 +162,16 @@ export function useAutosaveNumericField<TVars>({
     if (clamped !== lastSent) dispatch(clamped);
   };
 
-  return { value: local, onChange, onBlur };
+  const setValueAndSave = (n: number) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    pendingValueRef.current = null;
+    const clamped = clampRef.current ? clampRef.current(n) : n;
+    setLocal(String(clamped));
+    dispatch(clamped);
+  };
+
+  return { value: local, onChange, onBlur, setValueAndSave };
 }

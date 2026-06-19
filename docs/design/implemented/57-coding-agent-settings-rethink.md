@@ -264,12 +264,12 @@ That gives the product one visual language but two different emphases:
 
 ### Existing library check
 
-The frontend does **not** currently include a dedicated drag-and-drop or sortable library in [frontend/package.json](/Users/wangjohn/.codex/worktrees/8462/143/frontend/package.json).
+The frontend does **not** currently include a dedicated drag-and-drop or sortable library in [frontend/package.json](../../../frontend/package.json).
 
 Relevant existing UI infrastructure:
 
 - `@tanstack/react-table` is already installed and used for table rendering.
-- The shared table primitives in [frontend/src/components/ui/table.tsx](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/components/ui/table.tsx) already give us semantic table markup.
+- The shared table primitives in [frontend/src/components/ui/table.tsx](../../../frontend/src/components/ui/table.tsx) already give us semantic table markup.
 - The current settings pages do not yet use a sortable table pattern.
 
 ### Recommendation
@@ -438,8 +438,8 @@ type CodingAgentAuthRow struct {
 
 Store work:
 
-- extend [internal/db/org_credentials.go](/Users/wangjohn/.codex/worktrees/8462/143/internal/db/org_credentials.go) with ordered list + reorder methods
-- extend [internal/db/user_credentials.go](/Users/wangjohn/.codex/worktrees/8462/143/internal/db/user_credentials.go) with label-aware multi-row methods
+- extend [internal/db/org_credentials.go](../../../internal/db/org_credentials.go) with ordered list + reorder methods
+- extend [internal/db/user_credentials.go](../../../internal/db/user_credentials.go) with label-aware multi-row methods
 - keep all new store methods org-scoped and tenancy-safe
 
 Suggested store methods:
@@ -502,7 +502,7 @@ These endpoints should accept:
 
 The settings page only makes sense if runtime behavior matches what the user sees.
 
-Update [internal/services/agent/env.go](/Users/wangjohn/.codex/worktrees/8462/143/internal/services/agent/env.go) so coding-agent auth resolution becomes ordered-stack based:
+Update [internal/services/agent/env.go](../../../internal/services/agent/env.go) so coding-agent auth resolution becomes ordered-stack based:
 
 1. list personal auth rows for the relevant agent, ordered by `priority`
 2. choose the first runnable personal row
@@ -524,7 +524,7 @@ Build the new UI from shared components rather than embedding everything directl
 
 Suggested new frontend folder:
 
-- [frontend/src/components/coding-agents/](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/components/)
+- [frontend/src/components/coding-agents/](../../../frontend/src/components/)
 
 Suggested components:
 
@@ -540,13 +540,13 @@ Suggested components:
 
 Suggested supporting client work:
 
-- add API methods in [frontend/src/lib/api.ts](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/lib/api.ts)
-- add types in [frontend/src/lib/types.ts](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/lib/types.ts)
+- add API methods in [frontend/src/lib/api.ts](../../../frontend/src/lib/api.ts)
+- add types in [frontend/src/lib/types.ts](../../../frontend/src/lib/types.ts)
 - add query keys in `frontend/src/lib/query-keys.ts`
 
 ### Phase 6: Organization settings page
 
-Replace the current provider-section organization page in [frontend/src/app/(dashboard)/settings/agent/page.tsx](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/app/(dashboard)/settings/agent/page.tsx) with:
+Replace the current provider-section organization page in [frontend/src/app/(dashboard)/settings/agent/page.tsx](../../../frontend/src/app/(dashboard)/settings/agent/page.tsx) with:
 
 - page header + `Add auth`
 - one sortable table
@@ -554,7 +554,7 @@ Replace the current provider-section organization page in [frontend/src/app/(das
 
 Implementation notes:
 
-- keep the existing table styling language by continuing to use [frontend/src/components/ui/table.tsx](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/components/ui/table.tsx)
+- keep the existing table styling language by continuing to use [frontend/src/components/ui/table.tsx](../../../frontend/src/components/ui/table.tsx)
 - use `@tanstack/react-table` for column definition and row rendering
 - add `@dnd-kit` only for interaction, not for visual layout
 - reorder persists immediately on drop with optimistic cache update and rollback on error
@@ -563,7 +563,7 @@ Implementation notes:
 
 ### Phase 7: Personal settings page
 
-Replace the coding-agent credentials section in [frontend/src/app/(dashboard)/settings/account/page.tsx](/Users/wangjohn/.codex/worktrees/8462/143/frontend/src/app/(dashboard)/settings/account/page.tsx) with:
+Replace the coding-agent credentials section in [frontend/src/app/(dashboard)/settings/account/page.tsx](../../../frontend/src/app/(dashboard)/settings/account/page.tsx) with:
 
 - a top `Default auth` card
 - a compact `Backups` table using the same row component language

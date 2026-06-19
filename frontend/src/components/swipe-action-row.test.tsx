@@ -313,12 +313,15 @@ describe('SwipeActionRow', () => {
     vi.useFakeTimers();
     const action = deferred<void>();
     const onAction = vi.fn(() => action.promise);
+    const onCommitAnimationComplete = vi.fn();
 
     try {
       renderWithProviders(
         <SwipeActionRow
           actionLabel="Archive item"
           actionText="Archive"
+          committedText="Archived"
+          onCommitAnimationComplete={onCommitAnimationComplete}
           onAction={onAction}
         >
           <div>Row content</div>
@@ -344,19 +347,26 @@ describe('SwipeActionRow', () => {
 
       expect(onAction).toHaveBeenCalledTimes(1);
       expect(surface!.style.transform).toBe('translateX(-390px)');
+      expect(screen.getByText('Archived')).toBeInTheDocument();
+
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+      });
+
+      expect(surface!.style.transform).toBe('translateX(-390px)');
+      expect(container).toHaveAttribute('data-swipe-collapsing', 'true');
+      expect(onCommitAnimationComplete).not.toHaveBeenCalled();
+
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+      });
+
+      expect(onCommitAnimationComplete).toHaveBeenCalledTimes(1);
 
       await act(async () => {
         action.resolve();
         await action.promise;
       });
-
-      expect(surface!.style.transform).toBe('translateX(-390px)');
-
-      await act(async () => {
-        vi.advanceTimersByTime(200);
-      });
-
-      expect(surface!.style.transform).toBe('translateX(-0px)');
     } finally {
       vi.useRealTimers();
     }

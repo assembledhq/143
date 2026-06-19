@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Clock, Plus, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ErrorText } from "@/components/ui/error-notice";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 
@@ -138,7 +139,7 @@ export function TTLWarning({
       {recycleCountdown.visible && (
         <Badge
           variant="secondary"
-          className="text-xs gap-1 bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
+          className="text-xs gap-1 bg-warning/15 text-warning border-warning/20"
           data-testid="recycle-warning"
         >
           <RefreshCw className="size-3" />
@@ -152,7 +153,7 @@ export function TTLWarning({
             "text-xs gap-1",
             remaining.expired
               ? "bg-destructive/15 text-destructive border-destructive/20"
-              : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/20"
+              : "bg-warning/15 text-warning border-warning/20"
           )}
         >
           <Clock className="size-3" />
@@ -174,7 +175,7 @@ export function TTLWarning({
         </Button>
       )}
       {extendError && (
-        <span className="text-xs text-destructive">{extendError}</span>
+        <ErrorText>{extendError}</ErrorText>
       )}
     </div>
   );

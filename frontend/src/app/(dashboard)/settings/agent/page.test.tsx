@@ -2,19 +2,25 @@ import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
-import type { CodingAuth } from "@/lib/types";
+import type { CodingCredentialSummary } from "@/lib/types";
 import AgentPage, { reorderRows } from "./page";
 
+const mockUseAuth = vi.fn(() => ({
+  user: { id: "user-1", org_id: "org-1", role: "admin", email: "admin@example.com", name: "Admin", created_at: "", role_display: "admin" },
+}));
+
 vi.mock("@/hooks/use-auth", () => ({
-  useAuth: () => ({
-    user: { id: "user-1", org_id: "org-1", role: "admin", email: "admin@example.com", name: "Admin", created_at: "", role_display: "admin" },
-  }),
+  useAuth: () => mockUseAuth(),
 }));
 
 function installHandlers() {
   server.use(
-    http.get("/api/v1/settings/coding-auths", () =>
-      HttpResponse.json({
+    http.get("/api/v1/coding-credentials", ({ request }) => {
+      const scope = new URL(request.url).searchParams.get("scope");
+      if (scope !== "org") {
+        return HttpResponse.json({ data: [], meta: { scope } });
+      }
+      return HttpResponse.json({
         data: [
           {
             id: "auth-1",
@@ -23,8 +29,8 @@ function installHandlers() {
             agent: "codex",
             auth_type: "subscription",
             label: "Team seat A",
-            scope: "organization",
-            provider: "openai_chatgpt",
+            scope: "org",
+            provider: "openai_subscription",
             status: "healthy",
             is_default: true,
             usage_note: "ChatGPT Plus",
@@ -33,8 +39,8 @@ function installHandlers() {
           },
         ],
         meta: {},
-      }),
-    ),
+      });
+    }),
     http.get("/api/v1/settings", () =>
       HttpResponse.json({
         data: {
@@ -55,16 +61,34 @@ function installHandlers() {
 }
 
 describe("Agent settings page", () => {
-  it("renders the stack helper text and restored execution settings", async () => {
+  it("renders the stack helper text without shared runtime controls", async () => {
     installHandlers();
 
     renderWithProviders(<AgentPage />);
 
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
     expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
-    expect(screen.getByLabelText("Max concurrent sessions")).toHaveValue(5);
-    expect(screen.getByLabelText("Session max time (minutes)")).toHaveValue(25);
+    expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
+    expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
+  });
+
+  it("shows auth resolution notice in read-only view for non-admin users", async () => {
+    mockUseAuth.mockReturnValueOnce({
+      user: { id: "user-2", org_id: "org-1", role: "member", email: "member@example.com", name: "Member", created_at: "", role_display: "member" },
+    });
+    installHandlers();
+
+    renderWithProviders(<AgentPage />);
+
+    expect(await screen.findByText("Read-only view. Only admins can add, edit, or reorder coding auths.")).toBeInTheDocument();
+    expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
+    expect(screen.queryByRole("link", { name: "Sandboxes" })).not.toBeInTheDocument();
   });
 
   it("keeps the details sheet closed after dismissing it", async () => {
@@ -87,8 +111,12 @@ describe("Agent settings page", () => {
     const user = userEvent.setup();
     installHandlers();
     server.use(
-      http.get("/api/v1/settings/coding-auths", () =>
-        HttpResponse.json({
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        if (scope !== "org") {
+          return HttpResponse.json({ data: [], meta: { scope } });
+        }
+        return HttpResponse.json({
           data: [
             {
               id: "auth-1",
@@ -97,8 +125,8 @@ describe("Agent settings page", () => {
               agent: "codex",
               auth_type: "subscription",
               label: "Team seat A",
-              scope: "organization",
-              provider: "openai_chatgpt",
+              scope: "org",
+              provider: "openai_subscription",
               status: "needs_reauth",
               is_default: true,
               usage_note: "chatgpt plus",
@@ -107,8 +135,8 @@ describe("Agent settings page", () => {
             },
           ],
           meta: {},
-        }),
-      ),
+        });
+      }),
     );
 
     renderWithProviders(<AgentPage />);
@@ -127,7 +155,7 @@ describe("Agent settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
 
-    expect(await screen.findByText("Gemini CLI")).toBeInTheDocument();
+    expect(await screen.findByText("OpenCode")).toBeInTheDocument();
     expect(screen.getAllByText("Amp").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pi").length).toBeGreaterThan(0);
     expect(screen.queryByText(/Leave blank and we'll generate a sensible name/)).not.toBeInTheDocument();
@@ -143,7 +171,7 @@ describe("Agent settings page", () => {
 
     await user.click(screen.getByRole("button", { name: "Add auth" }));
     const dialog = await screen.findByRole("dialog");
-    await user.click(screen.getByLabelText("Gemini CLI"));
+    await user.click(screen.getByLabelText("OpenCode"));
 
     expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
 
@@ -157,37 +185,94 @@ describe("Agent settings page", () => {
     expect(screen.getByRole("option", { name: "Rush" })).toBeInTheDocument();
     await user.keyboard("{Escape}");
 
-    await user.click(screen.getByLabelText("Pi"));
-    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
-    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
-    expect(within(dialog).getByPlaceholderText("pi_...")).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Save auth" })).toBeDisabled();
-  });
+	    await user.click(screen.getByLabelText("Pi"));
+	    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
+	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
+	    expect(within(dialog).getByPlaceholderText("pi_...")).toBeInTheDocument();
+	    expect(within(dialog).getByRole("button", { name: "Save auth" })).toBeDisabled();
 
-  it("creates Amp auth and defaults in a single coding-auth request", async () => {
+	    await user.click(screen.getByLabelText("OpenCode"));
+	    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
+	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
+	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
+	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
+	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
+	  });
+
+	  it("creates OpenCode auth with an explicit backing provider", async () => {
+	    const user = userEvent.setup();
+	    let capturedBody: Record<string, unknown> | null = null;
+
+	    installHandlers();
+	    server.use(
+	      http.post("/api/v1/coding-credentials", async ({ request }) => {
+	        capturedBody = await request.json() as Record<string, unknown>;
+	        return HttpResponse.json({
+	          id: "auth-opencode",
+	          org_id: "org-1",
+	          priority: 2,
+	          agent: "opencode",
+	          auth_type: "api_key",
+	          label: "OpenCode API key",
+	          scope: "org",
+	          provider: "opencode",
+	          status: "healthy",
+	          is_default: false,
+	          created_at: "2026-04-22T10:00:00Z",
+	          updated_at: "2026-04-22T10:00:00Z",
+	        });
+	      }),
+	    );
+
+	    renderWithProviders(<AgentPage />);
+
+	    await user.click(screen.getByRole("button", { name: "Add auth" }));
+	    const dialog = await screen.findByRole("dialog");
+	    await user.click(screen.getByLabelText("OpenCode"));
+	    await user.click(within(dialog).getByRole("combobox", { name: "OpenCode provider" }));
+	    await user.click(await screen.findByRole("option", { name: "OpenCode via OpenRouter" }));
+	    await user.clear(within(dialog).getByLabelText("Custom model override"));
+	    await user.type(within(dialog).getByLabelText("Custom model override"), "xai/grok-code-fast");
+	    await user.type(within(dialog).getByPlaceholderText("OpenCode or provider key"), "sk-opencode-openrouter");
+	    await user.click(within(dialog).getByRole("button", { name: "Save auth" }));
+
+	    await waitFor(() => {
+	      expect(capturedBody).toMatchObject({
+	        agent: "opencode",
+	        auth_type: "api_key",
+	        api_key: "sk-opencode-openrouter",
+	        api_type: "openrouter",
+	        agent_defaults: {
+	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL_CUSTOM: "xai/grok-code-fast",
+	        },
+	      });
+	    });
+	  }, 20000);
+
+	  it("creates Amp auth and defaults in a single coding-auth request", async () => {
     const user = userEvent.setup();
     let capturedBody: Record<string, unknown> | null = null;
     let settingsPatched = false;
 
     installHandlers();
     server.use(
-      http.post("/api/v1/settings/coding-auths", async ({ request }) => {
+      // The unified create endpoint returns the new row unwrapped.
+      http.post("/api/v1/coding-credentials", async ({ request }) => {
         capturedBody = await request.json() as Record<string, unknown>;
         return HttpResponse.json({
-          data: {
-            id: "auth-2",
-            org_id: "org-1",
-            priority: 2,
-            agent: "amp",
-            auth_type: "api_key",
-            label: "Amp API key",
-            scope: "organization",
-            provider: "amp",
-            status: "healthy",
-            is_default: false,
-            created_at: "2026-04-22T10:00:00Z",
-            updated_at: "2026-04-22T10:00:00Z",
-          },
+          id: "auth-2",
+          org_id: "org-1",
+          priority: 2,
+          agent: "amp",
+          auth_type: "api_key",
+          label: "Amp API key",
+          scope: "org",
+          provider: "amp",
+          status: "healthy",
+          is_default: false,
+          created_at: "2026-04-22T10:00:00Z",
+          updated_at: "2026-04-22T10:00:00Z",
         });
       }),
       http.patch("/api/v1/settings", () => {
@@ -223,6 +308,7 @@ describe("Agent settings page", () => {
       expect(capturedBody).not.toBeNull();
     });
     expect(capturedBody).toMatchObject({
+      scope: "org",
       agent: "amp",
       auth_type: "api_key",
       api_key: "amp_123",
@@ -286,11 +372,6 @@ describe("Agent settings page", () => {
     const claudeLinks = await screen.findAllByRole("link", { name: "Claude API key management" });
     expect(claudeLinks[0]).toHaveAttribute("href", "https://platform.claude.com/settings/keys");
 
-    await user.click(screen.getByLabelText("Gemini CLI"));
-    await user.hover(within(dialog).getByRole("button", { name: "Where to get a Gemini CLI API key" }));
-    const geminiLinks = await screen.findAllByRole("link", { name: "Google AI Studio API keys" });
-    expect(geminiLinks[0]).toHaveAttribute("href", "https://aistudio.google.com/apikey");
-
     await user.click(screen.getByLabelText("Amp"));
     await user.hover(within(dialog).getByRole("button", { name: "Where to get a Amp API key" }));
     const ampLinks = await screen.findAllByRole("link", { name: "Amp settings" });
@@ -313,7 +394,7 @@ describe("Agent settings page", () => {
   it("shows a shared empty state when the org fallback stack has no auths", async () => {
     installHandlers();
     server.use(
-      http.get("/api/v1/settings/coding-auths", () =>
+      http.get("/api/v1/coding-credentials", () =>
         HttpResponse.json({
           data: [],
           meta: {},
@@ -329,24 +410,24 @@ describe("Agent settings page", () => {
 });
 
 describe("reorderRows", () => {
-  function makeRows(ids: string[]): CodingAuth[] {
+  function makeRows(ids: string[]): CodingCredentialSummary[] {
     return ids.map((id, index) => ({
       id,
       org_id: "org-1",
       priority: index + 1,
-      agent: "codex",
-      auth_type: "subscription",
+      agent: "codex" as const,
+      auth_type: "subscription" as const,
       label: id,
-      scope: "organization",
-      provider: "openai_chatgpt",
-      status: "healthy",
+      scope: "org" as const,
+      provider: "openai_subscription",
+      status: "healthy" as const,
       is_default: index === 0,
       created_at: "2026-04-22T10:00:00Z",
       updated_at: "2026-04-22T10:00:00Z",
     }));
   }
 
-  function ids(rows: CodingAuth[]) {
+  function ids(rows: CodingCredentialSummary[]) {
     return rows.map((row) => row.id);
   }
 

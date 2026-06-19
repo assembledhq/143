@@ -51,6 +51,50 @@ func TestAuditEmitter_EmitWebhookActionIncludesSessionAndProject(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "webhook audit emit should persist session and project correlations")
 }
 
+func TestAuditEmitter_EmitAPIActionUsesAPIActor(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	emitter := NewAuditEmitter(NewAuditLogStore(mock), zerolog.Nop())
+	orgID := uuid.New()
+	clientID := uuid.New()
+	tokenID := uuid.New()
+	resourceID := tokenID.String()
+
+	mock.ExpectQuery("INSERT INTO audit_logs").
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1), time.Now()))
+
+	emitter.EmitAPIAction(context.Background(), APIActionParams{
+		OrgID:        orgID,
+		APIClientID:  clientID,
+		APITokenID:   &tokenID,
+		Action:       models.AuditActionAPITokenUsed,
+		ResourceType: models.AuditResourceAPIToken,
+		ResourceID:   &resourceID,
+		Details:      json.RawMessage(`{"path":"/api/v1/sessions"}`),
+	})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "API audit emit should persist an api actor row")
+}
+
 func TestAuditEmitter_EmitUserActionsBatchesMultipleRows(t *testing.T) {
 	t.Parallel()
 
