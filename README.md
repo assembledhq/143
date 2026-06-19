@@ -58,10 +58,10 @@ The backend is Go, Postgres, and a Postgres-backed job queue. The frontend is Ne
 For local development you need:
 
 - Go 1.24+
-- Node.js 18+
+- Node.js 24+
 - PostgreSQL 17
 
-The setup script installs missing dependencies on macOS with Homebrew or on Linux with apt, creates the local database, installs dependencies, copies `.env.example` to `.env`, and runs migrations.
+The setup script installs missing dependencies on macOS with Homebrew or on Linux with apt/NodeSource, creates the local database, installs dependencies, copies `.env.example` to `.env`, and runs migrations.
 
 ```bash
 git clone https://github.com/assembledhq/143.git
