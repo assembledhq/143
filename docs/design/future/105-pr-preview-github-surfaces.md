@@ -50,12 +50,11 @@ Do not publish Preview links to GitHub until the repository is preview-ready.
 
 A repository is preview-ready when:
 
-- PR preview links are enabled in settings,
 - the repository has a valid committed preview configuration for the relevant branch/config,
-- preview startup has succeeded at least once for that repository/config, or an admin explicitly marks the preview config as verified after testing,
+- preview startup has succeeded at least once for that repository/config,
 - the GitHub App has the permissions required for the selected surfaces.
 
-If previews are not configured, config detection fails, startup has never succeeded, or previews are currently disabled for the repository, 143 should not create PR comments or commit statuses. The settings UI should show the missing prerequisite instead of allowing `pr_preview_surfaces_enabled` to be turned on.
+If previews are not configured, config detection fails, startup has never succeeded, or previews are currently disabled for the repository, 143 should not create PR comments or commit statuses. The settings UI must keep `pr_preview_surfaces_enabled` disabled and show the missing prerequisite instead of allowing a no-op enable.
 
 If previews later become broken after surfacing was enabled, stop publishing new GitHub surfaces until the repository returns to a preview-ready state. Existing comments/statuses can remain, because the stable route can explain the current failure, but new PRs should not get Preview links while the feature is known to be nonfunctional.
 
@@ -211,7 +210,9 @@ In `/settings/previews`:
 - Add `PR preview links` per repository.
 - Add child toggles for `PR comment` and `Commit status`.
 - Keep `Auto-preview` mode separate.
-- Disable `PR preview links` until preview configuration is valid and verified.
+- Disable `PR preview links` until preview configuration is valid and a test preview has succeeded.
+- Show a tooltip or inline message on the disabled toggle that names the missing prerequisite, for example `Add .143/config.json first` or `Run a successful test preview before enabling GitHub PR links`.
+- Provide a `Test preview` action next to the disabled toggle when config exists but no successful preview has been recorded. The action should start a normal manual preview for the repository/config and mark the repository preview-ready only after that preview reaches `ready` or `partially_ready`.
 - Show missing GitHub permissions and recent sync errors.
 
 Required permissions:
@@ -236,7 +237,7 @@ Backend:
 
 - Policy defaults and persistence.
 - Surface sync enqueue behavior, including `auto_mode=off`.
-- Preview-readiness gating: no comment/status when previews are unconfigured, unverified, disabled, or known broken.
+- Preview-readiness gating: no comment/status when previews are unconfigured, have never succeeded, disabled, or known broken.
 - Fork/draft/non-default-base PRs still get surfaces when enabled.
 - Comment create/update/marker recovery/duplicate prevention.
 - Commit status publishing.
@@ -245,6 +246,8 @@ Backend:
 Frontend:
 
 - Settings toggles.
+- Disabled-state message for missing config, missing successful preview, and missing GitHub permissions.
+- `Test preview` action visibility when config exists but preview readiness is not yet proven.
 - Missing-permission and sync-error states.
 
 ## Rollout
