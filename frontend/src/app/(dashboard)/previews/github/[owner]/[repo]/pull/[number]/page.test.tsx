@@ -424,6 +424,79 @@ describe("PullRequestPreviewPage", () => {
     });
   });
 
+  it("starts a PR preview without an existing target by resolving with open intent", async () => {
+    const requestedIntents: Array<string | null> = [];
+    let zeroStartCalled = false;
+    server.use(
+      http.get("*/api/v1/previews/github/acme/web/pull/42", ({ request }) => {
+        const intent = new URL(request.url).searchParams.get("intent");
+        requestedIntents.push(intent);
+        if (intent === "open") {
+          return HttpResponse.json({
+            data: {
+              target_id: "target-new",
+              preview_id: "prev-new",
+              repository_id: "repo-1",
+              repository_full_name: "acme/web",
+              branch: "feature/preview",
+              commit_sha: "def456",
+              latest_commit_sha: "def456",
+              source_type: "pull_request",
+              status: "starting",
+              stable_url: "https://143.dev/previews/github/acme/web/pull/42",
+              pull_request_url: "https://github.com/acme/web/pull/42",
+              launch: {
+                action: "wait",
+                reason: "starting",
+                auto_open: true,
+                represents_latest: true,
+                primary_label: "Opening when ready",
+              },
+            },
+          });
+        }
+        return HttpResponse.json({
+          data: {
+            target_id: "00000000-0000-0000-0000-000000000000",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "def456",
+            latest_commit_sha: "def456",
+            source_type: "pull_request",
+            status: "target_created",
+            stable_url: "https://143.dev/previews/github/acme/web/pull/42",
+            pull_request_url: "https://github.com/acme/web/pull/42",
+            launch: {
+              action: "start",
+              reason: "no_runtime",
+              auto_open: false,
+              represents_latest: true,
+              primary_label: "Start preview",
+            },
+          },
+        });
+      }),
+      http.post("*/api/v1/previews/00000000-0000-0000-0000-000000000000/start-latest", () => {
+        zeroStartCalled = true;
+        return HttpResponse.json(
+          { error: { code: "PREVIEW_NOT_FOUND", message: "preview not found" } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
+
+    await userEvent.click(await screen.findByRole("button", { name: /Start preview/ }));
+
+    await waitFor(() => {
+      expect(requestedIntents).toContain("open");
+    });
+    expect(zeroStartCalled).toBe(false);
+    expect(await screen.findByText("Starting preview")).toBeInTheDocument();
+  });
+
   it("renders blocked launch guidance without start actions", async () => {
     server.use(
       http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
