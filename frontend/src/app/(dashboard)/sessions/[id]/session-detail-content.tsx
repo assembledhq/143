@@ -4520,7 +4520,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
-  const hasCleanReviewLoop = hasCleanReviewLoopForSnapshot(reviewLoopsData?.data, session?.snapshot_key);
   const builderRequiresReviewBeforePR = user?.role === "builder" && (orgSettings.builder_permissions?.require_review_before_pr ?? true);
   const latestReadiness = readinessData?.data.latest;
   const readinessFresh = !!latestReadiness &&
