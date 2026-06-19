@@ -1,0 +1,10 @@
+Repository: {{.RepositoryFullName}}
+Language: {{.RepositoryLanguage}}
+Source: {{.SessionSource}}
+Phase: {{.Phase}}
+Issue type: {{.IssueType}}
+Issue labels: {{join .IssueLabels ", "}}
+Changed file kinds: {{join .ChangedFileKinds ", "}}
+Preview history: {{.PreviewHistory}}
+Capacity: {{.CapacitySummary}}
+User prompt: {{.UserPrompt}}

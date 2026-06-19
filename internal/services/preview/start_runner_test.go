@@ -209,10 +209,10 @@ func TestPreviewCachePrewarmScopeKey_SessionAllowsDeferredConfigDigest(t *testin
 		WorkspaceRevision: 7,
 	}
 
-	require.Equal(t, "preview_cache_prewarm:session:"+sessionID.String()+":7", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should be computable before config digest is known")
+	require.Equal(t, "session_preview_cache_prewarm:"+sessionID.String()+":7", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should be computable before config digest is known")
 
 	payload.ConfigDigest = "digest"
-	require.Equal(t, "preview_cache_prewarm:session:"+sessionID.String()+":7:digest", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should include digest when enqueue already knows it")
+	require.Equal(t, "session_preview_cache_prewarm:"+sessionID.String()+":7:digest", PreviewCachePrewarmScopeKey(payload), "session prewarm scope should include digest when enqueue already knows it")
 }
 
 type prewarmLiveSandboxProvider struct {
@@ -892,4 +892,33 @@ func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testi
 	require.Empty(t, cache.createKey, "secret-file configs should not write startup cache snapshots")
 	require.False(t, cache.restoreCalled, "secret-file configs should not restore cached workspace files")
 	require.Equal(t, StartupSnapshotSkippedSecretFiles, result, "secret-file configs should report the secret-file skip reason")
+}
+
+func TestSessionPreviewPrewarmStatusForCacheStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		cacheStatus    string
+		errMsg         string
+		expectedStatus string
+	}{
+		{cacheStatus: "running", expectedStatus: "running"},
+		{cacheStatus: "succeeded", expectedStatus: "succeeded"},
+		{cacheStatus: "skipped_warm", expectedStatus: "succeeded"},
+		{cacheStatus: "skipped_capacity", expectedStatus: "skipped_capacity"},
+		{cacheStatus: "failed", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_install", expectedStatus: "failed"},
+		{cacheStatus: "skipped_disabled", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_lockfiles", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_paths", expectedStatus: "failed"},
+		{cacheStatus: "unknown_status_with_error", errMsg: "something went wrong", expectedStatus: "failed"},
+		{cacheStatus: "unknown_status_no_error", expectedStatus: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cacheStatus, func(t *testing.T) {
+			t.Parallel()
+			got := sessionPreviewPrewarmStatusForCacheStatus(tt.cacheStatus, tt.errMsg)
+			require.Equal(t, tt.expectedStatus, got, "unexpected status for cache status %q", tt.cacheStatus)
+		})
+	}
 }

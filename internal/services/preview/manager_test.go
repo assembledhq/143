@@ -1508,7 +1508,7 @@ func TestRecyclePreview_SecretResolutionFailureMarksFailed(t *testing.T) {
 	require.NoError(t, err, "test preview config should marshal")
 
 	row := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
-	row[22] = recycleConfig
+	setPreviewInstanceRowColumn(row, "recycle_config", recycleConfig)
 
 	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1602,8 +1602,8 @@ func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *t
 	pid := 1234
 
 	legacyRow := newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)
-	legacyRow[21] = nil
-	legacyRow[22] = nil
+	setPreviewInstanceRowColumn(legacyRow, "recycle_config", nil)
+	setPreviewInstanceRowColumn(legacyRow, "recycle_sandbox", nil)
 
 	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).

@@ -229,12 +229,19 @@ export interface PreviewLog {
 }
 
 export interface PreviewStatusResponse {
-  instance: PreviewInstance;
+  instance?: PreviewInstance;
   services: PreviewService[];
   infrastructure?: PreviewInfrastructure[];
   preview_origin?: string;
   freshness?: PreviewFreshness;
   startup_estimate?: PreviewStartupEstimate;
+  prewarm?: PreviewPrewarmStatus;
+}
+
+export interface PreviewPrewarmStatus {
+  state: "warming" | "warm" | "stale" | "failed" | string;
+  workspace_revision: number;
+  resume_estimate_seconds?: number;
 }
 
 export interface PreviewStartupEstimate {
