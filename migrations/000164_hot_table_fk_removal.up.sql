@@ -1,4 +1,6 @@
--- Drop FKs from hot/ephemeral tables; keep org_id/parent-id columns and indexes.
+-- FKs are the default; this migration applies reviewed hot append-only/cache
+-- exceptions where parent-row lock fan-in can become a Postgres operational risk.
+-- Keep org_id/parent-id columns and indexes.
 -- session_logs: SessionLogStore.Create now validates session/thread ownership via
 --   SELECT before insert. ON DELETE CASCADE (session) and ON DELETE SET NULL (thread)
 --   are no longer DB-enforced; sessions/threads are soft-deleted so this is safe.

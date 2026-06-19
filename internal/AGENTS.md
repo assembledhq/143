@@ -6,7 +6,7 @@ Two automated lints run in `make lint-tenancy` (and in CI on every PR that touch
 
 1. **Schema lint** (`cmd/lint-schema`). A new migration that adds a `CREATE TABLE` will fail CI unless it has `org_id uuid NOT NULL REFERENCES organizations(id)` or an explicit exemption. Schema-qualified (`public.foo`) and double-quoted (`"foo"`) table names are recognized and normalized. Two exemption paths:
    - **No org_id at all** (genuinely cross-org/root/infra): allowlist in `cmd/lint-schema/main.go` or use `-- lint:no-org-id reason="..."` anywhere in the CREATE TABLE statement.
-   - **org_id NOT NULL but no FK** (reviewed hot table): use `-- lint:allow-hot-table-no-fk reason="..."` anywhere in the CREATE TABLE statement. Only for high-write append-only/event/log/cache/telemetry/runtime tables where the write path validates parent ownership in code. See `docs/design/96-foreign-key-policy-and-hot-table-audit.md`.
+   - **org_id NOT NULL but no FK** (reviewed hot append-only exception): use `-- lint:allow-hot-table-no-fk reason="..."` anywhere in the CREATE TABLE statement. Only for high-write append-only/event/log/cache/telemetry/runtime tables where the write path validates parent ownership in code. See `docs/design/96-foreign-key-policy-and-hot-table-audit.md`.
 
 2. **Store lint** (`cmd/lint-stores`). Every exported method on `*XxxStore` under `internal/db/` must either:
    - take `orgID uuid.UUID` explicitly (preferred). The parameter name must end in `orgid` case-insensitively (`orgID`, `OrgID`, `org_id`, `srcOrgID`, `targetOrgID`), or
@@ -34,7 +34,7 @@ The existing test `internal/db/tenancy_test.go` is a third layer of defense: it 
 
 ## Foreign keys on hot tables
 
-DB FKs are the default. For high-write append-only/event/log/cache/runtime tables they can create parent-row lock fan-in and Postgres MultiXact pressure — use `-- lint:allow-hot-table-no-fk reason="..."` on the CREATE TABLE and validate parent ownership in the write path instead. Keep `org_id uuid NOT NULL` and the indexes; avoid `ON DELETE CASCADE` from `organizations`. See `docs/design/96-foreign-key-policy-and-hot-table-audit.md` for the full policy and table audit.
+FKs are the default; hot append-only tables need an exception process because parent-row lock fan-in can become a Postgres operational risk. Use `-- lint:allow-hot-table-no-fk reason="..."` only for reviewed high-write append-only/event/log/cache/runtime tables, and validate parent ownership in the write path instead. Keep `org_id uuid NOT NULL` and the indexes; avoid `ON DELETE CASCADE` from `organizations`. See `docs/design/96-foreign-key-policy-and-hot-table-audit.md` for the full policy and table audit.
 
 ## Prefer Non-Mutating Code
 

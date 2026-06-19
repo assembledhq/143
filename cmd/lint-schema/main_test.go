@@ -44,7 +44,7 @@ func TestScan(t *testing.T) {
 			wantName: "widgets",
 		},
 		{
-			name: "flags org_id NOT NULL without FK or hot-table marker",
+			name: "flags org_id NOT NULL without FK or reviewed hot-table exception marker",
 			sql: `CREATE TABLE hot_events (
     id     uuid PRIMARY KEY,
     org_id uuid NOT NULL,
@@ -54,7 +54,7 @@ func TestScan(t *testing.T) {
 			wantName: "hot_events",
 		},
 		{
-			name: "accepts org_id NOT NULL without FK when hot-table marker is present",
+			name: "accepts org_id NOT NULL without FK when reviewed hot-table exception marker is present",
 			sql: `CREATE TABLE hot_events (
     -- lint:allow-hot-table-no-fk reason="append-only runtime events; session ownership checked before insert"
     id     uuid PRIMARY KEY,

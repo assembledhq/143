@@ -77,10 +77,11 @@ var (
 	//   );
 	inlineEscapeRE = regexp.MustCompile(`--[^\n]*lint:no-org-id\s+reason="[^"]+"`)
 
-	// Hot-table FK opt-out: allows a table with org_id NOT NULL to omit the
-	// REFERENCES organizations(id) FK. The reason="..." clause is required.
-	// Use only for reviewed high-write tables where the write path validates
-	// parent ownership in code. See docs/design/96-foreign-key-policy-and-hot-table-audit.md.
+	// Hot-table FK exception: allows a reviewed table with org_id NOT NULL to
+	// omit the REFERENCES organizations(id) FK. The reason="..." clause is
+	// required. Use only for high-write append-only tables where the write path
+	// validates parent ownership in code.
+	// See docs/design/96-foreign-key-policy-and-hot-table-audit.md.
 	hotTableFKMarkerRE = regexp.MustCompile(`--[^\n]*lint:allow-hot-table-no-fk\s+reason="[^"]+"`)
 )
 
@@ -126,8 +127,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q: %s\n", v.file, v.line, v.table, v.detail)
 	}
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Every new tenant-scoped table MUST have `org_id uuid NOT NULL REFERENCES organizations(id)`.")
-	fmt.Fprintln(os.Stderr, "For reviewed hot/append-only tables that intentionally omit the FK, add")
+	fmt.Fprintln(os.Stderr, "Every new tenant-scoped table defaults to `org_id uuid NOT NULL REFERENCES organizations(id)`.")
+	fmt.Fprintln(os.Stderr, "FKs are the default; for reviewed hot append-only table exceptions, add")
 	fmt.Fprintln(os.Stderr, "`-- lint:allow-hot-table-no-fk reason=\"...\"` inside the CREATE TABLE statement.")
 	fmt.Fprintln(os.Stderr, "To exempt a table from org_id entirely, add it to allowedNoOrgID in")
 	fmt.Fprintln(os.Stderr, "cmd/lint-schema/main.go or use `-- lint:no-org-id reason=\"...\"` on the CREATE TABLE line.")
@@ -183,7 +184,7 @@ func scan(file, src string) []violation {
 				file:   file,
 				line:   lineOf(src, start),
 				table:  table,
-				detail: "org_id is present but missing REFERENCES organizations(id) — add the FK for ordinary tables, or add `-- lint:allow-hot-table-no-fk reason=\"...\"` for reviewed hot tables",
+				detail: "org_id is present but missing REFERENCES organizations(id) — FKs are the default; add the FK or document a reviewed hot append-only exception with `-- lint:allow-hot-table-no-fk reason=\"...\"`",
 			})
 			continue
 		}
