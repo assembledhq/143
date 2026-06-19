@@ -74,13 +74,14 @@ func (m PreviewAutoMode) Validate() error {
 type PreviewStoppedReason string
 
 const (
-	PreviewStoppedReasonNone       PreviewStoppedReason = ""
-	PreviewStoppedReasonUser       PreviewStoppedReason = "user"
-	PreviewStoppedReasonExpired    PreviewStoppedReason = "expired"
-	PreviewStoppedReasonWarmPolicy PreviewStoppedReason = "warm_policy"
-	PreviewStoppedReasonPRClosed   PreviewStoppedReason = "pr_closed"
-	PreviewStoppedReasonDrain      PreviewStoppedReason = "drain"
-	PreviewStoppedReasonError      PreviewStoppedReason = "error"
+	PreviewStoppedReasonNone                 PreviewStoppedReason = ""
+	PreviewStoppedReasonUser                 PreviewStoppedReason = "user"
+	PreviewStoppedReasonExpired              PreviewStoppedReason = "expired"
+	PreviewStoppedReasonWarmPolicy           PreviewStoppedReason = "warm_policy"
+	PreviewStoppedReasonSessionPrewarmPolicy PreviewStoppedReason = "session_prewarm_policy"
+	PreviewStoppedReasonPRClosed             PreviewStoppedReason = "pr_closed"
+	PreviewStoppedReasonDrain                PreviewStoppedReason = "drain"
+	PreviewStoppedReasonError                PreviewStoppedReason = "error"
 )
 
 func (r PreviewStoppedReason) Validate() error {
@@ -89,12 +90,51 @@ func (r PreviewStoppedReason) Validate() error {
 		PreviewStoppedReasonUser,
 		PreviewStoppedReasonExpired,
 		PreviewStoppedReasonWarmPolicy,
+		PreviewStoppedReasonSessionPrewarmPolicy,
 		PreviewStoppedReasonPRClosed,
 		PreviewStoppedReasonDrain,
 		PreviewStoppedReasonError:
 		return nil
 	default:
 		return fmt.Errorf("invalid PreviewStoppedReason: %q", r)
+	}
+}
+
+// PreviewSessionPrewarmMode controls repository-level speculative session
+// preview warming before a user explicitly starts a preview.
+type PreviewSessionPrewarmMode string
+
+const (
+	PreviewSessionPrewarmModeOff   PreviewSessionPrewarmMode = "off"
+	PreviewSessionPrewarmModeCache PreviewSessionPrewarmMode = "cache"
+	PreviewSessionPrewarmModeSmart PreviewSessionPrewarmMode = "smart"
+)
+
+func (m PreviewSessionPrewarmMode) Validate() error {
+	switch m {
+	case PreviewSessionPrewarmModeOff, PreviewSessionPrewarmModeCache, PreviewSessionPrewarmModeSmart:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewSessionPrewarmMode: %q", m)
+	}
+}
+
+// PreviewSpeculativeDecision records the classifier/scheduler decision for
+// session preview prewarming.
+type PreviewSpeculativeDecision string
+
+const (
+	PreviewSpeculativeDecisionNone          PreviewSpeculativeDecision = "none"
+	PreviewSpeculativeDecisionCache         PreviewSpeculativeDecision = "cache"
+	PreviewSpeculativeDecisionWarmCandidate PreviewSpeculativeDecision = "warm_candidate"
+)
+
+func (d PreviewSpeculativeDecision) Validate() error {
+	switch d {
+	case PreviewSpeculativeDecisionNone, PreviewSpeculativeDecisionCache, PreviewSpeculativeDecisionWarmCandidate:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewSpeculativeDecision: %q", d)
 	}
 }
 
