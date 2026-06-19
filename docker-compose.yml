@@ -91,7 +91,7 @@ services:
           cpus: "0.5"
 
   frontend:
-    image: node:22-alpine
+    image: node:24-alpine
     working_dir: /app
     # npm ci is faster than npm install and uses package-lock.json exactly.
     # The node_modules volume persists packages across restarts so subsequent

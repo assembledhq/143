@@ -149,6 +149,10 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	jobStore := db.NewJobStore(pool)
+	jobStore.SetLogger(logger)
+	if jobNotifier := cache.NewJobNotifier(redisClient, logger); jobNotifier != nil {
+		jobStore.SetNotifier(jobNotifier)
+	}
 	sessionStreams := cache.NewSessionStreams(redisClient, logger, redisMetrics)
 	sessionStore.SetLogger(logger)
 	sessionLogStore.SetLogger(logger)
@@ -267,47 +271,26 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		return nil, shutdown, fmt.Errorf("worker services unavailable")
 	}
 
-	stores := &worker.Stores{
+	stores := buildSessionExecutorStores(sessionExecutorStoreDeps{
+		Pool:                pool,
 		Issues:              issueStore,
 		Sessions:            sessionStore,
 		Jobs:                jobStore,
 		Integrations:        integrationStore,
-		Webhooks:            db.NewWebhookDeliveryStore(pool),
 		PriorityScores:      priorityScoreStore,
 		ComplexityEstimates: complexityEstimateStore,
 		Projects:            projectStore,
 		ProjectTasks:        projectTaskStore,
 		Credentials:         credentialStore,
-		AuditLogs:           db.NewAuditLogStore(pool),
 		Organizations:       orgStore,
-		Users:               db.NewUserStore(pool),
 		SessionLogs:         sessionLogStore,
-		EvalTasks:           db.NewEvalTaskStore(pool),
-		EvalRuns:            db.NewEvalRunStore(pool),
-		EvalBatches:         db.NewEvalBatchStore(pool),
 		EvalBootstraps:      evalBootstrapStore,
-		EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
 		Repositories:        repoStore,
 		SessionMessages:     sessionMessageStore,
 		SessionThreads:      sessionThreadStore,
-		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
-		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
-		Automations:         db.NewAutomationStore(pool),
 		AutomationRuns:      automationRunStore,
-		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
-		PRReadiness:         db.NewPRReadinessStore(pool),
-		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
-		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        pullRequestStore,
-		SlackInstallations:  db.NewSlackInstallationStore(pool),
-		SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
-		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
-		SlackUserLinks:      db.NewSlackUserLinkStore(pool),
-		SlackChannels:       db.NewSlackChannelSettingsStore(pool),
-		SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
-		SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
-		SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
-	}
+	})
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
 	}
@@ -330,4 +313,125 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		HeartbeatInterval: 10 * time.Second,
 		RenewInterval:     20 * time.Second,
 	}, shutdown, nil
+}
+
+type sessionExecutorStoreDeps struct {
+	Pool                *pgxpool.Pool
+	Issues              *db.IssueStore
+	Sessions            *db.SessionStore
+	Jobs                *db.JobStore
+	Integrations        *db.IntegrationStore
+	PriorityScores      *db.PriorityScoreStore
+	ComplexityEstimates *db.ComplexityEstimateStore
+	Projects            *db.ProjectStore
+	ProjectTasks        *db.ProjectTaskStore
+	Credentials         *db.OrgCredentialStore
+	Organizations       *db.OrganizationStore
+	SessionLogs         *db.SessionLogStore
+	EvalBootstraps      *db.EvalBootstrapStore
+	Repositories        *db.RepositoryStore
+	SessionMessages     *db.SessionMessageStore
+	SessionThreads      *db.SessionThreadStore
+	AutomationRuns      *db.AutomationRunStore
+	PullRequests        *db.PullRequestStore
+}
+
+func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
+	pool := deps.Pool
+	if deps.Issues == nil {
+		deps.Issues = db.NewIssueStore(pool)
+	}
+	if deps.Sessions == nil {
+		deps.Sessions = db.NewSessionStore(pool)
+	}
+	if deps.Jobs == nil {
+		deps.Jobs = db.NewJobStore(pool)
+	}
+	if deps.Integrations == nil {
+		deps.Integrations = db.NewIntegrationStore(pool)
+	}
+	if deps.PriorityScores == nil {
+		deps.PriorityScores = db.NewPriorityScoreStore(pool)
+	}
+	if deps.ComplexityEstimates == nil {
+		deps.ComplexityEstimates = db.NewComplexityEstimateStore(pool)
+	}
+	if deps.Projects == nil {
+		deps.Projects = db.NewProjectStore(pool)
+	}
+	if deps.ProjectTasks == nil {
+		deps.ProjectTasks = db.NewProjectTaskStore(pool)
+	}
+	if deps.Credentials == nil {
+		deps.Credentials = db.NewOrgCredentialStore(pool, nil)
+	}
+	if deps.Organizations == nil {
+		deps.Organizations = db.NewOrganizationStore(pool)
+	}
+	if deps.SessionLogs == nil {
+		deps.SessionLogs = db.NewSessionLogStore(pool)
+	}
+	if deps.EvalBootstraps == nil {
+		deps.EvalBootstraps = db.NewEvalBootstrapStore(pool)
+	}
+	if deps.Repositories == nil {
+		deps.Repositories = db.NewRepositoryStore(pool)
+	}
+	if deps.SessionMessages == nil {
+		deps.SessionMessages = db.NewSessionMessageStore(pool)
+	}
+	if deps.SessionThreads == nil {
+		deps.SessionThreads = db.NewSessionThreadStore(pool)
+	}
+	if deps.AutomationRuns == nil {
+		deps.AutomationRuns = db.NewAutomationRunStore(pool)
+	}
+	if deps.PullRequests == nil {
+		deps.PullRequests = db.NewPullRequestStore(pool)
+	}
+	return &worker.Stores{
+		Issues:              deps.Issues,
+		Sessions:            deps.Sessions,
+		Jobs:                deps.Jobs,
+		Integrations:        deps.Integrations,
+		Memberships:         db.NewOrganizationMembershipStore(pool),
+		Webhooks:            db.NewWebhookDeliveryStore(pool),
+		PriorityScores:      deps.PriorityScores,
+		ComplexityEstimates: deps.ComplexityEstimates,
+		Projects:            deps.Projects,
+		ProjectTasks:        deps.ProjectTasks,
+		Credentials:         deps.Credentials,
+		AuditLogs:           db.NewAuditLogStore(pool),
+		Organizations:       deps.Organizations,
+		Users:               db.NewUserStore(pool),
+		SessionLogs:         deps.SessionLogs,
+		EvalTasks:           db.NewEvalTaskStore(pool),
+		EvalRuns:            db.NewEvalRunStore(pool),
+		EvalBatches:         db.NewEvalBatchStore(pool),
+		EvalBootstraps:      deps.EvalBootstraps,
+		EvalReleaseGates:    db.NewEvalReleaseGateStore(pool),
+		Repositories:        deps.Repositories,
+		GitHubInstallations: db.NewGitHubInstallationStore(pool),
+		SessionMessages:     deps.SessionMessages,
+		SessionThreads:      deps.SessionThreads,
+		HumanInputRequests:  db.NewSessionHumanInputRequestStore(pool),
+		ThreadFileEvents:    db.NewSessionThreadFileEventStore(pool),
+		SandboxHolders:      db.NewSessionSandboxHolderStore(pool),
+		Automations:         db.NewAutomationStore(pool),
+		AutomationRuns:      deps.AutomationRuns,
+		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
+		PRReadiness:         db.NewPRReadinessStore(pool),
+		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
+		Previews:            db.NewPreviewStore(pool),
+		PullRequests:        deps.PullRequests,
+		SlackInstallations:  db.NewSlackInstallationStore(pool),
+		SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
+		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
+		SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+		SlackChannels:       db.NewSlackChannelSettingsStore(pool),
+		SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
+		SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
+		SlackOutbound:       db.NewSlackOutboundMessageStore(pool),
+		SessionAttributions: db.NewSessionAttributionStore(pool),
+	}
 }

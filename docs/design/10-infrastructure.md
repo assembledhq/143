@@ -47,7 +47,7 @@ The setup script installs these if missing, or you can install them manually:
 | Tool | Minimum Version | Install |
 |------|----------------|---------|
 | Go | 1.23+ | `brew install go` / `apt install golang` |
-| Node.js | 20+ | `brew install node` / `apt install nodejs npm` |
+| Node.js | 24+ | `brew install node@24` / NodeSource 24.x |
 | PostgreSQL | 15+ | `brew install postgresql@17` / `apt install postgresql` |
 
 ### Why No Docker for Local Dev?

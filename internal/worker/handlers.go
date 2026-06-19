@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/feedback"
@@ -2077,6 +2078,15 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				return fmt.Errorf("get linked slack session: %w", getErr)
 			}
 			if slackShouldContinueLinkedSession(session.Status) {
+				var llm llmClient
+				if services != nil {
+					llm = services.LLM
+				}
+				refreshedSession, routingMode, routeErr := refreshSlackLinkedSessionRouting(ctx, stores, llm, logger, orgID, payload.TeamID, payload.ChannelID, payload.Text, session)
+				if routeErr != nil {
+					return fmt.Errorf("refresh linked Slack session routing: %w", routeErr)
+				}
+				session = refreshedSession
 				msg := &models.SessionMessage{
 					SessionID:  session.ID,
 					OrgID:      orgID,
@@ -2110,7 +2120,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
-				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, slackbotsvc.SlackRoutingModeAuto)
+				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, routingMode, routingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
 				posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, existingLink, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 				if postErr != nil {
 					logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
@@ -2182,6 +2192,12 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				logger.Warn().Err(settingsErr).Str("channel_id", payload.ChannelID).Msg("failed to load Slack channel settings")
 			}
 		}
+		var llm llmClient
+		if services != nil {
+			llm = services.LLM
+		}
+		resolvedContext = resolveSlackAutoRouting(ctx, llm, logger, payload.Text, resolvedContext)
+		session.InputManifest = slackRoutingInputManifest(session.InputManifest, resolvedContext.RoutingMode, resolvedContext.RoutingReason)
 		if err := stores.Sessions.Create(ctx, session); err != nil {
 			return fmt.Errorf("create slack session: %w", err)
 		}
@@ -2234,7 +2250,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		if teamLine := slackTeamSessionLine(*link); teamLine != "" {
 			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 		}
-		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode)
+		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode, resolvedContext.RoutingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
 		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
 		posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, *link, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 		if postErr != nil {
@@ -5060,6 +5076,17 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 	case "slack_repair_pr", "slack_start_work":
 		prompt := "Continue this session and repair the pull request or branch publication failure. Report the outcome and any next action."
 		if input.ActionID == "slack_start_work" {
+			if stores == nil || stores.Sessions == nil {
+				return fmt.Errorf("slack start-work dependencies are not configured")
+			}
+			session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+			if err != nil {
+				return fmt.Errorf("load Slack session for start-work routing: %w", err)
+			}
+			manifest := slackRoutingInputManifest(session.InputManifest, slackbotsvc.SlackRoutingModeStartWork, "Slack Start work action")
+			if _, err := stores.Sessions.UpdateInputManifest(ctx, orgID, sessionID, manifest); err != nil {
+				return fmt.Errorf("update Slack session start-work routing: %w", err)
+			}
 			prompt = "Continue this session from Slack and start the requested work. Report progress and outcome back to Slack."
 		}
 		return enqueueSlackSessionContinuationPrompt(ctx, stores, orgID, sessionID, prompt)
@@ -6487,7 +6514,7 @@ func slackSessionAckText(services *Services, sessionID uuid.UUID, verb string) s
 	}).Text
 }
 
-func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode) []ingestion.SlackBlock {
+func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode, showStartWorkAction bool) []ingestion.SlackBlock {
 	var sessionID uuid.UUID
 	if session != nil {
 		sessionID = session.ID
@@ -6519,7 +6546,7 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 				"channel_id": channelID,
 			}),
 		})
-		if routingMode == slackbotsvc.SlackRoutingModeAnswerOnly {
+		if showStartWorkAction {
 			actions = append(actions, slackbotsvc.SlackAction{
 				Text:     "Start work",
 				ActionID: "slack_start_work",
@@ -6675,8 +6702,250 @@ func slackSessionAckRoutingMode(ctx context.Context, stores *Stores, logger zero
 	return slackbotsvc.SlackRoutingMode(settings.RoutingMode)
 }
 
+func refreshSlackLinkedSessionRouting(ctx context.Context, stores *Stores, llm llmClient, logger zerolog.Logger, orgID uuid.UUID, teamID, channelID, text string, session models.Session) (models.Session, slackbotsvc.SlackRoutingMode, error) {
+	baseMode := slackSessionAckRoutingMode(ctx, stores, logger, orgID, teamID, channelID)
+	resolved := resolveSlackAutoRouting(ctx, llm, logger, text, slackbotsvc.SlackContextResolveResult{RoutingMode: baseMode})
+	manifest := slackRoutingInputManifest(session.InputManifest, resolved.RoutingMode, resolved.RoutingReason)
+	if string(manifest) == string(session.InputManifest) {
+		session.InputManifest = manifest
+		return session, resolved.RoutingMode, nil
+	}
+	if stores == nil || stores.Sessions == nil {
+		return session, resolved.RoutingMode, fmt.Errorf("slack session store is not configured")
+	}
+	updated, err := stores.Sessions.UpdateInputManifest(ctx, orgID, session.ID, manifest)
+	if err != nil {
+		return session, resolved.RoutingMode, fmt.Errorf("update Slack routing input manifest: %w", err)
+	}
+	return updated, resolved.RoutingMode, nil
+}
+
+func resolveSlackAutoRouting(ctx context.Context, llm llmClient, logger zerolog.Logger, text string, resolved slackbotsvc.SlackContextResolveResult) slackbotsvc.SlackContextResolveResult {
+	if override := slackbotsvc.RoutingOverrideFromText(text); override != "" {
+		return applySlackRoutingMode(resolved, override, "explicit Slack routing command")
+	}
+	if resolved.RoutingMode != "" && resolved.RoutingMode != slackbotsvc.SlackRoutingModeAuto {
+		return resolved
+	}
+	classification := classifySlackRouting(ctx, llm, logger, text)
+	return applySlackRoutingMode(resolved, classification.RoutingMode, classification.Reason)
+}
+
+type slackRoutingClassification struct {
+	RoutingMode slackbotsvc.SlackRoutingMode
+	Confidence  float64
+	Reason      string
+}
+
+func classifySlackRouting(ctx context.Context, llm llmClient, logger zerolog.Logger, text string) slackRoutingClassification {
+	if llm == nil {
+		return fallbackSlackRoutingClassification(text, "LLM classifier unavailable")
+	}
+	classifierCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	response, err := llm.Complete(classifierCtx, prompts.SlackRoutingClassifierPrompt(), strings.TrimSpace(text))
+	if err != nil {
+		logger.Warn().Err(err).Msg("Slack routing classifier failed, using heuristic fallback")
+		return fallbackSlackRoutingClassification(text, "LLM classifier failed")
+	}
+	classification, err := parseSlackRoutingClassification(response)
+	if err != nil {
+		logger.Warn().Err(err).Msg("Slack routing classifier returned invalid response, using heuristic fallback")
+		return fallbackSlackRoutingClassification(text, "LLM classifier returned invalid JSON")
+	}
+	if classification.Confidence < 0.65 {
+		return fallbackSlackRoutingClassification(text, "LLM classifier confidence below threshold")
+	}
+	return classification
+}
+
+func parseSlackRoutingClassification(response string) (slackRoutingClassification, error) {
+	jsonText := extractFirstJSONObject(response)
+	var raw struct {
+		RoutingMode slackbotsvc.SlackRoutingMode `json:"routing_mode"`
+		Confidence  float64                      `json:"confidence"`
+		Reason      string                       `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(jsonText), &raw); err != nil {
+		return slackRoutingClassification{}, err
+	}
+	switch raw.RoutingMode {
+	case slackbotsvc.SlackRoutingModeAnswerOnly, slackbotsvc.SlackRoutingModeStartWork:
+	default:
+		return slackRoutingClassification{}, fmt.Errorf("invalid Slack routing mode %q", raw.RoutingMode)
+	}
+	return slackRoutingClassification{
+		RoutingMode: raw.RoutingMode,
+		Confidence:  raw.Confidence,
+		Reason:      strings.TrimSpace(raw.Reason),
+	}, nil
+}
+
+func extractFirstJSONObject(s string) string {
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start >= 0 && end > start {
+		return s[start : end+1]
+	}
+	return s
+}
+
+func fallbackSlackRoutingClassification(text, reason string) slackRoutingClassification {
+	cleaned := normalizeSlackRoutingText(text)
+	mode := slackbotsvc.SlackRoutingModeAnswerOnly
+	if slackTextRequestsWork(cleaned) && (!slackTextLooksQuestionLike(cleaned) || slackTextQuestionRequestsWork(cleaned)) {
+		mode = slackbotsvc.SlackRoutingModeStartWork
+	} else if slackTextLooksQuestionLike(cleaned) {
+		mode = slackbotsvc.SlackRoutingModeAnswerOnly
+	}
+	return slackRoutingClassification{
+		RoutingMode: mode,
+		Confidence:  0,
+		Reason:      reason,
+	}
+}
+
+func normalizeSlackRoutingText(text string) string {
+	cleaned := strings.TrimSpace(strings.ToLower(text))
+	for strings.HasPrefix(cleaned, "<@") {
+		end := strings.Index(cleaned, ">")
+		if end < 0 {
+			break
+		}
+		cleaned = strings.TrimSpace(cleaned[end+1:])
+	}
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+func slackTextLooksQuestionLike(text string) bool {
+	if strings.Contains(text, "?") {
+		return true
+	}
+	questionPrefixes := []string{
+		"what ", "why ", "how ", "when ", "where ", "who ", "does ", "do ", "did ",
+		"is ", "are ", "can ", "could ", "would ", "should ", "has ", "have ", "will ",
+	}
+	for _, prefix := range questionPrefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func slackTextRequestsWork(text string) bool {
+	workTerms := []string{
+		"fix", "implement", "change", "update", "add", "remove", "create", "build",
+		"wire", "refactor", "migrate", "hide", "make", "repair",
+	}
+	for _, term := range workTerms {
+		if text == term || strings.HasPrefix(text, term+" ") || strings.Contains(text, " "+term+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func slackTextQuestionRequestsWork(text string) bool {
+	workTerms := []string{
+		"fix", "implement", "change", "update", "add", "remove", "create", "build",
+		"wire", "refactor", "migrate", "hide", "make", "repair",
+	}
+	requestPrefixes := []string{
+		"can you ", "could you ", "would you ", "will you ", "please ", "can we ", "could we ",
+	}
+	for _, prefix := range requestPrefixes {
+		if !strings.HasPrefix(text, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+		for _, term := range workTerms {
+			if rest == term || strings.HasPrefix(rest, term+" ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func applySlackRoutingMode(resolved slackbotsvc.SlackContextResolveResult, mode slackbotsvc.SlackRoutingMode, reason string) slackbotsvc.SlackContextResolveResult {
+	if mode == "" {
+		mode = slackbotsvc.SlackRoutingModeAnswerOnly
+	}
+	resolved.RoutingMode = mode
+	resolved.RoutingReason = strings.TrimSpace(reason)
+	if mode == slackbotsvc.SlackRoutingModeAnswerOnly {
+		resolved.Missing = nonRepositorySlackMissingContext(resolved.Missing)
+		resolved.ContextSummary.Missing = nonRepositorySlackMissingContext(resolved.ContextSummary.Missing)
+	}
+	return resolved
+}
+
+func nonRepositorySlackMissingContext(missing []slackbotsvc.MissingSlackContext) []slackbotsvc.MissingSlackContext {
+	if len(missing) == 0 {
+		return missing
+	}
+	filtered := make([]slackbotsvc.MissingSlackContext, 0, len(missing))
+	for _, item := range missing {
+		if item.Kind == "repository" {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func slackRoutingInputManifest(raw json.RawMessage, mode slackbotsvc.SlackRoutingMode, reason string) json.RawMessage {
+	manifest := map[string]any{}
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			manifest = map[string]any{}
+		}
+	}
+	slackManifest, _ := manifest["slack"].(map[string]any)
+	if slackManifest == nil {
+		slackManifest = map[string]any{}
+	}
+	slackManifest["routing_mode"] = string(mode)
+	if strings.TrimSpace(reason) != "" {
+		slackManifest["routing_reason"] = strings.TrimSpace(reason)
+	}
+	manifest["slack"] = slackManifest
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+func slackRoutingModeFromInputManifest(raw json.RawMessage) (slackbotsvc.SlackRoutingMode, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var manifest struct {
+		Slack struct {
+			RoutingMode slackbotsvc.SlackRoutingMode `json:"routing_mode"`
+		} `json:"slack"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return "", false
+	}
+	switch manifest.Slack.RoutingMode {
+	case slackbotsvc.SlackRoutingModeAuto, slackbotsvc.SlackRoutingModeAnswerOnly, slackbotsvc.SlackRoutingModeStartWork:
+		return manifest.Slack.RoutingMode, true
+	default:
+		return "", false
+	}
+}
+
 func shouldEnqueueSlackStartedRun(session *models.Session, resolved slackbotsvc.SlackContextResolveResult) bool {
-	if session == nil || session.RepositoryID == nil {
+	if session == nil {
+		return false
+	}
+	if resolved.RoutingMode == slackbotsvc.SlackRoutingModeAnswerOnly {
+		return true
+	}
+	if session.RepositoryID == nil {
 		return false
 	}
 	return !blockingSlackMissingContext(resolved.Missing)
