@@ -6287,7 +6287,7 @@ func refreshSlackLinkedSessionRouting(ctx context.Context, stores *Stores, llm l
 		return session, resolved.RoutingMode, nil
 	}
 	if stores == nil || stores.Sessions == nil {
-		return session, resolved.RoutingMode, fmt.Errorf("Slack session store is not configured")
+		return session, resolved.RoutingMode, fmt.Errorf("slack session store is not configured")
 	}
 	updated, err := stores.Sessions.UpdateInputManifest(ctx, orgID, session.ID, manifest)
 	if err != nil {
