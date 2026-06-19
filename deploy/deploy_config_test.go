@@ -298,7 +298,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.NoError(t, err, "test should read the deploy workflow")
 	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"`, "CI should use deploy-fleet's default app/worker role set for routine main-branch deploys")
 	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the artifact upload step can find per-host logs")
-	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v4`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
+	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v7`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
 
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")

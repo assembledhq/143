@@ -9,10 +9,25 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
+MIN_NODE_MAJOR=24
 
 info()  { echo -e "${GREEN}[143]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[143]${NC} $*"; }
 fail()  { echo -e "${RED}[143]${NC} $*"; exit 1; }
+
+node_major_version() {
+  node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0
+}
+
+ensure_node_version() {
+  command -v node >/dev/null 2>&1 || fail "Node.js installation failed."
+
+  local node_major
+  node_major="$(node_major_version)"
+  if [ "$node_major" -lt "$MIN_NODE_MAJOR" ]; then
+    fail "Node.js ${MIN_NODE_MAJOR}+ is required (found $(node --version)). Run: nvm install ${MIN_NODE_MAJOR} && nvm use ${MIN_NODE_MAJOR}, or install Node.js ${MIN_NODE_MAJOR}+."
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # 1. Detect OS
@@ -51,7 +66,7 @@ install_prereqs() {
     for pkg in "${missing[@]}"; do
       case "$pkg" in
         go)         info "Installing Go...";         brew install go ;;
-        node)       info "Installing Node.js...";    brew install node ;;
+        node)       info "Installing Node.js 24..."; brew install node@24 && brew link --overwrite --force node@24 ;;
         postgresql) info "Installing PostgreSQL...";  brew install postgresql@17 && brew services start postgresql@17 ;;
         sops)       info "Installing sops...";        brew install sops ;;
         age)        info "Installing age...";         brew install age ;;
@@ -63,7 +78,12 @@ install_prereqs() {
       for pkg in "${missing[@]}"; do
         case "$pkg" in
           go)         info "Installing Go...";         sudo apt-get install -y golang ;;
-          node)       info "Installing Node.js...";    sudo apt-get install -y nodejs npm ;;
+          node)
+            info "Installing Node.js 24..."
+            sudo apt-get install -y ca-certificates curl
+            curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+            ;;
           postgresql) info "Installing PostgreSQL...";  sudo apt-get install -y postgresql postgresql-client && sudo systemctl start postgresql ;;
           sops)       info "Installing sops...";        sudo apt-get install -y sops ;;
           age)        info "Installing age...";         sudo apt-get install -y age ;;
@@ -76,7 +96,7 @@ install_prereqs() {
 
   # Verify core tools landed (sops/age are optional — warn but don't fail)
   command -v go   >/dev/null 2>&1 || fail "Go installation failed."
-  command -v node >/dev/null 2>&1 || fail "Node.js installation failed."
+  ensure_node_version
   command -v psql >/dev/null 2>&1 || fail "PostgreSQL installation failed."
   if ! command -v sops >/dev/null 2>&1 || ! command -v age >/dev/null 2>&1; then
     warn "sops/age not available — encrypted secrets (make secrets-*) won't work."
@@ -87,6 +107,7 @@ install_prereqs() {
 }
 
 install_prereqs
+ensure_node_version
 
 # ---------------------------------------------------------------------------
 # 3. Print detected versions

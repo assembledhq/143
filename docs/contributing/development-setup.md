@@ -7,10 +7,10 @@ For the full GitHub App configuration walkthrough, see the [local development gu
 ## Prerequisites
 
 - Go 1.24+
-- Node.js 18+
+- Node.js 24+
 - PostgreSQL 17
 
-The setup script installs anything missing via Homebrew (macOS) or apt (Linux).
+The setup script installs anything missing via Homebrew (macOS) or apt/NodeSource (Linux).
 
 ## Quick Start
 
