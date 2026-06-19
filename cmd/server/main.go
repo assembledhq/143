@@ -1674,6 +1674,7 @@ func buildServices(
 		TitleService:      titleService,
 		Linear:            linearService,
 		SlackbotMetrics:   workerSlackbotMetrics,
+		Redis:             redisClient,
 		FrontendURL:       cfg.FrontendURL,
 		ReviewLoops:       reviewLoopSvc,
 		RuntimeSampler:    runtimeSampler,
