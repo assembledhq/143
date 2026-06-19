@@ -235,27 +235,30 @@ Admins should be able to add repo-specific checks after the built-in set is stab
 Two authoring paths should feed the same stored model:
 
 1. **Settings UI prompt checks.** An admin creates a check in `Settings -> Pull requests -> PR readiness`, chooses repositories, writes a short prompt, and sets enforcement defaults. 143 stores the active check definition in the database with version history.
-2. **Repo config checks.** A repository can define checks in `.143/pr-readiness.yml`. 143 reads the config at session start/readiness time, validates it, and materializes the active definitions for that repository. Config-file changes are reviewable in GitHub like any other repo policy.
+2. **Repo config checks.** A repository can define checks in the existing `.143/config.json` file under a `pr_readiness` key. This keeps readiness policy with the same repo-owned config surface used for previews and sandbox setup instead of introducing a second `.143` config file. 143 reads the config at session start/readiness time, validates it, and materializes the active definitions for that repository. Config-file changes are reviewable in GitHub like any other repo policy.
 
 Example config:
 
-```yaml
-pr_readiness:
-  checks:
-    - id: no_analytics_schema_drift
-      name: Analytics schema compatibility
-      type: prompt
-      enforcement:
-        builder: blocking
-        engineer: advisory
-      paths:
-        include:
-          - "analytics/**"
-          - "frontend/src/events/**"
-      prompt: |
-        Review the diff for analytics event schema drift.
-        Fail only if an event payload changes without a matching migration,
-        compatibility note, or test evidence.
+```json
+{
+  "pr_readiness": {
+    "checks": [
+      {
+        "id": "no_analytics_schema_drift",
+        "name": "Analytics schema compatibility",
+        "type": "prompt",
+        "enforcement": {
+          "builder": "blocking",
+          "engineer": "advisory"
+        },
+        "paths": {
+          "include": ["analytics/**", "frontend/src/events/**"]
+        },
+        "prompt": "Review the diff for analytics event schema drift. Fail only if an event payload changes without a matching migration, compatibility note, or test evidence."
+      }
+    ]
+  }
+}
 ```
 
 Prompt checks should receive a bounded readiness context: diff summary, changed file list, relevant hunks, linked issue context, existing readiness results, and repo conventions. They should return structured output:
@@ -274,7 +277,7 @@ Safety and product constraints:
 - Only admins can create or enable settings-defined prompt checks.
 - Repo config checks are accepted only from the checked-out repository and should be validated against a schema.
 - Custom checks can be turned `off`, `advisory`, or `blocking` like built-in checks.
-- The UI should show whether a check came from org settings, repo settings, or `.143/pr-readiness.yml`.
+- The UI should show whether a check came from org settings, repo settings, or `.143/config.json`.
 - Prompt checks should be bounded and evidence-seeking; they should not become broad "review the whole PR again" prompts.
 - Failed custom-check execution should surface as `error`; admins decide whether check errors block builders or degrade to advisory.
 
@@ -302,7 +305,7 @@ Safety and product constraints:
 ### Phase 4: Custom checks
 
 - Add settings-defined prompt checks.
-- Add `.143/pr-readiness.yml` ingestion.
+- Add `.143/config.json` `pr_readiness` ingestion.
 - Show custom check provenance and enforcement in the readiness card.
 - Keep custom checks behind admin-controlled enablement until latency and false-positive behavior are understood.
 
@@ -351,7 +354,7 @@ Use SSE/polling to update the readiness card while a run is queued/running. If a
 - How should expected test commands be inferred when a repo has no `.143` config?
 - Should branch-only publish be allowed when PR readiness is blocked?
 - Which risk flags belong in the PR footer versus only in the session?
-- If org settings and `.143/pr-readiness.yml` define the same custom check key, should repo config override settings, merge with it, or be rejected as ambiguous?
+- If org settings and `.143/config.json` define the same custom check key, should repo config override settings, merge with it, or be rejected as ambiguous?
 
 ## Recommendation
 
