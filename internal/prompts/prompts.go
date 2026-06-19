@@ -15,7 +15,9 @@ var templateFS embed.FS
 var templates *template.Template
 
 func init() {
-	templates = template.Must(template.ParseFS(templateFS, "templates/*.template"))
+	templates = template.Must(template.New("").Funcs(template.FuncMap{
+		"join": strings.Join,
+	}).ParseFS(templateFS, "templates/*.template"))
 }
 
 // render executes a named template with the given data and returns the result.
@@ -97,6 +99,31 @@ func DirectionAlignmentPrompt() string {
 // ComplexityEstimatePrompt returns the system prompt for complexity estimation.
 func ComplexityEstimatePrompt() string {
 	return render("complexity_estimate_prompt.template", nil)
+}
+
+// ─── Preview ───────────────────────────────────────────────────────────────
+
+// SessionPreviewPrewarmClassifierPrompt returns the system prompt for deciding
+// whether speculative session preview work is useful.
+func SessionPreviewPrewarmClassifierPrompt() string {
+	return render("session_preview_prewarm_classifier.template", nil)
+}
+
+type SessionPreviewPrewarmClassifierUserPromptData struct {
+	RepositoryFullName string
+	RepositoryLanguage string
+	SessionSource      string
+	UserPrompt         string
+	IssueLabels        []string
+	IssueType          string
+	PreviewHistory     string
+	CapacitySummary    string
+	Phase              string
+	ChangedFileKinds   []string
+}
+
+func SessionPreviewPrewarmClassifierUserPrompt(data SessionPreviewPrewarmClassifierUserPromptData) string {
+	return render("session_preview_prewarm_classifier_user.template", data)
 }
 
 // ─── Feedback ────────────────────────────────────────────────────────────────

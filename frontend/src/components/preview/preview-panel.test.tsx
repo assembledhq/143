@@ -80,7 +80,7 @@ const DEFAULT_PROPS = {
 };
 
 function makePreviewStatus(
-  overrides: Partial<PreviewStatusResponse["instance"]> = {},
+  overrides: Partial<NonNullable<PreviewStatusResponse["instance"]>> = {},
   services: PreviewStatusResponse["services"] = [],
   infrastructure: NonNullable<PreviewStatusResponse["infrastructure"]> = [],
 ): PreviewStatusResponse {
@@ -184,7 +184,7 @@ describe("PreviewPanel component", () => {
   it('shows idle state with "No preview running" when phase is absent', async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({
-        status: undefined as unknown as PreviewStatusResponse["instance"]["status"],
+        status: undefined as unknown as NonNullable<PreviewStatusResponse["instance"]>["status"],
       }),
     );
 
@@ -208,6 +208,24 @@ describe("PreviewPanel component", () => {
     });
     expect(screen.queryByText("no active preview")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+  });
+
+  it("shows resume copy when a session preview is warmed", async () => {
+    mockGet.mockResolvedValue({
+      services: [],
+      prewarm: {
+        state: "warm",
+        workspace_revision: 12,
+        resume_estimate_seconds: 30,
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Warmed and ready")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Resume Preview" })).toBeInTheDocument();
   });
 
   it('shows idle state when phase is "stopped"', async () => {

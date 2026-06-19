@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -22,7 +23,10 @@ const previewCurrentSummaryColumns = `pg.id, pg.org_id, pg.repository_id, pg.gro
 	pg.pull_request_number, pg.source_type, pg.source_id, pg.source_url, pg.current_target_id,
 	pg.latest_commit_sha, pg.current_status, pg.pinned, pg.created_by_user_id, pg.created_at, pg.last_activity_at,
 	repo.full_name AS repository_full_name,
-	COALESCE(latest.status, pg.current_status)::text AS status,
+	CASE
+		WHEN pg.current_status = 'warm' AND latest.stopped_reason = 'session_prewarm_policy' THEN 'warm'
+		ELSE COALESCE(latest.status, pg.current_status)
+	END::text AS status,
 	CASE
 		WHEN pg.pinned THEN 'pinned'
 		WHEN pg.latest_commit_sha = '' THEN 'unknown'
@@ -38,6 +42,13 @@ const previewCurrentSummaryColumns = `pg.id, pg.org_id, pg.repository_id, pg.gro
 	false AS resumable, NULL::integer AS resume_estimate_seconds`
 
 var prSourceIDRe = regexp.MustCompile(`^([^/\s]+)/([^#\s]+)#([0-9]+)(?:@.+)?$`)
+
+func nilIfUUIDZero(id uuid.UUID) *uuid.UUID {
+	if id == uuid.Nil {
+		return nil
+	}
+	return &id
+}
 
 type PreviewCurrentIndexFilters struct {
 	RepositoryID *uuid.UUID
@@ -69,6 +80,18 @@ func (s *PreviewStore) UpsertPreviewGroupForTarget(ctx context.Context, orgID uu
 	currentStatus, err := s.currentTargetStatus(ctx, orgID, target.ID)
 	if err != nil {
 		return nil, err
+	}
+	if target.SourceType == models.PreviewSourceTypeSession && strings.TrimSpace(target.SourceID) != "" {
+		if sessionID, parseErr := uuid.Parse(strings.TrimSpace(target.SourceID)); parseErr == nil {
+			if row, migrated, migrateErr := s.migrateSessionPreviewGroupToTarget(ctx, orgID, sessionID, target, latestCommitSHA, currentStatus); migrateErr != nil {
+				return nil, migrateErr
+			} else if migrated {
+				if err := s.AttachTargetToPreviewGroup(ctx, orgID, target.ID, row.ID); err != nil {
+					return nil, err
+				}
+				return row, nil
+			}
+		}
 	}
 	lastActivityAt := target.CreatedAt
 	if lastActivityAt.IsZero() {
@@ -133,6 +156,61 @@ func (s *PreviewStore) UpsertPreviewGroupForTarget(ctx context.Context, orgID uu
 		return nil, err
 	}
 	return &row, nil
+}
+
+func (s *PreviewStore) migrateSessionPreviewGroupToTarget(ctx context.Context, orgID, sessionID uuid.UUID, target models.PreviewTarget, latestCommitSHA, currentStatus string) (*models.PreviewGroup, bool, error) {
+	group := classifyPreviewGroup(target)
+	lastActivityAt := target.CreatedAt
+	if lastActivityAt.IsZero() {
+		lastActivityAt = time.Now()
+	}
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		UPDATE preview_groups
+		SET group_kind = @group_kind,
+		    branch = @branch,
+		    pull_request_number = @pull_request_number,
+		    source_type = @source_type,
+		    source_id = @source_id,
+		    source_url = @source_url,
+		    current_target_id = @current_target_id,
+		    latest_commit_sha = @latest_commit_sha,
+		    current_status = @current_status,
+		    last_activity_at = GREATEST(last_activity_at, @last_activity_at)
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND group_kind = 'session'
+		  AND source_id = @session_source_id
+		  AND preview_config_name = @preview_config_name
+		  AND pinned = false
+		RETURNING %s`, previewGroupColumns),
+		pgx.NamedArgs{
+			"org_id":              orgID,
+			"repository_id":       target.RepositoryID,
+			"group_kind":          group.kind,
+			"branch":              target.Branch,
+			"preview_config_name": target.PreviewConfigName,
+			"pull_request_number": group.pullRequestNumber,
+			"source_type":         group.sourceType,
+			"source_id":           group.sourceID,
+			"source_url":          group.sourceURL,
+			"current_target_id":   target.ID,
+			"latest_commit_sha":   latestCommitSHA,
+			"current_status":      currentStatus,
+			"last_activity_at":    lastActivityAt,
+			"session_source_id":   sessionID.String(),
+		},
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("migrate session preview group to target: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewGroup])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("collect migrated session preview group: %w", err)
+	}
+	return &row, true, nil
 }
 
 type previewGroupClassification struct {
@@ -243,6 +321,40 @@ func (s *PreviewStore) AttachTargetToPreviewGroup(ctx context.Context, orgID uui
 		return fmt.Errorf("preview target not found")
 	}
 	return nil
+}
+
+func (s *PreviewStore) UpsertSessionPreviewWarmGroup(ctx context.Context, orgID, repositoryID, sessionID, userID uuid.UUID, previewConfigName string) (*models.PreviewGroup, error) {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		INSERT INTO preview_groups (
+			org_id, repository_id, group_kind, branch, preview_config_name,
+			pull_request_number, source_type, source_id, source_url, current_target_id,
+			latest_commit_sha, current_status, pinned, created_by_user_id, last_activity_at
+		) VALUES (
+			@org_id, @repository_id, 'session', '', @preview_config_name,
+			NULL, 'session', @source_id, '', NULL,
+			'', 'warm', false, @created_by_user_id, now()
+		)
+		ON CONFLICT (org_id, repository_id, group_kind, branch, preview_config_name, COALESCE(pull_request_number, 0), source_type, source_id, pinned)
+		DO UPDATE SET
+			current_status = 'warm',
+			last_activity_at = now()
+		RETURNING %s`, previewGroupColumns),
+		pgx.NamedArgs{
+			"org_id":              orgID,
+			"repository_id":       repositoryID,
+			"preview_config_name": previewConfigName,
+			"source_id":           sessionID.String(),
+			"created_by_user_id":  nilIfUUIDZero(userID),
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert session preview warm group: %w", err)
+	}
+	group, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PreviewGroup])
+	if err != nil {
+		return nil, fmt.Errorf("collect session preview warm group: %w", err)
+	}
+	return &group, nil
 }
 
 // UpdatePreviewGroupsLatestSHAForBranch updates latest_commit_sha for all

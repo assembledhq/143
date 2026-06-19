@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/db"
@@ -30,6 +31,26 @@ const previewNoConfigMessage = "This repo has no .143/config.json committed with
 
 var ErrSandboxBusy = errors.New("session sandbox is busy")
 var ErrPreviewCachePrewarmCapacitySkipped = errors.New("preview cache prewarm skipped because sandbox capacity is unavailable")
+
+func reservationPlaceholderPreviewConfig() *models.PreviewConfig {
+	return &models.PreviewConfig{
+		Name:    "placeholder",
+		Primary: "app",
+		Services: map[string]models.ServiceConfig{
+			"app": {
+				Command: []string{"true"},
+				Port:    3000,
+				Ready: models.ReadinessProbe{
+					HTTPPath: "/",
+				},
+			},
+		},
+	}
+}
+
+func timePtr(t time.Time) *time.Time {
+	return &t
+}
 
 // StartRunner completes durable preview startup jobs after the API has
 // reserved the preview row and enqueued start_preview.
@@ -372,6 +393,11 @@ func (r *StartRunner) PrewarmPreviewCaches(ctx context.Context, payload PreviewC
 	r.createPreviewCachePrewarmRun(ctx, payload, scopeKey)
 	r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "running", "", "", "", "", false)
 	started := time.Now()
+	if payload.Source == PreviewCachePrewarmSourceSession {
+		defer func() {
+			metrics.RecordSessionPrewarmCost(ctx, payload.OrgID.String(), "cache", "post_turn", time.Since(started))
+		}()
+	}
 	timeout := r.prewarmTimeout
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -663,6 +689,11 @@ func (r *StartRunner) acquirePrewarmCapacity(ctx context.Context, purpose, sessi
 	if r.sandboxCapacity == nil {
 		return nil, nil
 	}
+	// Require at least 2 free slots before taking one for speculative work so
+	// that the last slot remains available for user-initiated sandboxes.
+	if !r.sandboxCapacity.HasSpeculativeHeadroom(ctx, 2) {
+		return nil, fmt.Errorf("%w: worker has insufficient headroom for speculative work (fewer than 2 slots free)", ErrPreviewCachePrewarmCapacitySkipped)
+	}
 	reservation, err := r.sandboxCapacity.Acquire(ctx, agent.SandboxCapacityRequest{
 		Purpose: purpose, SessionID: sessionID, OrgID: orgID,
 	})
@@ -782,6 +813,64 @@ func (r *StartRunner) updatePreviewCachePrewarmRun(ctx context.Context, payload 
 	if err := r.previews.UpdatePreviewCachePrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, scopeKey, status, packageManagerCacheKey, dependencyCacheKey, configDigest, errMsg, completed); err != nil {
 		r.logger.Warn().Err(err).Str("cache_scope_key", scopeKey).Str("status", status).Msg("failed to update preview cache prewarm run")
 	}
+	r.updateSessionPreviewCachePrewarmRun(ctx, payload, status, configDigest, errMsg, completed)
+}
+
+func (r *StartRunner) updateSessionPreviewCachePrewarmRun(ctx context.Context, payload PreviewCachePrewarmJobPayload, cacheStatus, configDigest, errMsg string, completed bool) {
+	if r == nil || r.previews == nil || payload.Source != PreviewCachePrewarmSourceSession || payload.SessionID == uuid.Nil {
+		return
+	}
+	status := sessionPreviewPrewarmStatusForCacheStatus(cacheStatus, errMsg)
+	if status == "" {
+		return
+	}
+	run, err := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionCache, configDigest, status, errMsg, completed)
+	if err != nil {
+		r.logger.Warn().Err(err).
+			Str("org_id", payload.OrgID.String()).
+			Str("repository_id", payload.RepositoryID.String()).
+			Str("session_id", payload.SessionID.String()).
+			Int64("workspace_revision", payload.WorkspaceRevision).
+			Str("config_digest", configDigest).
+			Str("decision", string(models.PreviewSpeculativeDecisionCache)).
+			Str("reason", payload.Reason).
+			Str("status", status).
+			Msg("failed to update session preview cache prewarm run")
+		return
+	}
+	if status == "failed" || status == "skipped_capacity" {
+		r.logger.Warn().
+			Str("org_id", payload.OrgID.String()).
+			Str("repository_id", payload.RepositoryID.String()).
+			Str("session_id", payload.SessionID.String()).
+			Int64("workspace_revision", payload.WorkspaceRevision).
+			Str("config_digest", configDigest).
+			Str("prewarm_run_id", run.ID.String()).
+			Str("decision", string(run.Decision)).
+			Str("reason", run.Reason).
+			Str("error", errMsg).
+			Msg("session preview cache prewarm finished unsuccessfully")
+	}
+}
+
+func sessionPreviewPrewarmStatusForCacheStatus(cacheStatus, errMsg string) string {
+	switch cacheStatus {
+	case "running":
+		return "running"
+	case "succeeded", "skipped_warm":
+		return "succeeded"
+	case "skipped_capacity":
+		return "skipped_capacity"
+	case "failed":
+		return "failed"
+	case "skipped_no_install", "skipped_disabled", "skipped_no_lockfiles", "skipped_no_paths":
+		return "failed"
+	default:
+		if errMsg != "" {
+			return "failed"
+		}
+		return ""
+	}
 }
 
 func nonNilJobID(jobID uuid.UUID) *uuid.UUID {
@@ -806,9 +895,9 @@ func previewCachePrewarmScopeKey(payload PreviewCachePrewarmJobPayload) string {
 			return ""
 		}
 		if payload.ConfigDigest != "" {
-			return fmt.Sprintf("preview_cache_prewarm:session:%s:%d:%s", payload.SessionID, payload.WorkspaceRevision, payload.ConfigDigest)
+			return fmt.Sprintf("session_preview_cache_prewarm:%s:%d:%s", payload.SessionID, payload.WorkspaceRevision, payload.ConfigDigest)
 		}
-		return fmt.Sprintf("preview_cache_prewarm:session:%s:%d", payload.SessionID, payload.WorkspaceRevision)
+		return fmt.Sprintf("session_preview_cache_prewarm:%s:%d", payload.SessionID, payload.WorkspaceRevision)
 	case PreviewCachePrewarmSourceBranch:
 		if payload.PreviewTargetID == uuid.Nil || payload.CommitSHA == "" {
 			return ""
@@ -962,6 +1051,165 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 				Str("worker_node_id", r.nodeID).
 				Msg("failed to persist session worker ownership")
 		}
+	}
+	return nil
+}
+
+func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPreviewWarmBuildJobPayload) error {
+	if r == nil || r.manager == nil || r.previews == nil || r.sessions == nil {
+		return fmt.Errorf("session preview warm runner is not configured")
+	}
+	started := time.Now()
+	defer func() {
+		metrics.RecordSessionPrewarmCost(ctx, payload.OrgID.String(), "warm_build", "post_turn", time.Since(started))
+	}()
+	run, err := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "running", "", false)
+	if err != nil {
+		return fmt.Errorf("mark session preview warm build running: %w", err)
+	}
+	failRun := func(errMsg string) {
+		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "failed", errMsg, true); updateErr != nil {
+			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build failed")
+		}
+	}
+
+	session, err := r.sessions.GetByID(ctx, payload.OrgID, payload.SessionID)
+	if err != nil {
+		failRun(fmt.Sprintf("get session: %v", err))
+		return fmt.Errorf("get session: %w", err)
+	}
+	if session.RepositoryID == nil || *session.RepositoryID != payload.RepositoryID || session.WorkspaceRevision != payload.WorkspaceRevision {
+		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "skipped_superseded", "session revision moved before warm build", true); updateErr != nil {
+			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build superseded")
+		}
+		return nil
+	}
+	if session.SnapshotKey == nil || strings.TrimSpace(*session.SnapshotKey) == "" {
+		failRun("session snapshot is unavailable")
+		return fmt.Errorf("session snapshot is unavailable")
+	}
+	if existing, activeErr := r.previews.GetActivePreviewForSession(ctx, payload.OrgID, payload.SessionID); activeErr == nil && existing != nil {
+		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "skipped_user_started", "user preview already active", true); updateErr != nil {
+			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build user-started")
+		}
+		return nil
+	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		failRun(fmt.Sprintf("check active preview: %v", activeErr))
+		return fmt.Errorf("check active preview: %w", activeErr)
+	}
+
+	userID := payload.UserID
+	if userID == uuid.Nil && session.TriggeredByUserID != nil {
+		userID = *session.TriggeredByUserID
+	}
+	initialConfig := reservationPlaceholderPreviewConfig()
+	input := StartPreviewInput{
+		SessionID:                  payload.SessionID,
+		OrgID:                      payload.OrgID,
+		UserID:                     userID,
+		Config:                     initialConfig,
+		RepositoryID:               payload.RepositoryID,
+		WorkspaceRevision:          session.WorkspaceRevision,
+		WorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
+	}
+	reservation, err := r.manager.ReservePreview(ctx, input)
+	if err != nil {
+		failRun(fmt.Sprintf("reserve preview: %v", err))
+		return fmt.Errorf("reserve preview: %w", err)
+	}
+	hydratedID := ""
+	acq := r.acquireSandbox(ctx, payload.OrgID, &session, reservation)
+	if acq.Err != nil {
+		r.manager.AbortReservation(ctx, reservation, "", fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		failRun(fmt.Sprintf("acquire sandbox: %v", acq.Err))
+		return fmt.Errorf("%s: %w", acq.ErrCodeOr("PREVIEW_HYDRATE_FAILED"), acq.Err)
+	}
+	if acq.Hydrated {
+		hydratedID = acq.Sandbox.ID
+	}
+	cfg, err := r.readWorkspacePreviewConfig(ctx, acq.Sandbox, payload.SessionID, "")
+	if err != nil {
+		r.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("read workspace config: %v", err))
+		failRun(fmt.Sprintf("read workspace config: %v", err))
+		return fmt.Errorf("read workspace config: %w", err)
+	}
+	if cfg == nil {
+		r.manager.AbortReservation(ctx, reservation, hydratedID, previewNoConfigMessage)
+		failRun(previewNoConfigMessage)
+		return fmt.Errorf("PREVIEW_NO_CONFIG: %s", previewNoConfigMessage)
+	}
+	input.Config = cfg
+	input.Sandbox = acq.Sandbox
+	liveStarted := time.Now()
+	launched, err := r.manager.LaunchPreview(ctx, reservation, input)
+	if err != nil {
+		classified := ClassifyLaunchFailure(err)
+		r.manager.AbortReservation(ctx, reservation, hydratedID, classified.Message)
+		failRun(classified.Message)
+		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
+	}
+	startupCacheKeys, cacheErr := r.computeSessionPreviewStartupCacheKeys(ctx, acq.Sandbox, cfg, payload.SessionID, payload.WorkspaceRevision)
+	if cacheErr != nil {
+		r.logger.Warn().Err(cacheErr).
+			Str("session_id", payload.SessionID.String()).
+			Int64("workspace_revision", payload.WorkspaceRevision).
+			Msg("session preview startup cache key unavailable; warmed preview will still be resumable")
+	}
+	r.createSessionPreviewStartupCache(ctx, payload.OrgID, payload.RepositoryID, startupCacheKeys, acq.Sandbox, cfg)
+	if err := r.manager.StopPreviewWithReason(ctx, payload.OrgID, launched.ID, models.PreviewStoppedReasonSessionPrewarmPolicy); err != nil {
+		failRun(fmt.Sprintf("stop warmed preview: %v", err))
+		return fmt.Errorf("stop warmed preview: %w", err)
+	}
+	metrics.RecordSessionPrewarmLiveMinutes(ctx, payload.OrgID.String(), time.Since(liveStarted))
+	fresh, err := r.sessions.GetByID(ctx, payload.OrgID, payload.SessionID)
+	if err != nil {
+		failRun(fmt.Sprintf("reload session: %v", err))
+		return fmt.Errorf("reload session: %w", err)
+	}
+	if fresh.WorkspaceRevision != payload.WorkspaceRevision {
+		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, computeConfigDigest(cfg), "skipped_superseded", "newer session revision exists", true); updateErr != nil {
+			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build stale")
+		}
+		metrics.RecordSessionPrewarmSpeculativeWaste(ctx, payload.OrgID.String(), "superseded")
+		return nil
+	}
+	if existing, activeErr := r.previews.GetActivePreviewForSession(ctx, payload.OrgID, payload.SessionID); activeErr == nil && existing != nil {
+		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, computeConfigDigest(cfg), "skipped_user_started", "user preview became active before warm result was published", true); updateErr != nil {
+			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build user-started")
+		}
+		metrics.RecordSessionPrewarmSpeculativeWaste(ctx, payload.OrgID.String(), "user_started")
+		return nil
+	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
+		failRun(fmt.Sprintf("check active preview before warm publish: %v", activeErr))
+		return fmt.Errorf("check active preview before warm publish: %w", activeErr)
+	}
+	group, groupErr := r.previews.UpsertSessionPreviewWarmGroup(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, userID, cfg.Name)
+	if groupErr != nil {
+		r.logger.Warn().Err(groupErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to upsert session preview warm group")
+	}
+	previewID := launched.ID
+	var groupID *uuid.UUID
+	if group != nil {
+		groupID = &group.ID
+	}
+	if _, err := r.previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
+		OrgID:             payload.OrgID,
+		RepositoryID:      payload.RepositoryID,
+		SessionID:         payload.SessionID,
+		WorkspaceRevision: payload.WorkspaceRevision,
+		ConfigDigest:      computeConfigDigest(cfg),
+		Mode:              models.PreviewSessionPrewarmModeSmart,
+		Decision:          models.PreviewSpeculativeDecisionWarmCandidate,
+		Confidence:        run.Confidence,
+		Reason:            run.Reason,
+		Explanation:       run.Explanation,
+		Status:            "succeeded",
+		PreviewID:         &previewID,
+		PreviewGroupID:    groupID,
+		CapacitySnapshot:  run.CapacitySnapshot,
+		CompletedAt:       timePtr(time.Now()),
+	}); err != nil {
+		return fmt.Errorf("record session preview warm build success: %w", err)
 	}
 	return nil
 }
@@ -1503,6 +1751,18 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 	return StartupSnapshotSaved
 }
 
+func (r *StartRunner) createSessionPreviewStartupCache(ctx context.Context, orgID, repoID uuid.UUID, keys branchPreviewStartupCacheKeys, sb *agent.Sandbox, cfg *models.PreviewConfig) StartupSnapshotResult {
+	result := r.createBranchPreviewStartupCache(ctx, orgID, repoID, keys, sb, cfg)
+	if keys.SnapshotKey != "" {
+		r.logger.Info().
+			Str("repository_id", repoID.String()).
+			Str("snapshot_key", keys.SnapshotKey).
+			Str("result", string(result)).
+			Msg("session preview startup snapshot result")
+	}
+	return result
+}
+
 func startupSnapshotResultForCreateError(err error) StartupSnapshotResult {
 	if err == nil {
 		return StartupSnapshotSaved
@@ -1554,6 +1814,14 @@ func (r *StartRunner) computeBranchPreviewStartupCacheKeys(ctx context.Context, 
 		BaseKey:     ComputeSnapshotBaseKey(lockInput.Bytes(), configDigest),
 		CommitSHA:   commitSHA,
 	}, nil
+}
+
+func (r *StartRunner) computeSessionPreviewStartupCacheKeys(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, sessionID uuid.UUID, workspaceRevision int64) (branchPreviewStartupCacheKeys, error) {
+	if sessionID == uuid.Nil || workspaceRevision < 0 {
+		return branchPreviewStartupCacheKeys{}, nil
+	}
+	sessionRevisionKey := fmt.Sprintf("session:%s:%d", sessionID, workspaceRevision)
+	return r.computeBranchPreviewStartupCacheKeys(ctx, sb, cfg, sessionRevisionKey)
 }
 
 func branchPreviewStartupCacheLockfiles(cfg *models.PreviewConfig) []string {

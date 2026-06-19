@@ -1858,6 +1858,144 @@ func (m *Manager) RecyclePreviewWithConfigAndRevision(ctx context.Context, orgID
 	})
 }
 
+// ResumeStoppedWarmPreview starts a session preview that was fully warmed and
+// then stopped by the session prewarm policy. It intentionally does not accept
+// arbitrary terminal previews: this path exists only to make a user click on a
+// current warm candidate cheaper than a cold start.
+func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID uuid.UUID) error {
+	started := time.Now()
+	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
+	if err != nil {
+		return fmt.Errorf("get preview instance: %w", err)
+	}
+	reason, err := m.store.GetPreviewStoppedReason(ctx, orgID, previewID)
+	if err != nil {
+		return err
+	}
+	if !instance.Status.IsTerminal() || reason != models.PreviewStoppedReasonSessionPrewarmPolicy {
+		return fmt.Errorf("preview is not a stopped session prewarm candidate (status=%s, reason=%s)", instance.Status, reason)
+	}
+	if m.provider == nil {
+		return fmt.Errorf("preview provider is not configured")
+	}
+
+	input, err := m.loadRecycleInput(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("load warm resume input: %w", err)
+	}
+
+	m.logger.Info().Str("preview_id", previewID.String()).Msg("resuming stopped warm preview")
+
+	updated, err := m.store.BeginStoppedWarmPreviewResume(ctx, orgID, previewID)
+	if err != nil {
+		return fmt.Errorf("claim warm preview resume: %w", err)
+	}
+	if !updated {
+		return fmt.Errorf("warm preview was claimed or stopped for another reason before resume could begin")
+	}
+
+	if err := m.store.RevokeAllForPreview(ctx, orgID, previewID); err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("warm resume: failed to revoke access sessions")
+	}
+
+	observer := m.newServiceObserver(orgID, previewID, "", "")
+	defer observer.Close()
+	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("warm resume: failed to set failed status after secret resolution error")
+		}
+		return err
+	}
+
+	var resumeRuntime *models.PreviewRuntime
+	if m.previewInternalBaseURL != "" {
+		resumeRuntime, err = m.store.CreateNextPreviewRuntime(ctx, orgID, previewID, m.workerNodeID, m.previewInternalBaseURL)
+		if err != nil {
+			if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "warm resume failed: could not create runtime epoch"); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Msg("warm resume: failed to set failed status after runtime epoch error")
+			}
+			return fmt.Errorf("warm resume: create runtime epoch: %w", err)
+		}
+	}
+
+	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
+		OrgID:        input.OrgID,
+		RepositoryID: input.RepositoryID,
+		SessionID:    input.SessionID,
+		ConfigDigest: computeConfigDigest(input.Config),
+		ExtraEnv:     m.platformEnv(previewID),
+	}, observer)
+	if err != nil {
+		if resumeRuntime != nil {
+			if runtimeErr := m.store.MarkPreviewRuntimeFailed(ctx, orgID, resumeRuntime.ID, err.Error()); runtimeErr != nil {
+				m.logger.Warn().Err(runtimeErr).Msg("warm resume: failed to mark runtime failed after start error")
+			}
+		}
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("warm resume: failed to set failed status")
+		}
+		return fmt.Errorf("warm resume start: %w", err)
+	}
+
+	if resumeRuntime != nil {
+		err = m.store.MarkPreviewRuntimeReady(ctx, orgID, resumeRuntime.ID, handle.Handle, handle.PrimaryPort)
+	} else {
+		err = m.store.UpdatePreviewHandle(ctx, orgID, previewID, handle.Handle, handle.PrimaryPort)
+	}
+	if err != nil {
+		m.logger.Error().Err(err).Msg("warm resume: failed to update handle, stopping new preview")
+		if stopErr := m.provider.StopPreview(ctx, handle.Handle); stopErr != nil {
+			m.logger.Warn().Err(stopErr).Str("preview_id", previewID.String()).Msg("warm resume: failed to stop preview after handle persistence error")
+		}
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "warm resume failed: could not persist new handle"); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("warm resume: failed to set failed status after handle update error")
+		}
+		return fmt.Errorf("warm resume: update handle: %w", err)
+	}
+
+	nextStatus := models.PreviewStatusReady
+	if handle.PartiallyReady {
+		nextStatus = models.PreviewStatusPartiallyReady
+	}
+	if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, nextStatus, ""); err != nil {
+		m.logger.Error().Err(err).Str("status", string(nextStatus)).Msg("warm resume: failed to set preview status")
+	}
+	if handle.PartiallyReady {
+		stopCh := make(chan struct{})
+		m.pollStopMu.Lock()
+		m.pollStopChs[previewID] = stopCh
+		m.pollStopMu.Unlock()
+		go func() {
+			m.pollSupportServiceStatus(stopCh, orgID, previewID, handle.Handle)
+			m.pollStopMu.Lock()
+			delete(m.pollStopChs, previewID)
+			m.pollStopMu.Unlock()
+		}()
+	}
+
+	newExpiry := time.Now().Add(DefaultHardTTL)
+	maxExpiry := instance.CreatedAt.Add(DefaultMaxTTL)
+	if newExpiry.After(maxExpiry) {
+		newExpiry = maxExpiry
+	}
+	if err := m.store.UpdatePreviewExpiry(ctx, orgID, previewID, newExpiry); err != nil {
+		m.logger.Warn().Err(err).Msg("warm resume: failed to reset expiry")
+	}
+	if m.hmrWatcher != nil {
+		m.hmrWatcher.StopWatching(previewID)
+		m.hmrWatcher.StartWatching(previewID, orgID)
+	}
+	if err := m.store.ClearRecycleSchedule(ctx, orgID, previewID); err != nil {
+		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("warm resume: failed to clear recycle schedule marker")
+	}
+
+	metrics.RecordSessionPreviewPrewarmResume(ctx, orgID, input.RepositoryID)
+	metrics.RecordSessionPrewarmOpenAfterPrewarm(ctx, orgID.String(), "warm_candidate")
+	metrics.RecordSessionPrewarmClickToReady(ctx, orgID.String(), "warm_resume", time.Since(started))
+	m.logger.Info().Str("preview_id", previewID.String()).Str("handle", handle.Handle).Msg("warm preview resumed")
+	return nil
+}
+
 type workspaceRevisionStamp struct {
 	revision  int64
 	updatedAt time.Time
