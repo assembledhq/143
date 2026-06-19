@@ -232,6 +232,22 @@ func (g *SandboxCapacityGate) logCapacity(req SandboxCapacityRequest, live, rese
 		Str("org_id", req.OrgID)
 }
 
+// HasSpeculativeHeadroom returns true when the worker has at least minFree
+// sandbox slots free after accounting for live containers and in-flight
+// reservations. Speculative (prewarm) work should call this with minFree=2
+// before attempting Acquire so that the last slot stays available for
+// user-initiated work.
+func (g *SandboxCapacityGate) HasSpeculativeHeadroom(ctx context.Context, minFree int) bool {
+	if g == nil || g.maxActive <= 0 {
+		return false
+	}
+	snapshot := g.Snapshot(ctx)
+	if snapshot.CountError != "" {
+		return false
+	}
+	return (snapshot.MaxActive - (snapshot.Live + snapshot.Reserved)) >= minFree
+}
+
 // SandboxCapacityReservation releases a previously acquired slot.
 type SandboxCapacityReservation struct {
 	gate *SandboxCapacityGate

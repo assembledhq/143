@@ -101,6 +101,10 @@ func TestRunPreviewHealthSamplerEmitsStructuredSample(t *testing.T) {
 		PreviewsFailedOrUnavailable: 1,
 		StartupP50Seconds:           23,
 		StartupP95Seconds:           61,
+		SessionPrewarmQueued:        2,
+		SessionPrewarmRunning:       1,
+		SessionPrewarmSkipped:       3,
+		SessionPrewarmFailed:        4,
 	}}
 	logs := &syncBuffer{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,6 +130,10 @@ func TestRunPreviewHealthSamplerEmitsStructuredSample(t *testing.T) {
 	require.Equal(t, float64(1), event["previews_failed_unavailable"], "preview health sampler should include failed or unavailable previews")
 	require.Equal(t, float64(23), event["startup_p50_seconds"], "preview health sampler should include startup p50")
 	require.Equal(t, float64(61), event["startup_p95_seconds"], "preview health sampler should include startup p95")
+	require.Equal(t, float64(2), event["session_prewarm_queued"], "preview health sampler should include queued session prewarm count")
+	require.Equal(t, float64(1), event["session_prewarm_running"], "preview health sampler should include running session prewarm count")
+	require.Equal(t, float64(3), event["session_prewarm_skipped"], "preview health sampler should include skipped session prewarm count")
+	require.Equal(t, float64(4), event["session_prewarm_failed"], "preview health sampler should include failed session prewarm count")
 }
 
 func TestRunControlPlaneHealthAlertsEmitsQueueAndWorkerHeartbeatWarnings(t *testing.T) {

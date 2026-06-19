@@ -272,6 +272,10 @@ type OrgSettings struct {
 	// org-wide. Warm and hibernated previews do not count.
 	PreviewAutoPoolMaxActive int `json:"preview_auto_pool_max_active,omitempty"`
 
+	// PreviewSessionPrewarmMaxActive caps concurrently running speculative
+	// session preview prewarm jobs org-wide. Zero disables session prewarm.
+	PreviewSessionPrewarmMaxActive int `json:"preview_session_prewarm_max_active,omitempty"`
+
 	RuntimeBudgets RuntimeBudgetSettings `json:"runtime_budgets,omitempty"`
 
 	SandboxLifecycle SandboxLifecycleSettings `json:"sandbox_lifecycle,omitempty"`
@@ -636,12 +640,15 @@ const (
 	DefaultMaxAutomaticExtensionSeconds    = 30 * 60
 	DefaultAbsoluteRuntimeCeilingSeconds   = 90 * 60
 
-	DefaultPreviewMaxPreviewsPerUser = 4
-	MinPreviewMaxPreviewsPerUser     = 1
-	MaxPreviewMaxPreviewsPerUser     = 20
-	DefaultPreviewAutoPoolMaxActive  = 4
-	MinPreviewAutoPoolMaxActive      = 1
-	MaxPreviewAutoPoolMaxActive      = 20
+	DefaultPreviewMaxPreviewsPerUser      = 4
+	MinPreviewMaxPreviewsPerUser          = 1
+	MaxPreviewMaxPreviewsPerUser          = 20
+	DefaultPreviewAutoPoolMaxActive       = 4
+	MinPreviewAutoPoolMaxActive           = 1
+	MaxPreviewAutoPoolMaxActive           = 20
+	DefaultPreviewSessionPrewarmMaxActive = 0
+	MinPreviewSessionPrewarmMaxActive     = 0
+	MaxPreviewSessionPrewarmMaxActive     = 25
 
 	DefaultPreviewMaxCPUMillis        = 2000
 	MinPreviewMaxCPUMillis            = 250
@@ -850,6 +857,11 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		s.PreviewAutoPoolMaxActive = MinPreviewAutoPoolMaxActive
 	} else if s.PreviewAutoPoolMaxActive > MaxPreviewAutoPoolMaxActive {
 		s.PreviewAutoPoolMaxActive = MaxPreviewAutoPoolMaxActive
+	}
+	if s.PreviewSessionPrewarmMaxActive < MinPreviewSessionPrewarmMaxActive {
+		s.PreviewSessionPrewarmMaxActive = MinPreviewSessionPrewarmMaxActive
+	} else if s.PreviewSessionPrewarmMaxActive > MaxPreviewSessionPrewarmMaxActive {
+		s.PreviewSessionPrewarmMaxActive = MaxPreviewSessionPrewarmMaxActive
 	}
 	if s.SandboxLifecycle.CompletedSessionRetentionMinutes == 0 {
 		s.SandboxLifecycle.CompletedSessionRetentionMinutes = DefaultCompletedSessionRetentionMinutes

@@ -128,6 +128,7 @@ func TestPreviewStoppedReason_Validate(t *testing.T) {
 		{name: "user is valid", reason: PreviewStoppedReasonUser},
 		{name: "expired is valid", reason: PreviewStoppedReasonExpired},
 		{name: "warm policy is valid", reason: PreviewStoppedReasonWarmPolicy},
+		{name: "session prewarm policy is valid", reason: PreviewStoppedReasonSessionPrewarmPolicy},
 		{name: "pr closed is valid", reason: PreviewStoppedReasonPRClosed},
 		{name: "drain is valid", reason: PreviewStoppedReasonDrain},
 		{name: "error is valid", reason: PreviewStoppedReasonError},
@@ -144,6 +145,64 @@ func TestPreviewStoppedReason_Validate(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "PreviewStoppedReason should accept migration check values")
+		})
+	}
+}
+
+func TestPreviewSessionPrewarmMode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    PreviewSessionPrewarmMode
+		wantErr bool
+	}{
+		{name: "off is valid", mode: PreviewSessionPrewarmModeOff},
+		{name: "cache is valid", mode: PreviewSessionPrewarmModeCache},
+		{name: "smart is valid", mode: PreviewSessionPrewarmModeSmart},
+		{name: "empty is invalid", mode: "", wantErr: true},
+		{name: "bogus is invalid", mode: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.mode.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewSessionPrewarmMode should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewSessionPrewarmMode should accept known policy modes")
+		})
+	}
+}
+
+func TestPreviewSpeculativeDecision_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		decision PreviewSpeculativeDecision
+		wantErr  bool
+	}{
+		{name: "none is valid", decision: PreviewSpeculativeDecisionNone},
+		{name: "cache is valid", decision: PreviewSpeculativeDecisionCache},
+		{name: "warm candidate is valid", decision: PreviewSpeculativeDecisionWarmCandidate},
+		{name: "empty is invalid", decision: "", wantErr: true},
+		{name: "bogus is invalid", decision: "bogus", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.decision.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "PreviewSpeculativeDecision should reject invalid values")
+				return
+			}
+			require.NoError(t, err, "PreviewSpeculativeDecision should accept known decision values")
 		})
 	}
 }
@@ -330,6 +389,63 @@ func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
 			sort.Strings(values)
 			sort.Strings(tt.expected)
 			require.Equal(t, tt.expected, values, "migration CHECK values should match Go enum constants")
+		})
+	}
+}
+
+func TestSessionPreviewPrewarmEnumsMatchMigrationChecks(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000205_session_preview_prewarm_policy.up.sql")
+	require.NoError(t, err, "session prewarm migration file should be readable")
+
+	tests := []struct {
+		name       string
+		constraint string
+		expected   []string
+	}{
+		{
+			name:       "session prewarm mode",
+			constraint: "repository_preview_policies_session_prewarm_mode_check",
+			expected: []string{
+				string(PreviewSessionPrewarmModeOff),
+				string(PreviewSessionPrewarmModeCache),
+				string(PreviewSessionPrewarmModeSmart),
+			},
+		},
+		{
+			name:       "session prewarm decision",
+			constraint: "session_preview_prewarm_runs_decision_check",
+			expected: []string{
+				string(PreviewSpeculativeDecisionNone),
+				string(PreviewSpeculativeDecisionCache),
+				string(PreviewSpeculativeDecisionWarmCandidate),
+			},
+		},
+		{
+			name:       "stopped reason extension",
+			constraint: "preview_instances_stopped_reason_check",
+			expected: []string{
+				string(PreviewStoppedReasonNone),
+				string(PreviewStoppedReasonUser),
+				string(PreviewStoppedReasonExpired),
+				string(PreviewStoppedReasonWarmPolicy),
+				string(PreviewStoppedReasonSessionPrewarmPolicy),
+				string(PreviewStoppedReasonPRClosed),
+				string(PreviewStoppedReasonDrain),
+				string(PreviewStoppedReasonError),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			values := migrationCheckValues(t, string(body), tt.constraint)
+			sort.Strings(values)
+			sort.Strings(tt.expected)
+			require.Equal(t, tt.expected, values, "session prewarm migration CHECK values should match Go enum constants")
 		})
 	}
 }

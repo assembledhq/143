@@ -38,6 +38,10 @@ type PreviewHealthSample struct {
 	PreviewsFailedOrUnavailable int64
 	StartupP50Seconds           float64
 	StartupP95Seconds           float64
+	SessionPrewarmQueued        int64
+	SessionPrewarmRunning       int64
+	SessionPrewarmSkipped       int64
+	SessionPrewarmFailed        int64
 }
 
 // NewPreviewStore creates a new PreviewStore.
@@ -122,7 +126,7 @@ const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, base_key,
 	size_bytes, worker_node_id, last_used_at, created_at`
 
 const repositoryPreviewPolicyColumns = `id, org_id, repository_id, auto_mode,
-	updated_by_user_id, created_at, updated_at`
+	session_prewarm_mode, updated_by_user_id, created_at, updated_at`
 
 const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
 	blob_key, size_bytes, metadata, last_used_at, created_at`
@@ -133,6 +137,11 @@ const previewDependencyCacheLocationColumns = `id, org_id, repo_id, cache_kind, 
 const previewCachePrewarmRunColumns = `id, org_id, repo_id, source, source_id, cache_scope_key,
 	job_id, worker_node_id, status, package_manager_cache_key, dependency_cache_key,
 	config_digest, commit_sha, workspace_revision, error, started_at, completed_at, created_at, updated_at`
+
+const sessionPreviewPrewarmRunColumns = `id, org_id, repository_id, session_id, workspace_revision,
+	config_digest, mode, decision, confidence, reason, explanation, status, job_id, preview_id,
+	preview_group_id, capacity_snapshot, error, created_at, updated_at, started_at, completed_at,
+	panel_opened_at`
 
 const prPreviewStateColumns = `id, org_id, repo_id, pr_number, github_comment_id,
 	last_preview_instance_id, last_screenshot_blob_path, last_visual_diff_blob_path,
@@ -611,28 +620,38 @@ func (s *PreviewStore) GetLatestPreviewTargetForBranch(ctx context.Context, orgI
 	return &row, nil
 }
 
-// UpsertRepositoryPreviewPolicy stores the auto-preview mode for one repository.
-func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, mode models.PreviewAutoMode) (*models.RepositoryPreviewPolicy, error) {
-	if err := mode.Validate(); err != nil {
-		return nil, err
+// UpdateRepositoryPreviewPolicy stores repository preview policy fields. Nil
+// modes preserve the existing value, or the default when creating the row.
+func (s *PreviewStore) UpdateRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, autoMode *models.PreviewAutoMode, sessionPrewarmMode *models.PreviewSessionPrewarmMode) (*models.RepositoryPreviewPolicy, error) {
+	if autoMode != nil {
+		if err := autoMode.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if sessionPrewarmMode != nil {
+		if err := sessionPrewarmMode.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	query := fmt.Sprintf(`
 		INSERT INTO repository_preview_policies (
-			org_id, repository_id, auto_mode, updated_by_user_id
+			org_id, repository_id, auto_mode, session_prewarm_mode, updated_by_user_id
 		) VALUES (
-			@org_id, @repository_id, @auto_mode, @updated_by_user_id
+			@org_id, @repository_id, COALESCE(@auto_mode::text, 'off'), COALESCE(@session_prewarm_mode::text, 'off'), @updated_by_user_id
 		)
 		ON CONFLICT (org_id, repository_id)
 		DO UPDATE SET
-			auto_mode = EXCLUDED.auto_mode,
+			auto_mode = COALESCE(@auto_mode::text, repository_preview_policies.auto_mode),
+			session_prewarm_mode = COALESCE(@session_prewarm_mode::text, repository_preview_policies.session_prewarm_mode),
 			updated_by_user_id = EXCLUDED.updated_by_user_id,
 			updated_at = now()
 		RETURNING %s`, repositoryPreviewPolicyColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
-		"org_id":             orgID,
-		"repository_id":      repositoryID,
-		"auto_mode":          mode,
-		"updated_by_user_id": userID,
+		"org_id":               orgID,
+		"repository_id":        repositoryID,
+		"auto_mode":            autoMode,
+		"session_prewarm_mode": sessionPrewarmMode,
+		"updated_by_user_id":   userID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upsert repository preview policy: %w", err)
@@ -642,6 +661,11 @@ func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID,
 		return nil, fmt.Errorf("scan repository preview policy: %w", err)
 	}
 	return &row, nil
+}
+
+// UpsertRepositoryPreviewPolicy stores the auto-preview mode for one repository.
+func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, mode models.PreviewAutoMode) (*models.RepositoryPreviewPolicy, error) {
+	return s.UpdateRepositoryPreviewPolicy(ctx, orgID, repositoryID, userID, &mode, nil)
 }
 
 // GetRepositoryPreviewPolicy returns the stored policy or "off" when no row
@@ -656,9 +680,10 @@ func (s *PreviewStore) GetRepositoryPreviewPolicy(ctx context.Context, orgID, re
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicy])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &models.RepositoryPreviewPolicy{
-			OrgID:        orgID,
-			RepositoryID: repositoryID,
-			AutoMode:     models.PreviewAutoModeOff,
+			OrgID:              orgID,
+			RepositoryID:       repositoryID,
+			AutoMode:           models.PreviewAutoModeOff,
+			SessionPrewarmMode: models.PreviewSessionPrewarmModeOff,
 		}, nil
 	}
 	if err != nil {
@@ -674,6 +699,7 @@ func (s *PreviewStore) ListRepositoryPreviewPolicies(ctx context.Context, orgID 
 			repo.id AS repository_id,
 			repo.full_name AS repository_full_name,
 			COALESCE(policy.auto_mode, 'off') AS auto_mode,
+			COALESCE(policy.session_prewarm_mode, 'off') AS session_prewarm_mode,
 			COALESCE(open_prs.open_pr_count, 0)::int AS open_pr_count,
 			policy.updated_at
 		FROM repositories repo
@@ -1470,6 +1496,62 @@ func (s *PreviewStore) updatePreviewStatusIfActive(ctx context.Context, orgID, i
 	return rows, nil
 }
 
+// BeginStoppedWarmPreviewResume atomically claims a stopped session prewarm
+// preview for user-visible resume. Only previews stopped by the session prewarm
+// policy can be resumed through this path.
+func (s *PreviewStore) BeginStoppedWarmPreviewResume(ctx context.Context, orgID, id uuid.UUID) (bool, error) {
+	status := models.PreviewStatusStarting
+	phase := previewPhaseForStatus(status)
+	tag, err := s.db.Exec(ctx, `
+		UPDATE preview_instances
+		SET status = @status,
+		    current_phase = @phase,
+		    error = '',
+		    stopped_at = NULL,
+		    stopped_reason = '',
+		    updated_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND status IN ('stopped', 'expired')
+		  AND stopped_reason = @stopped_reason`,
+		pgx.NamedArgs{
+			"id":             id,
+			"org_id":         orgID,
+			"status":         status,
+			"phase":          phase,
+			"stopped_reason": models.PreviewStoppedReasonSessionPrewarmPolicy,
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("begin stopped warm preview resume: %w", err)
+	}
+	rows := tag.RowsAffected()
+	if rows > 0 {
+		if err := s.syncPreviewGroupStatusForPreview(ctx, orgID, id, status); err != nil {
+			s.logger.Warn().Err(err).
+				Str("org_id", orgID.String()).
+				Str("preview_id", id.String()).
+				Str("status", string(status)).
+				Msg("failed to sync preview group status")
+		}
+	}
+	return rows > 0, nil
+}
+
+func (s *PreviewStore) GetPreviewStoppedReason(ctx context.Context, orgID, id uuid.UUID) (models.PreviewStoppedReason, error) {
+	var reason models.PreviewStoppedReason
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(stopped_reason, '')
+		FROM preview_instances
+		WHERE id = @id AND org_id = @org_id`,
+		pgx.NamedArgs{"id": id, "org_id": orgID},
+	).Scan(&reason)
+	if err != nil {
+		return models.PreviewStoppedReasonNone, fmt.Errorf("get preview stopped reason: %w", err)
+	}
+	return reason, nil
+}
+
 func (s *PreviewStore) UpdatePreviewSourceWorkspaceRevision(ctx context.Context, orgID, id uuid.UUID, revision int64, revisionUpdatedAt time.Time) error {
 	tag, err := s.db.Exec(ctx, `
 		UPDATE preview_instances
@@ -1539,7 +1621,11 @@ func (s *PreviewStore) PreviewHealthSample(ctx context.Context) (PreviewHealthSa
 			COUNT(*) FILTER (WHERE ready_at IS NOT NULL AND ready_at >= now() - interval '15 minutes')::bigint AS previews_ready,
 			COUNT(*) FILTER (WHERE status IN ('failed', 'unavailable') AND stopped_at >= now() - interval '15 minutes')::bigint AS previews_failed_unavailable,
 			COALESCE((SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p50_seconds,
-			COALESCE((SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p95_seconds
+			COALESCE((SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY startup_seconds) FROM recent_ready), 0)::double precision AS startup_p95_seconds,
+			(SELECT COUNT(*) FROM session_preview_prewarm_runs WHERE status = 'queued')::bigint AS session_prewarm_queued,
+			(SELECT COUNT(*) FROM session_preview_prewarm_runs WHERE status = 'running')::bigint AS session_prewarm_running,
+			(SELECT COUNT(*) FROM session_preview_prewarm_runs WHERE status LIKE 'skipped_%%' AND updated_at >= now() - interval '15 minutes')::bigint AS session_prewarm_skipped,
+			(SELECT COUNT(*) FROM session_preview_prewarm_runs WHERE status = 'failed' AND updated_at >= now() - interval '15 minutes')::bigint AS session_prewarm_failed
 		FROM preview_instances
 		WHERE status IN %s
 		   OR created_at >= now() - interval '15 minutes'
@@ -1554,6 +1640,10 @@ func (s *PreviewStore) PreviewHealthSample(ctx context.Context) (PreviewHealthSa
 		&sample.PreviewsFailedOrUnavailable,
 		&sample.StartupP50Seconds,
 		&sample.StartupP95Seconds,
+		&sample.SessionPrewarmQueued,
+		&sample.SessionPrewarmRunning,
+		&sample.SessionPrewarmSkipped,
+		&sample.SessionPrewarmFailed,
 	); err != nil {
 		return PreviewHealthSample{}, fmt.Errorf("preview health sample: %w", err)
 	}
@@ -3523,6 +3613,281 @@ func (s *PreviewStore) UpsertPreviewCachePrewarmRun(ctx context.Context, run *mo
 		return nil, fmt.Errorf("collect preview cache prewarm run: %w", err)
 	}
 	return &row, nil
+}
+
+func (s *PreviewStore) UpsertSessionPreviewPrewarmRun(ctx context.Context, run *models.SessionPreviewPrewarmRun) (*models.SessionPreviewPrewarmRun, error) {
+	if run == nil {
+		return nil, fmt.Errorf("session preview prewarm run is nil")
+	}
+	if err := run.Mode.Validate(); err != nil {
+		return nil, err
+	}
+	if err := run.Decision.Validate(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		INSERT INTO session_preview_prewarm_runs (
+			org_id, repository_id, session_id, workspace_revision, config_digest,
+			mode, decision, confidence, reason, explanation, status, job_id,
+			preview_id, preview_group_id, capacity_snapshot, error, started_at, completed_at
+		)
+		VALUES (
+			@org_id, @repository_id, @session_id, @workspace_revision, @config_digest,
+			@mode, @decision, @confidence, @reason, @explanation, @status, @job_id,
+			@preview_id, @preview_group_id, @capacity_snapshot, @error, @started_at, @completed_at
+		)
+		ON CONFLICT (org_id, session_id, workspace_revision, config_digest, decision) DO UPDATE SET
+			mode = EXCLUDED.mode,
+			confidence = EXCLUDED.confidence,
+			reason = EXCLUDED.reason,
+			explanation = EXCLUDED.explanation,
+			status = EXCLUDED.status,
+			job_id = COALESCE(EXCLUDED.job_id, session_preview_prewarm_runs.job_id),
+			preview_id = COALESCE(EXCLUDED.preview_id, session_preview_prewarm_runs.preview_id),
+			preview_group_id = COALESCE(EXCLUDED.preview_group_id, session_preview_prewarm_runs.preview_group_id),
+			capacity_snapshot = EXCLUDED.capacity_snapshot,
+			error = EXCLUDED.error,
+			started_at = COALESCE(EXCLUDED.started_at, session_preview_prewarm_runs.started_at),
+			completed_at = EXCLUDED.completed_at,
+			updated_at = now()
+		RETURNING %s`, sessionPreviewPrewarmRunColumns),
+		pgx.NamedArgs{
+			"org_id":             run.OrgID,
+			"repository_id":      run.RepositoryID,
+			"session_id":         run.SessionID,
+			"workspace_revision": run.WorkspaceRevision,
+			"config_digest":      run.ConfigDigest,
+			"mode":               run.Mode,
+			"decision":           run.Decision,
+			"confidence":         run.Confidence,
+			"reason":             run.Reason,
+			"explanation":        run.Explanation,
+			"status":             run.Status,
+			"job_id":             run.JobID,
+			"preview_id":         run.PreviewID,
+			"preview_group_id":   run.PreviewGroupID,
+			"capacity_snapshot":  run.CapacitySnapshot,
+			"error":              run.Error,
+			"started_at":         run.StartedAt,
+			"completed_at":       run.CompletedAt,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("upsert session preview prewarm run: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPreviewPrewarmRun])
+	if err != nil {
+		return nil, fmt.Errorf("collect session preview prewarm run: %w", err)
+	}
+	return &row, nil
+}
+
+func (s *PreviewStore) CountActiveSessionPreviewPrewarmRuns(ctx context.Context, orgID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*)::int
+		FROM session_preview_prewarm_runs
+		WHERE org_id = @org_id
+		  AND (
+		  	status = 'running'
+		  	OR (decision = 'warm_candidate' AND status = 'queued')
+		  )`,
+		pgx.NamedArgs{"org_id": orgID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active session preview prewarm runs: %w", err)
+	}
+	return count, nil
+}
+
+func (s *PreviewStore) UpdateSessionPreviewPrewarmRunStatus(ctx context.Context, orgID, repositoryID, sessionID uuid.UUID, workspaceRevision int64, decision models.PreviewSpeculativeDecision, configDigest, status, errMsg string, completed bool) (*models.SessionPreviewPrewarmRun, error) {
+	if err := decision.Validate(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		UPDATE session_preview_prewarm_runs
+		SET status = @status,
+			config_digest = COALESCE(NULLIF(@config_digest, ''), config_digest),
+			error = @error,
+			started_at = COALESCE(started_at, now()),
+			completed_at = CASE WHEN @completed THEN now() ELSE completed_at END,
+			updated_at = now()
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND session_id = @session_id
+		  AND workspace_revision = @workspace_revision
+		  AND decision = @decision
+		  AND (config_digest = @config_digest OR config_digest = '' OR @config_digest = '')
+		RETURNING %s`, sessionPreviewPrewarmRunColumns),
+		pgx.NamedArgs{
+			"org_id":             orgID,
+			"repository_id":      repositoryID,
+			"session_id":         sessionID,
+			"workspace_revision": workspaceRevision,
+			"decision":           decision,
+			"config_digest":      configDigest,
+			"status":             status,
+			"error":              errMsg,
+			"completed":          completed,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update session preview prewarm run status: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPreviewPrewarmRun])
+	if err != nil {
+		return nil, fmt.Errorf("collect session preview prewarm run status: %w", err)
+	}
+	return &row, nil
+}
+
+func (s *PreviewStore) GetLatestSessionPreviewPrewarmRun(ctx context.Context, orgID, sessionID uuid.UUID, decision models.PreviewSpeculativeDecision) (*models.SessionPreviewPrewarmRun, error) {
+	if err := decision.Validate(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		SELECT %s
+		FROM session_preview_prewarm_runs
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND decision = @decision
+		ORDER BY created_at DESC
+		LIMIT 1`, sessionPreviewPrewarmRunColumns),
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "decision": decision},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query latest session preview prewarm run: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPreviewPrewarmRun])
+	if err != nil {
+		return nil, fmt.Errorf("collect latest session preview prewarm run: %w", err)
+	}
+	return &row, nil
+}
+
+func (s *PreviewStore) SupersedeActiveSessionPreviewPrewarmRuns(ctx context.Context, orgID, sessionID uuid.UUID, status, errMsg string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_preview_prewarm_runs
+		SET status = @status,
+		    error = @error,
+		    completed_at = now(),
+		    updated_at = now()
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')`,
+		pgx.NamedArgs{
+			"org_id":     orgID,
+			"session_id": sessionID,
+			"status":     status,
+			"error":      errMsg,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("supersede active session preview prewarm runs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *PreviewStore) ExpireStaleQueuedSessionPreviewPrewarmRuns(ctx context.Context, orgID uuid.UUID, queuedBefore time.Time) (int64, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_preview_prewarm_runs
+		SET status = 'failed',
+		    error = 'queued session preview prewarm expired before a worker claimed it',
+		    completed_at = now(),
+		    updated_at = now()
+		WHERE org_id = @org_id
+		  AND status = 'queued'
+		  AND created_at < @queued_before`,
+		pgx.NamedArgs{
+			"org_id":        orgID,
+			"queued_before": queuedBefore,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("expire stale queued session preview prewarm runs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *PreviewStore) HasRecentSessionPreviewPrewarmCooldown(ctx context.Context, orgID, repositoryID uuid.UUID, since time.Time) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM session_preview_prewarm_runs
+			WHERE org_id = @org_id
+			  AND repository_id = @repository_id
+			  AND status IN ('skipped_capacity', 'skipped_cooldown', 'failed')
+			  AND updated_at >= @since
+		)`,
+		pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID, "since": since},
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check session preview prewarm cooldown: %w", err)
+	}
+	return exists, nil
+}
+
+func (s *PreviewStore) MarkSessionPreviewPrewarmPanelOpened(ctx context.Context, orgID, sessionID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE session_preview_prewarm_runs
+		SET panel_opened_at = now(),
+		    updated_at = now()
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND decision = 'warm_candidate'
+		  AND panel_opened_at IS NULL`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	)
+	if err != nil {
+		return fmt.Errorf("mark session preview prewarm panel opened: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) HasRecentRepoSessionCachePrewarm(ctx context.Context, orgID, repositoryID, excludeSessionID uuid.UUID, since time.Time) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM session_preview_prewarm_runs
+			WHERE org_id = @org_id
+			  AND repository_id = @repository_id
+			  AND session_id != @exclude_session_id
+			  AND decision = 'cache'
+			  AND status IN ('queued', 'running', 'succeeded')
+			  AND updated_at >= @since
+		)`,
+		pgx.NamedArgs{
+			"org_id":             orgID,
+			"repository_id":      repositoryID,
+			"exclude_session_id": excludeSessionID,
+			"since":              since,
+		},
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check recent repo session cache prewarm: %w", err)
+	}
+	return exists, nil
+}
+
+func (s *PreviewStore) CountSessionsWithPanelOpened(ctx context.Context, orgID, repositoryID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT DISTINCT session_id
+			FROM session_preview_prewarm_runs
+			WHERE org_id = @org_id
+			  AND repository_id = @repository_id
+			  AND panel_opened_at IS NOT NULL
+			LIMIT 20
+		) t`,
+		pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count sessions with panel opened: %w", err)
+	}
+	return count, nil
 }
 
 func (s *PreviewStore) UpdatePreviewCachePrewarmRunStatus(ctx context.Context, orgID, repoID uuid.UUID, cacheScopeKey, status, packageManagerCacheKey, dependencyCacheKey, configDigest, errMsg string, completed bool) error {
