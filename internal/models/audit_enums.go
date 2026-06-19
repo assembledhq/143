@@ -73,12 +73,17 @@ const (
 	AuditActionProjectTaskRetried    AuditAction = "project.task.retried"
 
 	// Automation actions
-	AuditActionAutomationCreated      AuditAction = "automation.created"
-	AuditActionAutomationUpdated      AuditAction = "automation.updated"
-	AuditActionAutomationDeleted      AuditAction = "automation.deleted"
-	AuditActionAutomationPaused       AuditAction = "automation.paused"
-	AuditActionAutomationResumed      AuditAction = "automation.resumed"
-	AuditActionAutomationRunTriggered AuditAction = "automation.run_triggered"
+	AuditActionAutomationCreated                  AuditAction = "automation.created"
+	AuditActionAutomationUpdated                  AuditAction = "automation.updated"
+	AuditActionAutomationDeleted                  AuditAction = "automation.deleted"
+	AuditActionAutomationPaused                   AuditAction = "automation.paused"
+	AuditActionAutomationResumed                  AuditAction = "automation.resumed"
+	AuditActionAutomationRunTriggered             AuditAction = "automation.run_triggered"
+	AuditActionAutomationGoalImprovementRequested AuditAction = "automation.goal_improvement.requested"
+	AuditActionAutomationGoalImprovementCompleted AuditAction = "automation.goal_improvement.completed"
+	AuditActionAutomationGoalImprovementFailed    AuditAction = "automation.goal_improvement.failed"
+	AuditActionAutomationGoalImprovementApplied   AuditAction = "automation.goal_improvement.applied"
+	AuditActionAutomationGoalImprovementCanceled  AuditAction = "automation.goal_improvement.canceled"
 
 	// Issue actions
 	AuditActionIssueCreated       AuditAction = "issue.created"
@@ -180,6 +185,8 @@ func (a AuditAction) Validate() error {
 		AuditActionProjectTaskDeleted, AuditActionProjectTaskRetried,
 		AuditActionAutomationCreated, AuditActionAutomationUpdated, AuditActionAutomationDeleted,
 		AuditActionAutomationPaused, AuditActionAutomationResumed, AuditActionAutomationRunTriggered,
+		AuditActionAutomationGoalImprovementRequested, AuditActionAutomationGoalImprovementCompleted,
+		AuditActionAutomationGoalImprovementFailed, AuditActionAutomationGoalImprovementApplied, AuditActionAutomationGoalImprovementCanceled,
 		AuditActionIssueCreated, AuditActionIssueReprioritized,
 		AuditActionPMAnalysisTriggered, AuditActionPMPlanCreated, AuditActionPMDecisionMade,
 		AuditActionPMBootstrapTriggered, AuditActionPMRefreshTriggered,

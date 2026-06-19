@@ -67,6 +67,10 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "invalid token", err)
 		return
 	}
+	if claims.SessionOrigin == string(models.SessionOriginAutomationGoalImprovement) {
+		writeError(w, r, http.StatusForbidden, "TOOL_NOT_AVAILABLE", "pull request creation is not available to automation goal improvement sessions")
+		return
+	}
 
 	sessionID, err := uuid.Parse(chi.URLParam(r, "sessionID"))
 	if err != nil {

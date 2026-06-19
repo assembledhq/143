@@ -1050,6 +1050,25 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Automation>>('/api/v1/automations', body),
     update: (id: string, body: Record<string, unknown>) =>
       patch<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`, body),
+    improveGoalDraft: (body: {
+      mode: import('./types').AutomationGoalImprovementMode;
+      name?: string;
+      goal: string;
+      repository_id?: string;
+      scope?: string;
+      config?: Record<string, unknown>;
+    }) =>
+      post<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>('/api/v1/automations/goal-improvements', body),
+    improveGoalSaved: (id: string, body: { mode: import('./types').AutomationGoalImprovementMode; include_recent_runs?: number }) =>
+      post<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/${id}/goal-improvements`, body),
+    listGoalImprovements: (id: string, limit = 10) =>
+      get<import('./types').ListResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/${id}/goal-improvements?limit=${limit}`),
+    getGoalImprovement: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/goal-improvements/${id}`),
+    cancelGoalImprovement: (id: string) =>
+      post<import('./types').SingleResponse<import('./types').AutomationGoalImprovement>>(`/api/v1/automations/goal-improvements/${id}/cancel`),
+    applyGoalImprovement: (automationId: string, improvementId: string, body: { expected_base_goal_hash: string; proposed_goal: string }) =>
+      post<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${automationId}/goal-improvements/${improvementId}/apply`, body),
     del: (id: string) => del(`/api/v1/automations/${id}`),
     pause: (id: string) =>
       post<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}/pause`),

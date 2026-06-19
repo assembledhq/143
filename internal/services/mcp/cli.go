@@ -25,14 +25,15 @@ type CLIAction string
 // Provider-derived namespaces such as "sentry" or "linear" are not declared as
 // constants because they are derived from configured integrations at runtime.
 const (
-	NamespaceLogs           CLINamespace = "logs"
-	NamespaceIssue          CLINamespace = "issue"
-	NamespacePR             CLINamespace = "pr"
-	NamespaceProject        CLINamespace = "project"
-	NamespaceTabs           CLINamespace = "session-tabs"
-	NamespaceEval           CLINamespace = "eval"
-	NamespaceCapability     CLINamespace = "capability"
-	NamespaceSessionHistory CLINamespace = "session-history"
+	NamespaceLogs                      CLINamespace = "logs"
+	NamespaceIssue                     CLINamespace = "issue"
+	NamespacePR                        CLINamespace = "pr"
+	NamespaceProject                   CLINamespace = "project"
+	NamespaceTabs                      CLINamespace = "session-tabs"
+	NamespaceEval                      CLINamespace = "eval"
+	NamespaceAutomationGoalImprovement CLINamespace = "automation-goal-improvement"
+	NamespaceCapability                CLINamespace = "capability"
+	NamespaceSessionHistory            CLINamespace = "session-history"
 )
 
 // Fixed actions for the hardcoded 143-owned namespace mappings.
@@ -44,6 +45,7 @@ const (
 	ActionPropose  CLIAction = "propose"
 	ActionSend     CLIAction = "send"
 	ActionAdd      CLIAction = "add"
+	ActionComplete CLIAction = "complete"
 	ActionRequest  CLIAction = "request"
 	ActionSearch   CLIAction = "search"
 )
@@ -208,6 +210,8 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceTabs, ActionMessages, true
 	case name == "eval_add":
 		return NamespaceEval, ActionAdd, true
+	case name == "automation_goal_improvement_complete":
+		return NamespaceAutomationGoalImprovement, ActionComplete, true
 	case name == "capability_list":
 		return NamespaceCapability, ActionList, true
 	case name == "capability_request":
@@ -243,6 +247,8 @@ func cliCategory(namespace CLINamespace, action CLIAction) string {
 		return "Session tabs"
 	case NamespaceEval:
 		return "Eval"
+	case NamespaceAutomationGoalImprovement:
+		return "Automation goal improvement"
 	case NamespaceCapability:
 		return "Agent capabilities"
 	case NamespaceSessionHistory:

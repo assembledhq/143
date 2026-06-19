@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/services/integration"
+	"github.com/google/uuid"
 )
 
 // taskManagerError formats a TaskManager error into an ErrorResult with a
@@ -328,6 +329,27 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		})
 	}
 
+	if len(tr.integrations.AutomationGoalImprovementCompleters()) > 0 {
+		tools = append(tools, Tool{
+			Name:        "automation_goal_improvement_complete",
+			Description: "Complete the current deep automation-goal improvement session with one structured proposal for human review.",
+			InputSchema: ToolSchema{
+				Type: "object",
+				Properties: map[string]SchemaProperty{
+					"improvement_id": {Type: "string", Description: "Automation goal improvement UUID"},
+					"proposed_goal":  {Type: "string", Description: "Complete improved automation goal"},
+					"rationale":      {Type: "string", Description: "Short rationale for the proposal"},
+					"changes":        {Type: "array", Description: "Important changes", Items: &SchemaProperty{Type: "string"}},
+					"evidence":       {Type: "array", Description: "Evidence used", Items: &SchemaProperty{Type: "string"}},
+					"risks":          {Type: "array", Description: "Risks or tradeoffs", Items: &SchemaProperty{Type: "string"}},
+					"confidence":     {Type: "string", Description: "Confidence level", Enum: []string{"low", "medium", "high"}, Default: "medium"},
+					"warnings":       {Type: "array", Description: "Reviewer warnings", Items: &SchemaProperty{Type: "string"}},
+				},
+				Required: []string{"improvement_id", "proposed_goal", "rationale", "confidence"},
+			},
+		})
+	}
+
 	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
 		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
@@ -454,6 +476,12 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("eval candidate reporter not registered")
 		}
 		return tr.callEvalCandidateReporter(ctx, reporters[0], name, args)
+	case "automation_goal_improvement_complete":
+		completers := tr.integrations.AutomationGoalImprovementCompleters()
+		if len(completers) == 0 {
+			return ErrorResult("automation goal improvement completer not registered")
+		}
+		return tr.callAutomationGoalImprovementCompleter(ctx, completers[0], name, args)
 	}
 
 	switch name {
@@ -1115,6 +1143,61 @@ func (tr *ToolRegistry) callEvalCandidateReporter(ctx context.Context, reporter 
 		return jsonResult(result)
 	default:
 		return ErrorResult(fmt.Sprintf("unknown eval candidate reporter method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Automation goal improvement completer dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callAutomationGoalImprovementCompleter(ctx context.Context, completer integration.AutomationGoalImprovementCompleter, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "automation_goal_improvement_complete":
+		var p struct {
+			ImprovementID string   `json:"improvement_id"`
+			ProposedGoal  string   `json:"proposed_goal"`
+			Rationale     string   `json:"rationale"`
+			Changes       []string `json:"changes"`
+			Evidence      []string `json:"evidence"`
+			Risks         []string `json:"risks"`
+			Confidence    string   `json:"confidence"`
+			Warnings      []string `json:"warnings"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if strings.TrimSpace(p.ImprovementID) == "" {
+			return ErrorResult("improvement_id is required")
+		}
+		if _, err := uuid.Parse(p.ImprovementID); err != nil {
+			return ErrorResult("improvement_id must be a valid UUID")
+		}
+		if strings.TrimSpace(p.ProposedGoal) == "" {
+			return ErrorResult("proposed_goal is required")
+		}
+		if strings.TrimSpace(p.Rationale) == "" {
+			return ErrorResult("rationale is required")
+		}
+		confidence := strings.TrimSpace(p.Confidence)
+		if confidence == "" {
+			confidence = "medium"
+		}
+		result, err := completer.CompleteGoalImprovement(ctx, integration.CompleteAutomationGoalImprovementParams{
+			ImprovementID: p.ImprovementID,
+			ProposedGoal:  p.ProposedGoal,
+			Rationale:     p.Rationale,
+			Changes:       p.Changes,
+			Evidence:      p.Evidence,
+			Risks:         p.Risks,
+			Confidence:    confidence,
+			Warnings:      p.Warnings,
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("complete automation goal improvement failed: %s", err))
+		}
+		return jsonResult(result)
+	default:
+		return ErrorResult(fmt.Sprintf("unknown automation goal improvement completer method: %s", method))
 	}
 }
 
