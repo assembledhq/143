@@ -141,4 +141,38 @@ describe("NoReposWarning", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("renders as a labeled setup row with asRow", async () => {
+    server.use(
+      http.get("/api/v1/integrations", () => {
+        return HttpResponse.json({
+          data: [{
+            id: "int-1",
+            provider: "github",
+            status: "active",
+            github_app_installed: true,
+            github_repo_selection_required: true,
+          }],
+          meta: {},
+        });
+      }),
+      http.get("/api/v1/repositories", () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post("/api/v1/integrations/github/sync", () => {
+        return HttpResponse.json({ data: { repos_synced: 0, repos_seen: 2, errors: 0 } });
+      })
+    );
+
+    renderWithProviders(<NoReposWarning asRow />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Repository")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/choose repositories in integrations/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /choose repositories/i })).toHaveAttribute(
+      "href",
+      "/settings/integrations?select_repos=1",
+    );
+  });
 });
