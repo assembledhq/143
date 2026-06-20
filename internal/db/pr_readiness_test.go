@@ -53,6 +53,27 @@ func TestPRReadinessStore_CreateRun(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPRReadinessStore_MarkFailed(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	summary := "Worker job failed before readiness completed."
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectExec("UPDATE pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = NewPRReadinessStore(mock).MarkFailed(context.Background(), orgID, runID, summary)
+
+	require.NoError(t, err, "MarkFailed should mark the readiness run failed")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPRReadinessStore_GetLatestBySession(t *testing.T) {
 	t.Parallel()
 
