@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
 import { integrations } from "./landing-copy";
+import { landingLayout as layout } from "./landing-layout";
 import { landingTypography as type } from "./landing-typography";
 
 interface IntegrationsSectionProps {
@@ -22,8 +23,8 @@ export default function IntegrationsSection({
       className="relative overflow-hidden px-6 py-28 sm:px-10 sm:py-36"
       style={{ background: isDark ? "#0a0a12" : "#f2f5f9" }}
     >
-      <div className="mx-auto max-w-5xl">
-        <div className="grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
+      <div className={layout.pageShell}>
+        <div className={layout.sectionHeaderGrid}>
           <p className={`${type.eyebrow} ${label}`}>
             07 Integrations
           </p>
