@@ -99,7 +99,7 @@ describe("PreviewSettingsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Auto-start policy" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findAllByText("assembledhq/143")).not.toHaveLength(0);
-    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText(/12 open PRs/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("radio", { name: /use warm auto-preview for assembledhq\/143/i }));
     await waitFor(() => {
@@ -174,7 +174,7 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
-  it("keeps auto-preview rows usable in the mobile stacked layout", async () => {
+  it("groups each repository's build and publish controls in one stacked card", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
       http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
@@ -195,13 +195,16 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    const repoLabels = await screen.findAllByText("assembledhq/143");
-    const row = repoLabels
-      .map((repoLabel) => repoLabel.closest("tr"))
-      .find((candidate) => candidate && within(candidate as HTMLElement).queryByText("Open PRs"));
-    expect(row).not.toBeNull();
-    expect(within(row as HTMLElement).getByText("Open PRs")).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByText("Updated")).toBeInTheDocument();
+    const repoLabel = (await screen.findAllByText("assembledhq/143"))[0];
+    // Each repository renders as a single self-contained card, not a table row.
+    const card = repoLabel.closest("div.rounded-md");
+    expect(card).not.toBeNull();
+    const cardEl = card as HTMLElement;
+    // The merged card carries both the auto-build mode and the open-PR count.
+    expect(within(cardEl).getByText(/5 open PRs/)).toBeInTheDocument();
+    expect(
+      within(cardEl).getByRole("radio", { name: /use warm auto-preview for assembledhq\/143/i }),
+    ).toBeInTheDocument();
   });
 
   it("renders the renamed Preview settings surface and loads bundles for the selected repository", async () => {
