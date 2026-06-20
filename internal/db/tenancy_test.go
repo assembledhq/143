@@ -71,6 +71,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"sessions", "where container_id is not null"},         // ListReferencedContainerIDs: worker-local Docker GC must compare host containers against all DB-owned container references
 		{"sessions", "where worker_node_id = @node_id"},        // WorkerDeployStatus: node-scoped deploy drain status
 		{"sessions", "diff_history"},                           // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
+		{"sessions", "exists(select 1 from sessions where id = @id)"}, // SessionLogStore.Create: cross-org check to distinguish org mismatch from missing session
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
 		{"jobs", "where j.status = 'pending' and j.run_at <= now()"},    // ClaimNextRunnable: cross-org worker queue consumer

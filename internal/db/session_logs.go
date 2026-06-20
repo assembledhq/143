@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 
@@ -46,7 +47,10 @@ func (s *SessionLogStore) SetLogger(logger zerolog.Logger) {
 func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) error {
 	query := `
 		INSERT INTO session_logs (session_id, org_id, thread_id, level, message, metadata, turn_number)
-		VALUES (@session_id, @org_id, @thread_id, @level, @message, @metadata, @turn_number)
+		SELECT @session_id, @org_id, @thread_id, @level, @message, @metadata, @turn_number
+		FROM sessions s
+		WHERE s.id = @session_id
+		  AND s.org_id = @org_id
 		RETURNING id, timestamp`
 
 	args := pgx.NamedArgs{
@@ -61,6 +65,23 @@ func (s *SessionLogStore) Create(ctx context.Context, log *models.SessionLog) er
 
 	row := s.db.QueryRow(ctx, query, args)
 	if err := row.Scan(&log.ID, &log.Timestamp); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Distinguish an org_id mismatch (tenant isolation violation) from a
+			// genuinely missing session, so callers and logs can treat them
+			// differently.
+			var sessionExists bool
+			if checkErr := s.db.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = @id)`,
+				pgx.NamedArgs{"id": log.SessionID},
+			).Scan(&sessionExists); checkErr == nil && sessionExists {
+				s.logger.Warn().
+					Str("session_id", log.SessionID.String()).
+					Str("org_id", log.OrgID.String()).
+					Msg("create session log: session exists but org_id did not match")
+				return fmt.Errorf("create session log: session %s does not belong to org %s", log.SessionID, log.OrgID)
+			}
+			return fmt.Errorf("create session log: session not found: %w", err)
+		}
 		return err
 	}
 	if s.streams != nil {

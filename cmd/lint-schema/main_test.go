@@ -34,6 +34,36 @@ func TestScan(t *testing.T) {
 			wantLen: 0,
 		},
 		{
+			name: "flags nullable org_id",
+			sql: `CREATE TABLE widgets (
+    id     uuid PRIMARY KEY,
+    org_id uuid REFERENCES organizations(id),
+    name   text NOT NULL
+);`,
+			wantLen:  1,
+			wantName: "widgets",
+		},
+		{
+			name: "flags org_id NOT NULL without FK or reviewed hot-table exception marker",
+			sql: `CREATE TABLE hot_events (
+    id     uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    name   text NOT NULL
+);`,
+			wantLen:  1,
+			wantName: "hot_events",
+		},
+		{
+			name: "accepts org_id NOT NULL without FK when reviewed hot-table exception marker is present",
+			sql: `CREATE TABLE hot_events (
+    -- lint:allow-hot-table-no-fk reason="append-only runtime events; session ownership checked before insert"
+    id     uuid PRIMARY KEY,
+    org_id uuid NOT NULL,
+    name   text NOT NULL
+);`,
+			wantLen: 0,
+		},
+		{
 			name: "accepts allowlisted table",
 			sql: `CREATE TABLE nodes (
     id   uuid PRIMARY KEY,
@@ -81,7 +111,7 @@ func TestScan(t *testing.T) {
 			name: "matches org_id regardless of case",
 			sql: `CREATE TABLE widgets (
     id     UUID PRIMARY KEY,
-    ORG_ID UUID NOT NULL
+    ORG_ID UUID NOT NULL REFERENCES organizations(id)
 );`,
 			wantLen: 0,
 		},
