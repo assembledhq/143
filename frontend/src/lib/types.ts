@@ -397,6 +397,7 @@ export interface PreviewPolicySummary {
   pr_preview_surfaces_enabled: boolean;
   github_pr_comment_enabled: boolean;
   github_commit_status_enabled: boolean;
+  preview_config_name?: string;
   preview_configured: boolean;
   preview_success_recorded: boolean;
   preview_config_names?: string[];

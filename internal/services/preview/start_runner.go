@@ -1562,6 +1562,16 @@ func (r *StartRunner) readWorkspacePreviewConfig(ctx context.Context, sb *agent.
 		return nil, fmt.Errorf("read %s: %w", repoconfig.ConfigPath, err)
 	}
 	cfg, err := ParseNamedConfig([]byte(content), previewConfigName)
+	if err != nil && previewConfigName != "" && errors.Is(err, ErrPreviewConfigNotFound) {
+		// The requested build profile no longer exists in .143/config.json
+		// (e.g. a saved policy profile was renamed). Fall back to the default
+		// config rather than failing the whole preview.
+		r.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("preview_config_name", previewConfigName).
+			Msg("saved preview config not found; falling back to default")
+		cfg, err = ParseNamedConfig([]byte(content), "")
+	}
 	if err != nil {
 		r.logger.Warn().Err(err).Str("session_id", sessionID.String()).Str("path", repoconfig.ConfigPath).Msg("committed preview config failed to parse")
 		return nil, fmt.Errorf("%w: parse %s: %w", ErrInvalidConfig, repoconfig.ConfigPath, err)

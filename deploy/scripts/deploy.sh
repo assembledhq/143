@@ -884,24 +884,52 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   # stage_caddy_config_if_changed — returns 0 if deploy/Caddyfile.new differs
   # from the currently deployed deploy/Caddyfile, and when it does, promotes
-  # the staged file into place (mv). Returns 1 (and removes the staged file)
-  # when contents match. Used to avoid restarting Caddy on code-only deploys;
-  # Caddy restarts briefly unbind ports 80/443 and surface as 502s through
-  # any upstream proxy (Cloudflare, etc.).
+  # the staged file into place. Returns 1 (and removes the staged file) when
+  # contents match. Used to avoid restarting Caddy on code-only deploys; Caddy
+  # restarts briefly unbind ports 80/443 and surface as 502s through any
+  # upstream proxy (Cloudflare, etc.).
+  #
+  # The promotion MUST overwrite the existing file in place (truncate + rewrite)
+  # rather than `mv` it. docker-compose.app.yml bind-mounts the Caddyfile as a
+  # single file (./deploy/Caddyfile:/etc/caddy/Caddyfile), and Docker pins a
+  # single-file mount to the file's inode at container start. `mv` replaces the
+  # path with a NEW inode, so the running container stays bound to the OLD one
+  # and never sees the change — `caddy reload` reads the frozen inode and logs
+  # "config is unchanged", a silent no-op. Overwriting in place keeps the inode
+  # stable so the bind-mounted file (and reload) reflects the new content. See
+  # the "Caddy bind-mount drift" incident (June 2026, install routes 404'd for
+  # ~10 days). Use a shell redirect, not `mv`: a rename always allocates a new
+  # inode. `cat >` is also preferred over `cp`, whose in-place-truncate vs.
+  # unlink-and-recreate behavior varies across implementations and flags, while
+  # a redirect is unambiguously an in-place truncate+rewrite. That write is
+  # therefore NOT atomic, so the guards below refuse an empty staged file and
+  # treat a failed write as fatal rather than leaving a corrupt live config.
   stage_caddy_config_if_changed() {
     local new_file="/opt/143/deploy/Caddyfile.new"
     local cur_file="/opt/143/deploy/Caddyfile"
     [ -f "$new_file" ] || return 1
-    if [ ! -f "$cur_file" ]; then
-      mv "$new_file" "$cur_file"
-      return 0
+    if [ -f "$cur_file" ] && cmp -s "$new_file" "$cur_file"; then
+      rm -f "$new_file"
+      return 1
     fi
-    if ! cmp -s "$new_file" "$cur_file"; then
-      mv "$new_file" "$cur_file"
-      return 0
+    # The overwrite below truncates cur_file before writing and is not atomic, so
+    # a bad write leaves the LIVE Caddyfile corrupt with no rollback. Refuse an
+    # empty staged file (checked before any truncation), and abort the deploy on
+    # a write failure instead of reporting a silent "unchanged" — shipping a
+    # truncated config would break the next caddy (re)load and can unbind
+    # :80/:443 on container recreate. A valid Caddyfile is never empty.
+    if [ ! -s "$new_file" ]; then
+      echo "ERROR: staged Caddyfile $new_file is empty; refusing to overwrite live config" >&2
+      rm -f "$new_file"
+      exit 1
+    fi
+    if ! cat "$new_file" > "$cur_file"; then
+      echo "ERROR: failed writing $cur_file from staged Caddyfile (live config may be truncated)" >&2
+      rm -f "$new_file"
+      exit 1
     fi
     rm -f "$new_file"
-    return 1
+    return 0
   }
 
   # stage_caddy_dockerfile_if_changed — returns 0 only when Dockerfile.caddy

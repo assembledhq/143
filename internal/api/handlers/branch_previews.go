@@ -285,6 +285,7 @@ type updatePreviewPolicyRequest struct {
 	PRPreviewSurfacesEnabled    *bool                             `json:"pr_preview_surfaces_enabled"`
 	GitHubPRCommentEnabled      *bool                             `json:"github_pr_comment_enabled"`
 	GitHubCommitStatusEnabled   *bool                             `json:"github_commit_status_enabled"`
+	PreviewConfigName           *string                           `json:"preview_config_name"`
 }
 
 type testPreviewPolicyRequest struct {
@@ -1307,7 +1308,7 @@ func (h *BranchPreviewHandler) selectBranchPreviewWorker(ctx context.Context, or
 	return branchPreviewWorkerSelection{worker: worker}, nil
 }
 
-func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error {
+func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode, previewConfigName string) error {
 	if h == nil || h.previews == nil {
 		return fmt.Errorf("preview handler is not configured")
 	}
@@ -1326,14 +1327,15 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "pool_full")
 		if h.jobs != nil {
 			deferredPayload := preview.AutoPreviewDeferredPayload{
-				OrgID:        orgID,
-				UserID:       userID,
-				RepositoryID: repo.ID,
-				PRNumber:     prNumber,
-				HeadRef:      headRef,
-				HeadSHA:      headSHA,
-				HTMLURL:      htmlURL,
-				Mode:         mode,
+				OrgID:             orgID,
+				UserID:            userID,
+				RepositoryID:      repo.ID,
+				PRNumber:          prNumber,
+				HeadRef:           headRef,
+				HeadSHA:           headSHA,
+				HTMLURL:           htmlURL,
+				Mode:              mode,
+				PreviewConfigName: previewConfigName,
 			}
 			dedupeKey := fmt.Sprintf("auto_preview_deferred:%s:%s:%d:%s", orgID, repo.ID, prNumber, headSHA)
 			if _, err := h.jobs.Enqueue(ctx, orgID, "preview", models.JobTypeAutoPreviewDeferred, deferredPayload, 4, &dedupeKey); err != nil {
@@ -1357,6 +1359,9 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 			SourceID:        sourceID,
 			SourceURL:       htmlURL,
 			CreatedByUserID: userID,
+			// Honor the repository's saved build profile so auto-built PR
+			// previews use the same named config as the settings page selection.
+			PreviewConfigName: previewConfigName,
 		}
 		if err := h.previews.CreatePreviewTarget(ctx, target); err != nil {
 			return fmt.Errorf("create auto preview target: %w", err)
@@ -2225,9 +2230,13 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
-	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.SessionPrewarmUntrustedFork == nil && req.PRPreviewSurfacesEnabled == nil && req.GitHubPRCommentEnabled == nil && req.GitHubCommitStatusEnabled == nil {
+	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.SessionPrewarmUntrustedFork == nil && req.PRPreviewSurfacesEnabled == nil && req.GitHubPRCommentEnabled == nil && req.GitHubCommitStatusEnabled == nil && req.PreviewConfigName == nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_POLICY", "at least one preview policy field is required")
 		return
+	}
+	if req.PreviewConfigName != nil {
+		trimmed := strings.TrimSpace(*req.PreviewConfigName)
+		req.PreviewConfigName = &trimmed
 	}
 	if req.AutoMode != nil {
 		if err := req.AutoMode.Validate(); err != nil {
@@ -2266,6 +2275,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 	beforeSurfaces := false
 	beforeComment := true
 	beforeStatus := true
+	beforeConfigName := ""
 	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
 		beforeMode = existing.AutoMode
 		beforeSessionPrewarmMode = existing.SessionPrewarmMode
@@ -2273,6 +2283,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		beforeSurfaces = existing.PRPreviewSurfacesEnabled
 		beforeComment = existing.GitHubPRCommentEnabled
 		beforeStatus = existing.GitHubCommitStatusEnabled
+		beforeConfigName = existing.PreviewConfigName
 	} else if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_LOOKUP_FAILED", "failed to load preview policy", existingErr)
 		return
@@ -2313,6 +2324,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		PRPreviewSurfacesEnabled:    req.PRPreviewSurfacesEnabled,
 		GitHubPRCommentEnabled:      req.GitHubPRCommentEnabled,
 		GitHubCommitStatusEnabled:   req.GitHubCommitStatusEnabled,
+		PreviewConfigName:           req.PreviewConfigName,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrPreviewNotReady) {
@@ -2341,6 +2353,9 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 		if req.GitHubCommitStatusEnabled != nil {
 			changes["github_commit_status_enabled"] = map[string]any{"before": beforeStatus, "after": policy.GitHubCommitStatusEnabled}
+		}
+		if req.PreviewConfigName != nil {
+			changes["preview_config_name"] = map[string]any{"before": beforeConfigName, "after": policy.PreviewConfigName}
 		}
 		details, marshalErr := json.Marshal(map[string]any{
 			"repository_id": repoID.String(),

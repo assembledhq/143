@@ -71,6 +71,29 @@ func (s *PRReadinessStore) MarkRunning(ctx context.Context, orgID, runID uuid.UU
 	return nil
 }
 
+func (s *PRReadinessStore) MarkFailed(ctx context.Context, orgID, runID uuid.UUID, summary string) error {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE pr_readiness_runs
+		SET status = 'failed',
+		    summary = @summary,
+		    completed_at = COALESCE(completed_at, now()),
+		    updated_at = now()
+		WHERE org_id = @org_id
+		  AND id = @id
+		  AND status IN ('queued', 'running')`, pgx.NamedArgs{
+		"org_id":  orgID,
+		"id":      runID,
+		"summary": summary,
+	})
+	if err != nil {
+		return fmt.Errorf("mark PR readiness failed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 func (s *PRReadinessStore) CompleteRunWithChecks(ctx context.Context, orgID uuid.UUID, runID uuid.UUID, result models.PRReadinessRun, checks []models.PRReadinessCheck) error {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {

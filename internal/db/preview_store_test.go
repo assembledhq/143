@@ -82,7 +82,7 @@ var previewStartupCacheTestCols = []string{
 var repositoryPreviewPolicyTestCols = []string{
 	"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork",
 	"pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled",
-	"updated_by_user_id", "created_at", "updated_at",
+	"preview_config_name", "updated_by_user_id", "created_at", "updated_at",
 }
 
 var sessionPreviewPrewarmRunTestCols = []string{
@@ -115,9 +115,9 @@ func TestPreviewStore_UpsertRepositoryPreviewPolicy_PreservesUnspecifiedModes(t 
 	sessionMode := models.PreviewSessionPrewarmModeSmart
 
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewAnyArgs(9)...).
+		WithArgs(previewAnyArgs(10)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(sessionMode), true, false, true, true, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(sessionMode), true, false, true, true, "", userID, now, now))
 
 	policy, err := store.UpsertRepositoryPreviewPolicy(context.Background(), orgID, repoID, userID, RepositoryPreviewPolicyPatch{SessionPrewarmMode: &sessionMode})
 	require.NoError(t, err, "UpsertRepositoryPreviewPolicy should accept a session-only update")

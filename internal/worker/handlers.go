@@ -898,7 +898,7 @@ func newAutoPreviewDeferredHandler(stores *Stores, services *Services, logger ze
 			}
 		}
 
-		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode); err != nil {
+		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode, input.PreviewConfigName); err != nil {
 			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)
 		}
 		return nil
@@ -9711,6 +9711,7 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if stores == nil || stores.PRReadiness == nil || stores.Sessions == nil {
 			return fmt.Errorf("PR readiness stores are not configured")
 		}
+		registerPRReadinessDeadLetter(ctx, stores, logger, orgID, readinessID)
 
 		run, err := stores.PRReadiness.GetRunByID(ctx, orgID, readinessID)
 		if err != nil {
@@ -9725,6 +9726,11 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if err != nil {
 			return fmt.Errorf("load readiness session: %w", err)
 		}
+		if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
+			return err
+		} else if loop != nil {
+			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+		}
 		if err := ensureSessionSnapshotQuiescent(ctx, stores, session); err != nil {
 			return err
 		}
@@ -9734,12 +9740,7 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			return err
 		}
 		if !reviewReady {
-			logger.Info().
-				Str("session_id", sessionID.String()).
-				Str("readiness_id", readinessID.String()).
-				Msg("PR readiness waiting for review loop")
-			delay := prePRReviewRetryDelay
-			return &RetryableError{Err: fmt.Errorf("PR readiness review loop is still running"), RetryAfter: &delay}
+			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
 		}
 
 		logs := []models.SessionLog{}
@@ -9803,6 +9804,53 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 	}
 }
 
+func registerPRReadinessDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, readinessID uuid.UUID) {
+	if stores == nil || stores.PRReadiness == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+		summary := "Readiness job failed before checks completed."
+		if deadLetterErr != nil {
+			summary = "Readiness job failed before checks completed: " + deadLetterErr.Error()
+		}
+		if err := stores.PRReadiness.MarkFailed(writeCtx, orgID, readinessID, summary); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Error().
+				Err(err).
+				Str("readiness_id", readinessID.String()).
+				Msg("failed to mark PR readiness run failed after job dead-letter")
+		}
+	})
+}
+
+func runningReadinessReviewLoop(ctx context.Context, stores *Stores, session models.Session) (*models.SessionReviewLoop, error) {
+	if stores == nil || stores.ReviewLoops == nil {
+		return nil, nil
+	}
+	loop, err := stores.ReviewLoops.GetRunningLoopBySession(ctx, session.OrgID, session.ID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load running readiness review loop: %w", err)
+	}
+	return &loop, nil
+}
+
+func retryPRReadinessReviewLoop(logger zerolog.Logger, sessionID, readinessID uuid.UUID) error {
+	logger.Info().
+		Str("session_id", sessionID.String()).
+		Str("readiness_id", readinessID.String()).
+		Msg("PR readiness waiting for review loop")
+	delay := prePRReviewRetryDelay
+	return &RetryableError{
+		Err:                    fmt.Errorf("PR readiness review loop is still running"),
+		RetryAfter:             &delay,
+		BypassMaxRetryDuration: true,
+	}
+}
+
 func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Services, session models.Session, snapshotKey string) (*models.SessionReviewLoop, bool, error) {
 	if stores == nil || stores.ReviewLoops == nil {
 		return nil, true, nil
@@ -9822,6 +9870,9 @@ func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Se
 		}
 		if loop.Status == models.ReviewLoopStatusRunning {
 			return &loop, false, nil
+		}
+		if stringValue(loop.LatestCheckpointKey) == snapshotKey || stringValue(loop.LoopStartCheckpointKey) == snapshotKey {
+			return &loop, true, nil
 		}
 	}
 	if services == nil || services.ReviewLoops == nil || snapshotKey == "" {

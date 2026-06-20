@@ -345,6 +345,7 @@ export const api = {
         pr_preview_surfaces_enabled?: boolean;
         github_pr_comment_enabled?: boolean;
         github_commit_status_enabled?: boolean;
+        preview_config_name?: string;
       }) =>
         request<import('./types').SingleResponse<unknown>>(`/api/v1/repositories/${repositoryId}/preview-policy`, {
           method: 'PUT',

@@ -5616,7 +5616,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -5717,7 +5717,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
@@ -5768,7 +5768,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
@@ -5820,7 +5820,7 @@ func TestEnqueueSessionPreviewPostTurnClassifier_SkipsWhenUserPreviewAlreadyActi
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT .+ FROM preview_instances").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerPreviewInstanceColumns()).
@@ -5862,7 +5862,7 @@ func TestEnqueueSessionPreviewWarmBuildIfCandidate_TargetsCacheLocalWorkerWithou
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT .+ FROM session_preview_prewarm_runs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
@@ -6127,7 +6127,7 @@ func workerOrganizationColumns() []string {
 }
 
 func workerRepositoryPreviewPolicyColumns() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "preview_config_name", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func workerRepositoryColumns() []string {
@@ -9521,6 +9521,121 @@ func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T)
 	require.NotNil(t, retryable.RetryAfter, "sibling sandbox race retries should use a short deliberate backoff")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxSiblingRace, "the wrapped error must preserve the ErrSandboxSiblingRace sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunPRReadinessHandler_DeadLetterMarksReadinessFailed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.PRReadiness = db.NewPRReadinessStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	readinessID := uuid.New()
+
+	mock.ExpectQuery("FROM pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("database unavailable"))
+	mock.ExpectExec("UPDATE pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	handler := newRunPRReadinessHandler(stores, &Services{}, zerolog.Nop())
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","readiness_id":"` + readinessID.String() + `"}`)
+
+	err := handler(ctx, "run_pr_readiness", payload)
+	require.Error(t, err, "handler should surface the readiness load failure")
+
+	jobctx.RunDeadLetterHooks(ctx, errors.New("retryable job timed out after 8m0s"))
+
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark the readiness run failed")
+}
+
+func TestRunPRReadinessHandler_RunningReviewLoopBypassesRetryWindow(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.PRReadiness = db.NewPRReadinessStore(mock)
+	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	readinessID := uuid.New()
+	loopID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snapshots/org/session/workspace.tar.zst"
+
+	mock.ExpectQuery("FROM pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "status",
+			"evaluated_workspace_revision", "evaluated_snapshot_key", "summary", "review_packet",
+			"triggered_by_user_id", "started_at", "completed_at", "created_at", "updated_at",
+		}).AddRow(readinessID, orgID, sessionID, nil, models.PRReadinessRunStatusRunning, int64(2), &snapshotKey, "Queued", nil, nil, now, nil, now, now))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 2, nil, &snapshotKey)...,
+		))
+	mock.ExpectQuery("FROM session_review_loops").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
+			loopID, orgID, sessionID, nil, &threadID, models.ReviewLoopStatusRunning,
+			models.ReviewLoopSourceManual, models.AgentTypeCodex, 1, models.ReviewLoopFixModeMinimal, 0,
+			true, nil, nil, &snapshotKey, &snapshotKey, nil, nil, now, nil,
+		))
+
+	handler := newRunPRReadinessHandler(stores, &Services{}, zerolog.Nop())
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","readiness_id":"` + readinessID.String() + `"}`)
+
+	err := handler(context.Background(), "run_pr_readiness", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "running review loop should defer readiness with a retryable error")
+	require.True(t, retryable.BypassMaxRetryDuration, "review-loop waits must not spend the generic retryable job window")
+	require.NotNil(t, retryable.RetryAfter, "review-loop waits should use a short fixed retry delay")
+	require.Equal(t, prePRReviewRetryDelay, *retryable.RetryAfter, "review-loop waits should use the PR review retry delay")
+	require.ErrorContains(t, retryable.Err, "PR readiness review loop is still running", "retryable reason should explain the review-loop wait")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEnsureReadinessReviewLoop_UsesTerminalLoopForSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	loopID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snapshots/org/session/workspace.tar.zst"
+	latestSummary := "Review still needs a decision."
+	session := models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex}
+
+	mock.ExpectQuery("FROM session_review_loops").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
+			loopID, orgID, sessionID, nil, &threadID, models.ReviewLoopStatusNeedsHumanDecision,
+			models.ReviewLoopSourceManual, models.AgentTypeCodex, 1, models.ReviewLoopFixModeMinimal, 1,
+			true, nil, nil, &snapshotKey, &snapshotKey, &latestSummary, nil, now, &now,
+		))
+
+	reviews := &stubWorkerReviewLoops{}
+	latest, reviewReady, err := ensureReadinessReviewLoop(context.Background(), stores, &Services{ReviewLoops: reviews}, session, snapshotKey)
+
+	require.NoError(t, err, "terminal review loop lookup should not fail")
+	require.True(t, reviewReady, "terminal review loops for the target snapshot should be ready for readiness evaluation")
+	require.NotNil(t, latest, "the terminal review loop should be returned as readiness evidence")
+	require.Equal(t, models.ReviewLoopStatusNeedsHumanDecision, latest.Status, "readiness should evaluate the existing non-clean review result")
+	require.Empty(t, reviews.starts, "readiness must not start another review loop after a terminal loop exists for the snapshot")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
