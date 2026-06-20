@@ -48,9 +48,6 @@ func reservationPlaceholderPreviewConfig() *models.PreviewConfig {
 	}
 }
 
-func timePtr(t time.Time) *time.Time {
-	return &t
-}
 
 // StartRunner completes durable preview startup jobs after the API has
 // reserved the preview row and enqueued start_preview.
