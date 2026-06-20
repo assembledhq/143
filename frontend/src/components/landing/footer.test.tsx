@@ -10,4 +10,12 @@ describe("Footer", () => {
 
     expect(docsLink).toHaveAttribute("href", "/docs");
   });
+
+  it("links to the naming page from the project links", () => {
+    render(<Footer isDark={false} />);
+
+    const nameLink = screen.getByRole("link", { name: "Why “143”?" });
+
+    expect(nameLink).toHaveAttribute("href", "/why-143");
+  });
 });
