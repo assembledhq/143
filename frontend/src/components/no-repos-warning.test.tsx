@@ -85,7 +85,7 @@ describe("NoReposWarning", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/choose repositories in integrations/i)
+        screen.getByText(/no repositories are claimed yet/i)
       ).toBeInTheDocument();
     });
     expect(screen.getByRole("link", { name: /choose repositories/i })).toHaveAttribute("href", "/settings/integrations?select_repos=1");
