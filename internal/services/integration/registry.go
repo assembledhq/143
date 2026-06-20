@@ -18,6 +18,7 @@ import (
 type Registry struct {
 	mu                                  sync.RWMutex
 	errorTrackers                       map[string]ErrorTracker
+	incidentProviders                   map[string]IncidentProvider
 	taskManagers                        map[string]TaskManager
 	documentStores                      map[string]DocumentStore
 	messageSources                      map[string]MessageSource
@@ -36,6 +37,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	return &Registry{
 		errorTrackers:                       make(map[string]ErrorTracker),
+		incidentProviders:                   make(map[string]IncidentProvider),
 		taskManagers:                        make(map[string]TaskManager),
 		documentStores:                      make(map[string]DocumentStore),
 		messageSources:                      make(map[string]MessageSource),
@@ -49,6 +51,32 @@ func NewRegistry() *Registry {
 		ciTestInsights:                      make(map[string]CITestInsights),
 		logProviders:                        make(map[string]LogProvider),
 	}
+}
+
+func (r *Registry) RegisterIncidentProvider(provider IncidentProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.incidentProviders[provider.Name()] = provider
+}
+
+func (r *Registry) IncidentProviders() []IncidentProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]IncidentProvider, 0, len(r.incidentProviders))
+	for _, p := range r.incidentProviders {
+		result = append(result, p)
+	}
+	return result
+}
+
+func (r *Registry) IncidentProvider(name string) (IncidentProvider, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.incidentProviders[name]
+	if !ok {
+		return nil, fmt.Errorf("incident provider %q not registered", name)
+	}
+	return p, nil
 }
 
 func (r *Registry) RegisterAutomationGoalImprovementCompleter(provider AutomationGoalImprovementCompleter) {
@@ -414,6 +442,9 @@ func (r *Registry) Summary() map[string][]string {
 	m := make(map[string][]string)
 	for name := range r.errorTrackers {
 		m["error_trackers"] = append(m["error_trackers"], name)
+	}
+	for name := range r.incidentProviders {
+		m["incident_providers"] = append(m["incident_providers"], name)
 	}
 	for name := range r.taskManagers {
 		m["task_managers"] = append(m["task_managers"], name)

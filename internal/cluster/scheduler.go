@@ -347,14 +347,17 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// Fifth pass: periodically reconcile stale PR health for open pull requests.
 	s.schedulePullRequestReconciliation(ctx, orgIDs, now)
 
-	// Sixth pass: clear pending_snapshot_key on sessions whose owning upload
+	// Sixth pass: reconcile PagerDuty incident mirrors from the provider API.
+	s.schedulePagerDutySync(ctx, orgIDs, now)
+
+	// Seventh pass: clear pending_snapshot_key on sessions whose owning upload
 	// goroutine died (worker OOM, drain timeout, etc). Without this, the
 	// orchestrator's gate would block continue_session forever for that
 	// session. Idempotent across schedulers — concurrent reapers update the
 	// same rows with the same NULL value.
 	s.reapStrandedPendingSnapshots(ctx, now)
 
-	// Seventh pass: refresh per-org Linear team-key allowlist once per UTC
+	// Eighth pass: refresh per-org Linear team-key allowlist once per UTC
 	// day so bare-identifier detection (e.g. "ACS-1234") picks up new teams
 	// created post-install. The OAuth callback enqueues an immediate refresh,
 	// so this cron is the long-term safety net for teams added later. The
@@ -363,14 +366,14 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	// truth.
 	s.scheduleLinearTeamKeyRefresh(ctx, orgIDs, now)
 
-	// Eighth pass: re-verify auto-join domains' DNS TXT records roughly
+	// Ninth pass: re-verify auto-join domains' DNS TXT records roughly
 	// daily. A domain that expires or transfers must not keep admitting new
 	// members forever — after MaxDomainRecheckFailures consecutive missing
 	// records, auto-join is disabled (the verified claim is kept so nobody
 	// else can grab the domain; re-enabling is an explicit admin action).
 	s.recheckVerifiedDomains(ctx, now)
 
-	// Ninth pass: reconcile GitHub org auto-join rosters roughly daily.
+	// Tenth pass: reconcile GitHub org auto-join rosters roughly daily.
 	// Login-time grants still live-confirm membership, so stale rosters only
 	// affect discovery latency; this sweep heals missed organization webhooks.
 	s.scheduleGitHubOrgRosterSyncs(ctx, now)
@@ -598,6 +601,20 @@ func (s *Scheduler) schedulePullRequestReconciliation(ctx context.Context, orgID
 		}
 		if _, err := s.jobs.Enqueue(ctx, orgID, "default", "reconcile_pull_request_state", payload, 2, &dedupeKey); err != nil {
 			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue reconcile_pull_request_state job")
+		}
+	}
+}
+
+func (s *Scheduler) schedulePagerDutySync(ctx context.Context, orgIDs []uuid.UUID, now time.Time) {
+	if s.jobs == nil {
+		return
+	}
+	tenMinuteBucket := now.UTC().Format("2006010215") + fmt.Sprintf("%d", now.UTC().Minute()/10)
+	for _, orgID := range orgIDs {
+		dedupeKey := fmt.Sprintf("pagerduty_sync:%s:%s", orgID.String(), tenMinuteBucket)
+		payload := map[string]any{"org_id": orgID.String()}
+		if _, err := s.jobs.Enqueue(ctx, orgID, "default", models.JobTypePagerDutySync, payload, 2, &dedupeKey); err != nil {
+			s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to enqueue pagerduty_sync job")
 		}
 	}
 }

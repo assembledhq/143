@@ -141,6 +141,118 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	for _, ip := range tr.integrations.IncidentProviders() {
+		prefix := ip.Name()
+		tools = append(tools,
+			Tool{
+				Name:        prefix + "_list_incidents",
+				Description: fmt.Sprintf("List active incidents from %s. Returns incident summaries with status, urgency, priority, service, and PagerDuty URL.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"statuses": {Type: "array", Description: "Incident statuses, e.g. triggered,acknowledged,resolved", Items: &SchemaProperty{Type: "string"}},
+						"urgency":  {Type: "string", Description: "Filter by urgency", Enum: []string{"high", "low"}},
+						"service":  {Type: "string", Description: "PagerDuty service ID to filter by"},
+						"since":    {Type: "string", Description: "Only incidents updated after this ISO 8601 timestamp"},
+						"limit":    {Type: "number", Description: "Max results to return (default: 25)", Default: 25},
+					},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_incident",
+				Description: fmt.Sprintf("Get details for one incident from %s, including assignees, escalation policy, teams, and service.", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"incident_id": {Type: "string", Description: "The PagerDuty incident ID"}},
+					Required:   []string{"incident_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_list_notes",
+				Description: fmt.Sprintf("List notes on a %s incident.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"incident_id": {Type: "string", Description: "The PagerDuty incident ID"},
+						"limit":       {Type: "number", Description: "Max notes to return (default: 50)", Default: 50},
+					},
+					Required: []string{"incident_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_list_log_entries",
+				Description: fmt.Sprintf("List log entries for a %s incident.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"incident_id": {Type: "string", Description: "The PagerDuty incident ID"},
+						"limit":       {Type: "number", Description: "Max log entries to return (default: 100)", Default: 100},
+					},
+					Required: []string{"incident_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_get_service",
+				Description: fmt.Sprintf("Get details for a %s service.", prefix),
+				InputSchema: ToolSchema{
+					Type:       "object",
+					Properties: map[string]SchemaProperty{"service_id": {Type: "string", Description: "The PagerDuty service ID"}},
+					Required:   []string{"service_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_list_oncalls",
+				Description: fmt.Sprintf("List current on-calls from %s.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"schedule_id": {Type: "string", Description: "PagerDuty schedule ID to filter by"},
+						"limit":       {Type: "number", Description: "Max on-calls to return (default: 20)", Default: 20},
+					},
+				},
+			},
+			Tool{
+				Name:        prefix + "_find_related_incidents",
+				Description: fmt.Sprintf("Find recent %s incidents related to an incident.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"incident_id": {Type: "string", Description: "The PagerDuty incident ID"},
+						"days":        {Type: "number", Description: "Lookback window in days (default: 90)", Default: 90},
+					},
+					Required: []string{"incident_id"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_add_note",
+				Description: fmt.Sprintf("Add a note to a %s incident.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"incident_id": {Type: "string", Description: "The PagerDuty incident ID"},
+						"note":        {Type: "string", Description: "Note body to append to the incident"},
+					},
+					Required: []string{"incident_id", "note"},
+				},
+			},
+			Tool{
+				Name:        prefix + "_create_status_update",
+				Description: fmt.Sprintf("Create a stakeholder status update on a %s incident.", prefix),
+				InputSchema: ToolSchema{
+					Type: "object",
+					Properties: map[string]SchemaProperty{
+						"incident_id": {Type: "string", Description: "The PagerDuty incident ID"},
+						"body":        {Type: "string", Description: "Status update body"},
+					},
+					Required: []string{"incident_id", "body"},
+				},
+			},
+		)
+		if !incidentProviderWritebackEnabled(ip) {
+			tools = tools[:len(tools)-2]
+		}
+	}
+
 	for _, tm := range tr.integrations.TaskManagers() {
 		prefix := tm.Name()
 		tools = append(tools,
@@ -500,6 +612,15 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 		return tr.callErrorTracker(ctx, et, method, args)
 	}
 
+	for _, ip := range tr.integrations.IncidentProviders() {
+		prefix := ip.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		return tr.callIncidentProvider(ctx, ip, method, args)
+	}
+
 	for _, tm := range tr.integrations.TaskManagers() {
 		prefix := tm.Name() + "_"
 		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
@@ -643,6 +764,171 @@ func (tr *ToolRegistry) callErrorTracker(ctx context.Context, et integration.Err
 	default:
 		return ErrorResult(fmt.Sprintf("unknown error tracker method: %s", method))
 	}
+}
+
+// --------------------------------------------------------------------------
+// Incident provider dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callIncidentProvider(ctx context.Context, ip integration.IncidentProvider, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "list_incidents":
+		var p struct {
+			Statuses []string `json:"statuses"`
+			Urgency  string   `json:"urgency"`
+			Service  string   `json:"service"`
+			Since    string   `json:"since"`
+			Limit    int      `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		filter := integration.IncidentFilter{
+			Statuses: p.Statuses,
+			Urgency:  p.Urgency,
+			Service:  p.Service,
+			Limit:    p.Limit,
+		}
+		if p.Since != "" {
+			if t, err := time.Parse(time.RFC3339, p.Since); err == nil {
+				filter.Since = t
+			}
+		}
+		incidents, err := ip.ListIncidents(ctx, filter)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list incidents failed: %s", err))
+		}
+		return jsonResult(incidents)
+
+	case "get_incident":
+		var p struct {
+			IncidentID string `json:"incident_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		incident, err := ip.GetIncident(ctx, p.IncidentID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get incident failed: %s", err))
+		}
+		return jsonResult(incident)
+
+	case "list_notes":
+		var p struct {
+			IncidentID string `json:"incident_id"`
+			Limit      int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		notes, err := ip.ListIncidentNotes(ctx, p.IncidentID, p.Limit)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list incident notes failed: %s", err))
+		}
+		return jsonResult(notes)
+
+	case "list_log_entries":
+		var p struct {
+			IncidentID string `json:"incident_id"`
+			Limit      int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		entries, err := ip.ListIncidentLogEntries(ctx, p.IncidentID, p.Limit)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list incident log entries failed: %s", err))
+		}
+		return jsonResult(entries)
+
+	case "get_service":
+		var p struct {
+			ServiceID string `json:"service_id"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		service, err := ip.GetService(ctx, p.ServiceID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("get service failed: %s", err))
+		}
+		return jsonResult(service)
+
+	case "list_oncalls":
+		var p struct {
+			ScheduleID string `json:"schedule_id"`
+			Limit      int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		onCalls, err := ip.ListOnCalls(ctx, integration.OnCallFilter{ScheduleID: p.ScheduleID, Limit: p.Limit})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("list on-calls failed: %s", err))
+		}
+		return jsonResult(onCalls)
+
+	case "find_related_incidents":
+		var p struct {
+			IncidentID string `json:"incident_id"`
+			Days       int    `json:"days"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		related, err := ip.FindRelatedIncidents(ctx, p.IncidentID, p.Days)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("find related incidents failed: %s", err))
+		}
+		return jsonResult(related)
+
+	case "add_note":
+		if !incidentProviderWritebackEnabled(ip) {
+			return ErrorResult("incident provider writeback is disabled")
+		}
+		var p struct {
+			IncidentID string `json:"incident_id"`
+			Note       string `json:"note"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if _, err := ip.AddIncidentNote(ctx, p.IncidentID, p.Note); err != nil {
+			return ErrorResult(fmt.Sprintf("add incident note failed: %s", err))
+		}
+		return TextResult("incident note added successfully")
+
+	case "create_status_update":
+		if !incidentProviderWritebackEnabled(ip) {
+			return ErrorResult("incident provider writeback is disabled")
+		}
+		var p struct {
+			IncidentID string `json:"incident_id"`
+			Body       string `json:"body"`
+		}
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if err := ip.CreateIncidentStatusUpdate(ctx, p.IncidentID, p.Body); err != nil {
+			return ErrorResult(fmt.Sprintf("create incident status update failed: %s", err))
+		}
+		return TextResult("incident status update created successfully")
+
+	default:
+		return ErrorResult(fmt.Sprintf("unknown incident provider method: %s", method))
+	}
+}
+
+type incidentWritebackState interface {
+	WritebackEnabled() bool
+}
+
+func incidentProviderWritebackEnabled(ip integration.IncidentProvider) bool {
+	state, ok := ip.(incidentWritebackState)
+	if !ok {
+		return true
+	}
+	return state.WritebackEnabled()
 }
 
 // --------------------------------------------------------------------------

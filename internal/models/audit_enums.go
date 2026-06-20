@@ -124,9 +124,12 @@ const (
 	AuditActionOrganizationCreated AuditAction = "organization.created"
 
 	// Integration & credential actions
-	AuditActionIntegrationConnected AuditAction = "integration.connected"
-	AuditActionCredentialUpdated    AuditAction = "credential.updated" // #nosec G101 -- not a credential
-	AuditActionCredentialDeleted    AuditAction = "credential.deleted" // #nosec G101 -- not a credential
+	AuditActionIntegrationConnected    AuditAction = "integration.connected"
+	AuditActionIntegrationUpdated      AuditAction = "integration.updated"
+	AuditActionIntegrationDisconnected AuditAction = "integration.disconnected"
+	AuditActionIntegrationWriteback    AuditAction = "integration.writeback"
+	AuditActionCredentialUpdated       AuditAction = "credential.updated" // #nosec G101 -- not a credential
+	AuditActionCredentialDeleted       AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
 	// Preview secret bundle actions
 	AuditActionPreviewSecretBundleUpdated  AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
@@ -199,7 +202,8 @@ func (a AuditAction) Validate() error {
 		AuditActionTeamDomainRemoved, AuditActionTeamMemberAutoJoined,
 		AuditActionTeamGitHubOrgAutoJoinEnabled, AuditActionTeamGitHubOrgAutoJoinDisabled,
 		AuditActionOrganizationCreated,
-		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
+		AuditActionIntegrationConnected, AuditActionIntegrationUpdated, AuditActionIntegrationDisconnected, AuditActionIntegrationWriteback,
+		AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionPreviewPolicyUpdated,

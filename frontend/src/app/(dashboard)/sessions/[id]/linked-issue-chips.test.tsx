@@ -166,6 +166,39 @@ describe('LinkedIssueChips', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
+  it('renders PagerDuty incident chips with incident deep links and service context', async () => {
+    const user = userEvent.setup();
+    const session = makeSession({
+      linked_issues: [
+        {
+          id: 'link-1',
+          session_id: 'sess-1',
+          issue_id: 'issue-1',
+          role: 'primary',
+          position: 0,
+          issue_source: 'pagerduty',
+          external_id: 'PABC123',
+          issue_title: 'Checkout outage',
+          issue_status: 'triggered',
+          pagerduty_incident_id: 'PABC123',
+          pagerduty_incident_number: '42',
+          pagerduty_incident_url: 'https://acme.pagerduty.com/incidents/PABC123',
+          pagerduty_service_name: 'Checkout',
+        },
+      ],
+    });
+
+    render(<LinkedIssueChips session={session} />);
+
+    const link = screen.getByRole('link', { name: 'PagerDuty #42' });
+    expect(link).toHaveAttribute('href', 'https://acme.pagerduty.com/incidents/PABC123');
+    expect(link).toHaveAttribute('target', '_blank');
+
+    await user.hover(link);
+
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Checkout outage (primary) · triggered · Checkout');
+  });
+
   it('mirrors tooltip into aria-label on non-link chips so screen readers announce issue context', () => {
     const session = makeSession({
       linked_issues: [

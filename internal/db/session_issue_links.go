@@ -29,23 +29,32 @@ const sessionIssueLinkSelectColumns = `sil.id, sil.org_id, sil.session_id, sil.i
 	sil.position, sil.added_by_user_id, sil.created_at,
 	i.title AS issue_title, i.source AS issue_source,
 	COALESCE(
-		NULLIF(provider_state.state->>'identifier', ''),
+		NULLIF(linear_state.state->>'identifier', ''),
 		CASE WHEN i.source = 'linear' THEN substring(i.title from '^([A-Z][A-Z0-9_]{0,9}-[0-9]+):') END,
 		i.external_id
 	) AS external_id,
 	i.description,
 	i.repository_id, i.status AS issue_status,
-	(provider_state.state->>'workspace_slug') AS issue_workspace_slug,
-	(provider_state.state->>'last_skipped_reason') AS linear_last_skipped_reason,
-	(provider_state.state->'primary_snapshot') AS linear_primary_snapshot`
+	(linear_state.state->>'workspace_slug') AS issue_workspace_slug,
+	(linear_state.state->>'last_skipped_reason') AS linear_last_skipped_reason,
+	(linear_state.state->'primary_snapshot') AS linear_primary_snapshot,
+	(pagerduty_state.state->>'incident_id') AS pagerduty_incident_id,
+	(pagerduty_state.state->>'incident_number') AS pagerduty_incident_number,
+	(pagerduty_state.state->>'incident_url') AS pagerduty_incident_url,
+	(pagerduty_state.state->>'service_id') AS pagerduty_service_id,
+	(pagerduty_state.state->>'service_name') AS pagerduty_service_name`
 
 const sessionIssueLinkFromClause = `
 	FROM session_issue_links sil
 	JOIN issues i ON i.id = sil.issue_id AND i.org_id = sil.org_id
-	LEFT JOIN session_issue_link_provider_state provider_state
-	  ON provider_state.link_id = sil.id
-	  AND provider_state.org_id = sil.org_id
-	  AND provider_state.provider = 'linear'`
+	LEFT JOIN session_issue_link_provider_state linear_state
+	  ON linear_state.link_id = sil.id
+	  AND linear_state.org_id = sil.org_id
+	  AND linear_state.provider = 'linear'
+	LEFT JOIN session_issue_link_provider_state pagerduty_state
+	  ON pagerduty_state.link_id = sil.id
+	  AND pagerduty_state.org_id = sil.org_id
+	  AND pagerduty_state.provider = 'pagerduty'`
 
 func (s *SessionIssueLinkStore) Create(
 	ctx context.Context,

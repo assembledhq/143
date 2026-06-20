@@ -80,11 +80,47 @@ import {
 import type {
   AgentCapabilityDefinition,
   AgentCapabilityGrant,
+  AutomationEventTriggerInput,
   AutomationGitHubEventFilters,
   ListResponse,
+  PagerDutyEventType,
+  PagerDutyEventTriggerFilter,
 } from "@/lib/types";
+import { queryKeys } from "@/lib/query-keys";
 import { browserTimezone, hourOptions, minuteOptions } from "../schedule-time";
 import { TimezonePicker } from "../timezone-picker";
+
+const pagerDutyEventTypeOptions: Array<{
+  value: PagerDutyEventType;
+  label: string;
+  ariaLabel: string;
+}> = [
+  {
+    value: "incident.triggered",
+    label: "Triggered",
+    ariaLabel: "PagerDuty triggered events",
+  },
+  {
+    value: "incident.annotated",
+    label: "Annotated",
+    ariaLabel: "PagerDuty annotated events",
+  },
+  {
+    value: "incident.priority_updated",
+    label: "Priority updated",
+    ariaLabel: "PagerDuty priority updated events",
+  },
+  {
+    value: "incident.acknowledged",
+    label: "Acknowledged",
+    ariaLabel: "PagerDuty acknowledged events",
+  },
+  {
+    value: "incident.resolved",
+    label: "Resolved",
+    ariaLabel: "PagerDuty resolved events",
+  },
+];
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -126,6 +162,19 @@ export default function NewAutomationPage() {
   const [triggerPaths, setTriggerPaths] = useState("");
   const [triggerFeedbackTypes, setTriggerFeedbackTypes] = useState("");
   const [triggerReviewStates, setTriggerReviewStates] = useState("");
+  const [pagerDutyEnabled, setPagerDutyEnabled] = useState(false);
+  const [pagerDutyEventTypes, setPagerDutyEventTypes] = useState<
+    PagerDutyEventType[]
+  >(["incident.triggered"]);
+  const [pagerDutyServiceIDs, setPagerDutyServiceIDs] = useState("");
+  const [pagerDutyTeamIDs, setPagerDutyTeamIDs] = useState("");
+  const [pagerDutyStatuses, setPagerDutyStatuses] = useState("");
+  const [pagerDutyUrgency, setPagerDutyUrgency] = useState<"high" | "low">("high");
+  const [pagerDutyPriorityNames, setPagerDutyPriorityNames] = useState("");
+  const [pagerDutyIncidentTypes, setPagerDutyIncidentTypes] = useState("");
+  const [pagerDutyTitleContains, setPagerDutyTitleContains] = useState("");
+  const [pagerDutyCustomFields, setPagerDutyCustomFields] = useState("");
+  const [pagerDutyCooldownMinutes, setPagerDutyCooldownMinutes] = useState("0");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<
@@ -155,6 +204,14 @@ export default function NewAutomationPage() {
     queryFn: () => api.repositories.list(),
   });
   const repos = reposData?.data ?? [];
+
+  const { data: pagerDutyResp } = useQuery({
+    queryKey: queryKeys.integrations.pagerDuty,
+    queryFn: () => api.integrations.listPagerDuty(),
+  });
+  const pagerDutyConnected = (pagerDutyResp?.data ?? []).some(
+    (integration) => integration.status === "active",
+  );
 
   const { data: capabilityCatalogResponse } = useQuery<
     ListResponse<AgentCapabilityDefinition>
@@ -221,6 +278,17 @@ export default function NewAutomationPage() {
       return current.filter((item) => item !== trigger);
     });
   };
+  const togglePagerDutyEventType = (
+    eventType: PagerDutyEventType,
+    checked: boolean,
+  ) => {
+    setPagerDutyEventTypes((current) => {
+      if (checked) {
+        return current.includes(eventType) ? current : [...current, eventType];
+      }
+      return current.filter((item) => item !== eventType);
+    });
+  };
 
   const githubEventFilters: AutomationGitHubEventFilters = useMemo(
     () => ({
@@ -238,6 +306,28 @@ export default function NewAutomationPage() {
       triggerReviewStates,
     ],
   );
+  const pagerDutyEventTriggers = buildPagerDutyEventTriggers(
+    pagerDutyEnabled,
+    pagerDutyEventTypes,
+    pagerDutyServiceIDs,
+    pagerDutyTeamIDs,
+    pagerDutyStatuses,
+    pagerDutyUrgency,
+    pagerDutyPriorityNames,
+    pagerDutyIncidentTypes,
+    pagerDutyTitleContains,
+    pagerDutyCustomFields,
+    pagerDutyCooldownMinutes,
+    repoId,
+  );
+  const pagerDutyTriggerValid =
+    !pagerDutyEnabled ||
+    (pagerDutyEventTypes.length > 0 &&
+      commaList(pagerDutyServiceIDs).length > 0 &&
+      (pagerDutyUrgency.length > 0 ||
+        commaList(pagerDutyPriorityNames).length > 0));
+  const hasEventTriggers =
+    productTriggers.length > 0 || pagerDutyEventTriggers.length > 0;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -259,6 +349,9 @@ export default function NewAutomationPage() {
         timezone,
         triggers: productTriggers,
         github_event_filters: githubEventFilters,
+        ...(pagerDutyEventTriggers.length > 0
+          ? { event_triggers: pagerDutyEventTriggers }
+          : {}),
         model,
         identity_scope: identityScope,
         pre_pr_review_loops: effectivePrePRReviewLoops,
@@ -299,7 +392,8 @@ export default function NewAutomationPage() {
     goal.trim().length > 0 &&
     !goalLength.isTooLong &&
     repoId.length > 0 &&
-    (scheduleEnabled || productTriggers.length > 0);
+    pagerDutyTriggerValid &&
+    (scheduleEnabled || hasEventTriggers);
 
   return (
     <PageContainer size="wide">
@@ -333,6 +427,7 @@ export default function NewAutomationPage() {
                   schedule_type: scheduleEnabled ? "interval" : "none",
                   triggers: productTriggers,
                   github_event_filters: githubEventFilters,
+                  event_triggers: pagerDutyEventTriggers,
                   base_branch: selectedBaseBranch.trim() || undefined,
                   agent_type: effectiveAgentType,
                   model,
@@ -499,7 +594,160 @@ export default function NewAutomationPage() {
                       ))}
                     </div>
                   </div>
-                  {!scheduleEnabled && productTriggers.length === 0 ? (
+                  <div className="space-y-2">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Incident events
+                    </span>
+                    <Label className="flex min-h-6 cursor-pointer items-center gap-2 text-sm font-normal">
+                      <Checkbox
+                        checked={pagerDutyEnabled}
+                        disabled={!pagerDutyConnected}
+                        onCheckedChange={(checked) =>
+                          setPagerDutyEnabled(checked === true)
+                        }
+                        aria-label="PagerDuty incidents"
+                      />
+                      <span className="min-w-0 leading-snug">
+                        PagerDuty incidents
+                      </span>
+                    </Label>
+                    {!pagerDutyConnected ? (
+                      <p className="text-xs text-muted-foreground">
+                        Connect PagerDuty in settings to use incident triggers.
+                      </p>
+                    ) : null}
+                    {pagerDutyEnabled ? (
+                      <div className="space-y-3">
+                        <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                          {pagerDutyEventTypeOptions.map((option) => (
+                            <Label
+                              key={option.value}
+                              className="flex min-h-6 cursor-pointer items-center gap-2 text-sm font-normal"
+                            >
+                              <Checkbox
+                                checked={pagerDutyEventTypes.includes(
+                                  option.value,
+                                )}
+                                onCheckedChange={(checked) =>
+                                  togglePagerDutyEventType(
+                                    option.value,
+                                    checked === true,
+                                  )
+                                }
+                                aria-label={option.ariaLabel}
+                              />
+                              <span className="min-w-0 leading-snug">
+                                {option.label}
+                              </span>
+                            </Label>
+                          ))}
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_9rem]">
+                          <Input
+                            aria-label="PagerDuty service IDs"
+                            placeholder="Service IDs, comma-separated"
+                            value={pagerDutyServiceIDs}
+                            onChange={(event) =>
+                              setPagerDutyServiceIDs(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Select
+                            value={pagerDutyUrgency}
+                            onValueChange={(value) => {
+                              if (value === "high" || value === "low") {
+                                setPagerDutyUrgency(value);
+                              }
+                            }}
+                          >
+                            <SelectTrigger
+                              className="h-8"
+                              aria-label="PagerDuty urgency"
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="high">High</SelectItem>
+                              <SelectItem value="low">Low</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <Input
+                            aria-label="PagerDuty team IDs"
+                            placeholder="Team IDs, comma-separated"
+                            value={pagerDutyTeamIDs}
+                            onChange={(event) =>
+                              setPagerDutyTeamIDs(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="PagerDuty statuses"
+                            placeholder="Statuses: triggered, acknowledged"
+                            value={pagerDutyStatuses}
+                            onChange={(event) =>
+                              setPagerDutyStatuses(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="PagerDuty priority names"
+                            placeholder="Priority names, comma-separated"
+                            value={pagerDutyPriorityNames}
+                            onChange={(event) =>
+                              setPagerDutyPriorityNames(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="PagerDuty incident types"
+                            placeholder="Incident types, comma-separated"
+                            value={pagerDutyIncidentTypes}
+                            onChange={(event) =>
+                              setPagerDutyIncidentTypes(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="PagerDuty title contains"
+                            placeholder="Title contains"
+                            value={pagerDutyTitleContains}
+                            onChange={(event) =>
+                              setPagerDutyTitleContains(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="PagerDuty cooldown minutes"
+                            type="number"
+                            min={0}
+                            max={10080}
+                            value={pagerDutyCooldownMinutes}
+                            onChange={(event) =>
+                              setPagerDutyCooldownMinutes(event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="PagerDuty custom fields"
+                            placeholder="field=value, field=other"
+                            value={pagerDutyCustomFields}
+                            onChange={(event) =>
+                              setPagerDutyCustomFields(event.target.value)
+                            }
+                            className="h-8 sm:col-span-2"
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+                    {pagerDutyEnabled && !pagerDutyTriggerValid ? (
+                      <p className="text-xs text-destructive">
+                        Add at least one PagerDuty service ID.
+                      </p>
+                    ) : null}
+                  </div>
+                  {!scheduleEnabled && !hasEventTriggers ? (
                     <p className="text-xs text-destructive">
                       Select at least one trigger.
                     </p>
@@ -899,6 +1147,95 @@ function commaList(value: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function statusList(
+  value: string,
+): Array<"triggered" | "acknowledged" | "resolved"> {
+  const allowed = new Set(["triggered", "acknowledged", "resolved"]);
+  return commaList(value)
+    .map((item) => item.toLowerCase())
+    .filter(
+      (item): item is "triggered" | "acknowledged" | "resolved" =>
+        allowed.has(item),
+    );
+}
+
+function parseCooldownMinutes(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.min(parsed, 10080);
+}
+
+function parsePagerDutyCustomFields(value: string): Record<string, string[]> {
+  return commaList(value).reduce<Record<string, string[]>>((fields, item) => {
+    const separator = item.includes("=") ? "=" : item.includes(":") ? ":" : "";
+    if (!separator) return fields;
+
+    const [rawKey, ...rawValueParts] = item.split(separator);
+    const key = rawKey.trim();
+    const fieldValue = rawValueParts.join(separator).trim();
+    if (!key || !fieldValue) return fields;
+
+    fields[key] = [...(fields[key] ?? []), fieldValue];
+    return fields;
+  }, {});
+}
+
+function buildPagerDutyEventTriggers(
+  enabled: boolean,
+  eventTypes: PagerDutyEventType[],
+  serviceIDInput: string,
+  teamIDInput: string,
+  statusInput: string,
+  urgency: "high" | "low",
+  priorityNameInput: string,
+  incidentTypeInput: string,
+  titleContainsInput: string,
+  customFieldsInput: string,
+  cooldownMinutesInput: string,
+  repositoryID: string,
+): AutomationEventTriggerInput[] {
+  if (!enabled) return [];
+
+  const serviceIDs = commaList(serviceIDInput);
+  const normalizedEventTypes = eventTypes.filter((eventType, index) =>
+    eventTypes.indexOf(eventType) === index,
+  );
+  if (serviceIDs.length === 0 || normalizedEventTypes.length === 0) {
+    return [];
+  }
+  const teamIDs = commaList(teamIDInput);
+  const statuses = statusList(statusInput);
+  const priorityNames = commaList(priorityNameInput);
+  const incidentTypes = commaList(incidentTypeInput);
+  const titleContains = titleContainsInput.trim();
+  const customFields = parsePagerDutyCustomFields(customFieldsInput);
+  const cooldownMinutes = parseCooldownMinutes(cooldownMinutesInput);
+
+  const filter: PagerDutyEventTriggerFilter = {
+    service_ids: serviceIDs,
+    urgencies: [urgency],
+  };
+  if (teamIDs.length > 0) filter.team_ids = teamIDs;
+  if (statuses.length > 0) filter.statuses = statuses;
+  if (priorityNames.length > 0) filter.priority_names = priorityNames;
+  if (incidentTypes.length > 0) filter.incident_types = incidentTypes;
+  if (titleContains.length > 0) filter.title_contains = titleContains;
+  if (Object.keys(customFields).length > 0) filter.custom_fields = customFields;
+  if (cooldownMinutes !== undefined) filter.cooldown_minutes = cooldownMinutes;
+
+  return [
+    {
+      provider: "pagerduty",
+      event_types: normalizedEventTypes,
+      filter,
+      repository_id: repositoryID || undefined,
+      enabled: true,
+    },
+  ];
 }
 
 function TemplateGroup({

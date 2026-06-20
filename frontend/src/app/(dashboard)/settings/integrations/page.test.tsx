@@ -20,6 +20,14 @@ const {
   listSlackChannelsMock,
   updateSlackChannelsMock,
   updateSlackChannelSettingsMock,
+  listPagerDutyMock,
+  updatePagerDutyMock,
+  testPagerDutyMock,
+  listPagerDutyMappingsMock,
+  upsertPagerDutyMappingMock,
+  listPagerDutyIncidentsMock,
+  startPagerDutyIncidentSessionMock,
+  loginPagerDutyMock,
   teamListMembersMock,
   githubConnectMock,
   currentUserMock,
@@ -50,6 +58,14 @@ const {
     listSlackChannelsMock: vi.fn(),
     updateSlackChannelsMock: vi.fn(),
     updateSlackChannelSettingsMock: vi.fn(),
+    listPagerDutyMock: vi.fn(),
+    updatePagerDutyMock: vi.fn(),
+    testPagerDutyMock: vi.fn(),
+    listPagerDutyMappingsMock: vi.fn(),
+    upsertPagerDutyMappingMock: vi.fn(),
+    listPagerDutyIncidentsMock: vi.fn(),
+    startPagerDutyIncidentSessionMock: vi.fn(),
+    loginPagerDutyMock: vi.fn(),
     teamListMembersMock: vi.fn(),
     githubConnectMock: vi.fn(),
     currentUserMock: {
@@ -91,6 +107,14 @@ vi.mock("@/lib/api", () => ({
       listSlackChannels: listSlackChannelsMock,
       updateSlackChannels: updateSlackChannelsMock,
       updateSlackChannelSettings: updateSlackChannelSettingsMock,
+      listPagerDuty: listPagerDutyMock,
+      updatePagerDuty: updatePagerDutyMock,
+      testPagerDuty: testPagerDutyMock,
+      listPagerDutyMappings: listPagerDutyMappingsMock,
+      upsertPagerDutyMapping: upsertPagerDutyMappingMock,
+      listPagerDutyIncidents: listPagerDutyIncidentsMock,
+      startPagerDutyIncidentSession: startPagerDutyIncidentSessionMock,
+      loginPagerDuty: loginPagerDutyMock,
     },
     repositories: {
       list: repositoriesListMock,
@@ -210,11 +234,62 @@ describe("IntegrationsPage", () => {
     listSlackChannelsMock.mockResolvedValue({ data: [] });
     updateSlackChannelsMock.mockResolvedValue(undefined);
     updateSlackChannelSettingsMock.mockResolvedValue({ data: {} });
+    listPagerDutyMock.mockResolvedValue({ data: [], meta: {} });
+    updatePagerDutyMock.mockResolvedValue({ data: {}, meta: {} });
+    testPagerDutyMock.mockResolvedValue({
+      data: {
+        integration: {
+          id: "pd-1",
+          org_id: "org-1",
+          provider: "pagerduty",
+          integration_id: "pagerduty-1",
+          status: "active",
+          writeback_enabled: true,
+          auto_create_webhook: false,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        credential_configured: true,
+        auth_ok: true,
+        webhook_secret_configured: true,
+        recent_webhook_failures: 0,
+        writeback_enabled: true,
+        auto_create_webhook: false,
+        last_health_check_at: "2026-01-02T00:00:00Z",
+        last_synced_at: "2026-01-02T00:00:00Z",
+        symptoms: [],
+      },
+    });
+    listPagerDutyMappingsMock.mockResolvedValue({ data: [], meta: {} });
+    upsertPagerDutyMappingMock.mockResolvedValue({ data: {}, meta: {} });
+    listPagerDutyIncidentsMock.mockResolvedValue({ data: [], meta: {} });
+    startPagerDutyIncidentSessionMock.mockResolvedValue({
+      data: {
+        id: "session-1",
+        org_id: "org-1",
+        repository_id: "repo-1",
+        title: "PagerDuty incident session",
+        status: "pending",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+    });
     claimGitHubRepositoriesMock.mockRejectedValue(
       new ApiErrorMock("GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories"),
     );
     githubConnectMock.mockClear();
+    loginPagerDutyMock.mockClear();
     currentUserMock.role = "admin";
+  });
+
+  it("starts PagerDuty OAuth from the connect card", async () => {
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Connect PagerDuty" }));
+
+    expect(loginPagerDutyMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText("OAuth Access Token")).not.toBeInTheDocument();
   });
 
   it("offers a GitHub user-auth connect action when repo claiming requires it", async () => {
@@ -483,6 +558,104 @@ describe("IntegrationsPage", () => {
         linear_team_id: "VIR",
         linear_project_id: undefined,
         repository_id: "repo-143",
+      });
+    });
+  });
+
+  it("manages PagerDuty health, settings, and recent incidents", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        { id: "repo-1", org_id: "org-1", full_name: "acme/api", status: "active" },
+        { id: "repo-2", org_id: "org-1", full_name: "acme/web", status: "active" },
+      ],
+      meta: {},
+    });
+    listPagerDutyMock.mockResolvedValue({
+      data: [
+        {
+          id: "pd-1",
+          org_id: "org-1",
+          provider: "pagerduty",
+          integration_id: "pagerduty-1",
+          account_subdomain: "acme",
+          status: "degraded",
+          default_repository_id: "repo-1",
+          writeback_enabled: true,
+          auto_create_webhook: false,
+          last_error: "OAuth token expired",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    listPagerDutyIncidentsMock.mockResolvedValue({
+      data: [
+        {
+          id: "mirror-1",
+          org_id: "org-1",
+          pagerduty_integration_id: "pd-1",
+          incident_id: "PINC123",
+          incident_number: 42,
+          html_url: "https://acme.pagerduty.com/incidents/PINC123",
+          title: "Checkout outage",
+          status: "triggered",
+          urgency: "high",
+          priority_name: "P1",
+          service_id: "P123",
+          service_name: "Checkout",
+          escalation_policy_name: "Primary On-call",
+          assigned_user_ids: [],
+          team_ids: ["TEAM1", "TEAM2"],
+          latest_note: "Database failover in progress",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage PagerDuty" }));
+    const sheet = await screen.findByRole("dialog", { name: "PagerDuty" });
+
+    expect(await within(sheet).findByText("OAuth token expired")).toBeInTheDocument();
+    expect(await within(sheet).findByText("Checkout outage")).toBeInTheDocument();
+    expect(within(sheet).getByText("#42")).toBeInTheDocument();
+    expect(within(sheet).getByText("P1")).toBeInTheDocument();
+    expect(within(sheet).getByText("Teams: TEAM1, TEAM2")).toBeInTheDocument();
+    expect(within(sheet).getByText("Escalation: Primary On-call")).toBeInTheDocument();
+    expect(within(sheet).getByText("Latest note: Database failover in progress")).toBeInTheDocument();
+    expect(within(sheet).getByRole("link", { name: "Open incident in PagerDuty" })).toHaveAttribute("href", "https://acme.pagerduty.com/incidents/PINC123");
+    expect(within(sheet).getByText("Repository: acme/api")).toBeInTheDocument();
+    expect(within(sheet).getByLabelText("PagerDuty automation workflow run URL")).toHaveValue("/api/v1/automations/{automation_id}/run");
+    await user.click(within(sheet).getByRole("button", { name: "Reauthorize PagerDuty" }));
+    expect(loginPagerDutyMock).toHaveBeenCalledTimes(1);
+
+    await user.click(within(sheet).getByRole("button", { name: "Test PagerDuty connection" }));
+    await within(sheet).findByText("Connection healthy");
+
+    await user.click(within(sheet).getByRole("switch", { name: "PagerDuty writeback" }));
+    await waitFor(() => {
+      expect(updatePagerDutyMock).toHaveBeenCalledWith({ writeback_enabled: false });
+    });
+
+    await user.click(within(sheet).getByRole("combobox", { name: "Default PagerDuty repository" }));
+    await user.click(await screen.findByRole("option", { name: "acme/web" }));
+    await waitFor(() => {
+      expect(updatePagerDutyMock).toHaveBeenCalledWith({ default_repository_id: "repo-2" });
+    });
+
+    await user.click(within(sheet).getByRole("button", { name: "Start session for Checkout outage" }));
+    await waitFor(() => {
+      expect(startPagerDutyIncidentSessionMock).toHaveBeenCalledWith("PINC123", {
+        pagerduty_integration_id: "pd-1",
       });
     });
   });

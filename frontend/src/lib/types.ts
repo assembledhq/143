@@ -455,6 +455,153 @@ export interface Integration {
   created_at: string;
 }
 
+export type PagerDutyOAuthMode = "scoped" | "classic_user";
+export type PagerDutyIntegrationStatus = "active" | "degraded" | "inactive";
+
+export interface PagerDutyIntegration {
+  id: string;
+  org_id: string;
+  integration_id: string;
+  credential_ref?: string;
+  account_subdomain?: string;
+  service_region?: string;
+  oauth_mode?: PagerDutyOAuthMode;
+  scopes?: string[];
+  status: PagerDutyIntegrationStatus;
+  default_repository_id?: string;
+  writeback_enabled: boolean;
+  auto_create_webhook?: boolean;
+  connected_at?: string;
+  last_webhook_at?: string;
+  last_ingested_at?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PagerDutyConnectRequest {
+  access_token: string;
+  refresh_token?: string;
+  webhook_secret?: string;
+  account_subdomain?: string;
+  service_region?: string;
+  oauth_mode?: PagerDutyOAuthMode;
+  scopes?: string[];
+  default_repository_id?: string;
+  writeback_enabled?: boolean;
+  auto_create_webhook?: boolean;
+}
+
+export interface PagerDutyServiceRepoMapping {
+  id: string;
+  org_id: string;
+  pagerduty_integration_id: string;
+  pagerduty_service_id: string;
+  pagerduty_service_name: string;
+  pagerduty_team_id?: string;
+  repository_id: string;
+  base_branch?: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PagerDutyServiceRepoMappingUpsert {
+  pagerduty_integration_id: string;
+  pagerduty_service_id: string;
+  pagerduty_service_name: string;
+  pagerduty_team_id?: string;
+  repository_id: string;
+  base_branch?: string;
+  enabled?: boolean;
+}
+
+export interface PagerDutyServiceSummary {
+  id: string;
+  summary: string;
+  html_url?: string;
+  escalation_policy?: string;
+  team_ids?: string[];
+}
+
+export interface PagerDutyHealth {
+  integration: PagerDutyIntegration;
+  credential_configured: boolean;
+  auth_ok: boolean;
+  webhook_secret_configured: boolean;
+  recent_webhook_failures: number;
+  latest_webhook_error?: string;
+  latest_webhook_failure_at?: string;
+  last_health_check_at?: string;
+  last_synced_at?: string;
+  last_error?: string;
+  writeback_enabled: boolean;
+  auto_create_webhook: boolean;
+  symptoms: string[];
+}
+
+export interface PagerDutyWebhookSetup {
+  pagerduty_integration_id: string;
+  integration_id: string;
+  webhook_url: string;
+  webhook_secret_configured: boolean;
+  webhook_subscription_id?: string;
+  service_id?: string;
+  team_id?: string;
+  events?: PagerDutyEventType[];
+}
+
+export interface PagerDutyWebhookSetupRequest {
+  service_id?: string;
+  team_id?: string;
+  description?: string;
+  events?: PagerDutyEventType[];
+}
+
+export interface PagerDutyIncident {
+  id: string;
+  org_id: string;
+  pagerduty_integration_id: string;
+  issue_id?: string;
+  incident_id: string;
+  incident_number?: number;
+  html_url?: string;
+  title: string;
+  status: string;
+  urgency?: string;
+  priority_id?: string;
+  priority_name?: string;
+  service_id?: string;
+  service_name?: string;
+  escalation_policy_id?: string;
+  escalation_policy_name?: string;
+  incident_type?: string;
+  assigned_user_ids: string[];
+  team_ids: string[];
+  latest_note?: string;
+  raw_data?: Record<string, unknown>;
+  triggered_at?: string;
+  acknowledged_at?: string;
+  resolved_at?: string;
+  last_event_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PagerDutyIncidentListParams {
+  integration_id?: string;
+  status?: string;
+  service_id?: string;
+  limit?: number;
+}
+
+export interface PagerDutyIncidentSessionStartRequest {
+  pagerduty_integration_id?: string;
+  repository_id?: string;
+  base_branch?: string;
+  message?: string;
+}
+
 export type SlackRoutingMode = "auto" | "answer_only" | "start_work";
 export type SlackResponseVisibility = "thread" | "dm";
 export type SlackNotificationPreset =
@@ -815,6 +962,11 @@ export interface Session {
     // Latest backend-recorded reason a Linear state sync was skipped for
     // this link (if any). Used by the session detail debug chip.
     linear_last_skipped_reason?: string;
+    pagerduty_incident_id?: string;
+    pagerduty_incident_number?: string;
+    pagerduty_incident_url?: string;
+    pagerduty_service_id?: string;
+    pagerduty_service_name?: string;
   }>;
   // Linear-specific session policy flags. Frozen at session create.
   linear_private?: boolean;
@@ -2745,6 +2897,52 @@ export type AutomationGitHubEvent =
   | "github.pull_request_review.submitted"
   | "github.pull_request_review_comment.created";
 
+export type AutomationEventProvider = "pagerduty";
+export type PagerDutyEventType =
+  | "incident.triggered"
+  | "incident.acknowledged"
+  | "incident.unacknowledged"
+  | "incident.resolved"
+  | "incident.reopened"
+  | "incident.reassigned"
+  | "incident.escalated"
+  | "incident.priority_updated"
+  | "incident.annotated"
+  | "incident.status_update_published";
+
+export interface PagerDutyEventTriggerFilter {
+  service_ids?: string[];
+  team_ids?: string[];
+  statuses?: Array<"triggered" | "acknowledged" | "resolved">;
+  urgencies?: Array<"high" | "low">;
+  priority_names?: string[];
+  incident_types?: string[];
+  title_contains?: string;
+  custom_fields?: Record<string, string[]>;
+  cooldown_minutes?: number;
+}
+
+export interface AutomationEventTrigger {
+  id: string;
+  org_id: string;
+  automation_id: string;
+  provider: AutomationEventProvider;
+  event_types: PagerDutyEventType[];
+  filter: PagerDutyEventTriggerFilter;
+  repository_id?: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationEventTriggerInput {
+  provider: AutomationEventProvider;
+  event_types: PagerDutyEventType[];
+  filter?: PagerDutyEventTriggerFilter;
+  repository_id?: string;
+  enabled?: boolean;
+}
+
 export interface AutomationGitHubEventFilters {
   base_branches?: string[];
   authors?: string[];
@@ -2777,6 +2975,7 @@ export interface Automation {
   cron_expression?: string;
   github_event_triggers?: AutomationGitHubEvent[];
   github_event_filters?: AutomationGitHubEventFilters;
+  event_triggers?: AutomationEventTrigger[];
   timezone: string;
   next_run_at?: string;
   last_run_at?: string;

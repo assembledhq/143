@@ -41,6 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
+	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -96,6 +97,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pullRequestStore := db.NewPullRequestStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
+	pagerDutyIntegrationStore := db.NewPagerDutyIntegrationStore(pool)
+	pagerDutyServiceRepoMappingStore := db.NewPagerDutyServiceRepoMappingStore(pool)
+	pagerDutyIncidentStore := db.NewPagerDutyIncidentStore(pool)
+	pagerDutyInboundEventStore := db.NewPagerDutyInboundEventStore(pool)
 	sessionStore.SetLogger(logger)
 	sessionLogStore.SetLogger(logger)
 	jobStore.SetLogger(logger)
@@ -216,6 +221,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if slackMetricsErr != nil {
 		logger.Warn().Err(slackMetricsErr).Msg("failed to initialize Slackbot metrics")
 	}
+	pagerDutyMetrics, pagerDutyMetricsErr := metrics.NewPagerDutyMetrics()
+	if pagerDutyMetricsErr != nil {
+		logger.Warn().Err(pagerDutyMetricsErr).Msg("failed to initialize PagerDuty metrics")
+	}
 	integrationOpts := []handlers.IntegrationHandlerOption{
 		handlers.WithSentryOAuth(cfg.SentryOAuthClientID, cfg.SentryOAuthClientSecret),
 		handlers.WithGitHubIntegrationOAuth(cfg.GitHubOAuthClientID, cfg.GitHubOAuthClientSecret),
@@ -255,6 +264,39 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
 	integrationHandler.SetGitHubRosterJobStore(jobStore)
+	sessionMessageStore := db.NewSessionMessageStore(pool)
+	pagerDutySessionStarter := pagerdutysvc.NewSessionStarter(sessionStore, sessionMessageStore, jobStore, logger)
+	pagerDutySessionStarter.SetProviderStateStore(db.NewPagerDutyProviderStateStore(pool))
+	pagerDutyWritebacks := pagerdutysvc.NewWritebackService(pagerdutysvc.WritebackDeps{
+		Integrations:  pagerDutyIntegrationStore,
+		Credentials:   credentialStore,
+		Incidents:     pagerDutyIncidentStore,
+		ProviderState: db.NewPagerDutyProviderStateStore(pool),
+		FrontendURL:   cfg.FrontendURL,
+		Audit:         auditEmitter,
+		Metrics:       pagerDutyMetrics,
+		Logger:        logger,
+	})
+	pagerDutySessionStarter.SetWritebacker(pagerDutyWritebacks)
+	pagerDutyIntegrationHandler := handlers.NewPagerDutyIntegrationHandler(handlers.PagerDutyIntegrationHandlerConfig{
+		Integrations:          integrationStore,
+		Credentials:           credentialStore,
+		CredentialReader:      credentialStore,
+		CredentialDisabler:    credentialStore,
+		PagerDutyIntegrations: pagerDutyIntegrationStore,
+		Mappings:              pagerDutyServiceRepoMappingStore,
+		Repositories:          repoStore,
+		Incidents:             pagerDutyIncidentStore,
+		SessionStarter:        pagerDutySessionStarter,
+		WebhookFailures:       webhookDeliveryStore,
+		BaseURL:               cfg.BaseURL,
+		FrontendURL:           cfg.FrontendURL,
+		Disabled:              !cfg.PagerDutyIntegrationEnabled,
+		OAuthClientID:         cfg.PagerDutyOAuthClientID,
+		OAuthClientSecret:     cfg.PagerDutyOAuthClientSecret,
+		Metrics:               pagerDutyMetrics,
+		Logger:                logger,
+	})
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	slackbotHandler := handlers.NewSlackbotHandler(
@@ -292,7 +334,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	settingsHandler.SetRuntimeStatusCounters(sessionStore, previewStore)
 	issueHandler := handlers.NewIssueHandler(issueStore)
 	autopilotHandler := handlers.NewAutopilotHandler(autopilotQueueStore)
-	sessionMessageStore := db.NewSessionMessageStore(pool)
 	sessionThreadStore := db.NewSessionThreadStore(pool)
 	sessionThreadStore.SetLogger(logger)
 	if sessionStreams != nil {
@@ -461,6 +502,24 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
+	pagerDutyWebhookHandler := handlers.NewPagerDutyWebhookHandler(handlers.PagerDutyWebhookHandlerConfig{
+		Webhooks:              webhookDeliveryStore,
+		Integrations:          integrationStore,
+		PagerDutyIntegrations: pagerDutyIntegrationStore,
+		Credentials:           credentialStore,
+		InboundEvents:         pagerDutyInboundEventStore,
+		Jobs:                  jobStore,
+		Incidents:             pagerDutyIncidentStore,
+		IssueIngester:         ingestionSvc,
+		IssueStatuses:         issueStore,
+		Mappings:              pagerDutyServiceRepoMappingStore,
+		Repositories:          repoStore,
+		SessionStarter:        pagerDutySessionStarter,
+		Metrics:               pagerDutyMetrics,
+		RequireSecret:         cfg.Env == "production",
+		Logger:                logger,
+	})
+	pagerDutyWebhookHandler.SetAuditEmitter(auditEmitter)
 	// Reject unsigned webhook deliveries in production. Local dev keeps
 	// the historical fail-open behavior so loopback test POSTs work
 	// without configuring credentials.
@@ -552,9 +611,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	automationStore := db.NewAutomationStore(pool)
 	automationRunStore := db.NewAutomationRunStore(pool)
+	automationEventTriggerStore := db.NewAutomationEventTriggerStore(pool)
 	automationGoalImprovementStore := db.NewAutomationGoalImprovementStore(pool)
 	automationHandler := handlers.NewAutomationHandler(automationStore, automationRunStore)
 	automationHandler.SetJobStore(jobStore)
+	automationHandler.SetEventTriggerStore(automationEventTriggerStore)
 	automationHandler.SetRepositoryStore(repoStore)
 	automationHandler.SetOrgStore(orgStore)
 	automationHandler.SetCodingCredentialStore(codingCredentialStore)
@@ -598,6 +659,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// Wire audit emitter into all handlers that perform state changes.
 	authHandler.SetAuditEmitter(auditEmitter)
 	integrationHandler.SetAuditEmitter(auditEmitter)
+	pagerDutyIntegrationHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAuditEmitter(auditEmitter)
 	sessionHandler.SetAttributionStore(sessionAttributionStore)
@@ -901,6 +963,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/github", webhookHandler.HandleGitHub)
 			r.Post("/sentry", ingestionWebhookHandler.HandleSentry)
 			r.Post("/linear", ingestionWebhookHandler.HandleLinear)
+			r.Post("/pagerduty", pagerDutyWebhookHandler.Handle)
+			r.Post("/pagerduty/start-session", pagerDutyWebhookHandler.HandleStartSessionAction)
 		})
 
 		// Internal API routes (token-based auth — called by sandbox agents)
@@ -1096,6 +1160,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/session-composer/slash-commands", sessionComposerHandler.ListSlashCommands)
 				r.Get("/api/v1/session-composer/slash-commands/details", sessionComposerHandler.GetSlashCommandDetail)
 				r.Get("/api/v1/integrations", integrationHandler.ListIntegrations)
+				r.Get("/api/v1/integrations/pagerduty", pagerDutyIntegrationHandler.List)
+				r.Get("/api/v1/integrations/pagerduty/mappings", pagerDutyIntegrationHandler.ListMappings)
+				r.Get("/api/v1/integrations/pagerduty/incidents", pagerDutyIntegrationHandler.ListIncidents)
+				r.Get("/api/v1/integrations/pagerduty/incidents/{incident_id}", pagerDutyIntegrationHandler.GetIncident)
 				r.Get("/api/v1/autopilot/queue", autopilotHandler.Queue)
 				r.Get("/api/v1/issues", issueHandler.List)
 				r.Get("/api/v1/issues/{id}", issueHandler.Get)
@@ -1170,6 +1238,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/automations/{id}/runs/{rid}", automationHandler.GetRun)
 				r.Get("/api/v1/automations/{id}/stats", automationHandler.Stats)
 				r.Get("/api/v1/automations/{id}/capabilities", agentCapabilitiesHandler.GetAutomationPolicy)
+				r.Get("/api/v1/automations/{id}/event-triggers", automationHandler.ListEventTriggers)
 				r.Get("/api/v1/automations/{id}/goal-improvements", automationHandler.ListGoalImprovements)
 				r.Get("/api/v1/automations/goal-improvements/{improvement_id}", automationHandler.GetGoalImprovement)
 
@@ -1364,6 +1433,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.With(goalImproveApplyLimit).Post("/api/v1/automations/{id}/goal-improvements/{improvement_id}/apply", automationHandler.ApplyGoalImprovement)
 				r.Patch("/api/v1/automations/{id}", automationHandler.Update)
 				r.Patch("/api/v1/automations/{id}/capabilities", agentCapabilitiesHandler.PatchAutomationPolicy)
+				r.Put("/api/v1/automations/{id}/event-triggers", automationHandler.ReplaceEventTriggers)
 				r.Delete("/api/v1/automations/{id}", automationHandler.Delete)
 				r.Post("/api/v1/automations/{id}/run", automationHandler.RunNow)
 				r.Post("/api/v1/automations/{id}/pause", automationHandler.Pause)
@@ -1546,6 +1616,19 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/mezmo/connect", integrationHandler.ConnectMezmo)
 				r.Delete("/api/v1/integrations/mezmo/disconnect", integrationHandler.DisconnectIntegration)
+				r.Get("/api/v1/integrations/pagerduty/login", pagerDutyIntegrationHandler.StartOAuth)
+				r.Get("/api/v1/integrations/pagerduty/callback", pagerDutyIntegrationHandler.HandleOAuthCallback)
+				r.Post("/api/v1/integrations/pagerduty", pagerDutyIntegrationHandler.Connect)
+				r.Post("/api/v1/integrations/pagerduty/connect", pagerDutyIntegrationHandler.Connect)
+				r.Patch("/api/v1/integrations/pagerduty", pagerDutyIntegrationHandler.Patch)
+				r.Delete("/api/v1/integrations/pagerduty", pagerDutyIntegrationHandler.Delete)
+				r.Post("/api/v1/integrations/pagerduty/test", pagerDutyIntegrationHandler.Test)
+				r.Get("/api/v1/integrations/pagerduty/services", pagerDutyIntegrationHandler.ListServices)
+				r.Get("/api/v1/integrations/pagerduty/webhook-setup", pagerDutyIntegrationHandler.GetWebhookSetup)
+				r.Post("/api/v1/integrations/pagerduty/webhook-setup", pagerDutyIntegrationHandler.CreateWebhookSetup)
+				r.Post("/api/v1/integrations/pagerduty/mappings", pagerDutyIntegrationHandler.UpsertMapping)
+				r.Post("/api/v1/integrations/pagerduty/incidents/{incident_id}/session", pagerDutyIntegrationHandler.StartIncidentSession)
+				r.Delete("/api/v1/integrations/pagerduty/disconnect", pagerDutyIntegrationHandler.Delete)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)

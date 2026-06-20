@@ -48,6 +48,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
+	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/pm"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -1345,13 +1346,14 @@ func buildServices(
 	// and the PM service so both paths resolve provider credentials, Codex
 	// auth.json, and agent_config overrides through a single code path.
 	agentEnv := agent.NewAgentEnv(agent.AgentEnvDeps{
-		Credentials:       credentialStore,
-		CodingCredentials: codingCredentialStore,
-		Orgs:              orgStore,
-		OrgSettingsCache:  orgSettingsCache,
-		CodexAuth:         codexAuthSvc,
-		Provider:          sandboxProvider,
-		Logger:            logger,
+		Credentials:           credentialStore,
+		CodingCredentials:     codingCredentialStore,
+		Orgs:                  orgStore,
+		OrgSettingsCache:      orgSettingsCache,
+		CodexAuth:             codexAuthSvc,
+		PagerDutyIntegrations: db.NewPagerDutyIntegrationStore(pool),
+		Provider:              sandboxProvider,
+		Logger:                logger,
 	})
 
 	// Orchestrator.
@@ -1372,7 +1374,8 @@ func buildServices(
 	automationRunUpdater := automations.NewAutomationHooks(automationRunStore, logger)
 	automationGoalImprovementStore := db.NewAutomationGoalImprovementStore(pool)
 	automationGoalImprovementUpdater := automations.NewGoalImprovementService(automationGoalImprovementStore, automationStore, automationRunStore, sessionStore, jobStore, pool, llmClient)
-	automationGoalImprovementUpdater.SetAuditEmitter(db.NewAuditEmitter(db.NewAuditLogStore(pool), logger))
+	auditEmitter := db.NewAuditEmitter(db.NewAuditLogStore(pool), logger)
+	automationGoalImprovementUpdater.SetAuditEmitter(auditEmitter)
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 
@@ -1608,6 +1611,10 @@ func buildServices(
 	if slackMetricsErr != nil {
 		logger.Warn().Err(slackMetricsErr).Msg("failed to register slackbot metrics in worker; Slackbot emits will not record")
 	}
+	workerPagerDutyMetrics, pagerDutyMetricsErr := metrics.NewPagerDutyMetrics()
+	if pagerDutyMetricsErr != nil {
+		logger.Warn().Err(pagerDutyMetricsErr).Msg("failed to register PagerDuty metrics in worker; PagerDuty paths will not record")
+	}
 	linearService := linear.Build(linear.BuildDeps{
 		Pool:               pool,
 		Logger:             logger,
@@ -1691,6 +1698,54 @@ func buildServices(
 		SandboxGC:         sandboxGC,
 		SandboxAuthBroker: sandboxAuthBroker,
 	}
+	pagerDutyTriggerer := automations.NewPagerDutyEventTriggerService(
+		db.NewAutomationEventTriggerStore(pool),
+		db.NewAutomationStore(pool),
+		automationRunStore,
+		jobStore,
+		pool,
+		logger,
+	)
+	pagerDutyIntegrationStore := db.NewPagerDutyIntegrationStore(pool)
+	pagerDutyIncidentStore := db.NewPagerDutyIncidentStore(pool)
+	defaultWorkRepositoryView := db.LinearAgentSettingsView{Orgs: orgStore, Repos: repoStore}
+	pagerDutyIngester := ingestion.NewService(issueStore, db.NewWebhookDeliveryStore(pool), jobStore, logger)
+	pagerDutyWritebacks := pagerdutysvc.NewWritebackService(pagerdutysvc.WritebackDeps{
+		Integrations:  pagerDutyIntegrationStore,
+		Credentials:   credentialStore,
+		Incidents:     pagerDutyIncidentStore,
+		ProviderState: db.NewPagerDutyProviderStateStore(pool),
+		FrontendURL:   cfg.FrontendURL,
+		Audit:         auditEmitter,
+		Metrics:       workerPagerDutyMetrics,
+		Logger:        logger,
+	})
+	orchestrator.SetPagerDutyWritebacker(pagerDutyWritebacks)
+	automationRunUpdater.SetPagerDutyWritebacker(pagerDutyWritebacks)
+	pagerDutyTriggerer.SetRepositoryResolver(db.NewPagerDutyServiceRepoMappingStore(pool), pagerDutyIntegrationStore)
+	pagerDutyTriggerer.SetDefaultRepositoryResolver(defaultWorkRepositoryView)
+	pagerDutyTriggerer.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
+	pagerDutyTriggerer.SetMetrics(workerPagerDutyMetrics)
+	pagerDutyTriggerer.SetAuditEmitter(auditEmitter)
+	svc.PagerDuty = pagerdutysvc.NewProcessor(pagerdutysvc.ProcessorDeps{
+		Events:       db.NewPagerDutyInboundEventStore(pool),
+		Integrations: pagerDutyIntegrationStore,
+		Ingester:     pagerDutyIngester,
+		Issues:       issueStore,
+		Incidents:    pagerDutyIncidentStore,
+		Triggers:     pagerDutyTriggerer,
+		Metrics:      workerPagerDutyMetrics,
+	})
+	svc.PagerDutySync = pagerdutysvc.NewSyncer(pagerdutysvc.SyncerDeps{
+		Integrations: pagerDutyIntegrationStore,
+		Credentials:  credentialStore,
+		Ingester:     pagerDutyIngester,
+		Issues:       issueStore,
+		Incidents:    pagerDutyIncidentStore,
+		Metrics:      workerPagerDutyMetrics,
+		Logger:       logger,
+	})
+	svc.PagerDutyWrites = pagerDutyWritebacks
 	configureSessionExecutorDispatch(svc, cfg, pool, dockerCli, jobStore, logger)
 
 	// Linear inbound-agent worker wiring. The process-wide

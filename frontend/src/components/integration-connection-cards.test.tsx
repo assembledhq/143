@@ -86,6 +86,38 @@ describe("integration connection cards", () => {
     expect(onConnectMezmo).toHaveBeenCalledTimes(1);
   });
 
+  it("renders the PagerDuty card and triggers connect", async () => {
+    const user = userEvent.setup();
+    const onConnectPagerDuty = vi.fn();
+
+    renderWithProviders(
+      <AdditionalIntegrationCards
+        sentryConnected={false}
+        linearConnected={false}
+        linearLoading={false}
+        slackConnected={false}
+        notionConnected={false}
+        onConnectSentry={vi.fn()}
+        onConnectLinear={vi.fn()}
+        onConnectSlack={vi.fn()}
+        onConnectNotion={vi.fn()}
+        circleciConnected={false}
+        onConnectCircleCI={vi.fn()}
+        mezmoConnected={false}
+        onConnectMezmo={vi.fn()}
+        pagerdutyConnected={false}
+        onConnectPagerDuty={onConnectPagerDuty}
+      />
+    );
+
+    expect(screen.getByText("PagerDuty")).toBeInTheDocument();
+    expect(screen.getByAltText("PagerDuty logo")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Connect PagerDuty" }));
+
+    expect(onConnectPagerDuty).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a Disconnect button for Mezmo when connected with a handler", () => {
     renderWithProviders(
       <AdditionalIntegrationCards

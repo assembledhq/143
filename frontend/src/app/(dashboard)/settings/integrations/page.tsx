@@ -16,6 +16,7 @@ import { ErrorNotice, ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import {
   Command,
   CommandCheckItem,
@@ -57,6 +58,10 @@ import type {
   GitHubRepositoryClaimCandidate,
   LinearTeamKey,
   LinearTeamRepoMapping,
+  PagerDutyHealth,
+  PagerDutyIncident,
+  PagerDutyIntegration,
+  PagerDutyServiceRepoMapping,
   Repository,
   SlackBotSettingsUpdate,
   SlackChannel,
@@ -1194,6 +1199,493 @@ function LinearRoutingSummary({ repositories }: { repositories: Repository[] }) 
   );
 }
 
+function PagerDutyCardSummary({ integration }: { integration: PagerDutyIntegration }) {
+  const { data: mappingsResp, isLoading } = useQuery({
+    queryKey: queryKeys.integrations.pagerDutyMappings(integration.id),
+    queryFn: () => api.integrations.listPagerDutyMappings(integration.id),
+    enabled: Boolean(integration.id),
+    staleTime: 60_000,
+  });
+
+  if (isLoading) {
+    return <p className="mt-1.5 text-xs text-muted-foreground">Loading routing summary...</p>;
+  }
+
+  const mappingCount = mappingsResp?.data?.length ?? 0;
+  const account = integration.account_subdomain ? `${integration.account_subdomain}.pagerduty.com` : "PagerDuty";
+  return (
+    <p className="mt-1.5 text-xs text-muted-foreground">
+      {account} · {mappingCount} service route{mappingCount === 1 ? "" : "s"}
+    </p>
+  );
+}
+
+function PagerDutyRoutingSettings({
+  integration,
+  repositories,
+  onReplaceCredentials,
+}: {
+  integration?: PagerDutyIntegration;
+  repositories: Repository[];
+  onReplaceCredentials: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [serviceID, setServiceID] = useState("");
+  const [serviceName, setServiceName] = useState("");
+  const [mappingRepoID, setMappingRepoID] = useState("");
+  const [baseBranch, setBaseBranch] = useState("");
+  const activeRepositories = repositories.filter((repo) => repo.status === "active");
+  const integrationID = integration?.id ?? "";
+  const webhookQuery = integration?.integration_id
+    ? `integration_id=${encodeURIComponent(integration.integration_id)}&pagerduty_integration_id=${encodeURIComponent(integration.id)}`
+    : "";
+  const webhookPath = webhookQuery
+    ? `/api/v1/webhooks/pagerduty?${webhookQuery}`
+    : "";
+  const actionPath = webhookQuery
+    ? `/api/v1/webhooks/pagerduty/start-session?${webhookQuery}`
+    : "";
+  const workflowRunPath = "/api/v1/automations/{automation_id}/run";
+
+  const { data: mappingsResp, isLoading } = useQuery({
+    queryKey: queryKeys.integrations.pagerDutyMappings(integrationID),
+    queryFn: () => api.integrations.listPagerDutyMappings(integrationID),
+    enabled: Boolean(integrationID),
+    staleTime: 60_000,
+  });
+  const { data: incidentsResp, isLoading: incidentsLoading } = useQuery({
+    queryKey: ["integrations", "pagerduty", "incidents", integrationID],
+    queryFn: () =>
+      api.integrations.listPagerDutyIncidents({
+        integration_id: integrationID,
+        limit: 5,
+      }),
+    enabled: Boolean(integrationID),
+    staleTime: 30_000,
+  });
+  const testConnection = useMutation({
+    mutationFn: () => api.integrations.testPagerDuty(integrationID),
+  });
+  const updateSettings = useMutation({
+    mutationFn: (body: {
+      default_repository_id?: string | null;
+      writeback_enabled?: boolean;
+      auto_create_webhook?: boolean;
+    }) => api.integrations.updatePagerDuty(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.pagerDuty });
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+    },
+  });
+  const startIncidentSession = useMutation({
+    mutationFn: (incident: PagerDutyIncident) =>
+      api.integrations.startPagerDutyIncidentSession(incident.incident_id, {
+        pagerduty_integration_id: incident.pagerduty_integration_id,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["integrations", "pagerduty", "incidents", integrationID],
+      });
+    },
+  });
+  const upsertMapping = useMutation({
+    mutationFn: () =>
+      api.integrations.upsertPagerDutyMapping({
+        pagerduty_integration_id: integrationID,
+        pagerduty_service_id: serviceID.trim(),
+        pagerduty_service_name: serviceName.trim(),
+        repository_id: mappingRepoID,
+        base_branch: baseBranch.trim() || undefined,
+      }),
+    onSuccess: () => {
+      setServiceID("");
+      setServiceName("");
+      setMappingRepoID("");
+      setBaseBranch("");
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.pagerDutyMappings(integrationID) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.pagerDuty });
+    },
+  });
+
+  if (!integration) {
+    return (
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium">PagerDuty routing</h3>
+        <p className="text-sm text-muted-foreground">
+          Connect PagerDuty before configuring service-to-repository routing.
+        </p>
+        <Button size="sm" onClick={onReplaceCredentials}>Connect PagerDuty</Button>
+      </div>
+    );
+  }
+
+  const mappings = mappingsResp?.data ?? [];
+  const incidents = incidentsResp?.data ?? [];
+  const health = testConnection.data?.data;
+  const canSave = integrationID !== "" && serviceID.trim() !== "" && serviceName.trim() !== "" && mappingRepoID !== "" && !upsertMapping.isPending;
+
+  return (
+    <div className="space-y-5">
+      <div className="space-y-3 rounded-md border border-border p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-medium">Connection health</h3>
+              <Badge variant={integration.status === "active" ? "secondary" : "outline"}>
+                {integration.status}
+              </Badge>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {integration.account_subdomain
+                ? `${integration.account_subdomain}.pagerduty.com`
+                : "PagerDuty account"}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              loading={testConnection.isPending}
+              disabled={testConnection.isPending}
+              onClick={() => testConnection.mutate()}
+            >
+              Test PagerDuty connection
+            </Button>
+            <Button size="sm" variant="outline" onClick={onReplaceCredentials}>
+              {integration.status === "degraded" ? "Reauthorize PagerDuty" : "Replace credentials"}
+            </Button>
+          </div>
+        </div>
+        {integration.last_error ? (
+          <ErrorText>{integration.last_error}</ErrorText>
+        ) : null}
+        {health ? <PagerDutyHealthResult health={health} /> : null}
+        {testConnection.isError ? (
+          <ErrorText>Failed to test PagerDuty connection.</ErrorText>
+        ) : null}
+      </div>
+
+      <div className="space-y-3 rounded-md border border-border p-3">
+        <div>
+          <h3 className="text-sm font-medium">Defaults</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Choose fallback routing and writeback behavior for PagerDuty sessions and automations.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label>Default repository</Label>
+            <Select
+              value={integration.default_repository_id ?? NO_DEFAULT_REPO_VALUE}
+              onValueChange={(value) =>
+                updateSettings.mutate({
+                  default_repository_id:
+                    value === NO_DEFAULT_REPO_VALUE ? null : value,
+                })
+              }
+              disabled={activeRepositories.length === 0 || updateSettings.isPending}
+            >
+              <SelectTrigger aria-label="Default PagerDuty repository">
+                <SelectValue placeholder="Repository" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DEFAULT_REPO_VALUE}>No default repository</SelectItem>
+                {activeRepositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <Label htmlFor="pagerduty-writeback" className="min-w-0">
+                PagerDuty writeback
+              </Label>
+              <Switch
+                id="pagerduty-writeback"
+                aria-label="PagerDuty writeback"
+                checked={integration.writeback_enabled}
+                disabled={updateSettings.isPending}
+                onCheckedChange={(checked) =>
+                  updateSettings.mutate({ writeback_enabled: checked })
+                }
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <Label htmlFor="pagerduty-auto-webhook" className="min-w-0">
+                Auto-create webhook
+              </Label>
+              <Switch
+                id="pagerduty-auto-webhook"
+                aria-label="PagerDuty auto-create webhook"
+                checked={integration.auto_create_webhook === true}
+                disabled={updateSettings.isPending}
+                onCheckedChange={(checked) =>
+                  updateSettings.mutate({ auto_create_webhook: checked })
+                }
+              />
+            </div>
+          </div>
+        </div>
+        {updateSettings.isError ? (
+          <ErrorText>Failed to update PagerDuty settings.</ErrorText>
+        ) : null}
+      </div>
+
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium">Webhook delivery</h3>
+        <p className="text-sm text-muted-foreground">
+          Use this endpoint when configuring the PagerDuty webhook subscription for this integration.
+        </p>
+        <Input readOnly value={webhookPath} aria-label="PagerDuty webhook URL" />
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Use this endpoint for a PagerDuty Custom Incident Action named Start 143 session.
+          </p>
+          <Input readOnly value={actionPath} aria-label="PagerDuty start session action URL" />
+        </div>
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Use this endpoint from PagerDuty Incident Workflow Web API actions to run a specific event automation.
+          </p>
+          <Input readOnly value={workflowRunPath} aria-label="PagerDuty automation workflow run URL" />
+        </div>
+      </div>
+
+      <div className="space-y-3 rounded-md border border-border p-3">
+        <div>
+          <h3 className="text-sm font-medium">Recent incidents</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Mirrored PagerDuty incidents can start a focused agent session.
+          </p>
+        </div>
+        {incidentsLoading ? (
+          <p className="text-sm text-muted-foreground">Loading incidents...</p>
+        ) : incidents.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No PagerDuty incidents mirrored yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {incidents.map((incident) => (
+              <PagerDutyIncidentRow
+                key={incident.id || incident.incident_id}
+                incident={incident}
+                repositoryName={pagerDutyIncidentRepositoryName(
+                  incident,
+                  mappings,
+                  activeRepositories,
+                  integration.default_repository_id,
+                )}
+                starting={startIncidentSession.isPending}
+                onStart={() => startIncidentSession.mutate(incident)}
+              />
+            ))}
+          </div>
+        )}
+        {startIncidentSession.isError ? (
+          <ErrorText>Failed to start a PagerDuty incident session.</ErrorText>
+        ) : null}
+      </div>
+
+      <div className="space-y-3 rounded-md border border-border p-3">
+        <div>
+          <h3 className="text-sm font-medium">Service routing</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Route incidents from PagerDuty service IDs into the repository the responding agent should use.
+          </p>
+        </div>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading service routes...</p>
+        ) : mappings.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No service routes configured yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {mappings.map((mapping: PagerDutyServiceRepoMapping) => (
+              <div key={mapping.id} className="grid gap-2 rounded-md border border-border px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{mapping.pagerduty_service_name || mapping.pagerduty_service_id}</div>
+                  <div className="truncate text-xs text-muted-foreground">{mapping.pagerduty_service_id}</div>
+                </div>
+                <div className="min-w-0 text-sm">
+                  <div className="truncate">{repoName(activeRepositories, mapping.repository_id)}</div>
+                  <div className="truncate text-xs text-muted-foreground">{mapping.base_branch || "Repository default branch"}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="grid gap-2 border-t border-border pt-4 sm:grid-cols-[1fr_1fr_1.3fr_0.8fr_auto]">
+          <Input
+            aria-label="PagerDuty service ID"
+            placeholder="Service ID"
+            value={serviceID}
+            onChange={(event) => setServiceID(event.target.value)}
+          />
+          <Input
+            aria-label="PagerDuty service name"
+            placeholder="Service name"
+            value={serviceName}
+            onChange={(event) => setServiceName(event.target.value)}
+          />
+          <Select value={mappingRepoID} onValueChange={setMappingRepoID} disabled={activeRepositories.length === 0}>
+            <SelectTrigger aria-label="PagerDuty route repository">
+              <SelectValue placeholder="Repository" />
+            </SelectTrigger>
+            <SelectContent>
+              {activeRepositories.map((repo) => (
+                <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Input
+            aria-label="PagerDuty route base branch"
+            placeholder="Branch"
+            value={baseBranch}
+            onChange={(event) => setBaseBranch(event.target.value)}
+          />
+          <Button
+            type="button"
+            disabled={!canSave}
+            loading={upsertMapping.isPending}
+            onClick={() => upsertMapping.mutate()}
+          >
+            Save
+          </Button>
+        </div>
+        {activeRepositories.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Connect a GitHub repository before routing PagerDuty incidents.</p>
+        ) : null}
+        {upsertMapping.isError ? <ErrorText>Failed to update PagerDuty service routing.</ErrorText> : null}
+      </div>
+    </div>
+  );
+}
+
+function PagerDutyHealthResult({ health }: { health: PagerDutyHealth }) {
+  const healthy = health.auth_ok && health.credential_configured;
+  return (
+    <div className="space-y-2 rounded-md bg-muted/30 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={healthy ? "secondary" : "destructive"}>
+          {healthy ? "Connection healthy" : "Connection needs attention"}
+        </Badge>
+        <span className="text-xs text-muted-foreground">
+          Webhook secret {health.webhook_secret_configured ? "configured" : "missing"}
+        </span>
+      </div>
+      <dl className="grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
+        <dt className="text-muted-foreground">Last checked</dt>
+        <dd>{formatIntegrationTimestamp(health.last_health_check_at)}</dd>
+        <dt className="text-muted-foreground">Last synced</dt>
+        <dd>{formatIntegrationTimestamp(health.last_synced_at)}</dd>
+        <dt className="text-muted-foreground">Writeback</dt>
+        <dd>{health.writeback_enabled ? "Enabled" : "Disabled"}</dd>
+        <dt className="text-muted-foreground">Webhook setup</dt>
+        <dd>{health.auto_create_webhook ? "Automatic" : "Manual"}</dd>
+        <dt className="text-muted-foreground">Webhook failures</dt>
+        <dd>{health.recent_webhook_failures ?? 0} in the last 24h</dd>
+        {health.latest_webhook_error ? (
+          <>
+            <dt className="text-muted-foreground">Latest webhook error</dt>
+            <dd>{health.latest_webhook_error}</dd>
+          </>
+        ) : null}
+      </dl>
+      {health.last_error ? <ErrorText>{health.last_error}</ErrorText> : null}
+      {health.symptoms.length > 0 ? (
+        <ul className="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
+          {health.symptoms.map((symptom) => (
+            <li key={symptom}>{symptom}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function PagerDutyIncidentRow({
+  incident,
+  repositoryName,
+  starting,
+  onStart,
+}: {
+  incident: PagerDutyIncident;
+  repositoryName: string;
+  starting: boolean;
+  onStart: () => void;
+}) {
+  const serviceLabel = incident.service_name || incident.service_id || "Unknown service";
+  const repositoryMapped = repositoryName !== "Unmapped";
+  const teams = incident.team_ids?.filter(Boolean) ?? [];
+  return (
+    <div className="grid gap-3 rounded-md border border-border px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+      <div className="min-w-0 space-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="truncate text-sm font-medium">{incident.title}</span>
+          {incident.incident_number ? <Badge variant="outline">#{incident.incident_number}</Badge> : null}
+          <Badge variant="outline">{incident.status}</Badge>
+          {incident.urgency ? <Badge variant="secondary">{incident.urgency}</Badge> : null}
+          {incident.priority_name ? <Badge variant="secondary">{incident.priority_name}</Badge> : null}
+        </div>
+        <div className="space-y-0.5 text-xs text-muted-foreground">
+          <p className="truncate">Service: {serviceLabel}</p>
+          <p className={repositoryMapped ? "truncate" : "truncate text-destructive"}>Repository: {repositoryName}</p>
+          {incident.escalation_policy_name ? <p className="truncate">Escalation: {incident.escalation_policy_name}</p> : null}
+          {teams.length > 0 ? <p className="truncate">Teams: {teams.join(", ")}</p> : null}
+          {incident.latest_note ? <p className="line-clamp-2">Latest note: {incident.latest_note}</p> : null}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2 sm:justify-end">
+        {incident.html_url ? (
+          <Button asChild size="sm" variant="ghost">
+            <a href={incident.html_url} target="_blank" rel="noreferrer" aria-label="Open incident in PagerDuty">
+              <ExternalLink aria-hidden="true" />
+              Open
+            </a>
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          loading={starting}
+          disabled={starting}
+          onClick={onStart}
+          aria-label={`Start session for ${incident.title}`}
+        >
+          Start session
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function pagerDutyIncidentRepositoryName(
+  incident: PagerDutyIncident,
+  mappings: PagerDutyServiceRepoMapping[],
+  repositories: Repository[],
+  defaultRepositoryID?: string,
+): string {
+  const serviceID = incident.service_id?.trim();
+  if (serviceID) {
+    const mapping = mappings.find((candidate) => candidate.enabled && candidate.pagerduty_service_id === serviceID);
+    if (mapping) {
+      return repoName(repositories, mapping.repository_id);
+    }
+  }
+  if (defaultRepositoryID) {
+    return repoName(repositories, defaultRepositoryID);
+  }
+  return "Unmapped";
+}
+
+function formatIntegrationTimestamp(value?: string): string {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 function IntegrationDangerZone({
   provider,
   name,
@@ -1268,7 +1760,9 @@ function IntegrationDetailSheet({
   onReplaceNotionToken,
   onReplaceCircleCIToken,
   onReplaceMezmoCredentials,
+  onReplacePagerDutyCredentials,
   mezmoBaseURL,
+  pagerDutyIntegration,
 }: {
   provider: IntegrationKey | null;
   open: boolean;
@@ -1287,7 +1781,9 @@ function IntegrationDetailSheet({
   onReplaceNotionToken: () => void;
   onReplaceCircleCIToken: () => void;
   onReplaceMezmoCredentials: () => void;
+  onReplacePagerDutyCredentials: () => void;
   mezmoBaseURL?: string;
+  pagerDutyIntegration?: PagerDutyIntegration;
 }) {
   if (!provider) return null;
   const meta = getIntegrationByKey(provider);
@@ -1381,6 +1877,13 @@ function IntegrationDetailSheet({
               </p>
               <Button size="sm" variant="outline" onClick={onReplaceMezmoCredentials}>Replace credentials</Button>
             </div>
+          ) : null}
+          {provider === "pagerduty" ? (
+            <PagerDutyRoutingSettings
+              integration={pagerDutyIntegration}
+              repositories={repositories}
+              onReplaceCredentials={onReplacePagerDutyCredentials}
+            />
           ) : null}
 
           {isConnected ? (
@@ -1509,6 +2012,10 @@ export default function IntegrationsPage() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+  const { data: pagerDutyResp } = useQuery({
+    queryKey: queryKeys.integrations.pagerDuty,
+    queryFn: () => api.integrations.listPagerDuty(),
+  });
   const { data: repositoriesResp } = useQuery({
     queryKey: ["repositories", "integrations", "include-disconnected"],
     queryFn: () => api.repositories.list({ includeDisconnected: true }),
@@ -1606,6 +2113,9 @@ export default function IntegrationsPage() {
   const mezmoIntegration = integrationsResp?.data?.find(
     (integration) => integration.provider === "mezmo" && integration.status === "active"
   );
+  const pagerDutyIntegration = pagerDutyResp?.data?.find(
+    (integration) => integration.status === "active" || integration.status === "degraded"
+  );
   const repositories = repositoriesResp?.data ?? [];
   const activeRepositories = repositories.filter((repo) => repo.status === "active");
   const connected = {
@@ -1616,6 +2126,7 @@ export default function IntegrationsPage() {
     notion: Boolean(notionIntegration),
     circleci: Boolean(circleciIntegration),
     mezmo: Boolean(mezmoIntegration),
+    pagerduty: Boolean(pagerDutyIntegration),
   } satisfies Partial<Record<IntegrationKey, boolean>>;
 
   return (
@@ -1645,6 +2156,8 @@ export default function IntegrationsPage() {
         circleciLoading={circleciConnectMutation.isPending}
         mezmoConnected={Boolean(mezmoIntegration)}
         mezmoLoading={mezmoConnectMutation.isPending}
+        pagerdutyConnected={Boolean(pagerDutyIntegration)}
+        pagerdutyLoading={false}
         onConnectGitHub={() => api.integrations.loginGitHub()}
         onConnectSentry={() => api.integrations.loginSentry()}
         onConnectLinear={() => api.integrations.loginLinear()}
@@ -1660,6 +2173,9 @@ export default function IntegrationsPage() {
         onConnectMezmo={() => {
           setMezmoError(null);
           setMezmoDialogOpen(true);
+        }}
+        onConnectPagerDuty={() => {
+          api.integrations.loginPagerDuty();
         }}
         onManageGitHub={isAdmin ? () => setSelectedIntegration("github") : undefined}
         onManageIntegration={isAdmin ? (provider) => setSelectedIntegration(provider) : undefined}
@@ -1680,6 +2196,9 @@ export default function IntegrationsPage() {
             <p className="mt-1.5 text-xs text-muted-foreground">
               Production log queries are enabled
             </p>
+          ) : undefined,
+          pagerduty: pagerDutyIntegration ? (
+            <PagerDutyCardSummary integration={pagerDutyIntegration} />
           ) : undefined,
         }}
         onDisconnect={(provider) => disconnectMutation.mutate(provider)}
@@ -1719,7 +2238,11 @@ export default function IntegrationsPage() {
           setMezmoError(null);
           setMezmoDialogOpen(true);
         }}
+        onReplacePagerDutyCredentials={() => {
+          api.integrations.loginPagerDuty();
+        }}
         mezmoBaseURL={mezmoIntegration?.mezmo_base_url}
+        pagerDutyIntegration={pagerDutyIntegration}
       />
 
       <TokenDialog
@@ -1837,6 +2360,7 @@ export default function IntegrationsPage() {
           mezmoConnectMutation.mutate({ apiKey: values.apiKey, baseUrl: values.baseUrl })
         }
       />
+
     </PageContainer>
   );
 }

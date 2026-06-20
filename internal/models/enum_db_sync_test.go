@@ -171,13 +171,14 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		),
 		"integrations_provider": toStrings(
 			IntegrationProviderGitHub, IntegrationProviderSentry,
-			IntegrationProviderLinear, IntegrationProviderSlack,
-			IntegrationProviderNotion, IntegrationProviderCircleCI,
+			IntegrationProviderLinear, IntegrationProviderPagerDuty,
+			IntegrationProviderSlack, IntegrationProviderNotion,
+			IntegrationProviderCircleCI, IntegrationProviderVictoriaLogs,
 			IntegrationProviderMezmo,
 		),
 		// issue_source.go
 		"issues_source": toStrings(
-			IssueSourceSentry, IssueSourceLinear,
+			IssueSourceSentry, IssueSourceLinear, IssueSourcePagerDuty,
 			IssueSourceManual, IssueSourcePMAgent,
 		),
 		// pm_enums.go

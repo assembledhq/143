@@ -1,4 +1,4 @@
-export type IntegrationKey = "github" | "sentry" | "linear" | "slack" | "notion" | "circleci" | "mezmo";
+export type IntegrationKey = "github" | "sentry" | "linear" | "slack" | "notion" | "circleci" | "mezmo" | "pagerduty";
 
 export type IntegrationDefinition = {
   key: IntegrationKey;
@@ -49,6 +49,12 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
     name: "Mezmo",
     description: "Query and search log data from Mezmo.",
     logoSrc: "/integrations/mezmo.svg",
+  },
+  {
+    key: "pagerduty",
+    name: "PagerDuty",
+    description: "Trigger incident response automation from PagerDuty events.",
+    logoSrc: "/integrations/pagerduty.svg",
   },
 ];
 

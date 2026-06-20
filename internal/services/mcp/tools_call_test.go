@@ -84,6 +84,58 @@ func (m *mockMessageSource) GetThread(_ context.Context, messageID string) (*int
 }
 
 // --------------------------------------------------------------------------
+// Mock: IncidentProvider
+// --------------------------------------------------------------------------
+
+type mockIncidentProvider struct {
+	name string
+}
+
+func (m *mockIncidentProvider) Name() string { return m.name }
+
+func (m *mockIncidentProvider) ListIncidents(_ context.Context, filter integration.IncidentFilter) ([]integration.IncidentSummary, error) {
+	return []integration.IncidentSummary{{ID: "PINCIDENT", Status: "triggered", ServiceID: filter.Service, Title: "checkout degraded"}}, nil
+}
+
+func (m *mockIncidentProvider) GetIncident(_ context.Context, incidentID string) (*integration.IncidentDetail, error) {
+	return &integration.IncidentDetail{IncidentSummary: integration.IncidentSummary{ID: incidentID, Title: "checkout degraded"}}, nil
+}
+
+func (m *mockIncidentProvider) AddIncidentNote(_ context.Context, incidentID, note string) (string, error) {
+	if incidentID == "" || note == "" {
+		return "", fmt.Errorf("incident_id and note are required")
+	}
+	return "note-1", nil
+}
+
+func (m *mockIncidentProvider) ListIncidentNotes(_ context.Context, incidentID string, limit int) ([]integration.IncidentNote, error) {
+	return []integration.IncidentNote{{ID: "PNOTE", IncidentID: incidentID, Content: "Investigating", UserName: "Alice"}}, nil
+}
+
+func (m *mockIncidentProvider) ListIncidentLogEntries(_ context.Context, incidentID string, limit int) ([]integration.IncidentLogEntry, error) {
+	return []integration.IncidentLogEntry{{ID: "PLOG", IncidentID: incidentID, Type: "trigger", Summary: "Triggered"}}, nil
+}
+
+func (m *mockIncidentProvider) GetService(_ context.Context, serviceID string) (*integration.IncidentService, error) {
+	return &integration.IncidentService{ID: serviceID, Name: "Checkout", EscalationPolicy: "Primary"}, nil
+}
+
+func (m *mockIncidentProvider) ListOnCalls(_ context.Context, filter integration.OnCallFilter) ([]integration.OnCall, error) {
+	return []integration.OnCall{{UserID: "PUSER", UserName: "Alice", ScheduleID: filter.ScheduleID}}, nil
+}
+
+func (m *mockIncidentProvider) FindRelatedIncidents(_ context.Context, incidentID string, days int) ([]integration.IncidentSummary, error) {
+	return []integration.IncidentSummary{{ID: "PRELATED", Title: "similar to " + incidentID}}, nil
+}
+
+func (m *mockIncidentProvider) CreateIncidentStatusUpdate(_ context.Context, incidentID, body string) error {
+	if incidentID == "" || body == "" {
+		return fmt.Errorf("incident_id and body are required")
+	}
+	return nil
+}
+
+// --------------------------------------------------------------------------
 // Mock: IssueCreator
 // --------------------------------------------------------------------------
 
@@ -209,6 +261,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg := integration.NewRegistry()
 	reg.RegisterErrorTracker(&mockErrorTracker{name: "sentry"})
 	reg.RegisterTaskManager(&mockTaskManager{name: "linear"})
+	reg.RegisterIncidentProvider(&mockIncidentProvider{name: "pagerduty"})
 	reg.RegisterCodeReviewSource(&mockCodeReviewSource{name: "github"})
 	reg.RegisterDocumentStore(&mockDocumentStore{name: "notion"})
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
@@ -235,6 +288,37 @@ func TestCallToolCITestInsights_ListFlakyTests(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].TestName != "TestFlaky" {
 		t.Errorf("unexpected list_flaky_tests result: %+v", got)
+	}
+}
+
+func TestCallToolPagerDutyIncidentProviderExtendedTools(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		tool     string
+		args     string
+		expected string
+	}{
+		{name: "list notes", tool: "pagerduty_list_notes", args: `{"incident_id":"PINCIDENT","limit":10}`, expected: "Investigating"},
+		{name: "list log entries", tool: "pagerduty_list_log_entries", args: `{"incident_id":"PINCIDENT","limit":10}`, expected: "Triggered"},
+		{name: "get service", tool: "pagerduty_get_service", args: `{"service_id":"PSVC"}`, expected: "Checkout"},
+		{name: "list oncalls", tool: "pagerduty_list_oncalls", args: `{"schedule_id":"PSCHED","limit":10}`, expected: "Alice"},
+		{name: "find related", tool: "pagerduty_find_related_incidents", args: `{"incident_id":"PINCIDENT","days":90}`, expected: "PRELATED"},
+		{name: "create status update", tool: "pagerduty_create_status_update", args: `{"incident_id":"PINCIDENT","body":"Fix is rolling out"}`, expected: "incident status update created successfully"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tr := NewToolRegistry(buildFullTestRegistry())
+			result := tr.CallTool(context.Background(), tt.tool, json.RawMessage(tt.args))
+
+			require.False(t, result.IsError, "PagerDuty extended tool should dispatch without error")
+			require.Contains(t, result.Content[0].Text, tt.expected, "PagerDuty extended tool should return provider data")
+		})
 	}
 }
 
@@ -586,16 +670,25 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 27
-	if len(tools) != 27 {
+	// 4 error tracker + 9 incident response + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 36
+	if len(tools) != 36 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 27 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 36 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
+		"pagerduty_list_incidents":             false,
+		"pagerduty_get_incident":               false,
+		"pagerduty_list_notes":                 false,
+		"pagerduty_list_log_entries":           false,
+		"pagerduty_get_service":                false,
+		"pagerduty_list_oncalls":               false,
+		"pagerduty_find_related_incidents":     false,
+		"pagerduty_add_note":                   false,
+		"pagerduty_create_status_update":       false,
 		"github_list_recent_prs":               false,
 		"github_get_pr_reviews":                false,
 		"notion_search_documents":              false,

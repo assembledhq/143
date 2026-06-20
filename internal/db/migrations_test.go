@@ -194,6 +194,18 @@ func TestCodingCredentialsVersioningMigrationUsesInsertOnlyRuntimeState(t *testi
 	require.Contains(t, sql, "ERRCODE = 'foreign_key_violation'", "runtime guard should reject orphaned runtime state")
 }
 
+func TestPagerDutyIntegrationAccountUniqueIndexTreatsNullAccountsAsEqual(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000209_pagerduty_integration.up.sql")
+	require.NoError(t, err, "test should read the PagerDuty integration migration")
+
+	sql := string(body)
+	require.Contains(t, sql,
+		"ON pagerduty_integrations (org_id, COALESCE(account_subdomain, ''), service_region)",
+		"PagerDuty account uniqueness should treat NULL account_subdomain values as equal")
+}
+
 func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

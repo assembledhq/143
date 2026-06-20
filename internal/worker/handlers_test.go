@@ -49,6 +49,8 @@ var workerSessionIssueLinkColumns = []string{
 	"issue_title", "issue_source", "external_id", "description",
 	"repository_id", "issue_status", "issue_workspace_slug",
 	"linear_last_skipped_reason", "linear_primary_snapshot",
+	"pagerduty_incident_id", "pagerduty_incident_number", "pagerduty_incident_url",
+	"pagerduty_service_id", "pagerduty_service_name",
 }
 
 var workerComplexityEstimateColumns = []string{
@@ -3306,12 +3308,9 @@ func TestLinearJobHandlers(t *testing.T) {
 			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCompleted, 1, nil, nil)...))
 		mock.ExpectQuery("SELECT .+ FROM session_issue_links").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-			WillReturnRows(pgxmock.NewRows([]string{
-				"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
-				"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_last_skipped_reason", "linear_primary_snapshot",
-			}).AddRow(
+			WillReturnRows(pgxmock.NewRows(workerSessionIssueLinkColumns).AddRow(
 				linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
-				&title, &source, &externalID, nil, nil, &status, nil, nil, nil,
+				&title, &source, &externalID, nil, nil, &status, nil, nil, nil, nil, nil, nil, nil, nil,
 			))
 		mock.ExpectQuery("SELECT .+ FROM issues WHERE id").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4689,7 +4688,7 @@ func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", configSnapshot,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
 			models.AutomationRunStatusCompleted, nil, nil, nil, now, now,
 		))
 	mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
@@ -4741,7 +4740,7 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", configSnapshot,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
 			models.AutomationRunStatusCompleted, nil, nil, nil, now, now,
 		))
 	mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
@@ -4789,12 +4788,9 @@ func TestOpenPRHandler_HydratesLinkedIssuesBeforeCreatePR(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	mock.ExpectQuery("SELECT .+ FROM session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "issue_id", "role", "position", "added_by_user_id", "created_at",
-			"issue_title", "issue_source", "external_id", "description", "repository_id", "issue_status", "issue_workspace_slug", "linear_last_skipped_reason", "linear_primary_snapshot",
-		}).AddRow(
+		WillReturnRows(pgxmock.NewRows(workerSessionIssueLinkColumns).AddRow(
 			linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now,
-			&title, &source, &externalID, nil, nil, &status, nil, nil, nil,
+			&title, &source, &externalID, nil, nil, &status, nil, nil, nil, nil, nil, nil, nil, nil,
 		))
 	mock.ExpectQuery("UPDATE sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -5689,7 +5685,7 @@ func TestSessionPrewarmClassifierIssueInputsUseLabelsAndIssueType(t *testing.T) 
 	mock.ExpectQuery("SELECT [\\s\\S]+ FROM session_issue_links").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionIssueLinkColumns).
-			AddRow(linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now, &issueTitle, &issueSource, &externalID, &description, nil, &issueStatus, nil, nil, nil))
+			AddRow(linkID, orgID, sessionID, issueID, string(models.SessionIssueLinkRolePrimary), 0, nil, now, &issueTitle, &issueSource, &externalID, &description, nil, &issueStatus, nil, nil, nil, nil, nil, nil, nil, nil))
 	mock.ExpectQuery("SELECT id, org_id, external_id").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerIssueColumns).
@@ -6072,7 +6068,8 @@ func TestStartPreviewHandler_PreviewCapacityRetriesClearsTargetWhenNoWorkerAvail
 func automationRunRowColumns() []string {
 	return []string{
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
-		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
+		"triggered_by_user_id", "scheduled_time", "trigger_id", "provider", "provider_event_id", "trigger_context",
+		"goal_snapshot", "config_snapshot",
 		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
 	}
 }
@@ -6161,7 +6158,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", []byte("{}"),
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6223,6 +6220,82 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Automations = db.NewAutomationStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	automationRepoID := uuid.New()
+	overrideRepoID := uuid.New()
+	triggerID := uuid.New()
+	now := time.Now()
+	provider := string(models.AutomationEventProviderPagerDuty)
+	providerEventID := "evt-1"
+	triggerContext := []byte(fmt.Sprintf(`{"provider":"pagerduty","repository_id":"%s"}`, overrideRepoID))
+
+	payload, err := json.Marshal(map[string]string{
+		"org_id":            orgID.String(),
+		"automation_id":     automationID.String(),
+		"automation_run_id": runID.String(),
+	})
+	require.NoError(t, err, "marshal payload should succeed")
+
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			runID, automationID, orgID, now, models.AutomationTriggeredByProviderEvent,
+			nil, nil, &triggerID, &provider, &providerEventID, triggerContext, "goal", []byte("{}"),
+			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+		))
+	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
+			automationID, orgID, &automationRepoID, "incident", "fix incident", nil,
+			models.AutomationIconTypeEmoji, "⚙️",
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
+			[]string{}, []byte("{}"),
+			nil, nil, true, nil, nil, nil,
+			50, []byte("{}"), now, now, nil,
+		))
+	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	expectedGoal := "goal"
+	mock.ExpectBegin()
+	mock.ExpectQuery(`INSERT INTO sessions`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &expectedGoal, pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), &overrideRepoID, pgxmock.AnyArg(), &runID,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(sessionID, now, now))
+	mock.ExpectQuery(`INSERT INTO session_threads`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+	mock.ExpectQuery(`INSERT INTO jobs`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
+	err = handler(context.Background(), models.JobTypeAutomationRun, payload)
+	require.NoError(t, err, "provider-event automation should dispatch successfully")
+	require.NoError(t, mock.ExpectationsWereMet(), "session should use trigger context repository override")
+}
+
 // TestAutomationRunHandler_LosesRaceClaimingPendingRow proves the at-least-
 // once-delivery safety net: when two workers race to claim the same pending
 // run, the loser's TransitionStatusIf returns affected=0, the handler must
@@ -6254,7 +6327,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", []byte("{}"),
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6311,7 +6384,7 @@ func TestAutomationRunHandler_SkipsWhenRunNotPending(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", []byte("{}"),
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusRunning, nil, nil, nil, now, now,
 		))
 
@@ -6345,7 +6418,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationDeleted(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", []byte("{}"),
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6391,7 +6464,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, "goal", []byte("{}"),
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6447,7 +6520,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
-			&clickerID, nil, "goal", []byte("{}"),
+			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6521,7 +6594,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
-			&clickerID, nil, "goal", []byte("{}"),
+			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6601,7 +6674,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
-			&clickerID, nil, "goal", configSnapshot,
+			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -6673,7 +6746,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
-			&clickerID, nil, "goal", []byte("{}"),
+			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 

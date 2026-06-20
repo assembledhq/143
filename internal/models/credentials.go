@@ -34,6 +34,7 @@ const (
 	ProviderGitHubOAuth           ProviderName = "github_oauth"
 	ProviderSentry                ProviderName = "sentry"
 	ProviderLinear                ProviderName = "linear"
+	ProviderPagerDuty             ProviderName = "pagerduty"
 	ProviderSlack                 ProviderName = "slack"
 	ProviderNotion                ProviderName = "notion"
 	ProviderCircleCI              ProviderName = "circleci"
@@ -47,7 +48,7 @@ var AllProviders = []ProviderName{
 	ProviderOpenAI, ProviderOpenAISubscription,
 	ProviderGemini, ProviderAmp, ProviderPi, ProviderOpenCode, ProviderOpenRouter,
 	ProviderGitHubApp, ProviderGitHubAppUser, ProviderGitHubOAuth,
-	ProviderSentry, ProviderLinear, ProviderSlack, ProviderNotion,
+	ProviderSentry, ProviderLinear, ProviderPagerDuty, ProviderSlack, ProviderNotion,
 	ProviderCircleCI, ProviderVictoriaLogs, ProviderMezmo,
 }
 
@@ -336,6 +337,7 @@ func (c GitHubAppUserConfig) Provider() ProviderName { return ProviderGitHubAppU
 func (c GitHubOAuthConfig) Provider() ProviderName   { return ProviderGitHubOAuth }
 func (c SentryConfig) Provider() ProviderName        { return ProviderSentry }
 func (c LinearConfig) Provider() ProviderName        { return ProviderLinear }
+func (c PagerDutyConfig) Provider() ProviderName     { return ProviderPagerDuty }
 func (c CircleCIConfig) Provider() ProviderName      { return ProviderCircleCI }
 func (c MezmoConfig) Provider() ProviderName         { return ProviderMezmo }
 func (c SlackConfig) Provider() ProviderName         { return ProviderSlack }
@@ -760,6 +762,12 @@ func ParseProviderConfig(provider ProviderName, data []byte) (ProviderConfig, er
 		var cfg LinearConfig
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("invalid linear config: %w", err)
+		}
+		return cfg, nil
+	case ProviderPagerDuty:
+		var cfg PagerDutyConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid pagerduty config: %w", err)
 		}
 		return cfg, nil
 	case ProviderOpenAISubscription:

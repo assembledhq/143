@@ -153,6 +153,11 @@ type Config struct {
 	SlackSigningSecret     string `env:"SLACK_SIGNING_SECRET"`
 	SlackSummaryModel      string `env:"SLACK_SUMMARY_MODEL" envDefault:"gpt-5.4-nano"`
 
+	// PagerDuty OAuth / incident integration
+	PagerDutyOAuthClientID       string `env:"PAGERDUTY_OAUTH_CLIENT_ID"`
+	PagerDutyOAuthClientSecret   string `env:"PAGERDUTY_OAUTH_CLIENT_SECRET"`
+	PagerDutyIntegrationEnabled  bool   `env:"PAGERDUTY_INTEGRATION_ENABLED" envDefault:"true"`
+
 	// GitHub App
 	GitHubAppID           int64  `env:"GITHUB_APP_ID"`
 	GitHubAppClientID     string `env:"GITHUB_APP_CLIENT_ID"`

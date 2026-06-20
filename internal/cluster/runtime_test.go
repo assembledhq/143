@@ -178,7 +178,7 @@ func TestSchedulerRunOnce(t *testing.T) {
 			},
 			repos:           &schedulerRuntimeRepoStoreMock{},
 			jobs:            &schedulerRuntimeJobsMock{},
-			expectedEnqueue: 10, // 2 orgs get recurring maintenance jobs (incl. linear team-key refresh) plus PR-health reconciliation; only the org with no prior PM plan is due for pm_analyze under the 24h default
+			expectedEnqueue: 12, // 2 orgs get recurring maintenance jobs (incl. Linear team-key refresh, PagerDuty sync, and PR-health reconciliation); only the org with no prior PM plan is due for pm_analyze under the 24h default
 			expectedRelease: 1,
 		},
 	}

@@ -30,6 +30,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
+	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/pm"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/prioritization"
@@ -338,6 +339,12 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
+	if services != nil && services.PagerDuty != nil {
+		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
+	}
+	if services != nil && services.PagerDutySync != nil {
+		w.Register(models.JobTypePagerDutySync, newPagerDutySyncHandler(services.PagerDutySync, logger))
+	}
 	if stores.GitHubInstallations != nil && services != nil && services.GitHubOrgRoster != nil {
 		w.Register(models.JobTypeSyncGitHubOrgRoster, newSyncGitHubOrgRosterHandler(stores, services, logger))
 	}
@@ -519,6 +526,18 @@ type SandboxAuthBroker interface {
 	Release(ctx context.Context, orgID, sessionID, holderID uuid.UUID) error
 }
 
+type pagerDutyEventProcessor interface {
+	ProcessInboundEvent(ctx context.Context, orgID, eventID uuid.UUID) error
+}
+
+type pagerDutySyncer interface {
+	SyncOrg(ctx context.Context, orgID uuid.UUID) (pagerdutysvc.SyncResult, error)
+}
+
+type pagerDutyPRWritebacker interface {
+	OnPROpened(ctx context.Context, session models.Session, pr models.PullRequest) error
+}
+
 type prCreator interface {
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
@@ -557,6 +576,9 @@ type Services struct {
 	Snapshots       storage.SnapshotStore         // nil-safe: needed for eval code_check grading
 	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
 	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
+	PagerDuty       pagerDutyEventProcessor       // nil-safe: PagerDuty incident ingestion disabled if nil
+	PagerDutySync   pagerDutySyncer               // nil-safe: PagerDuty reconciliation disabled if nil
+	PagerDutyWrites pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
@@ -1381,6 +1403,68 @@ func newPrioritizeHandler(stores *Stores, services *Services, logger zerolog.Log
 	}
 }
 
+func newPagerDutyIngestEventHandler(processor pagerDutyEventProcessor, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if processor == nil {
+			return nil
+		}
+		var input struct {
+			OrgID   string `json:"org_id"`
+			EventID string `json:"event_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal pagerduty_ingest_event payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		eventID, err := uuid.Parse(input.EventID)
+		if err != nil {
+			return fmt.Errorf("parse PagerDuty inbound event ID: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Str("event_id", eventID.String()).
+			Msg("processing PagerDuty inbound event")
+		if err := processor.ProcessInboundEvent(ctx, orgID, eventID); err != nil {
+			return fmt.Errorf("process PagerDuty inbound event: %w", err)
+		}
+		return nil
+	}
+}
+
+func newPagerDutySyncHandler(syncer pagerDutySyncer, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if syncer == nil {
+			return nil
+		}
+		var input struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal pagerduty_sync payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse org ID: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Msg("running PagerDuty reconciliation")
+		result, err := syncer.SyncOrg(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("sync PagerDuty incidents: %w", err)
+		}
+		logger.Info().
+			Str("org_id", orgID.String()).
+			Int("integrations", result.IntegrationCount).
+			Int("incidents", result.IncidentCount).
+			Msg("PagerDuty reconciliation complete")
+		return nil
+	}
+}
+
 func newPMAnalyzeHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
@@ -1591,6 +1675,16 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			return nil
 		}
+		repositoryID, err := automationRunRepositoryID(run, automation)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusPending, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after invalid automation trigger context")
+				return fmt.Errorf("mark run failed after invalid automation trigger context: %w", updateErr)
+			}
+			return nil
+		}
 
 		// Atomic claim: pending → running. Performed BEFORE session creation
 		// so a duplicate worker that loses the race never reaches the Sessions
@@ -1651,7 +1745,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			ReasoningEffort:    automation.ReasoningEffort,
 			TriggeredByUserID:  sessionTriggeredByUserID,
 			TargetBranch:       targetBranch,
-			RepositoryID:       automation.RepositoryID,
+			RepositoryID:       repositoryID,
 			AutomationRunID:    &runID,
 			PMApproach:         goalSeed,
 			CapabilitySnapshot: run.CapabilitySnapshot,
@@ -1707,6 +1801,28 @@ func automationRunIdentityScope(run models.AutomationRun, automation models.Auto
 		return "", err
 	}
 	return snapshot.IdentityScope.OrDefault(), nil
+}
+
+func automationRunRepositoryID(run models.AutomationRun, automation models.Automation) (*uuid.UUID, error) {
+	repositoryID := automation.RepositoryID
+	if len(run.TriggerContext) == 0 {
+		return repositoryID, nil
+	}
+	var context struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := json.Unmarshal(run.TriggerContext, &context); err != nil {
+		return nil, fmt.Errorf("parse automation trigger context: %w", err)
+	}
+	raw := strings.TrimSpace(context.RepositoryID)
+	if raw == "" {
+		return repositoryID, nil
+	}
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid repository_id in automation trigger context: %w", err)
+	}
+	return &parsed, nil
 }
 
 func automationExecutionUserID(automation models.Automation, identityScope models.AutomationIdentityScope) (*uuid.UUID, error) {
@@ -9187,6 +9303,14 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
+		}
+		if services.PagerDutyWrites != nil && pr != nil {
+			if err := services.PagerDutyWrites.OnPROpened(ctx, run, *pr); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", runID.String()).
+					Msg("failed to write PagerDuty PR-open note")
+			}
 		}
 		enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 			EventKind:      string(models.SlackNotificationPROpened),

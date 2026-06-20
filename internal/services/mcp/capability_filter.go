@@ -72,6 +72,7 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 	case models.AgentCapabilityIssueSources:
 		add(CLINamespace("sentry"), CLIAction("list_errors"), CLIAction("get_error"), CLIAction("get_error_trend"), CLIAction("find_related_errors"))
 		add(CLINamespace("linear"), CLIAction("list_tasks"), CLIAction("get_task"), CLIAction("find_related_tasks"))
+		add(CLINamespace("pagerduty"), CLIAction("list_incidents"), CLIAction("get_incident"), CLIAction("list_notes"), CLIAction("list_log_entries"), CLIAction("get_service"), CLIAction("list_oncalls"), CLIAction("find_related_incidents"))
 	case models.AgentCapabilityTeamDocs:
 		add(CLINamespace("notion"), CLIAction("search_documents"), CLIAction("get_document"))
 		add(CLINamespace("slack"), CLIAction("search_messages"), CLIAction("get_thread"))
@@ -79,6 +80,7 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		add(NamespaceLogs, CLIAction("query"), CLIAction("context"), CLIAction("fields"), CLIAction("stats"))
 	case models.AgentCapabilityExternalComments:
 		add(CLINamespace("linear"), CLIAction("update_task"), CLIAction("create_task"))
+		add(CLINamespace("pagerduty"), CLIAction("add_note"), CLIAction("create_status_update"))
 	case models.AgentCapabilityProjectProposals:
 		add(NamespaceProject, ActionPropose)
 	case models.AgentCapabilityEvalAuthoring:
