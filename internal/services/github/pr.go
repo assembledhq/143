@@ -59,7 +59,7 @@ type PreviewStopper interface {
 // concrete implementation lives in the API/preview layer so this package can
 // own webhook policy decisions without importing the preview package.
 type AutoPreviewStarter interface {
-	StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error
+	StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode, previewConfigName string) error
 }
 
 type SyncPRPreviewSurfacesPayload struct {
@@ -1750,7 +1750,7 @@ func (s *PRService) handleAutoPreviewEvent(ctx context.Context, event PullReques
 				Msg("failed to update preview group latest sha on pr event")
 		}
 	}
-	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode)
+	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode, policy.PreviewConfigName)
 }
 
 func (s *PRService) repositoryFromPullRequestEvent(ctx context.Context, event PullRequestEvent) (models.Repository, error) {

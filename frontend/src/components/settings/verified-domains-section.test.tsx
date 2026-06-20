@@ -58,7 +58,7 @@ describe("VerifiedDomainsSection", () => {
 
     renderWithProviders(<VerifiedDomainsSection />);
 
-    expect(await screen.findByText(/Install the GitHub App on a GitHub organization/)).toBeInTheDocument();
+    expect(await screen.findByText(/GitHub is connected, but the app isn't installed on a GitHub organization/)).toBeInTheDocument();
     expect(screen.queryByText(/Connect GitHub to enable organization-based auto-join/)).not.toBeInTheDocument();
   });
 

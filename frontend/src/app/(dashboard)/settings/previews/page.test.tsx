@@ -99,7 +99,7 @@ describe("PreviewSettingsPage", () => {
 
     expect(await screen.findByRole("tab", { name: "Auto-start policy" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findAllByText("assembledhq/143")).not.toHaveLength(0);
-    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText(/12 open PRs/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("radio", { name: /use warm auto-preview for assembledhq\/143/i }));
     await waitFor(() => {
@@ -174,7 +174,7 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
-  it("keeps auto-preview rows usable in the mobile stacked layout", async () => {
+  it("groups each repository's build and publish controls in one stacked card", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
       http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
@@ -195,13 +195,16 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    const repoLabels = await screen.findAllByText("assembledhq/143");
-    const row = repoLabels
-      .map((repoLabel) => repoLabel.closest("tr"))
-      .find((candidate) => candidate && within(candidate as HTMLElement).queryByText("Open PRs"));
-    expect(row).not.toBeNull();
-    expect(within(row as HTMLElement).getByText("Open PRs")).toBeInTheDocument();
-    expect(within(row as HTMLElement).getByText("Updated")).toBeInTheDocument();
+    const repoLabel = (await screen.findAllByText("assembledhq/143"))[0];
+    // Each repository renders as a single self-contained card, not a table row.
+    const card = repoLabel.closest("div.rounded-md");
+    expect(card).not.toBeNull();
+    const cardEl = card as HTMLElement;
+    // The merged card carries both the auto-build mode and the open-PR count.
+    expect(within(cardEl).getByText(/5 open PRs/)).toBeInTheDocument();
+    expect(
+      within(cardEl).getByRole("radio", { name: /use warm auto-preview for assembledhq\/143/i }),
+    ).toBeInTheDocument();
   });
 
   it("renders the renamed Preview settings surface and loads bundles for the selected repository", async () => {
@@ -914,6 +917,93 @@ describe("PreviewSettingsPage", () => {
 
     await waitFor(() => {
       expect(testPreviewBody).toEqual({ preview_config_name: "web" });
+    });
+  });
+
+  it("toggles a PR preview surface from the publish stage", async () => {
+    let savedPolicy: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "off",
+            pr_preview_surfaces_enabled: true,
+            github_pr_comment_enabled: true,
+            github_commit_status_enabled: true,
+            preview_configured: true,
+            preview_success_recorded: true,
+            preview_ready: true,
+            github_pr_comment_permission_ok: true,
+            github_commit_status_permission_ok: true,
+            open_pr_count: 2,
+            updated_at: "2026-06-08T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.put("*/api/v1/repositories/repo-1/preview-policy", async ({ request }) => {
+        savedPolicy = await request.json();
+        return HttpResponse.json({ data: { id: "policy-1" } });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("switch", { name: /enable pr comment preview link for assembledhq\/143/i }),
+    );
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({ github_pr_comment_enabled: false });
+    });
+  });
+
+  it("persists the selected build profile to the repository policy", async () => {
+    let savedPolicy: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "off",
+            pr_preview_surfaces_enabled: false,
+            github_pr_comment_enabled: true,
+            github_commit_status_enabled: true,
+            preview_configured: true,
+            preview_success_recorded: true,
+            preview_config_names: ["web", "admin"],
+            preview_config_default_name: "web",
+            preview_ready: true,
+            github_pr_comment_permission_ok: true,
+            github_commit_status_permission_ok: true,
+            open_pr_count: 1,
+            updated_at: null,
+          },
+        ],
+        meta: {},
+      })),
+      http.put("*/api/v1/repositories/repo-1/preview-policy", async ({ request }) => {
+        savedPolicy = await request.json();
+        return HttpResponse.json({ data: { id: "policy-1" } });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(
+      await screen.findByRole("combobox", { name: /select build profile for assembledhq\/143/i }),
+    );
+    await userEvent.click(await screen.findByRole("option", { name: "admin" }));
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({ preview_config_name: "admin" });
     });
   });
 
