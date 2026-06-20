@@ -898,9 +898,12 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # "config is unchanged", a silent no-op. Overwriting in place keeps the inode
   # stable so the bind-mounted file (and reload) reflects the new content. See
   # the "Caddy bind-mount drift" incident (June 2026, install routes 404'd for
-  # ~10 days). The `cat >` redirect creates cur_file on the first deploy and
-  # truncates+rewrites the same inode afterwards (never `mv`/`cp`, which unlink
-  # and recreate the path with a fresh inode).
+  # ~10 days). Use a shell redirect, not `mv`: a rename always allocates a new
+  # inode. `cat >` is also preferred over `cp`, whose in-place-truncate vs.
+  # unlink-and-recreate behavior varies across implementations and flags, while
+  # a redirect is unambiguously an in-place truncate+rewrite. That write is
+  # therefore NOT atomic, so the guards below refuse an empty staged file and
+  # treat a failed write as fatal rather than leaving a corrupt live config.
   stage_caddy_config_if_changed() {
     local new_file="/opt/143/deploy/Caddyfile.new"
     local cur_file="/opt/143/deploy/Caddyfile"
@@ -909,9 +912,21 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       rm -f "$new_file"
       return 1
     fi
-    if ! cat "$new_file" > "$cur_file"; then
+    # The overwrite below truncates cur_file before writing and is not atomic, so
+    # a bad write leaves the LIVE Caddyfile corrupt with no rollback. Refuse an
+    # empty staged file (checked before any truncation), and abort the deploy on
+    # a write failure instead of reporting a silent "unchanged" — shipping a
+    # truncated config would break the next caddy (re)load and can unbind
+    # :80/:443 on container recreate. A valid Caddyfile is never empty.
+    if [ ! -s "$new_file" ]; then
+      echo "ERROR: staged Caddyfile $new_file is empty; refusing to overwrite live config" >&2
       rm -f "$new_file"
-      return 1
+      exit 1
+    fi
+    if ! cat "$new_file" > "$cur_file"; then
+      echo "ERROR: failed writing $cur_file from staged Caddyfile (live config may be truncated)" >&2
+      rm -f "$new_file"
+      exit 1
     fi
     rm -f "$new_file"
     return 0

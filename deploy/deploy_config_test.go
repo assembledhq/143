@@ -183,6 +183,15 @@ func TestCaddyfilePromotedInPlaceNotRenamed(t *testing.T) {
 		"stage_caddy_config_if_changed must overwrite the live Caddyfile in place to preserve the bind-mounted inode")
 	require.NotContains(t, fn, `mv "$new_file" "$cur_file"`,
 		"stage_caddy_config_if_changed must not mv the staged Caddyfile over the live one — mv swaps the inode and the single-file bind mount keeps serving the old config")
+
+	// The in-place overwrite is not atomic, so the function must guard against
+	// truncating the live config to an empty/partial file: refuse an empty
+	// staged file and abort (exit) on a failed write rather than silently
+	// reporting "unchanged".
+	require.Contains(t, fn, `[ ! -s "$new_file" ]`,
+		"stage_caddy_config_if_changed must refuse to promote an empty staged Caddyfile before truncating the live config")
+	require.Contains(t, fn, "exit 1",
+		"stage_caddy_config_if_changed must abort the deploy on an empty staged file or failed write instead of leaving a corrupt live Caddyfile")
 }
 
 func TestPreviewWildcardProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
