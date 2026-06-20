@@ -199,6 +199,7 @@ type RepositoryPreviewPolicy struct {
 	PRPreviewSurfacesEnabled  bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
 	GitHubPRCommentEnabled    bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
 	GitHubCommitStatusEnabled bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
+	PreviewConfigName         string                    `db:"preview_config_name" json:"preview_config_name,omitempty"`
 	UpdatedByUserID           uuid.UUID                 `db:"updated_by_user_id" json:"updated_by_user_id"`
 	CreatedAt                 time.Time                 `db:"created_at" json:"created_at"`
 	UpdatedAt                 time.Time                 `db:"updated_at" json:"updated_at"`
@@ -214,6 +215,7 @@ type RepositoryPreviewPolicySummary struct {
 	PRPreviewSurfacesEnabled       bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
 	GitHubPRCommentEnabled         bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
 	GitHubCommitStatusEnabled      bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
+	PreviewConfigName              string                    `db:"preview_config_name" json:"preview_config_name,omitempty"`
 	PreviewConfigured              bool                      `db:"preview_configured" json:"preview_configured"`
 	PreviewSuccessRecorded         bool                      `db:"preview_success_recorded" json:"preview_success_recorded"`
 	PreviewConfigNames             []string                  `db:"-" json:"preview_config_names,omitempty"`

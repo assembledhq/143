@@ -42,8 +42,8 @@ func (f fakeBranchPreviewGitHubWithDetails) GetInstallationDetails(context.Conte
 
 type fakeBranchPreviewGitHubWithErrors struct {
 	fakeBranchPreviewGitHub
-	tokenErr      error
-	configErr     error
+	tokenErr  error
+	configErr error
 }
 
 func (f fakeBranchPreviewGitHubWithErrors) GetInstallationToken(context.Context, int64) (string, error) {
@@ -1467,9 +1467,9 @@ func TestBranchPreviewHandler_UpdatePolicyEmitsAudit(t *testing.T) {
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(8)...).
+		WithArgs(previewHandlerAnyArgs(9)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"auto_mode":"warm"}`))
@@ -1566,11 +1566,11 @@ func TestBranchPreviewHandler_UpdatePolicySessionPrewarmOnlyPreservesAutoMode(t 
 	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(8)...).
+		WithArgs(previewHandlerAnyArgs(9)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, true, true, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, true, true, "", userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"session_prewarm_mode":"smart"}`))
@@ -1688,7 +1688,7 @@ func TestGitHubPreviewSurfacePermissionHelpers(t *testing.T) {
 }
 
 func repositoryPreviewPolicyTestCols() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "preview_config_name", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func repositoryTestCols() []string {
@@ -2986,9 +2986,9 @@ func TestEnrichPreviewPolicyConfigReadiness_PreservesReadinessOnTransientError(t
 		DefaultBranch: "main",
 	}
 	policy := &models.RepositoryPreviewPolicySummary{
-		PreviewConfigured:    true,
+		PreviewConfigured:      true,
 		PreviewSuccessRecorded: true,
-		PreviewReady:         true,
+		PreviewReady:           true,
 	}
 
 	handler.enrichPreviewPolicyConfigReadiness(context.Background(), repo, policy)
@@ -3025,9 +3025,9 @@ func TestEnrichPreviewPolicyConfigReadiness_SetsNotConfiguredOnMissingFile(t *te
 		DefaultBranch: "main",
 	}
 	policy := &models.RepositoryPreviewPolicySummary{
-		PreviewConfigured:    true,
+		PreviewConfigured:      true,
 		PreviewSuccessRecorded: true,
-		PreviewReady:         true,
+		PreviewReady:           true,
 	}
 
 	handler.enrichPreviewPolicyConfigReadiness(context.Background(), repo, policy)
