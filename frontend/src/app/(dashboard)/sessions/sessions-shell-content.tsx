@@ -6,6 +6,10 @@ import { ManualSessionCreatePageContent } from "./new/manual-session-create-page
 import { SessionDetailPageClient } from "./[id]/session-detail-page-client";
 import type { SessionsRouteState } from "./sessions-route-state";
 
+// When nothing is selected we don't show a "Select a session" placeholder; we
+// default to the "Let's build" create-session experience so the main panel is
+// always actionable.
+
 export function SessionsShellContent({ routeState }: { routeState: SessionsRouteState }) {
   if (routeState.isUnsupportedRoute) {
     return (
@@ -21,10 +25,6 @@ export function SessionsShellContent({ routeState }: { routeState: SessionsRoute
     );
   }
 
-  if (routeState.isCreatingSession) {
-    return <ManualSessionCreatePageContent />;
-  }
-
   if (routeState.selectedSessionId) {
     return (
       <SessionDetailPageClient
@@ -34,15 +34,7 @@ export function SessionsShellContent({ routeState }: { routeState: SessionsRoute
     );
   }
 
-  return (
-    <div className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-4 py-10">
-      <EmptyState
-        variant="inline"
-        icon={MessageSquareText}
-        title="Select a session"
-        description="Choose a session from the sidebar to review its transcript, changes, preview, and publish state."
-        action={{ label: "New session", href: "/sessions/new" }}
-      />
-    </div>
-  );
+  // Both the explicit create route (/sessions/new) and the bare index
+  // (/sessions, nothing selected) fall through to the "Let's build" composer.
+  return <ManualSessionCreatePageContent />;
 }
