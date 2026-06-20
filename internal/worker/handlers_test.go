@@ -5156,6 +5156,11 @@ func TestUserFacingPRError(t *testing.T) {
 			want: "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session.",
 		},
 		{
+			name: "branch diverged",
+			err:  ghservice.ErrPushBranchDiverged,
+			want: "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again.",
+		},
+		{
 			name: "sandbox auth unavailable",
 			err:  fmt.Errorf("open sandbox auth socket: %w", ghservice.ErrSandboxAuthUnavailable),
 			want: "143 could not prepare GitHub credentials for this push.",
@@ -5187,6 +5192,7 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 		{name: "snapshot not captured is terminal", err: ghservice.ErrSnapshotNotCaptured, want: true},
 		{name: "snapshot unavailable is terminal", err: ghservice.ErrSnapshotUnavailable, want: true},
 		{name: "no changes is terminal", err: ghservice.ErrNoChanges, want: true},
+		{name: "branch diverged is terminal", err: ghservice.ErrPushBranchDiverged, want: true},
 		{name: "generic error retries", err: errors.New("boom"), want: false},
 	}
 
