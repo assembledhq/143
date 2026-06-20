@@ -129,9 +129,14 @@ func (s *OrgJoinTokenStore) GetActiveRecoverableToken(ctx context.Context, orgID
 	return token, rawToken, nil
 }
 
+// List returns the org's join tokens for the admin UI, excluding revoked
+// ones. Revoked links are kept in the table for the audit trail but are
+// filtered out here so the settings list only shows links an admin can still
+// act on (expired/exhausted ones stay visible until revoked).
 func (s *OrgJoinTokenStore) List(ctx context.Context, orgID uuid.UUID) ([]models.OrgJoinToken, error) {
 	query := fmt.Sprintf(`SELECT %s FROM org_join_tokens
-		WHERE org_id = @org_id ORDER BY created_at DESC, id DESC`, orgJoinTokenColumns)
+		WHERE org_id = @org_id AND revoked_at IS NULL
+		ORDER BY created_at DESC, id DESC`, orgJoinTokenColumns)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID})
 	if err != nil {
 		return nil, fmt.Errorf("list org join tokens: %w", err)
