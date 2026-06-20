@@ -9876,6 +9876,8 @@ func userFacingPRError(err error) string {
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return ghservice.PushRejectedPRMessage
+	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+		return ghservice.PushBranchDivergedPRMessage
 	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
 		return ghservice.SandboxAuthUnavailablePRMessage
 	default:
@@ -10004,6 +10006,8 @@ func shouldDeadLetterPRError(err error) bool {
 	case errors.Is(err, ghservice.ErrPRClosed):
 		return true
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
+		return true
+	case errors.Is(err, ghservice.ErrPushBranchDiverged):
 		return true
 	default:
 		return false
