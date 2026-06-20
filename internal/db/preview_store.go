@@ -131,7 +131,7 @@ const previewStartupCacheColumns = `id, org_id, repo_id, snapshot_key, base_key,
 
 const repositoryPreviewPolicyColumns = `id, org_id, repository_id, auto_mode,
 	session_prewarm_mode, pr_preview_surfaces_enabled, github_pr_comment_enabled, github_commit_status_enabled,
-	updated_by_user_id, created_at, updated_at`
+	preview_config_name, updated_by_user_id, created_at, updated_at`
 
 const previewDependencyCacheColumns = `id, org_id, repo_id, cache_kind, cache_key, placement_key,
 	blob_key, size_bytes, metadata, last_used_at, created_at`
@@ -632,6 +632,7 @@ type RepositoryPreviewPolicyPatch struct {
 	PRPreviewSurfacesEnabled  *bool
 	GitHubPRCommentEnabled    *bool
 	GitHubCommitStatusEnabled *bool
+	PreviewConfigName         *string
 }
 
 // UpsertRepositoryPreviewPolicy stores preview policy for one repository.
@@ -659,7 +660,7 @@ func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID,
 		INSERT INTO repository_preview_policies (
 			org_id, repository_id, auto_mode, session_prewarm_mode,
 			pr_preview_surfaces_enabled, github_pr_comment_enabled, github_commit_status_enabled,
-			updated_by_user_id
+			preview_config_name, updated_by_user_id
 		) VALUES (
 			@org_id, @repository_id,
 			COALESCE(@auto_mode, 'off'),
@@ -667,6 +668,7 @@ func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID,
 			COALESCE(@pr_preview_surfaces_enabled, false),
 			COALESCE(@github_pr_comment_enabled, true),
 			COALESCE(@github_commit_status_enabled, true),
+			COALESCE(@preview_config_name, ''),
 			@updated_by_user_id
 		)
 		ON CONFLICT (org_id, repository_id)
@@ -676,6 +678,7 @@ func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID,
 			pr_preview_surfaces_enabled = COALESCE(@pr_preview_surfaces_enabled, repository_preview_policies.pr_preview_surfaces_enabled),
 			github_pr_comment_enabled = COALESCE(@github_pr_comment_enabled, repository_preview_policies.github_pr_comment_enabled),
 			github_commit_status_enabled = COALESCE(@github_commit_status_enabled, repository_preview_policies.github_commit_status_enabled),
+			preview_config_name = COALESCE(@preview_config_name, repository_preview_policies.preview_config_name),
 			updated_by_user_id = EXCLUDED.updated_by_user_id,
 			updated_at = now()
 		RETURNING %s`, repositoryPreviewPolicyColumns)
@@ -687,6 +690,7 @@ func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID,
 		"pr_preview_surfaces_enabled":  patch.PRPreviewSurfacesEnabled,
 		"github_pr_comment_enabled":    patch.GitHubPRCommentEnabled,
 		"github_commit_status_enabled": patch.GitHubCommitStatusEnabled,
+		"preview_config_name":          patch.PreviewConfigName,
 		"updated_by_user_id":           userID,
 	})
 	if err != nil {
@@ -736,6 +740,7 @@ func (s *PreviewStore) ListRepositoryPreviewPolicies(ctx context.Context, orgID 
 			COALESCE(policy.pr_preview_surfaces_enabled, false) AS pr_preview_surfaces_enabled,
 			COALESCE(policy.github_pr_comment_enabled, true) AS github_pr_comment_enabled,
 			COALESCE(policy.github_commit_status_enabled, true) AS github_commit_status_enabled,
+			COALESCE(policy.preview_config_name, '') AS preview_config_name,
 			COALESCE(readiness.has_config, false) AS preview_configured,
 			COALESCE(readiness.has_success, false) AS preview_success_recorded,
 			COALESCE(readiness.preview_ready, false) AS preview_ready,

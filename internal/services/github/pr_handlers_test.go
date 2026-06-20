@@ -199,7 +199,7 @@ func TestHandleAutoPreviewEvent_StartsForPolicyEnabledPullRequest(t *testing.T) 
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 
 	event := autoPreviewPullRequestEvent(orgID)
 	err := svc.handleAutoPreviewEvent(context.Background(), event)
@@ -249,7 +249,7 @@ func TestHandleAutoPreviewEvent_StartsForReopenedAndSynchronizePullRequests(t *t
 			previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 
 			event := autoPreviewPullRequestEvent(orgID)
 			event.Action = tt.action
@@ -300,7 +300,7 @@ func TestHandleAutoPreviewEvent_SkipsDraftAndForkPullRequests(t *testing.T) {
 			previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, uuid.New(), now, now))
+					AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", uuid.New(), now, now))
 
 			event := autoPreviewPullRequestEvent(orgID)
 			tt.mutate(&event)
@@ -342,7 +342,7 @@ func TestHandleAutoPreviewEvent_EnqueuesSurfaceSyncForForkPullRequestHeadRepo(t 
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), true, true, true, uuid.New(), now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), true, true, true, "", uuid.New(), now, now))
 	jobMock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), "preview", models.JobTypeSyncPRPreviewSurfaces, prPreviewSurfacePayloadArg{wantHeadOwner: "fork", wantHeadRepo: "app"}, 0, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
@@ -382,7 +382,7 @@ func TestHandleAutoPreviewEvent_SkipsDisabledPolicyAndNonDefaultBranch(t *testin
 				previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-						AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOff), string(models.PreviewSessionPrewarmModeOff), false, true, true, uuid.New(), now, now))
+						AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOff), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", uuid.New(), now, now))
 			},
 		},
 		{
@@ -428,7 +428,7 @@ type recordingAutoPreviewStarter struct {
 	headRef string
 }
 
-func (s *recordingAutoPreviewStarter) StartAutoPullRequestPreview(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.Repository, _ int, headRef, _ string, _ string, mode models.PreviewAutoMode) error {
+func (s *recordingAutoPreviewStarter) StartAutoPullRequestPreview(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.Repository, _ int, headRef, _ string, _ string, mode models.PreviewAutoMode, _ string) error {
 	s.called = true
 	s.mode = mode
 	s.headRef = headRef
@@ -453,7 +453,7 @@ func autoPreviewPullRequestEvent(orgID uuid.UUID) PullRequestEvent {
 }
 
 func githubRepositoryPreviewPolicyTestCols() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "preview_config_name", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 type prPreviewSurfacePayloadArg struct {
@@ -3247,7 +3247,7 @@ func TestHandlePullRequestEvent_OpenedWith143GeneratedPRTriggersAutoPreview(t *t
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 
 	event := autoPreviewPullRequestEvent(orgID)
 	err := svc.HandlePullRequestEvent(context.Background(), event)
@@ -3312,7 +3312,7 @@ func TestHandlePullRequestEvent_ReadyForReviewWith143GeneratedPRTriggersAutoPrev
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 
 	event := autoPreviewPullRequestEvent(orgID)
 	event.Action = "ready_for_review"
@@ -3505,7 +3505,7 @@ func TestHandleAutoPreviewEvent_SynchronizeUpdatesPRPreviewGroupSHA(t *testing.T
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 	previewMock.ExpectExec("UPDATE preview_groups").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -3547,7 +3547,7 @@ func TestHandleAutoPreviewEvent_ReadyForReviewUpdatesPRPreviewGroupSHA(t *testin
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", userID, now, now))
 	previewMock.ExpectExec("UPDATE preview_groups").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -3613,7 +3613,7 @@ func TestSyncPRPreviewSurfaces_SkipsWhenPolicySurfacesDisabled(t *testing.T) {
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, uuid.New(), now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), false, true, true, "", uuid.New(), now, now))
 
 	payload := SyncPRPreviewSurfacesPayload{
 		OrgID:        orgID,
@@ -3655,7 +3655,7 @@ func TestSyncPRPreviewSurfaces_SkipsDraftPullRequests(t *testing.T) {
 	previewMock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(githubRepositoryPreviewPolicyTestCols()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), true, true, true, uuid.New(), now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeOn), string(models.PreviewSessionPrewarmModeOff), true, true, true, "", uuid.New(), now, now))
 
 	payload := SyncPRPreviewSurfacesPayload{
 		OrgID:        orgID,
