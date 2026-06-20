@@ -191,30 +191,32 @@ type PreviewTargetHistory struct {
 
 // RepositoryPreviewPolicy stores the per-repository auto-preview mode.
 type RepositoryPreviewPolicy struct {
-	ID                        uuid.UUID                 `db:"id" json:"id"`
-	OrgID                     uuid.UUID                 `db:"org_id" json:"org_id"`
-	RepositoryID              uuid.UUID                 `db:"repository_id" json:"repository_id"`
-	AutoMode                  PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
-	SessionPrewarmMode        PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
-	PRPreviewSurfacesEnabled  bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
-	GitHubPRCommentEnabled    bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
-	GitHubCommitStatusEnabled bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
-	PreviewConfigName         string                    `db:"preview_config_name" json:"preview_config_name,omitempty"`
-	UpdatedByUserID           uuid.UUID                 `db:"updated_by_user_id" json:"updated_by_user_id"`
-	CreatedAt                 time.Time                 `db:"created_at" json:"created_at"`
-	UpdatedAt                 time.Time                 `db:"updated_at" json:"updated_at"`
+	ID                          uuid.UUID                 `db:"id" json:"id"`
+	OrgID                       uuid.UUID                 `db:"org_id" json:"org_id"`
+	RepositoryID                uuid.UUID                 `db:"repository_id" json:"repository_id"`
+	AutoMode                    PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
+	SessionPrewarmMode          PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
+	SessionPrewarmUntrustedFork bool                      `db:"session_prewarm_untrusted_fork" json:"session_prewarm_untrusted_fork"`
+	PRPreviewSurfacesEnabled    bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
+	GitHubPRCommentEnabled      bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
+	GitHubCommitStatusEnabled   bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
+	PreviewConfigName           string                    `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	UpdatedByUserID             uuid.UUID                 `db:"updated_by_user_id" json:"updated_by_user_id"`
+	CreatedAt                   time.Time                 `db:"created_at" json:"created_at"`
+	UpdatedAt                   time.Time                 `db:"updated_at" json:"updated_at"`
 }
 
 // RepositoryPreviewPolicySummary is the settings-page view of repository
 // policy with repository identity and PR volume.
 type RepositoryPreviewPolicySummary struct {
-	RepositoryID              uuid.UUID                 `db:"repository_id" json:"repository_id"`
-	RepositoryFullName        string                    `db:"repository_full_name" json:"repository_full_name"`
-	AutoMode                  PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
-	SessionPrewarmMode        PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
-	PRPreviewSurfacesEnabled  bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
-	GitHubPRCommentEnabled    bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
-	GitHubCommitStatusEnabled bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
+	RepositoryID                uuid.UUID                 `db:"repository_id" json:"repository_id"`
+	RepositoryFullName          string                    `db:"repository_full_name" json:"repository_full_name"`
+	AutoMode                    PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
+	SessionPrewarmMode          PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
+	SessionPrewarmUntrustedFork bool                      `db:"session_prewarm_untrusted_fork" json:"session_prewarm_untrusted_fork"`
+	PRPreviewSurfacesEnabled    bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
+	GitHubPRCommentEnabled      bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
+	GitHubCommitStatusEnabled   bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
 	// PreviewConfigName is the saved build profile for this repository (the
 	// settings-page selection). Distinct from PreviewConfigNames (the profiles
 	// available in .143/config.json) and PreviewConfigDefaultName (that file's
@@ -901,6 +903,8 @@ type PreviewPrewarmStatus struct {
 	State                 string `json:"state"`
 	WorkspaceRevision     int64  `json:"workspace_revision"`
 	ResumeEstimateSeconds *int   `json:"resume_estimate_seconds,omitempty"`
+	PreviewID             string `json:"preview_id,omitempty"`
+	Error                 string `json:"error,omitempty"`
 }
 
 type PreviewFreshness struct {

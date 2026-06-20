@@ -667,13 +667,13 @@ export function PreviewPanel({
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_EXPIRED) {
         setMutationError(
-          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start Preview again.",
+          "This session's sandbox snapshot has expired. Send a new message to the agent to rebuild it, then try Start preview again.",
         );
         return;
       }
       if (code === PREVIEW_ERROR_CODES.SNAPSHOT_UNAVAILABLE) {
         setMutationError(
-          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again.",
+          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start preview again.",
         );
         return;
       }
@@ -688,7 +688,7 @@ export function PreviewPanel({
         // backend already destroyed our half-built container; the user just
         // needs to wait a beat and click again.
         setMutationError(
-          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again.",
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start preview again.",
         );
         return;
       }
@@ -698,7 +698,7 @@ export function PreviewPanel({
         // error code; suggest retry rather than burying the cause under the
         // generic "Failed to start preview:" prefix.
         setMutationError(
-          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy.",
+          "Could not reach the preview worker (connection dropped). Try Start preview again — if this keeps happening, the worker may be unhealthy.",
         );
         return;
       }
@@ -957,6 +957,10 @@ export function PreviewPanel({
   const isPrewarmWarming = prewarm?.state === "warming";
   const isPrewarmWarm = prewarm?.state === "warm";
   const isPrewarmFailed = prewarm?.state === "failed";
+  const prewarmFailureText =
+    isPrewarmFailed && prewarm?.error
+      ? prewarm.error
+      : "The last background preview warm-up failed. Starting preview will show the latest diagnostics.";
   useEffect(() => {
     const rail = startupPhaseRailRef.current;
     if (!rail) {
@@ -1511,7 +1515,7 @@ export function PreviewPanel({
                   : isPrewarmWarming
                     ? "A prepared preview is being built in the background."
                     : isPrewarmFailed
-                      ? "The last background preview warm-up failed. Starting preview will show the latest diagnostics."
+                      ? prewarmFailureText
                       : idleRecoveryCopy.description}
               </p>
               {instance?.created_at && lastPreviewStoppedAt && (
@@ -1536,7 +1540,7 @@ export function PreviewPanel({
               loading={startMutation.isPending}
             >
               {!startMutation.isPending && <Play className="size-3.5" />}
-              {isPrewarmWarm ? "Resume Preview" : "Start Preview"}
+              {isPrewarmWarm ? "Resume preview" : "Start preview"}
             </Button>
             <p className="text-xs text-muted-foreground"></p>
           </div>

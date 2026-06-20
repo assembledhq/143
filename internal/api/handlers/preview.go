@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -1178,14 +1179,20 @@ func (h *PreviewHandler) sessionPreviewPrewarmStatus(ctx context.Context, orgID,
 		state = "warming"
 	case "succeeded":
 		if run.WorkspaceRevision == session.WorkspaceRevision {
+			if ok := h.sessionWarmPreviewStartupCacheAvailable(ctx, orgID, session, run, nil); !ok {
+				return nil
+			}
 			state = "warm"
 		} else {
-			state = "stale"
+			if _, markErr := h.store.SupersedeStaleSessionPreviewWarmRuns(ctx, orgID, sessionID, session.WorkspaceRevision); markErr != nil {
+				h.logger.Warn().Err(markErr).Str("session_id", sessionID.String()).Msg("failed to mark stale session preview warm run")
+			}
+			return nil
 		}
 	case "failed":
-		// Only surface failures after the user has opened the Preview panel so we
-		// don't alarm them about speculative work they never triggered.
-		if run.WorkspaceRevision == session.WorkspaceRevision && run.PanelOpenedAt != nil {
+		// This status endpoint is called by the Preview panel, so a current
+		// revision failure becomes user-actionable on the first panel open.
+		if run.WorkspaceRevision == session.WorkspaceRevision {
 			state = "failed"
 		}
 	}
@@ -1202,11 +1209,18 @@ func (h *PreviewHandler) sessionPreviewPrewarmStatus(ctx context.Context, orgID,
 		seconds := 30
 		estimate = &seconds
 	}
-	return &models.PreviewPrewarmStatus{
+	status := &models.PreviewPrewarmStatus{
 		State:                 state,
 		WorkspaceRevision:     run.WorkspaceRevision,
 		ResumeEstimateSeconds: estimate,
 	}
+	if state == "failed" {
+		status.Error = run.Error
+		if run.PreviewID != nil {
+			status.PreviewID = run.PreviewID.String()
+		}
+	}
+	return status
 }
 
 func (h *PreviewHandler) warmSessionPreviewForResume(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PreviewInstance, *previewHTTPError) {
@@ -1256,7 +1270,53 @@ func (h *PreviewHandler) warmSessionPreviewForResume(ctx context.Context, orgID,
 	if instance.SourceWorkspaceRevision == nil || *instance.SourceWorkspaceRevision != session.WorkspaceRevision {
 		return nil, nil
 	}
+	if ok := h.sessionWarmPreviewStartupCacheAvailable(ctx, orgID, session, run, instance); !ok {
+		return nil, nil
+	}
 	return instance, nil
+}
+
+func (h *PreviewHandler) sessionWarmPreviewStartupCacheAvailable(ctx context.Context, orgID uuid.UUID, session models.Session, run *models.SessionPreviewPrewarmRun, instance *models.PreviewInstance) bool {
+	if h == nil || h.store == nil || run == nil || run.PreviewID == nil || session.RepositoryID == nil {
+		return false
+	}
+	if instance == nil {
+		loaded, err := h.store.GetPreviewInstance(ctx, orgID, *run.PreviewID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to load warm preview instance for startup cache check")
+			}
+			return false
+		}
+		instance = loaded
+	}
+	if instance == nil || strings.TrimSpace(instance.WorkerNodeID) == "" {
+		return false
+	}
+	ok, err := h.store.HasSessionPreviewStartupCache(ctx, orgID, *session.RepositoryID, session.ID, run.WorkspaceRevision, instance.WorkerNodeID)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to verify session preview startup cache")
+		return false
+	}
+	return ok
+}
+
+func (h *PreviewHandler) sessionPreviewStartMetricPath(ctx context.Context, orgID, sessionID uuid.UUID) string {
+	if h == nil || h.store == nil {
+		return "cold_start"
+	}
+	run, err := h.store.GetLatestSessionPreviewPrewarmRun(ctx, orgID, sessionID, models.PreviewSpeculativeDecisionCache)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load cache prewarm run for preview start metric")
+		}
+		return "cold_start"
+	}
+	if run.Status == "succeeded" {
+		metrics.RecordSessionPrewarmOpenAfterPrewarm(ctx, orgID.String(), "cache")
+		return "prewarm_cache"
+	}
+	return "cold_start"
 }
 
 func (h *PreviewHandler) resumeWarmSessionPreview(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance) *previewHTTPError {
@@ -1518,6 +1578,7 @@ func (h *PreviewHandler) recyclePreviewByID(ctx context.Context, orgID, previewI
 
 func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 	clearWriteDeadline(w, r)
+	clickStarted := time.Now()
 
 	if !h.requireManager(w, r) {
 		return
@@ -1550,6 +1611,8 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 				writePreviewHTTPError(w, r, resumeErr)
 				return
 			}
+			metrics.RecordSessionPrewarmOpenAfterPrewarm(r.Context(), orgID.String(), "warm_candidate")
+			metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), "warm_resume", time.Since(clickStarted))
 			refreshed, err := h.store.GetPreviewInstance(r.Context(), orgID, warmInstance.ID)
 			if err != nil {
 				refreshed = warmInstance
@@ -1564,12 +1627,14 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 			writePreviewHTTPError(w, r, startErr)
 			return
 		}
+		metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), h.sessionPreviewStartMetricPath(r.Context(), orgID, sessionID), time.Since(clickStarted))
 		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
 			Data: ensurePreviewResponse{Action: "started", Instance: started},
 		})
 		return
 	}
 	if instance.Status == models.PreviewStatusStarting {
+		metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), "live_reuse", time.Since(clickStarted))
 		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
 			Data: ensurePreviewResponse{Action: "already_starting", Instance: instance},
 		})

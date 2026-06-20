@@ -239,9 +239,11 @@ export interface PreviewStatusResponse {
 }
 
 export interface PreviewPrewarmStatus {
-  state: "warming" | "warm" | "stale" | "failed" | string;
+  state: "warming" | "warm" | "failed" | string;
   workspace_revision: number;
   resume_estimate_seconds?: number;
+  preview_id?: string;
+  error?: string;
 }
 
 export interface PreviewStartupEstimate {

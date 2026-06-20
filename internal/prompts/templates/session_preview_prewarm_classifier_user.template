@@ -1,5 +1,6 @@
 Repository: {{.RepositoryFullName}}
 Language: {{.RepositoryLanguage}}
+Preview config digest: {{.PreviewConfigDigest}}
 Source: {{.SessionSource}}
 Phase: {{.Phase}}
 Issue type: {{.IssueType}}

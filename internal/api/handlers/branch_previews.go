@@ -279,12 +279,13 @@ type restartBranchPreviewRequest struct {
 }
 
 type updatePreviewPolicyRequest struct {
-	AutoMode                  *models.PreviewAutoMode           `json:"auto_mode"`
-	SessionPrewarmMode        *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
-	PRPreviewSurfacesEnabled  *bool                             `json:"pr_preview_surfaces_enabled"`
-	GitHubPRCommentEnabled    *bool                             `json:"github_pr_comment_enabled"`
-	GitHubCommitStatusEnabled *bool                             `json:"github_commit_status_enabled"`
-	PreviewConfigName         *string                           `json:"preview_config_name"`
+	AutoMode                    *models.PreviewAutoMode           `json:"auto_mode"`
+	SessionPrewarmMode          *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
+	SessionPrewarmUntrustedFork *bool                             `json:"session_prewarm_untrusted_fork"`
+	PRPreviewSurfacesEnabled    *bool                             `json:"pr_preview_surfaces_enabled"`
+	GitHubPRCommentEnabled      *bool                             `json:"github_pr_comment_enabled"`
+	GitHubCommitStatusEnabled   *bool                             `json:"github_commit_status_enabled"`
+	PreviewConfigName           *string                           `json:"preview_config_name"`
 }
 
 type testPreviewPolicyRequest struct {
@@ -2229,7 +2230,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
-	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.PRPreviewSurfacesEnabled == nil && req.GitHubPRCommentEnabled == nil && req.GitHubCommitStatusEnabled == nil && req.PreviewConfigName == nil {
+	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.SessionPrewarmUntrustedFork == nil && req.PRPreviewSurfacesEnabled == nil && req.GitHubPRCommentEnabled == nil && req.GitHubCommitStatusEnabled == nil && req.PreviewConfigName == nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_POLICY", "at least one preview policy field is required")
 		return
 	}
@@ -2270,6 +2271,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 	}
 	beforeMode := models.PreviewAutoModeOff
 	beforeSessionPrewarmMode := models.PreviewSessionPrewarmModeOff
+	beforeSessionPrewarmUntrustedFork := false
 	beforeSurfaces := false
 	beforeComment := true
 	beforeStatus := true
@@ -2277,6 +2279,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
 		beforeMode = existing.AutoMode
 		beforeSessionPrewarmMode = existing.SessionPrewarmMode
+		beforeSessionPrewarmUntrustedFork = existing.SessionPrewarmUntrustedFork
 		beforeSurfaces = existing.PRPreviewSurfacesEnabled
 		beforeComment = existing.GitHubPRCommentEnabled
 		beforeStatus = existing.GitHubCommitStatusEnabled
@@ -2315,12 +2318,13 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	policy, err := h.previews.UpsertRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, db.RepositoryPreviewPolicyPatch{
-		AutoMode:                  req.AutoMode,
-		SessionPrewarmMode:        req.SessionPrewarmMode,
-		PRPreviewSurfacesEnabled:  req.PRPreviewSurfacesEnabled,
-		GitHubPRCommentEnabled:    req.GitHubPRCommentEnabled,
-		GitHubCommitStatusEnabled: req.GitHubCommitStatusEnabled,
-		PreviewConfigName:         req.PreviewConfigName,
+		AutoMode:                    req.AutoMode,
+		SessionPrewarmMode:          req.SessionPrewarmMode,
+		SessionPrewarmUntrustedFork: req.SessionPrewarmUntrustedFork,
+		PRPreviewSurfacesEnabled:    req.PRPreviewSurfacesEnabled,
+		GitHubPRCommentEnabled:      req.GitHubPRCommentEnabled,
+		GitHubCommitStatusEnabled:   req.GitHubCommitStatusEnabled,
+		PreviewConfigName:           req.PreviewConfigName,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrPreviewNotReady) {
@@ -2337,6 +2341,9 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 		if req.SessionPrewarmMode != nil {
 			changes["session_prewarm_mode"] = map[string]any{"before": beforeSessionPrewarmMode, "after": policy.SessionPrewarmMode}
+		}
+		if req.SessionPrewarmUntrustedFork != nil {
+			changes["session_prewarm_untrusted_fork"] = map[string]any{"before": beforeSessionPrewarmUntrustedFork, "after": policy.SessionPrewarmUntrustedFork}
 		}
 		if req.PRPreviewSurfacesEnabled != nil {
 			changes["pr_preview_surfaces_enabled"] = map[string]any{"before": beforeSurfaces, "after": policy.PRPreviewSurfacesEnabled}
