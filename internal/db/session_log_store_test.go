@@ -19,6 +19,8 @@ var logColumns = []string{
 	"id", "session_id", "org_id", "thread_id", "timestamp", "level", "message", "metadata", "turn_number",
 }
 
+const sessionLogValidatedInsertPattern = `(?s)INSERT INTO session_logs[\s\S]+FROM sessions s\s+WHERE s\.id = @session_id\s+AND s\.org_id = @org_id\s+RETURNING id, timestamp`
+
 func newLogRow(id int64, sessionID uuid.UUID, now time.Time) []any {
 	return []any{
 		id, sessionID, uuid.New(), nil, now, "info", "doing something", json.RawMessage(`{}`), 0,
@@ -41,7 +43,7 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 		Metadata:  json.RawMessage(`{"step": 1}`),
 	}
 
-	mock.ExpectQuery("INSERT INTO session_logs").
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "timestamp"}).
@@ -52,6 +54,32 @@ func TestSessionLogStore_Create_Success(t *testing.T) {
 	require.NoError(t, err, "should create agent run log without error")
 	require.Equal(t, int64(1), log.ID, "should set the generated ID on the log")
 	require.Equal(t, now, log.Timestamp, "should set the timestamp on the log")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_AllowsThreadAttributionWithoutThreadLookup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	now := time.Now()
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		ThreadID:  uuidPtr(uuid.New()),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(11), now))
+
+	require.NoError(t, store.Create(context.Background(), log), "Create should keep thread attribution without requiring a session_threads lookup")
+	require.Equal(t, int64(11), log.ID, "Create should set the generated ID on the attributed log")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -79,7 +107,7 @@ func TestSessionLogStore_Create_PublishesToRedis(t *testing.T) {
 		Metadata:  json.RawMessage(`{"step": 1}`),
 	}
 
-	mock.ExpectQuery("INSERT INTO session_logs").
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "timestamp"}).
@@ -115,7 +143,7 @@ func TestSessionLogStore_Create_PublishFailureIsBestEffort(t *testing.T) {
 		Message:   "started execution",
 	}
 
-	mock.ExpectQuery("INSERT INTO session_logs").
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}).AddRow(int64(8), now))
 
@@ -138,7 +166,7 @@ func TestSessionLogStore_Create_ScanError(t *testing.T) {
 		Message:   "started execution",
 	}
 
-	mock.ExpectQuery("INSERT INTO session_logs").
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id"}).
@@ -147,6 +175,66 @@ func TestSessionLogStore_Create_ScanError(t *testing.T) {
 
 	err = store.Create(context.Background(), log)
 	require.Error(t, err, "Create should surface row scan failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_InvalidParent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		ThreadID:  uuidPtr(uuid.New()),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}))
+	// Follow-up EXISTS check: session does not exist at all.
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	err = store.Create(context.Background(), log)
+	require.Error(t, err, "Create should fail when the parent session is invalid")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionLogStore_Create_OrgMismatch(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool without error")
+	defer mock.Close()
+
+	store := NewSessionLogStore(mock)
+	store.SetLogger(zerolog.Nop())
+	log := &models.SessionLog{
+		SessionID: uuid.New(),
+		OrgID:     uuid.New(),
+		Level:     "info",
+		Message:   "started execution",
+	}
+
+	// INSERT returns no rows because the org_id does not match the session's org.
+	mock.ExpectQuery(sessionLogValidatedInsertPattern).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "timestamp"}))
+	// Follow-up EXISTS check: session exists under a different org.
+	mock.ExpectQuery(`SELECT EXISTS\(SELECT 1 FROM sessions WHERE`).
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	err = store.Create(context.Background(), log)
+	require.Error(t, err, "Create should return an error on org_id mismatch")
+	require.Contains(t, err.Error(), "does not belong to org", "error should distinguish org mismatch from missing session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

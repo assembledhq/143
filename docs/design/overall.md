@@ -65,6 +65,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 ### Data And Coordination
 
 - PostgreSQL is the source of truth for org data, repositories, issues, sessions, threads, jobs, credentials, PRs, previews, usage, and audit records. Every tenant-owned table and query is scoped by `org_id`.
+- Database-backed foreign keys remain the default for tenant-scoped product/control-plane tables. Hot append-only/event/log/cache/runtime tables need an explicit exception review before omitting parent FKs, because parent-row lock fan-in can become a Postgres operational risk; exceptions must keep `org_id NOT NULL`, keep query scoping, and validate parent ownership in the write path.
 - The job queue is Postgres-backed. Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED`, and durable state transitions are committed before Redis wakeups or SSE notifications.
 - Redis is an optional acceleration layer for cache, pub/sub, SSE fan-out, and coordination. Losing Redis should degrade live updates, not lose durable work. See [implemented/52-redis.md](implemented/52-redis.md).
 - Session snapshots and multi-node recovery use shared object storage so workers and API nodes do not depend on one machine's local disk. See [implemented/54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md).
