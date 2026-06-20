@@ -1735,7 +1735,7 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 		return
 	}
 	if h.githubAppUserAuth == nil {
-		writeError(w, r, http.StatusBadRequest, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account before claiming repositories")
+		writeError(w, r, http.StatusBadRequest, "GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories")
 		return
 	}
 
@@ -1776,7 +1776,7 @@ func (h *IntegrationHandler) ClaimGitHubInstallationRepositories(w http.Response
 
 	userCredential, err := h.githubAppUserAuth.GetValidCredential(ctx, orgID, user.ID)
 	if err != nil || userCredential == nil || userCredential.AccessToken == "" {
-		writeError(w, r, http.StatusBadRequest, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account before claiming repositories")
+		writeError(w, r, http.StatusBadRequest, "GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories")
 		return
 	}
 
