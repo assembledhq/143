@@ -23,11 +23,11 @@ export default function IntegrationsSection({
   const body = isDark ? "text-white/50" : "text-slate-600";
 
   const renderGrid = (items: ToolItem[]) => (
-    <div className="grid gap-px overflow-hidden rounded-lg border border-border/60 bg-border/60 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="flex flex-wrap justify-center gap-3">
       {items.map((item) => (
         <Card
           key={item.name}
-          className={`rounded-none border-0 ${
+          className={`w-full flex-none sm:w-[calc(50%_-_0.375rem)] lg:w-[calc(33.333%_-_0.5rem)] ${
             item.description ? "min-h-44" : ""
           } ${isDark ? "bg-[#0d0d15]" : "bg-white/80"}`}
         >
