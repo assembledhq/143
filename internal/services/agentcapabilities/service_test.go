@@ -63,7 +63,6 @@ func TestServiceResolveForSessionUsesRecommendedDefaultsWhenNoPolicyExists(t *te
 	require.Equal(t, []models.AgentCapabilityID{
 		models.AgentCapabilityRepoContext,
 		models.AgentCapabilityPRHistory,
-		models.AgentCapabilitySessionHistory,
 		models.AgentCapabilityReviewFeedback,
 		models.AgentCapabilityCIHistory,
 		models.AgentCapabilityPublishing,

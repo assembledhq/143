@@ -304,7 +304,6 @@ func (s *Service) resolvePolicyGrants(ctx context.Context, in ResolveInput) ([]m
 var recommendedDefaultEnabledCapabilities = map[models.AgentCapabilityID]bool{
 	models.AgentCapabilityRepoContext:    true,
 	models.AgentCapabilityPRHistory:      true,
-	models.AgentCapabilitySessionHistory: true,
 	models.AgentCapabilityReviewFeedback: true,
 	models.AgentCapabilityCIHistory:      true,
 	models.AgentCapabilityPublishing:     true,

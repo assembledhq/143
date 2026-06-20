@@ -21,7 +21,6 @@ export function capabilityAccessFor(definition: AgentCapabilityDefinition) {
 export const RECOMMENDED_DEFAULT_CAPABILITY_IDS: readonly AgentCapabilityID[] = [
   "repo_context",
   "pr_history",
-  "session_history",
   "review_feedback",
   "ci_history",
   "publishing",
