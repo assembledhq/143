@@ -145,7 +145,9 @@ func (h *JoinTokenHandler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// List returns the org's join tokens with derived lifecycle status.
+// List returns the org's non-revoked join tokens with derived lifecycle
+// status. Revoked links are filtered out at the store so they don't clutter
+// the settings list.
 func (h *JoinTokenHandler) List(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	if orgID == uuid.Nil {
