@@ -188,9 +188,12 @@ export default function AboutPage() {
             </p>
 
             <p>
-              The name comes from 1943, when the Lockheed Skunk Works team built
-              the XP-80 Shooting Star in 143 days. It is a nod to small teams
-              with enough ownership and infrastructure to move quickly.
+              <Link href="/why-143" className={linkClass}>
+                The name comes from
+              </Link>{" "}
+              1943, when the Lockheed Skunk Works team built the XP-80 Shooting
+              Star in 143 days. It is a nod to small teams with enough ownership
+              and infrastructure to move quickly.
             </p>
 
             <p>I really hope you like it.</p>
