@@ -179,7 +179,7 @@ export function CodexDeviceCodeModal({
             </div>
           </div>
         )}
-        {status === "completed" && <div className="mt-4"><p className="text-sm font-medium text-success">Connected successfully!</p></div>}
+        {status === "completed" && <p className="text-sm font-medium text-success">Connected successfully!</p>}
         {(status === "error" || status === "expired") && (
           <div className="mt-4">
             <ErrorText className="text-sm">{error}</ErrorText>
