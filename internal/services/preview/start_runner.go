@@ -48,7 +48,6 @@ func reservationPlaceholderPreviewConfig() *models.PreviewConfig {
 	}
 }
 
-
 // StartRunner completes durable preview startup jobs after the API has
 // reserved the preview row and enqueued start_preview.
 type StartRunner struct {

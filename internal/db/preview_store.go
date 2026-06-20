@@ -720,13 +720,13 @@ func (s *PreviewStore) GetRepositoryPreviewPolicy(ctx context.Context, orgID, re
 	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.RepositoryPreviewPolicy])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &models.RepositoryPreviewPolicy{
-			OrgID:                     orgID,
-			RepositoryID:              repositoryID,
-			AutoMode:                  models.PreviewAutoModeOff,
-			SessionPrewarmMode:        models.PreviewSessionPrewarmModeOff,
+			OrgID:                       orgID,
+			RepositoryID:                repositoryID,
+			AutoMode:                    models.PreviewAutoModeOff,
+			SessionPrewarmMode:          models.PreviewSessionPrewarmModeOff,
 			SessionPrewarmUntrustedFork: false,
-			GitHubPRCommentEnabled:    true,
-			GitHubCommitStatusEnabled: true,
+			GitHubPRCommentEnabled:      true,
+			GitHubCommitStatusEnabled:   true,
 		}, nil
 	}
 	if err != nil {
