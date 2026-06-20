@@ -11,4 +11,5 @@ ALTER TABLE preview_instances
 
 ALTER TABLE repository_preview_policies
     DROP CONSTRAINT IF EXISTS repository_preview_policies_session_prewarm_mode_check,
+    DROP COLUMN IF EXISTS session_prewarm_untrusted_fork,
     DROP COLUMN IF EXISTS session_prewarm_mode;

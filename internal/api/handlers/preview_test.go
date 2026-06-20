@@ -577,6 +577,13 @@ var previewInstanceTestCols = []string{
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
+var handlerSessionPreviewPrewarmRunTestCols = []string{
+	"id", "org_id", "repository_id", "session_id", "workspace_revision", "config_digest",
+	"mode", "decision", "confidence", "reason", "explanation", "status", "job_id",
+	"preview_id", "preview_group_id", "capacity_snapshot", "error", "created_at",
+	"updated_at", "started_at", "completed_at", "panel_opened_at",
+}
+
 var handlerPreviewServiceTestCols = []string{
 	"id", "preview_instance_id", "service_name", "role", "status",
 	"command", "cwd", "port", "pid", "error", "created_at",
@@ -745,6 +752,109 @@ func expectAbortReservationNoDestroy(mock pgxmock.PgxPoolIface) {
 			pgxmock.NewRows([]string{"session_id", "container_id", "turn_holds"}).
 				AddRow(uuid.New(), "", false),
 		)
+}
+
+func TestPreviewHandler_SessionPreviewPrewarmStatus_HidesWarmWithoutStartupCache(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	workspaceRevision := int64(12)
+	previewRow := newActivePreviewRow(previewID, sessionID, orgID, userID, now)
+	for i, column := range previewInstanceTestCols {
+		switch column {
+		case "status":
+			previewRow[i] = string(models.PreviewStatusStopped)
+		case "worker_node_id":
+			previewRow[i] = "worker-a"
+		case "source_workspace_revision":
+			previewRow[i] = &workspaceRevision
+		}
+	}
+	sessionRow := sessionRowWithContainerAndRepo(sessionID, orgID, repoID, "warm-preview-container")
+	for i, column := range sessionRowColumns {
+		switch column {
+		case "workspace_revision":
+			sessionRow[i] = workspaceRevision
+		}
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerSessionPreviewPrewarmRunTestCols).
+			AddRow(runID, orgID, repoID, sessionID, workspaceRevision, "digest",
+				string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate),
+				float64(0.91), "ui_change", "Likely UI.", "succeeded", nil, &previewID, nil,
+				json.RawMessage(`{}`), "", now, now, &now, &now, nil))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionRowColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(previewRow...))
+	mock.ExpectQuery("SELECT EXISTS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	status := h.sessionPreviewPrewarmStatus(context.Background(), orgID, sessionID)
+
+	require.Nil(t, status, "warm prewarm status should be hidden when the worker-local startup snapshot is unavailable")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewHandler_SessionPreviewPrewarmStatus_ReturnsFailedWarmDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	h := newPreviewHandlerWithMock(mock)
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	workspaceRevision := int64(12)
+	sessionRow := sessionRowWithContainerAndRepo(sessionID, orgID, repoID, "warm-preview-container")
+	for i, column := range sessionRowColumns {
+		if column == "workspace_revision" {
+			sessionRow[i] = workspaceRevision
+		}
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(handlerSessionPreviewPrewarmRunTestCols).
+			AddRow(runID, orgID, repoID, sessionID, workspaceRevision, "digest",
+				string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate),
+				float64(0.91), "ui_change", "Likely UI.", "failed", nil, &previewID, nil,
+				json.RawMessage(`{}`), "install command failed", now, now, &now, &now, nil))
+	mock.ExpectQuery("SELECT .+ FROM sessions WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionRowColumns).AddRow(sessionRow...))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs SET panel_opened_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	status := h.sessionPreviewPrewarmStatus(context.Background(), orgID, sessionID)
+
+	require.NotNil(t, status, "current failed warm prewarm status should be user-actionable once the panel opens")
+	require.Equal(t, "failed", status.State, "failed warm status should be surfaced")
+	require.Equal(t, previewID.String(), status.PreviewID, "failed warm status should include the failed preview id")
+	require.Equal(t, "install command failed", status.Error, "failed warm status should include the latest warm error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {

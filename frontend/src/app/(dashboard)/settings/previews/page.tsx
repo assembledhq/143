@@ -570,6 +570,28 @@ function RepoPreviewCard({
               </p>
             ) : null}
           </div>
+          <div className="space-y-1.5">
+            <span className="block text-xs text-muted-foreground">Forks</span>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={policy.session_prewarm_untrusted_fork}
+                disabled={!sessionPrewarmEnabled}
+                aria-label={`Allow session prewarm for untrusted forks in ${policy.repository_full_name}`}
+                onCheckedChange={(checked) => {
+                  if (
+                    checked === policy.session_prewarm_untrusted_fork ||
+                    !sessionPrewarmEnabled
+                  ) {
+                    return;
+                  }
+                  onUpdatePolicy({ session_prewarm_untrusted_fork: checked });
+                }}
+              />
+              <span className="text-xs text-muted-foreground">
+                Untrusted forks
+              </span>
+            </div>
+          </div>
         </div>
 
         <div className="space-y-3 md:border-l md:border-border md:pl-4">

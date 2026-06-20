@@ -393,6 +393,7 @@ export interface PreviewPolicySummary {
   repository_full_name: string;
   auto_mode: "off" | "warm" | "on";
   session_prewarm_mode: "off" | "cache" | "smart";
+  session_prewarm_untrusted_fork: boolean;
   pr_preview_surfaces_enabled: boolean;
   github_pr_comment_enabled: boolean;
   github_commit_status_enabled: boolean;
