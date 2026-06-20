@@ -143,14 +143,15 @@ describe("SessionsLayout", () => {
     expect(preloadSessionDetailContent).toHaveBeenCalled();
   });
 
-  it("owns the empty sessions workspace content on the bare /sessions route", () => {
+  it("defaults the bare /sessions route to the create-session content", () => {
     renderWithProviders(
       <SessionsLayout>
         <div>Legacy child content</div>
       </SessionsLayout>,
     );
 
-    expect(screen.getByText("Select a session")).toBeInTheDocument();
+    expect(screen.getByTestId("manual-session-create-page")).toBeInTheDocument();
+    expect(screen.queryByText("Select a session")).not.toBeInTheDocument();
     expect(screen.queryByText("Legacy child content")).not.toBeInTheDocument();
   });
 
