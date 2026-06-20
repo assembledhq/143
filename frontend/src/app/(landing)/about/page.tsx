@@ -72,10 +72,15 @@ export default function AboutPage() {
               </p>
               <p>
                 The name comes from the 143 days it took a small team of
-                Lockheed engineers to build the XP-80 Shooting Star, America&apos;s
-                first jet fighter, in 1943. A small focused team with the right
-                tools doing the impossible. That&apos;s the spirit we wanted to
-                capture.
+                Lockheed engineers to build America&apos;s first jet fighter in
+                1943 &mdash;{" "}
+                <Link
+                  href="/why-143"
+                  className={`underline underline-offset-2 ${isDark ? "hover:text-white/70" : "hover:text-slate-800"} transition-colors`}
+                >
+                  the story behind the name
+                </Link>
+                .
               </p>
             </section>
 
