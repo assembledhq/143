@@ -6,10 +6,38 @@ import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import type { AgentCapabilityDefinition, AgentCapabilityGrant } from "@/lib/types";
+import type { AgentCapabilityDefinition, AgentCapabilityGrant, AgentCapabilityID } from "@/lib/types";
 
 export function capabilityAccessFor(definition: AgentCapabilityDefinition) {
   return definition.max_access_level;
+}
+
+// Capabilities that ship enabled by default for the org session-default policy
+// when an admin has not configured one yet. These are the broadly-useful,
+// commonly-needed capabilities (code/PR/test context plus branch & PR
+// publishing); higher-risk write and production-data capabilities stay opt-in.
+// Keep in sync with recommendedDefaultGrants in
+// internal/services/agentcapabilities/service.go.
+export const RECOMMENDED_DEFAULT_CAPABILITY_IDS: readonly AgentCapabilityID[] = [
+  "repo_context",
+  "pr_history",
+  "session_history",
+  "review_feedback",
+  "ci_history",
+  "publishing",
+];
+
+// recommendedDefaultGrants seeds the catalog with the default-enabled set above.
+// Use this (instead of normalizeCapabilityGrants) when there is no stored policy
+// so the UI reflects sensible defaults rather than everything switched off.
+export function recommendedDefaultGrants(catalog: AgentCapabilityDefinition[]): AgentCapabilityGrant[] {
+  const enabled = new Set<AgentCapabilityID>(RECOMMENDED_DEFAULT_CAPABILITY_IDS);
+  return catalog.map((definition) => ({
+    capability_id: definition.id,
+    access_level: capabilityAccessFor(definition),
+    enabled: enabled.has(definition.id),
+    config: {},
+  }));
 }
 
 export function normalizeCapabilityGrants(
