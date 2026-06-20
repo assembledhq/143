@@ -917,6 +917,8 @@ describe("PreviewSettingsPage", () => {
             repository_id: "repo-1",
             repository_full_name: "assembledhq/143",
             auto_mode: "off",
+            session_prewarm_mode: "off",
+            session_prewarm_untrusted_fork: false,
             pr_preview_surfaces_enabled: false,
             github_pr_comment_enabled: true,
             github_commit_status_enabled: true,
