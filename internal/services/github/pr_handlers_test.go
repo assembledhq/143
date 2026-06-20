@@ -428,7 +428,7 @@ type recordingAutoPreviewStarter struct {
 	headRef string
 }
 
-func (s *recordingAutoPreviewStarter) StartAutoPullRequestPreview(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.Repository, _ int, headRef, _ string, _ string, mode models.PreviewAutoMode) error {
+func (s *recordingAutoPreviewStarter) StartAutoPullRequestPreview(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ models.Repository, _ int, headRef, _ string, _ string, mode models.PreviewAutoMode, _ string) error {
 	s.called = true
 	s.mode = mode
 	s.headRef = headRef

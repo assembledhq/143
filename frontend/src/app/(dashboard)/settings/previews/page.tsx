@@ -290,14 +290,31 @@ function AutoPreviewSection() {
               onSelectPreviewConfig={(value) => {
                 // Optimistically reflect the choice, then persist it so both
                 // auto-built PR previews and Test preview use this profile.
+                const previous = selectedPreviewConfigs[policy.repository_id];
                 setSelectedPreviewConfigs((current) => ({
                   ...current,
                   [policy.repository_id]: value,
                 }));
-                policyMutation.mutate({
-                  repositoryId: policy.repository_id,
-                  body: { preview_config_name: value },
-                });
+                policyMutation.mutate(
+                  {
+                    repositoryId: policy.repository_id,
+                    body: { preview_config_name: value },
+                  },
+                  {
+                    // Revert the optimistic selection if the save fails, so the
+                    // dropdown never shows an unpersisted profile.
+                    onError: () =>
+                      setSelectedPreviewConfigs((current) => {
+                        const next = { ...current };
+                        if (previous === undefined) {
+                          delete next[policy.repository_id];
+                        } else {
+                          next[policy.repository_id] = previous;
+                        }
+                        return next;
+                      }),
+                  },
+                );
               }}
               onUpdatePolicy={(body) =>
                 policyMutation.mutate({

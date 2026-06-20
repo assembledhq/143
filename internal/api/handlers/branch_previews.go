@@ -1307,7 +1307,7 @@ func (h *BranchPreviewHandler) selectBranchPreviewWorker(ctx context.Context, or
 	return branchPreviewWorkerSelection{worker: worker}, nil
 }
 
-func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error {
+func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode, previewConfigName string) error {
 	if h == nil || h.previews == nil {
 		return fmt.Errorf("preview handler is not configured")
 	}
@@ -1326,14 +1326,15 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 		metrics.RecordPreviewAutoBuild(ctx, orgID.String(), string(mode), "pool_full")
 		if h.jobs != nil {
 			deferredPayload := preview.AutoPreviewDeferredPayload{
-				OrgID:        orgID,
-				UserID:       userID,
-				RepositoryID: repo.ID,
-				PRNumber:     prNumber,
-				HeadRef:      headRef,
-				HeadSHA:      headSHA,
-				HTMLURL:      htmlURL,
-				Mode:         mode,
+				OrgID:             orgID,
+				UserID:            userID,
+				RepositoryID:      repo.ID,
+				PRNumber:          prNumber,
+				HeadRef:           headRef,
+				HeadSHA:           headSHA,
+				HTMLURL:           htmlURL,
+				Mode:              mode,
+				PreviewConfigName: previewConfigName,
 			}
 			dedupeKey := fmt.Sprintf("auto_preview_deferred:%s:%s:%d:%s", orgID, repo.ID, prNumber, headSHA)
 			if _, err := h.jobs.Enqueue(ctx, orgID, "preview", models.JobTypeAutoPreviewDeferred, deferredPayload, 4, &dedupeKey); err != nil {
@@ -1357,11 +1358,9 @@ func (h *BranchPreviewHandler) StartAutoPullRequestPreview(ctx context.Context, 
 			SourceID:        sourceID,
 			SourceURL:       htmlURL,
 			CreatedByUserID: userID,
-		}
-		// Honor the repository's saved build profile so auto-built PR previews
-		// use the same named config as the settings page selection.
-		if policy, policyErr := h.previews.GetRepositoryPreviewPolicy(ctx, orgID, repo.ID); policyErr == nil && policy != nil {
-			target.PreviewConfigName = policy.PreviewConfigName
+			// Honor the repository's saved build profile so auto-built PR
+			// previews use the same named config as the settings page selection.
+			PreviewConfigName: previewConfigName,
 		}
 		if err := h.previews.CreatePreviewTarget(ctx, target); err != nil {
 			return fmt.Errorf("create auto preview target: %w", err)

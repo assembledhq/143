@@ -208,28 +208,32 @@ type RepositoryPreviewPolicy struct {
 // RepositoryPreviewPolicySummary is the settings-page view of repository
 // policy with repository identity and PR volume.
 type RepositoryPreviewPolicySummary struct {
-	RepositoryID                   uuid.UUID                 `db:"repository_id" json:"repository_id"`
-	RepositoryFullName             string                    `db:"repository_full_name" json:"repository_full_name"`
-	AutoMode                       PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
-	SessionPrewarmMode             PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
-	PRPreviewSurfacesEnabled       bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
-	GitHubPRCommentEnabled         bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
-	GitHubCommitStatusEnabled      bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
-	PreviewConfigName              string                    `db:"preview_config_name" json:"preview_config_name,omitempty"`
-	PreviewConfigured              bool                      `db:"preview_configured" json:"preview_configured"`
-	PreviewSuccessRecorded         bool                      `db:"preview_success_recorded" json:"preview_success_recorded"`
-	PreviewConfigNames             []string                  `db:"-" json:"preview_config_names,omitempty"`
-	PreviewConfigDefaultName       string                    `db:"-" json:"preview_config_default_name,omitempty"`
-	PreviewConfigRequiresSelection bool                      `db:"-" json:"preview_config_requires_selection,omitempty"`
-	PreviewReady                   bool                      `db:"preview_ready" json:"preview_ready"`
-	PreviewReadinessMissingReason  string                    `db:"preview_readiness_missing_reason" json:"preview_readiness_missing_reason,omitempty"`
-	GitHubPRCommentPermissionOK    bool                      `db:"github_pr_comment_permission_ok" json:"github_pr_comment_permission_ok"`
-	GitHubCommitStatusPermissionOK bool                      `db:"github_commit_status_permission_ok" json:"github_commit_status_permission_ok"`
-	LastSurfaceSyncSHA             string                    `db:"last_surface_sync_sha" json:"last_surface_sync_sha,omitempty"`
-	LastSurfaceSyncAt              *time.Time                `db:"last_surface_sync_at" json:"last_surface_sync_at,omitempty"`
-	LastSurfaceSyncError           string                    `db:"last_surface_sync_error" json:"last_surface_sync_error,omitempty"`
-	OpenPRCount                    int                       `db:"open_pr_count" json:"open_pr_count"`
-	UpdatedAt                      *time.Time                `db:"updated_at" json:"updated_at,omitempty"`
+	RepositoryID              uuid.UUID                 `db:"repository_id" json:"repository_id"`
+	RepositoryFullName        string                    `db:"repository_full_name" json:"repository_full_name"`
+	AutoMode                  PreviewAutoMode           `db:"auto_mode" json:"auto_mode"`
+	SessionPrewarmMode        PreviewSessionPrewarmMode `db:"session_prewarm_mode" json:"session_prewarm_mode"`
+	PRPreviewSurfacesEnabled  bool                      `db:"pr_preview_surfaces_enabled" json:"pr_preview_surfaces_enabled"`
+	GitHubPRCommentEnabled    bool                      `db:"github_pr_comment_enabled" json:"github_pr_comment_enabled"`
+	GitHubCommitStatusEnabled bool                      `db:"github_commit_status_enabled" json:"github_commit_status_enabled"`
+	// PreviewConfigName is the saved build profile for this repository (the
+	// settings-page selection). Distinct from PreviewConfigNames (the profiles
+	// available in .143/config.json) and PreviewConfigDefaultName (that file's
+	// own default).
+	PreviewConfigName              string     `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	PreviewConfigured              bool       `db:"preview_configured" json:"preview_configured"`
+	PreviewSuccessRecorded         bool       `db:"preview_success_recorded" json:"preview_success_recorded"`
+	PreviewConfigNames             []string   `db:"-" json:"preview_config_names,omitempty"`
+	PreviewConfigDefaultName       string     `db:"-" json:"preview_config_default_name,omitempty"`
+	PreviewConfigRequiresSelection bool       `db:"-" json:"preview_config_requires_selection,omitempty"`
+	PreviewReady                   bool       `db:"preview_ready" json:"preview_ready"`
+	PreviewReadinessMissingReason  string     `db:"preview_readiness_missing_reason" json:"preview_readiness_missing_reason,omitempty"`
+	GitHubPRCommentPermissionOK    bool       `db:"github_pr_comment_permission_ok" json:"github_pr_comment_permission_ok"`
+	GitHubCommitStatusPermissionOK bool       `db:"github_commit_status_permission_ok" json:"github_commit_status_permission_ok"`
+	LastSurfaceSyncSHA             string     `db:"last_surface_sync_sha" json:"last_surface_sync_sha,omitempty"`
+	LastSurfaceSyncAt              *time.Time `db:"last_surface_sync_at" json:"last_surface_sync_at,omitempty"`
+	LastSurfaceSyncError           string     `db:"last_surface_sync_error" json:"last_surface_sync_error,omitempty"`
+	OpenPRCount                    int        `db:"open_pr_count" json:"open_pr_count"`
+	UpdatedAt                      *time.Time `db:"updated_at" json:"updated_at,omitempty"`
 }
 
 // PreviewLink is a stable app-owned URL mapping to a branch preview target.

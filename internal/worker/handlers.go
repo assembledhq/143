@@ -898,7 +898,7 @@ func newAutoPreviewDeferredHandler(stores *Stores, services *Services, logger ze
 			}
 		}
 
-		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode); err != nil {
+		if err := services.AutoPreviewStarter.StartAutoPullRequestPreview(ctx, input.OrgID, input.UserID, repo, input.PRNumber, input.HeadRef, input.HeadSHA, input.HTMLURL, input.Mode, input.PreviewConfigName); err != nil {
 			return fmt.Errorf("auto_preview_deferred: start preview: %w", err)
 		}
 		return nil
