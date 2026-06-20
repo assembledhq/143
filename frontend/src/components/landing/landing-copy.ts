@@ -53,6 +53,34 @@ export const platformLayers = [
   },
 ];
 
+export const codingAgents = [
+  {
+    name: "Codex",
+    logo: "/agents/codex.svg",
+    description: "OpenAI Codex on the GPT-5 models.",
+  },
+  {
+    name: "Claude Code",
+    logo: "/agents/claude_code.svg",
+    description: "Anthropic Claude — Fable, Opus, Sonnet, and Haiku.",
+  },
+  {
+    name: "Amp",
+    logo: "/agents/amp.svg",
+    description: "Sourcegraph Amp, run by mode.",
+  },
+  {
+    name: "Pi",
+    logo: "/agents/pi.svg",
+    description: "Pi coding agent with its own provider auth.",
+  },
+  {
+    name: "OpenCode",
+    logo: "/agents/opencode.svg",
+    description: "Multi-provider agent across OpenAI, Anthropic, Gemini, and more.",
+  },
+];
+
 export const integrations = [
   {
     name: "GitHub",
@@ -75,6 +103,11 @@ export const integrations = [
     description: "Errors, traces, stack context, and production signals.",
   },
   {
+    name: "PagerDuty",
+    logo: "/integrations/pagerduty.svg",
+    description: "Incidents and on-call alerts that kick off a fix.",
+  },
+  {
     name: "Notion",
     logo: "/integrations/notion.svg",
     description: "Product notes, specs, runbooks, and team knowledge.",
@@ -83,5 +116,10 @@ export const integrations = [
     name: "CircleCI",
     logo: "/integrations/circleci.svg",
     description: "Build status, failing jobs, and repair-loop feedback.",
+  },
+  {
+    name: "Mezmo",
+    logo: "/integrations/mezmo.svg",
+    description: "Production log search and signals from Mezmo.",
   },
 ];

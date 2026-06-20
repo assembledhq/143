@@ -23,7 +23,7 @@ export default function CtaSection({ isDark }: CtaSectionProps) {
             isDark ? "text-white" : "text-slate-900"
           }`}
         >
-          Try 143 now.
+          Put your agents to work.
         </h2>
         <div>
           <Button
