@@ -423,6 +423,25 @@ func TestSessionPreviewPrewarmEnumsMatchMigrationChecks(t *testing.T) {
 			},
 		},
 		{
+			name:       "session prewarm status",
+			constraint: "session_preview_prewarm_runs_status_check",
+			expected: []string{
+				"decided",
+				"queued",
+				"running",
+				"skipped_capacity",
+				"skipped_superseded",
+				"skipped_user_started",
+				"skipped_cooldown",
+				"skipped_untrusted_fork",
+				"skipped_no_lockfiles",
+				"skipped_no_paths",
+				"classifier_timeout",
+				"succeeded",
+				"failed",
+			},
+		},
+		{
 			name:       "stopped reason extension",
 			constraint: "preview_instances_stopped_reason_check",
 			expected: []string{

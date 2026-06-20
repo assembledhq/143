@@ -32,17 +32,18 @@ type SessionPrewarmClassifier struct {
 }
 
 type SessionPrewarmClassifierInput struct {
-	RepositoryFullName          string
-	RepositoryLanguage          string
-	SessionSource               string
-	UserPrompt                  string
-	IssueLabels                 []string
-	IssueType                   string
-	PreviewHistory              string
-	HistoricalPreviewOpenCount  int
-	CapacitySummary             string
-	Phase                       string
-	ChangedFileKinds            []string
+	RepositoryFullName         string
+	RepositoryLanguage         string
+	PreviewConfigDigest        string
+	SessionSource              string
+	UserPrompt                 string
+	IssueLabels                []string
+	IssueType                  string
+	PreviewHistory             string
+	HistoricalPreviewOpenCount int
+	CapacitySummary            string
+	Phase                      string
+	ChangedFileKinds           []string
 }
 
 type SessionPrewarmClassifierResult struct {
@@ -70,16 +71,17 @@ func (c *SessionPrewarmClassifier) Classify(ctx context.Context, input SessionPr
 	}
 	systemPrompt := prompts.SessionPreviewPrewarmClassifierPrompt()
 	userPrompt := prompts.SessionPreviewPrewarmClassifierUserPrompt(prompts.SessionPreviewPrewarmClassifierUserPromptData{
-		RepositoryFullName: strings.TrimSpace(input.RepositoryFullName),
-		RepositoryLanguage: strings.TrimSpace(input.RepositoryLanguage),
-		SessionSource:      strings.TrimSpace(input.SessionSource),
-		UserPrompt:         sanitizeSessionPrewarmClassifierText(input.UserPrompt),
-		IssueLabels:        sanitizeSessionPrewarmList(input.IssueLabels),
-		IssueType:          sanitizeSessionPrewarmClassifierText(input.IssueType),
-		PreviewHistory:     previewHistory,
-		CapacitySummary:    strings.TrimSpace(input.CapacitySummary),
-		Phase:              strings.TrimSpace(input.Phase),
-		ChangedFileKinds:   sanitizeSessionPrewarmList(input.ChangedFileKinds),
+		RepositoryFullName:  strings.TrimSpace(input.RepositoryFullName),
+		RepositoryLanguage:  strings.TrimSpace(input.RepositoryLanguage),
+		PreviewConfigDigest: strings.TrimSpace(input.PreviewConfigDigest),
+		SessionSource:       strings.TrimSpace(input.SessionSource),
+		UserPrompt:          sanitizeSessionPrewarmClassifierText(input.UserPrompt),
+		IssueLabels:         sanitizeSessionPrewarmList(input.IssueLabels),
+		IssueType:           sanitizeSessionPrewarmClassifierText(input.IssueType),
+		PreviewHistory:      previewHistory,
+		CapacitySummary:     strings.TrimSpace(input.CapacitySummary),
+		Phase:               strings.TrimSpace(input.Phase),
+		ChangedFileKinds:    sanitizeSessionPrewarmList(input.ChangedFileKinds),
 	})
 	timeout := c.timeout
 	if timeout <= 0 {
