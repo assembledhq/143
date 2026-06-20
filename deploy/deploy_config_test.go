@@ -164,6 +164,27 @@ func TestCLIDistributionRoutesProxyToAPI(t *testing.T) {
 	require.Contains(t, cliDistBlock, "port 8080", "CLI distribution routes must target the main API port")
 }
 
+// TestCaddyfilePromotedInPlaceNotRenamed pins the fix for the June 2026 "Caddy
+// bind-mount drift" incident: docker-compose.app.yml bind-mounts the Caddyfile
+// as a single file, and Docker pins single-file mounts to the inode at container
+// start. Promoting a new Caddyfile with `mv` swaps the inode, so the running
+// container keeps reading the old file and `caddy reload` is a silent no-op
+// ("config is unchanged"). stage_caddy_config_if_changed must overwrite the
+// live Caddyfile in place (cat > preserves the inode) so reloads actually apply.
+func TestCaddyfilePromotedInPlaceNotRenamed(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+
+	fn := extractShellFunction(t, deployText, "stage_caddy_config_if_changed", "stage_caddy_dockerfile_if_changed")
+	require.Contains(t, fn, `cat "$new_file" > "$cur_file"`,
+		"stage_caddy_config_if_changed must overwrite the live Caddyfile in place to preserve the bind-mounted inode")
+	require.NotContains(t, fn, `mv "$new_file" "$cur_file"`,
+		"stage_caddy_config_if_changed must not mv the staged Caddyfile over the live one — mv swaps the inode and the single-file bind mount keeps serving the old config")
+}
+
 func TestPreviewWildcardProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
 	t.Parallel()
 

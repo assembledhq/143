@@ -884,24 +884,37 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   # stage_caddy_config_if_changed — returns 0 if deploy/Caddyfile.new differs
   # from the currently deployed deploy/Caddyfile, and when it does, promotes
-  # the staged file into place (mv). Returns 1 (and removes the staged file)
-  # when contents match. Used to avoid restarting Caddy on code-only deploys;
-  # Caddy restarts briefly unbind ports 80/443 and surface as 502s through
-  # any upstream proxy (Cloudflare, etc.).
+  # the staged file into place. Returns 1 (and removes the staged file) when
+  # contents match. Used to avoid restarting Caddy on code-only deploys; Caddy
+  # restarts briefly unbind ports 80/443 and surface as 502s through any
+  # upstream proxy (Cloudflare, etc.).
+  #
+  # The promotion MUST overwrite the existing file in place (truncate + rewrite)
+  # rather than `mv` it. docker-compose.app.yml bind-mounts the Caddyfile as a
+  # single file (./deploy/Caddyfile:/etc/caddy/Caddyfile), and Docker pins a
+  # single-file mount to the file's inode at container start. `mv` replaces the
+  # path with a NEW inode, so the running container stays bound to the OLD one
+  # and never sees the change — `caddy reload` reads the frozen inode and logs
+  # "config is unchanged", a silent no-op. Overwriting in place keeps the inode
+  # stable so the bind-mounted file (and reload) reflects the new content. See
+  # the "Caddy bind-mount drift" incident (June 2026, install routes 404'd for
+  # ~10 days). The `cat >` redirect creates cur_file on the first deploy and
+  # truncates+rewrites the same inode afterwards (never `mv`/`cp`, which unlink
+  # and recreate the path with a fresh inode).
   stage_caddy_config_if_changed() {
     local new_file="/opt/143/deploy/Caddyfile.new"
     local cur_file="/opt/143/deploy/Caddyfile"
     [ -f "$new_file" ] || return 1
-    if [ ! -f "$cur_file" ]; then
-      mv "$new_file" "$cur_file"
-      return 0
+    if [ -f "$cur_file" ] && cmp -s "$new_file" "$cur_file"; then
+      rm -f "$new_file"
+      return 1
     fi
-    if ! cmp -s "$new_file" "$cur_file"; then
-      mv "$new_file" "$cur_file"
-      return 0
+    if ! cat "$new_file" > "$cur_file"; then
+      rm -f "$new_file"
+      return 1
     fi
     rm -f "$new_file"
-    return 1
+    return 0
   }
 
   # stage_caddy_dockerfile_if_changed — returns 0 only when Dockerfile.caddy
