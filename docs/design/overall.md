@@ -6,6 +6,8 @@
 
 This document is the product and architecture map. It should explain the overall system at a high level and link to detailed design docs for contracts, state machines, UI specifics, rollout plans, and operational procedures.
 
+The public homepage positions 143 as shared coding-agent infrastructure for engineering teams: one team-visible workspace for context, integrations, cloud agent execution, previews, review loops, audit logs, and usage analytics. Product imagery uses wide, repeatable screenshots from seeded/demo product states so the homepage shows the real workspace instead of mock-only generated visuals. See [implemented/81-homepage-positioning-refresh.md](implemented/81-homepage-positioning-refresh.md) and [future/88-homepage-product-screenshots.md](future/88-homepage-product-screenshots.md).
+
 ## Product Model
 
 - **Organization** is the tenant boundary. Repositories, integrations, API clients, credentials, usage, audit logs, sessions, automations, and projects are all scoped to one `org_id`.
