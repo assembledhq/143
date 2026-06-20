@@ -127,6 +127,43 @@ func TestJoinTokenHandler_CreateStoresRecoverableRawToken(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code, "Create should return created for a recoverable join token, body: %s", w.Body.String())
 }
 
+func TestJoinTokenHandler_ListExcludesRevokedTokens(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	tokenID := uuid.New()
+	creatorID := uuid.New()
+	now := time.Now()
+	mock := newPgxMock(t)
+	handler := NewJoinTokenHandler(db.NewOrgJoinTokenStore(mock), "https://143.example")
+
+	// The list query must filter revoked links at the database so they don't
+	// clutter the settings list. Pin the WHERE clause here.
+	mock.ExpectQuery(`(?s)SELECT .*FROM org_join_tokens.*revoked_at IS NULL`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(orgJoinTokenTestColumns()).AddRow(
+			tokenID, orgID, "sha256:test", "143j_ActiveTk", models.RoleMember, "Active link",
+			[]byte("v0:143j_TestToken123456789012"), creatorID, nil, 0, nil, nil, nil, now,
+		))
+
+	req := newJoinTokenRequest(http.MethodGet, "/api/v1/org/join-tokens", orgID, userID, nil)
+	w := httptest.NewRecorder()
+	handler.List(w, req)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "List should filter revoked tokens in its query")
+	require.Equal(t, http.StatusOK, w.Code, "List should return OK, body: %s", w.Body.String())
+	var body struct {
+		Data []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "List response should be valid JSON")
+	require.Len(t, body.Data, 1, "List should return the active token")
+	require.Equal(t, "active", body.Data[0].Status, "listed tokens should never be revoked")
+}
+
 func newJoinTokenRequest(method, path string, orgID, userID uuid.UUID, params map[string]string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	ctx := middleware.WithOrgID(req.Context(), orgID)
