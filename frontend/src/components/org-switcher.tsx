@@ -126,6 +126,26 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
     return () => window.removeEventListener(ACTIVE_ORG_CHANGED_EVENT, handler);
   }, []);
 
+  // Bootstrap: pin the server-resolved active org into this tab's
+  // sessionStorage the first time it resolves, so every subsequent request
+  // carries an explicit X-Active-Org-ID header. A fresh tab starts with empty
+  // sessionStorage and therefore sends NO header, leaving the backend to fall
+  // back to the *shared* session last_org_id — which any sibling tab can
+  // overwrite at any moment (see internal/api/middleware/auth.go). That
+  // fallback is exactly how one tab's data used to bleed into another. Writing
+  // the resolved id here closes the hole: the backend's "skip last_org_id
+  // write when a header is present" guard only protects tabs that actually
+  // send the header.
+  //
+  // Adoption is deliberately local-only — it does NOT call api.auth.setActiveOrg,
+  // so it never mutates the shared hint or drags sibling tabs to this org. Only
+  // an explicit switch (activateOrgAndNavigate) writes the server-side hint.
+  useEffect(() => {
+    if (!tabOrgId && serverActiveOrgId) {
+      setActiveOrgId(serverActiveOrgId);
+    }
+  }, [tabOrgId, serverActiveOrgId]);
+
   // Name the currently-active org in the revocation toast. Capturing via ref
   // lets us read the label the user *had* right before the server signaled
   // revocation without making invalidateQueries race our own read of it.

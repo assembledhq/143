@@ -526,6 +526,23 @@ Settings-style endpoints (user settings, org settings, per-resource preference d
 - **When adding a new settings-style endpoint, give it merge-patch semantics on the backend** rather than full-document replace, so callers are never forced into the cache-merge pattern. See `UserStore.MergeSettings` + `models.ApplyUserSettingsMergePatch` for the server-side reference implementation, and the backend rule in `internal/AGENTS.md`.
 - If multiple rapid edits to the same patch field are coalesced client-side (in-flight + queued refs), **merge queued patches per key** instead of replacing the queue, so edits to different keys all land.
 
+## Active organization (multi-tenancy)
+
+A user can belong to many orgs and have **a different org open in each browser tab**. Getting this right is a correctness requirement, not a nicety — mixing two orgs' data on one screen is a data-leak-shaped bug. There is exactly one client-side source of truth for "which org is this tab acting as":
+
+> **`src/lib/active-org.ts` — the per-tab `active_org_id` in `sessionStorage`. Read it with `getActiveOrgId()`; change it only with `setActiveOrgId()`.**
+
+Everything else is downstream of that value. Do not introduce a second store (React context, a Zustand slice, a second storage key, a prop drilled from the server) for "current org" — funnel through `active-org.ts`.
+
+How the value flows and why:
+
+- **Every org-scoped request carries it as the `X-Active-Org-ID` header** (`src/lib/api.ts`). EventSource streams can't send headers, so they pass it as the `?org_id=` query param (`src/lib/sse.ts`). If you add a new request path, it must carry the active org one of these two ways.
+- **Never rely on the server's `last_org_id` fallback for correctness.** The backend falls back to the session's `last_org_id` only when no header/param is present — and that hint is **shared across all of the user's tabs**, so any sibling tab can change it. A request that omits the header resolves against whatever org another tab last touched. That is the original cause of the "two workspaces blended into one screen" bug.
+- **A fresh tab adopts, but never mutates, the shared hint.** `OrgSwitcher` pins the server-resolved active org into this tab's `sessionStorage` on first load (local `setActiveOrgId`, **not** `api.auth.setActiveOrg`) so the tab immediately starts sending an explicit header. Adopting is read-only; only an explicit user switch (`activateOrgAndNavigate`) writes the server-side hint and drags future cold loads along.
+- **The React Query cache is scoped to the active org structurally** (`src/components/providers.tsx`): the `QueryClient` is recreated whenever `active_org_id` changes. **Do not encode the org id into individual `queryKey`s** — the boundary lives in the provider, in one place, so no current or future query (or invalidation prefix) has to remember to include it. Org-scoped query keys (`["sessions", …]`, `["integrations"]`, `["repositories"]`, etc.) stay org-free on purpose; the surrounding client is what makes them org-correct.
+
+When you touch anything org-aware, the test is: *could a request resolve to the wrong org because the header was missing, or could org A's cached data survive into an org-B client?* If either is possible, route the org through `active-org.ts` and let the provider own cache isolation.
+
 ## Error Reporting (Sentry)
 
 Errors are reported to Sentry via `@sentry/nextjs`. Three layers handle this automatically:
