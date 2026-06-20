@@ -204,8 +204,8 @@ describe('SessionDetailPage overview and review loop', () => {
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
     await screen.findByText('Could not reproduce the error in test environment');
-    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Review and fix with a selected agent before creating a PR.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Review before PR')).not.toBeInTheDocument();
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Code review' })).not.toBeInTheDocument();
   });
@@ -233,9 +233,9 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByRole('button', { name: 'Review' })).toBeDisabled();
-    expect(screen.getByText('Review and fix with a selected agent before creating a PR.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
+    expect(await screen.findByRole('button', { name: 'Review & fix' })).toBeDisabled();
+    expect(screen.getByText('Review before PR')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute('title', 'A reusable sandbox snapshot is required before review');
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
@@ -293,7 +293,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
 
     const dialog = screen.getByRole('dialog', { name: 'Review' });
     expect(within(dialog).getByRole('combobox', { name: 'Review coding agent' })).toBeInTheDocument();
@@ -347,7 +347,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
     await user.click(await screen.findByRole('button', { name: 'Increase review passes' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
@@ -401,7 +401,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
     const dialog = screen.getByRole('dialog', { name: 'Review' });
     expect(within(dialog).getByRole('radio', { name: 'Minimal fixes' })).toBeChecked();
 
@@ -459,7 +459,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
 
     expect(screen.queryByText('2 is the standard pass')).not.toBeInTheDocument();
 
@@ -532,7 +532,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     expect(await screen.findByText('Codex 1')).toBeInTheDocument();
 
-    await user.click(await screen.findByRole('button', { name: 'Review' }));
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
     await user.click(screen.getByRole('button', { name: 'Start review' }));
 
     const reviewTab = await screen.findByRole('tab', { name: /Codex Review/ });
@@ -597,7 +597,7 @@ describe('SessionDetailPage overview and review loop', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Open session details' }));
     const detailSheet = await screen.findByRole('dialog', { name: 'Session details' });
-    await user.click(within(detailSheet).getByRole('button', { name: 'Review' }));
+    await user.click(within(detailSheet).getByRole('button', { name: 'Review & fix' }));
     await user.click(await screen.findByRole('button', { name: 'Start review' }));
 
     await waitFor(() => {
@@ -621,7 +621,7 @@ describe('SessionDetailPage overview and review loop', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
 
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
     });
   });
 
