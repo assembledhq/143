@@ -1,7 +1,7 @@
 # Session Branch Guardrails
 
 > Status: Implemented
-> Last reviewed: 2026-04-30
+> Last reviewed: 2026-06-19
 
 ## Summary
 
@@ -24,6 +24,7 @@ The worker creates one canonical branch name for the session, injects that branc
 - `git-bootstrap` now sets `push.autoSetupRemote=true` so a first plain `git push` from the designated branch naturally creates the matching upstream.
 - The push guard lives in the repo’s `pre-push` hook, so it applies to ordinary agent-driven Git pushes as well as resumed sessions after bootstrap reruns.
 - The guard is intentionally branch-specific rather than token-specific: it reduces accidental pushes to the wrong branch without changing GitHub auth behavior.
+- Snapshot-backed PR/branch publish paths also guard server-side force pushes: before `--force-with-lease`, the push sandbox fetches the current remote session branch and refuses to overwrite it when the remote tree is not represented in the checkpoint. Metadata-only retry rewrites remain allowed when the remote tree equals the local tree.
 
 ## Why this shape
 
