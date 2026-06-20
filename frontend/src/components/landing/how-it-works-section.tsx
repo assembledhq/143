@@ -129,9 +129,9 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
               place to run, review, and schedule it.
             </h2>
             <p className={`max-w-2xl ${type.body} ${body}`}>
-              143 turns private prompts, local runs, and one-off fixes into a
-              shared system with context, previews, review loops, and history
-              the whole team can trust.
+              143 turns scattered local runs and one-off fixes into a shared
+              system with context, previews, review loops, and history the
+              whole team can trust.
             </p>
           </div>
         </div>
