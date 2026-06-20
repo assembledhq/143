@@ -115,15 +115,14 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
   }
 }
 
-function AuthResolutionNotice({ isAdmin }: { isAdmin: boolean }) {
+function OrgAuthsHeader({ isAdmin, showReorderHint }: { isAdmin: boolean; showReorderHint?: boolean }) {
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-border bg-muted/30 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="space-y-1">
-        <p className="text-xs font-medium text-foreground">
-          Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.
-        </p>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="space-y-1.5">
+        <h2 className="text-xs font-medium text-foreground">Organization-wide auths</h2>
         <p className="text-xs text-muted-foreground">
-          Shared sandbox networking, lifecycle, and capacity controls live in Sandboxes.
+          Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom.
+          {showReorderHint && " Move the auth you want to prefer higher in the list."}
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -364,10 +363,8 @@ export default function AgentPage() {
             <ShieldAlert className="mr-1.5 inline h-3.5 w-3.5 align-text-bottom" />
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
-          <AuthResolutionNotice isAdmin={isAdmin} />
-
           <section className="space-y-3">
-            <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
+            <OrgAuthsHeader isAdmin={isAdmin} />
             {rows.length === 0 ? (
               <Card>
                 <EmptyState
@@ -449,15 +446,8 @@ export default function AgentPage() {
             </Button>
           )}
         />
-        <AuthResolutionNotice isAdmin={isAdmin} />
-
         <section className="space-y-4">
-          <div className="space-y-1.5">
-            <h2 className="text-xs font-medium text-foreground">Fallback stack</h2>
-            <p className="text-xs text-muted-foreground">
-              The stack runs from top to bottom. Move the auth you want to prefer higher in the list.
-            </p>
-          </div>
+          <OrgAuthsHeader isAdmin={isAdmin} showReorderHint />
           <CodingAuthStack
             rows={rows}
             selectedId={selectedId}
