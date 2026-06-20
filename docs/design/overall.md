@@ -18,7 +18,7 @@ This document is the product and architecture map. It should explain the overall
 - **Automation** is a team-owned recurring or event-triggered instruction that creates sessions through the same execution pipeline as manual work.
 - **Project** is the higher-level planning surface for PM-proposed or human-authored multi-step work. Projects group related tasks and can feed sessions over time.
 - **Preview** is a temporary isolated web runtime for a session or branch. It is addressed by a preview origin, controlled by backend state, and backed by a worker-owned sandbox/runtime.
-- **Branch or PR** is the publish artifact. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, and leaving repository-native CI/CD as the validation source of truth.
+- **Branch or PR** is the publish artifact. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, running policy-driven pre-PR readiness checks with reviewer-facing evidence when configured, and leaving repository-native CI/CD as the validation source of truth.
 
 ## Core Flow
 
@@ -73,7 +73,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 
 - Workers run coding-agent jobs, continuation turns, preview starts, ingestion syncs, PM planning, automations, and repair work.
 - Sandboxes are the permission boundary for agent execution. They run with resource limits, gVisor isolation in production, controlled network policy, and per-session GitHub credential access through a worker-owned auth broker rather than long-lived tokens in the container environment.
-- Repository-owned `.143/config.json` can declare sandbox setup for agent work, including supported platform-managed tool dependencies and bootstrap commands that run after clone and auth setup before the coding agent starts.
+- Repository-owned `.143/config.json` can declare sandbox setup for agent work, including supported platform-managed tool dependencies, bootstrap commands that run after clone and auth setup before the coding agent starts, and prompt-only PR readiness custom checks that are validated and materialized for the repository.
 - The sandbox image installs the supported coding-agent CLIs, including Codex, Claude Code, OpenCode, Amp, and Pi. Runtime credentials are resolved from ordered personal/team auth stacks with health and rate-limit state tracked separately from credential config.
 - Long-running sessions survive routine deploys through durable session executors, leases, checkpointed recovery, snapshots, and worker drain/spin-down controls. See [implemented/82-durable-session-executors.md](implemented/82-durable-session-executors.md).
 - Routine worker deploys verify host support services without activating support-service changes. Mutating shared worker support services such as `sandbox-dns`, Chrome, gVisor checks, bridge config, or Docker daemon config is a maintenance-mode operation because it can affect active sandboxes and previews.
@@ -110,6 +110,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - **Durable state precedes live updates.** UI optimism is allowed, but backend truth must be committed before jobs, SSE events, Redis messages, or preview wakeups are treated as authoritative.
 - **Workers own live runtimes.** API nodes coordinate and persist state; workers own sandbox processes, preview runtimes, and runtime-local recovery.
 - **Repository-native CI/CD validates published branches.** 143 may review diffs, run agent review loops, and sync PR health, but it no longer owns a separate validation stage.
+- **PR readiness is preflight evidence, not approval.** Readiness runs are tied to workspace revision/snapshot, use automatic evidence and prompt-only custom checks, and can block builders according to role-specific policy while remaining advisory for engineers/admins by default. Bypasses require a reason, are role-aware, are audited, and only apply to current completed blocking checks; settings expose bypass counts by repository, user, and check. Optional auto-runs are policy-controlled and default off.
 - **PR repair availability follows the branch head.** For the current PR head SHA, `active_repairs` is the server-owned in-progress state that suppresses duplicate repair and merge actions across health-version churn; `health_version` remains launch provenance.
 - **Agent tools must use platform paths.** Sandbox agents, automations, and external clients should call `143-tools` or `/api/v1`, so auth, audit, templates, Linear links, PR state, dedupe, and policy checks stay consistent.
 - **Untrusted app previews stay isolated.** Previewed apps run on preview origins, not the main app origin, and preview secrets are delivered through preview-specific backend controls.

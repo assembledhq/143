@@ -3,7 +3,10 @@ package repoconfig
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 const (
@@ -19,6 +22,25 @@ type Config struct {
 	Dependencies map[string]string `json:"dependencies,omitempty"`
 	Bootstrap    CommandSection    `json:"bootstrap,omitempty"`
 	Validation   CommandSection    `json:"validation,omitempty"`
+	PRReadiness  PRReadinessConfig `json:"pr_readiness,omitempty"`
+}
+
+type PRReadinessConfig struct {
+	Checks []PRReadinessCheckConfig `json:"checks,omitempty"`
+}
+
+type PRReadinessCheckConfig struct {
+	ID          string                              `json:"id"`
+	Name        string                              `json:"name"`
+	Type        string                              `json:"type"`
+	Enforcement models.PRReadinessEnforcementByRole `json:"enforcement,omitempty"`
+	Paths       PRReadinessPathFilter               `json:"paths,omitempty"`
+	Prompt      string                              `json:"prompt"`
+}
+
+type PRReadinessPathFilter struct {
+	Include []string `json:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
 }
 
 func Parse(data []byte) (Config, error) {
@@ -38,8 +60,61 @@ func Parse(data []byte) (Config, error) {
 	if err := normalizeCommandSection("validation.commands", &cfg.Validation); err != nil {
 		return Config{}, err
 	}
+	if err := normalizePRReadiness(&cfg.PRReadiness); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+var readinessCheckIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
+
+func normalizePRReadiness(cfg *PRReadinessConfig) error {
+	seen := map[string]struct{}{}
+	for i := range cfg.Checks {
+		check := &cfg.Checks[i]
+		fieldPath := fmt.Sprintf("pr_readiness.checks[%d]", i)
+		check.ID = strings.TrimSpace(check.ID)
+		check.Name = strings.TrimSpace(check.Name)
+		check.Type = strings.TrimSpace(check.Type)
+		check.Prompt = strings.TrimSpace(check.Prompt)
+		if !readinessCheckIDPattern.MatchString(check.ID) {
+			return fmt.Errorf("%s.id must match %s", fieldPath, readinessCheckIDPattern.String())
+		}
+		if _, ok := seen[check.ID]; ok {
+			return fmt.Errorf("%s.id must be unique", fieldPath)
+		}
+		seen[check.ID] = struct{}{}
+		if check.Name == "" {
+			return fmt.Errorf("%s.name must be a non-empty string", fieldPath)
+		}
+		if check.Type != "prompt" {
+			return fmt.Errorf("%s.type must be %q", fieldPath, "prompt")
+		}
+		if check.Prompt == "" {
+			return fmt.Errorf("%s.prompt must be a non-empty string", fieldPath)
+		}
+		if err := check.Enforcement.Validate(); err != nil {
+			return fmt.Errorf("%s.enforcement: %w", fieldPath, err)
+		}
+		if err := normalizePathFilter(fieldPath+".paths.include", check.Paths.Include); err != nil {
+			return err
+		}
+		if err := normalizePathFilter(fieldPath+".paths.exclude", check.Paths.Exclude); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizePathFilter(fieldPath string, values []string) error {
+	for i, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s[%d] must be a non-empty string", fieldPath, i)
+		}
+		values[i] = strings.TrimSpace(value)
+	}
+	return nil
 }
 
 func normalizeCommandSection(fieldPath string, section *CommandSection) error {

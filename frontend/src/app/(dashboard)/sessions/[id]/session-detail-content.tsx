@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
@@ -66,6 +66,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Select,
   SelectContent,
@@ -135,7 +140,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, PRReadinessCheck, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -647,8 +652,24 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
   );
 }
 
-function PRReadinessCard({ session }: { session: Session }) {
+type PRReadinessCardProps = {
+  session: Session;
+  hasPR?: boolean;
+  onOpenChanges?: () => void;
+  onOpenReview?: () => void;
+  reviewActionDisabled?: boolean;
+};
+
+function PRReadinessCard({ session, hasPR, onOpenChanges, onOpenReview, reviewActionDisabled }: PRReadinessCardProps) {
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const { user } = useAuth();
+  const [bypassOpen, setBypassOpen] = useState(false);
+  const [bypassReason, setBypassReason] = useState("");
+  const [issueLessReason, setIssueLessReason] = useState<string | null>(null);
+  const [detailsCollapsed, setDetailsCollapsed] = useState(!!hasPR);
+  const packetRef = useRef<HTMLDivElement | null>(null);
+  const contextRef = useRef<HTMLTextAreaElement | null>(null);
   const readinessQuery = useQuery({
     queryKey: queryKeys.sessions.readiness(session.id),
     queryFn: () => api.sessions.getReadiness(session.id),
@@ -658,6 +679,14 @@ function PRReadinessCard({ session }: { session: Session }) {
     },
   });
   const readiness = readinessQuery.data?.data.latest;
+  const contextQuery = useQuery({
+    queryKey: [...queryKeys.sessions.readiness(session.id), "context"],
+    queryFn: () => api.sessions.getReadinessContext(session.id),
+  });
+  const policyQuery = useQuery({
+    queryKey: queryKeys.settings.prReadinessPolicy(session.repository_id ?? null),
+    queryFn: () => api.settings.getPRReadinessPolicy(session.repository_id ?? undefined),
+  });
   const runMutation = useMutation({
     mutationFn: () => api.sessions.runReadiness(session.id),
     onSuccess: () => {
@@ -668,15 +697,64 @@ function PRReadinessCard({ session }: { session: Session }) {
       toast.error(err instanceof Error ? err.message : "Readiness checks could not be started");
     },
   });
+  const bypassMutation = useMutation({
+    mutationFn: () => api.sessions.createReadinessBypass(session.id, bypassReason),
+    onSuccess: () => {
+      setBypassOpen(false);
+      setBypassReason("");
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(session.id) });
+      toast.success("Readiness blocker bypassed");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness blocker could not be bypassed");
+    },
+  });
+  const contextMutation = useMutation({
+    mutationFn: (reason: string) => api.sessions.updateReadinessContext(session.id, reason),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [...queryKeys.sessions.readiness(session.id), "context"] });
+      toast.success("Readiness context saved");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness context could not be saved");
+    },
+  });
   const status = readiness?.status;
   const running = status === "queued" || status === "running" || runMutation.isPending;
   const checks = readiness?.checks ?? [];
-  const passed = checks.filter((check) => check.status === "passed");
-  const warnings = checks.filter((check) => check.status === "warning" || (check.status === "failed" && check.enforcement !== "blocking"));
-  const blocked = checks.filter((check) => check.status === "failed" && check.enforcement === "blocking");
+  const bypassedKeys = new Set((readiness?.bypasses ?? []).flatMap((bypass) => bypass.bypassed_checks));
+  const checkKey = (check: PRReadinessCheck) => check.check_key || check.check_type;
+  const checkEnforcement = (check: PRReadinessCheck) => check.effective_enforcement || enforcementForRole(check, user?.role) || check.enforcement;
   const stale = readiness && (
     readiness.evaluated_workspace_revision !== session.workspace_revision ||
     (readiness.evaluated_snapshot_key ?? "") !== (session.snapshot_key ?? "")
+  );
+  const staleCheck = stale && readiness ? staleReadinessCheck(readiness, session, checkEnforcement) : null;
+  const visibleChecks = stale ? checks.filter((check) => check.check_type !== "freshness") : checks;
+  const passed = visibleChecks.filter((check) => check.status === "passed");
+  const blocked = [
+    ...visibleChecks.filter((check) => (check.status === "failed" || check.status === "error") && checkEnforcement(check) === "blocking" && !bypassedKeys.has(checkKey(check))),
+    ...(staleCheck ? [staleCheck] : []),
+  ];
+  const bypassed = checks.filter((check) => bypassedKeys.has(checkKey(check)));
+  const warnings = visibleChecks.filter((check) =>
+    check.status === "warning" ||
+    ((check.status === "failed" || check.status === "error") && checkEnforcement(check) !== "blocking")
+  );
+  const bypassPolicy = policyQuery.data?.data.config.bypass;
+  const currentRole = user?.role ?? "";
+  const bypassRoleAllowed = !bypassPolicy || (
+    bypassPolicy.enabled !== false &&
+    (bypassPolicy.allowed_roles ?? ["admin", "member", "builder"]).includes(currentRole) &&
+    (bypassPolicy.scopes ?? ["completed_blocking_checks"]).includes("completed_blocking_checks")
+  );
+  const nonBypassableChecks = new Set(bypassPolicy?.non_bypassable_checks ?? []);
+  const bypassableBlocked = blocked.filter((check) =>
+    !stale &&
+    !isDerivedStaleReadinessCheck(check) &&
+    bypassRoleAllowed &&
+    !nonBypassableChecks.has(checkKey(check)) &&
+    !nonBypassableChecks.has(check.check_type)
   );
   const title = !readiness
     ? "Not checked yet"
@@ -685,6 +763,72 @@ function PRReadinessCard({ session }: { session: Session }) {
       : stale
         ? "Stale after latest changes"
         : readiness.summary || readinessStatusLabel(readiness.status);
+  const packet = readinessPacket(readiness?.review_packet);
+  const displayedIssueLessReason = issueLessReason ?? contextQuery.data?.data.issue_less_reason ?? "";
+  const handleCheckAction = (check: PRReadinessCheck) => {
+    const action = (check.action ?? "").toLowerCase();
+    if (!action) return;
+    if (action.includes("re-run") || action.includes("run readiness")) {
+      if (!running) runMutation.mutate();
+      return;
+    }
+    if (action.includes("view files") || action.includes("view changes")) {
+      onOpenChanges?.();
+      return;
+    }
+    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
+      if (!reviewActionDisabled) onOpenReview?.();
+      return;
+    }
+    if (action.includes("view packet")) {
+      packetRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (action.includes("view context") || action.includes("add context")) {
+      contextRef.current?.focus();
+      contextRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (action.includes("configuration")) {
+      router.push("/settings");
+    }
+  };
+  const checkActionDisabled = (check: PRReadinessCheck) => {
+    const action = (check.action ?? "").toLowerCase();
+    if (action.includes("re-run") || action.includes("run readiness")) {
+      return running;
+    }
+    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
+      return !!reviewActionDisabled || !onOpenReview;
+    }
+    if (action.includes("view files") || action.includes("view changes")) {
+      return !onOpenChanges;
+    }
+    return false;
+  };
+
+  if (hasPR && readiness && detailsCollapsed) {
+    return (
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-xs flex items-center gap-2">
+              {readinessStatusIcon(readiness, stale, running)}
+              PR readiness
+            </CardTitle>
+            <Button size="xs" variant="outline" onClick={() => setDetailsCollapsed(false)}>
+              Details
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+          <Badge variant={stale ? "destructive" : "secondary"}>{stale ? "stale" : "current"}</Badge>
+          <span>{title}</span>
+          {readiness.bypasses?.length ? <Badge variant="outline">{readiness.bypasses.length} bypass</Badge> : null}
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <Card>
@@ -707,6 +851,13 @@ function PRReadinessCard({ session }: { session: Session }) {
       </CardHeader>
       <CardContent className="space-y-3 text-xs">
         <div className="font-medium text-foreground">{title}</div>
+        {readiness && !running && (
+          <div className="flex flex-wrap gap-2 text-muted-foreground">
+            <Badge variant="outline">rev {readiness.evaluated_workspace_revision}</Badge>
+            <Badge variant={stale ? "destructive" : "secondary"}>{stale ? "stale" : "current"}</Badge>
+            {readiness.bypasses?.length ? <Badge variant="outline">{readiness.bypasses.length} bypass</Badge> : null}
+          </div>
+        )}
         {running && (
           <div className="space-y-1 text-muted-foreground">
             <div>Collecting diff</div>
@@ -717,17 +868,98 @@ function PRReadinessCard({ session }: { session: Session }) {
         )}
         {!running && readiness && (
           <div className="space-y-3">
-            <ReadinessCheckGroup title="Passed" checks={passed} empty="None" />
-            <ReadinessCheckGroup title="Warnings" checks={warnings} empty="None" />
-            <ReadinessCheckGroup title="Blocked" checks={blocked} empty="None" />
+            <ReadinessCheckGroup title="Passed" checks={passed} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
+            <ReadinessCheckGroup title="Warnings" checks={warnings} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
+            <ReadinessCheckGroup title="Blocked" checks={blocked} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
+            <ReadinessCheckGroup title="Bypassed" checks={bypassed} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
+            {packet && <ReadinessPacketSummary ref={packetRef} packet={packet} />}
+            {blocked.length > 0 && !stale && bypassableBlocked.length > 0 && (
+              <Button size="xs" variant="outline" onClick={() => setBypassOpen(true)}>
+                Bypass blockers
+              </Button>
+            )}
+          </div>
+        )}
+        {hasPR && readiness && !detailsCollapsed && (
+          <Button size="xs" variant="ghost" onClick={() => setDetailsCollapsed(true)}>
+            Collapse
+          </Button>
+        )}
+        {(session.linked_issues?.length ?? 0) === 0 && (
+          <div className="space-y-2 border-t border-border pt-3">
+            <Label htmlFor="readiness-context" className="text-xs">Issue-less context</Label>
+            <Textarea
+              id="readiness-context"
+              ref={contextRef}
+              value={displayedIssueLessReason}
+              onChange={(event) => setIssueLessReason(event.target.value)}
+              rows={2}
+              placeholder="Reason this PR has no linked issue"
+            />
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={contextMutation.isPending || !displayedIssueLessReason.trim()}
+              onClick={() => contextMutation.mutate(displayedIssueLessReason)}
+            >
+              Save context
+            </Button>
           </div>
         )}
       </CardContent>
+      <Dialog open={bypassOpen} onOpenChange={setBypassOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Bypass readiness blockers</DialogTitle>
+            <DialogDescription>Bypass applies only to the current completed readiness run and will be shown in the PR footer.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 rounded-md border border-border px-3 py-2 text-xs">
+            <div className="font-medium text-foreground">Blockers being bypassed</div>
+            <div className="space-y-1">
+              {bypassableBlocked.map((check) => (
+                <div key={checkKey(check)}>
+                  <div className="font-medium text-foreground">{check.title}</div>
+                  {check.summary ? <div className="text-muted-foreground">{check.summary}</div> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+          <Textarea
+            value={bypassReason}
+            onChange={(event) => setBypassReason(event.target.value)}
+            rows={4}
+            placeholder="Reason for bypass"
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBypassOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              disabled={bypassMutation.isPending || bypassReason.trim().length < 8}
+              onClick={() => bypassMutation.mutate()}
+            >
+              {bypassMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
+              Bypass
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
 
-function ReadinessCheckGroup({ title, checks, empty }: { title: string; checks: PRReadinessCheck[]; empty: string }) {
+function ReadinessCheckGroup({
+  title,
+  checks,
+  empty,
+  onAction,
+  actionDisabled,
+}: {
+  title: string;
+  checks: PRReadinessCheck[];
+  empty: string;
+  onAction?: (check: PRReadinessCheck) => void;
+  actionDisabled?: (check: PRReadinessCheck) => boolean;
+}) {
   return (
     <div className="space-y-1">
       <div className="font-medium text-foreground">{title}</div>
@@ -736,16 +968,184 @@ function ReadinessCheckGroup({ title, checks, empty }: { title: string; checks: 
       ) : (
         <div className="space-y-1">
           {checks.map((check) => (
-            <div key={check.id || check.check_type} className="flex items-start gap-2 text-muted-foreground">
-              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
-              <span>{check.title}</span>
-            </div>
+            <ReadinessCheckRow key={check.id || check.check_key || check.check_type} check={check} onAction={onAction} actionDisabled={actionDisabled?.(check) ?? false} />
           ))}
         </div>
       )}
     </div>
   );
 }
+
+function ReadinessCheckRow({ check, onAction, actionDisabled }: { check: PRReadinessCheck; onAction?: (check: PRReadinessCheck) => void; actionDisabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const evidence = formatReadinessCheckDetails(check.details);
+  return (
+    <div className="flex items-start gap-2 text-muted-foreground">
+      <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-foreground">{check.title}</span>
+          {check.provenance && check.provenance !== "builtin" ? (
+            <span className="text-xs uppercase text-muted-foreground">{readinessCheckProvenanceLabel(check)}</span>
+          ) : null}
+          {check.action ? (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={actionDisabled}
+              onClick={() => onAction?.(check)}
+            >
+              {check.action}
+            </Button>
+          ) : null}
+          {evidence ? (
+            <Collapsible open={open} onOpenChange={setOpen}>
+              <CollapsibleTrigger asChild>
+                <Button size="xs" variant="ghost" aria-label={`${open ? "Hide" : "Show"} evidence for ${check.title}`}>
+                  {open ? "Hide evidence" : "Evidence"}
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="basis-full">
+                <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-muted px-2 py-1 text-xs leading-relaxed text-muted-foreground">
+                  {evidence}
+                </pre>
+              </CollapsibleContent>
+            </Collapsible>
+          ) : null}
+        </div>
+        {check.summary ? <div className="text-xs">{check.summary}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+function formatReadinessCheckDetails(value: unknown) {
+  if (!value || (typeof value === "object" && Object.keys(value as Record<string, unknown>).length === 0)) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function readinessCheckProvenanceLabel(check: PRReadinessCheck) {
+  if (check.provenance === "repo_config" || check.source === "repo_config") {
+    return ".143/config.json";
+  }
+  if (check.provenance === "org_settings") {
+    return check.source === "repository" ? "repo settings" : "org settings";
+  }
+  return check.provenance;
+}
+
+function staleReadinessCheck(readiness: PRReadinessRun, session: Session, enforcementForCheck: (check: PRReadinessCheck) => PRReadinessEnforcement): PRReadinessCheck {
+  const freshness = readiness.checks?.find((check) => check.check_type === "freshness");
+  const base: PRReadinessCheck = freshness ?? {
+    id: "__stale_readiness__",
+    org_id: readiness.org_id,
+    run_id: readiness.id,
+    session_id: readiness.session_id,
+    check_key: "__stale_readiness__",
+    check_type: "freshness",
+    status: "failed",
+    enforcement: "blocking",
+    effective_enforcement: "blocking",
+    title: "Readiness is stale",
+    summary: "Workspace files changed after this readiness result was produced.",
+    action: "Re-run",
+    created_at: readiness.updated_at,
+  };
+  const enforcement = enforcementForCheck(base);
+  return {
+    ...base,
+    id: "__stale_readiness__",
+    check_key: "__stale_readiness__",
+    status: "failed",
+    enforcement: enforcement === "off" ? "blocking" : enforcement,
+    effective_enforcement: enforcement === "off" ? "blocking" : enforcement,
+    title: "Readiness is stale",
+    summary: "Workspace files changed after this readiness result was produced.",
+    details: {
+      current_workspace_revision: session.workspace_revision,
+      evaluated_workspace_revision: readiness.evaluated_workspace_revision,
+      current_snapshot_key: session.snapshot_key,
+      evaluated_snapshot_key: readiness.evaluated_snapshot_key,
+    },
+    action: "Re-run",
+  };
+}
+
+function isDerivedStaleReadinessCheck(check: PRReadinessCheck) {
+  return check.check_key === "__stale_readiness__";
+}
+
+type ReadinessPacket = {
+  what_changed?: { changed_files?: string[]; diff_stats?: unknown };
+  why_changed?: { linked_issue_count?: number; issue_less_reason?: string };
+  checked_at?: string;
+  risk_flags?: string[];
+  unknowns?: string[];
+  bypasses?: PRReadinessBypass[];
+};
+
+function readinessPacket(value: unknown): ReadinessPacket | null {
+  if (!value || typeof value !== "object") return null;
+  return value as ReadinessPacket;
+}
+
+function enforcementForRole(check: PRReadinessCheck, role?: string | null): PRReadinessEnforcement | undefined {
+  if (!check.enforcement_by_role) return undefined;
+  if (role === "admin") return check.enforcement_by_role.admin;
+  if (role === "member") return check.enforcement_by_role.engineer;
+  if (role === "builder") return check.enforcement_by_role.builder;
+  return undefined;
+}
+
+function policyRequiresRoleReadiness(config: PRReadinessPolicyConfig, role: "builder" | "engineer" | "admin") {
+  if (role === "builder" && config.enabled_for_builders === false) {
+    return false;
+  }
+  return Object.values(config.checks ?? {}).some((check) => {
+    const enforcement = check.enforcement;
+    if (!enforcement) return false;
+    return enforcement[role] !== undefined && enforcement[role] !== "off";
+  });
+}
+
+const ReadinessPacketSummary = forwardRef<HTMLDivElement, { packet: ReadinessPacket }>(function ReadinessPacketSummary({ packet }, ref) {
+  const changedFiles = Array.isArray(packet.what_changed?.changed_files) ? packet.what_changed.changed_files : [];
+  const riskFlags = Array.isArray(packet.risk_flags) ? packet.risk_flags : [];
+  const unknowns = Array.isArray(packet.unknowns) ? packet.unknowns : [];
+  const bypasses = Array.isArray(packet.bypasses) ? packet.bypasses : [];
+
+  return (
+    <div ref={ref} className="space-y-2 border-t border-border pt-3">
+      <div className="font-medium text-foreground">Review packet</div>
+      <div className="flex flex-wrap gap-2 text-muted-foreground">
+        <Badge variant="outline">{changedFiles.length} files</Badge>
+        {packet.why_changed?.linked_issue_count !== undefined ? (
+          <Badge variant="outline">{packet.why_changed.linked_issue_count} linked issues</Badge>
+        ) : null}
+        {riskFlags.slice(0, 4).map((flag) => (
+          <Badge key={flag} variant="secondary">{flag.replaceAll("_", " ")}</Badge>
+        ))}
+        {unknowns.slice(0, 4).map((unknown) => (
+          <Badge key={unknown} variant="outline">unknown {unknown.replaceAll("_", " ")}</Badge>
+        ))}
+        {bypasses.length ? <Badge variant="destructive">{bypasses.length} bypass</Badge> : null}
+      </div>
+      {packet.why_changed?.issue_less_reason ? (
+        <div className="text-muted-foreground">{packet.why_changed.issue_less_reason}</div>
+      ) : null}
+      {packet.checked_at ? <div className="text-muted-foreground">Checked {formatTimeAgo(packet.checked_at)}</div> : null}
+    </div>
+  );
+});
 
 function readinessStatusLabel(status: PRReadinessRun["status"]) {
   switch (status) {
@@ -770,7 +1170,21 @@ function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boole
   return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
-function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
+function OverviewTab({
+  session,
+  members,
+  prStatus,
+  onOpenChanges,
+  onOpenReview,
+  reviewActionDisabled,
+}: {
+  session: Session;
+  members: User[];
+  prStatus?: PullRequestStatus | null;
+  onOpenChanges?: () => void;
+  onOpenReview?: () => void;
+  reviewActionDisabled?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -814,7 +1228,13 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
   return (
     <div className="space-y-4">
-      <PRReadinessCard session={session} />
+      <PRReadinessCard
+        session={session}
+        hasPR={!!prStatus}
+        onOpenChanges={onOpenChanges}
+        onOpenReview={onOpenReview}
+        reviewActionDisabled={reviewActionDisabled}
+      />
 
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
@@ -3624,6 +4044,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [pendingMergeWhenReady, setPendingMergeWhenReady] = useState(false);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
+  const [readinessPreflightOptions, setReadinessPreflightOptions] = useState<{ draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean } | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isDocumentVisible = useDocumentVisible();
@@ -4513,26 +4934,77 @@ export function SessionDetailContent({ id }: { id: string }) {
       return status === "queued" || status === "running" ? pollMs(3000) : false;
     },
   });
+  const runReadinessMutation = useMutation({
+    mutationFn: () => api.sessions.runReadiness(id),
+    onSuccess: () => {
+      setReadinessPreflightOptions(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+      toast.success("Readiness checks queued");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness checks could not be queued");
+    },
+  });
   const { data: orgSettingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
     enabled: user?.role === "builder",
   });
+  const { data: readinessPolicyResponse } = useQuery({
+    queryKey: queryKeys.settings.prReadinessPolicy(session?.repository_id ?? null),
+    queryFn: () => api.settings.getPRReadinessPolicy(session?.repository_id ?? undefined),
+    enabled: user?.role === "builder" && !!session,
+  });
   const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
-  const builderRequiresReviewBeforePR = user?.role === "builder" && (orgSettings.builder_permissions?.require_review_before_pr ?? true);
+  const builderRequiresReviewBeforePR = user?.role === "builder" && (
+    readinessPolicyResponse?.data.config
+      ? policyRequiresRoleReadiness(readinessPolicyResponse.data.config, "builder")
+      : (orgSettings.builder_permissions?.require_review_before_pr ?? true)
+  );
   const latestReadiness = readinessData?.data.latest;
+  const latestReadinessStale = !!latestReadiness && (
+    latestReadiness.evaluated_workspace_revision !== session?.workspace_revision ||
+    (latestReadiness.evaluated_snapshot_key ?? "") !== (session?.snapshot_key ?? "")
+  );
+  const latestBypassedKeys = new Set((latestReadiness?.bypasses ?? []).flatMap((bypass) => bypass.bypassed_checks));
+  const hasUnbypassedReadinessBlocker = (latestReadiness?.checks ?? []).some((check) => {
+    const key = check.check_key || check.check_type;
+    const enforcement = check.effective_enforcement || check.enforcement_by_role?.builder || check.enforcement;
+    return (check.status === "failed" || check.status === "error") && enforcement === "blocking" && !latestBypassedKeys.has(key);
+  });
   const readinessFresh = !!latestReadiness &&
     latestReadiness.status !== "queued" &&
     latestReadiness.status !== "running" &&
-    latestReadiness.status !== "blocked" &&
     latestReadiness.status !== "failed" &&
     latestReadiness.evaluated_workspace_revision === session?.workspace_revision &&
     (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
-    !(latestReadiness.checks ?? []).some((check) => check.enforcement === "blocking" && check.status === "failed");
+    !hasUnbypassedReadinessBlocker;
   const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
+  const readinessWarningSignature = !latestReadiness
+    ? "missing"
+    : latestReadinessStale
+      ? "stale"
+      : (latestReadiness.checks ?? [])
+        .filter((check) => check.status === "warning" || check.status === "failed" || check.status === "error")
+        .map((check) => `${check.check_key || check.check_type}:${check.status}`)
+        .sort()
+        .join("|") || "none";
+  const readinessPreflightKey = `pr-readiness-preflight:${user?.id ?? "anon"}:${id}:${session?.workspace_revision ?? 0}:${readinessWarningSignature}`;
+  const shouldShowReadinessPreflight = (user?.role === "admin" || user?.role === "member") &&
+    canAttemptCreatePR &&
+    readinessWarningSignature !== "none";
+  const readinessPreflightFindings = latestReadinessStale
+    ? [{ key: "stale", title: "Readiness is stale", summary: "Re-run checks before relying on this result." }]
+    : (latestReadiness?.checks ?? [])
+      .filter((check) => check.status === "warning" || check.status === "failed" || check.status === "error")
+      .map((check) => ({
+        key: check.check_key || check.check_type,
+        title: check.title,
+        summary: check.summary,
+      }));
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
@@ -4566,7 +5038,14 @@ export function SessionDetailContent({ id }: { id: string }) {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
     },
-    onSuccess: (_data, options) => {
+    onSuccess: (data, options) => {
+      if (data.status === "readiness_queued") {
+        setLocalPRActionError(null);
+        setLocalPRState("idle");
+        queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+        toast.success("Readiness checks queued");
+        return;
+      }
       setLocalPRActionError(null);
       setLocalPRState("queued");
       if (options?.resumeToken) {
@@ -4635,6 +5114,14 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(msg, { duration: PR_ERROR_TOAST_DURATION_MS });
     },
   });
+
+  const submitCreatePR = useCallback((options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean }) => {
+    if (shouldShowReadinessPreflight && typeof window !== "undefined" && window.localStorage.getItem(readinessPreflightKey) !== "ack") {
+      setReadinessPreflightOptions(options ?? {});
+      return;
+    }
+    createPRMutation.mutate(options);
+  }, [createPRMutation, readinessPreflightKey, shouldShowReadinessPreflight]);
 
   const startReviewLoopMutation = useMutation({
     mutationFn: () =>
@@ -5609,8 +6096,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       setPRAuthPrompt({ purpose: "create_pr" });
       return;
     }
-    createPRMutation.mutate(undefined);
-  }, [createPRMutation, ghBlocked, localPRState]);
+    submitCreatePR(undefined);
+  }, [createPRMutation.isPending, ghBlocked, localPRState, submitCreatePR]);
 
   const createBranch = useCallback(() => {
     if (localBranchState !== "idle" || createBranchMutation.isPending || !canCreatePR) {
@@ -5631,8 +6118,8 @@ export function SessionDetailContent({ id }: { id: string }) {
       setPRAuthPrompt({ purpose: "create_pr", mergeWhenReady: true });
       return;
     }
-    createPRMutation.mutate({ mergeWhenReady: true });
-  }, [canCreatePR, createPRMutation, ghBlocked, localPRState]);
+    submitCreatePR({ mergeWhenReady: true });
+  }, [canCreatePR, createPRMutation.isPending, ghBlocked, localPRState, submitCreatePR]);
 
   const pushChangesFromKeyboard = useCallback(() => {
     if (localPushState !== "idle" || pushChangesMutation.isPending) {
@@ -5860,7 +6347,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     description: prActionError,
     action: prActionDisabled ? undefined : {
       label: prActionLabel,
-      onClick: () => createPRMutation.mutate(undefined),
+      onClick: () => submitCreatePR(undefined),
     },
   } : null;
   const trimmedDraftTitle = draftTitle.trim();
@@ -5962,7 +6449,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
-                      onClick={() => createPRMutation.mutate(undefined)}
+                      onClick={() => submitCreatePR(undefined)}
                     >
                       {!prActionSpinning && (prState === "failed" || localPRActionError ? (
                         <AlertTriangle className="h-3 w-3" />
@@ -6187,7 +6674,14 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} prStatus={prStatus} />
+          <OverviewTab
+            session={session}
+            members={members}
+            prStatus={prStatus}
+            onOpenChanges={() => setDetailTab("changes")}
+            onOpenReview={() => setReviewSetupOpen(true)}
+            reviewActionDisabled={reviewActionDisabled}
+          />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -6867,6 +7361,55 @@ export function SessionDetailContent({ id }: { id: string }) {
         onOpenChange={setKeyboardHelpOpen}
         canShipPR={canShipPR}
       />
+      <AlertDialog
+        open={readinessPreflightOptions !== null}
+        onOpenChange={(open) => {
+          if (!open) setReadinessPreflightOptions(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Review readiness before creating PR?</AlertDialogTitle>
+            <AlertDialogDescription>
+              PR readiness is {readinessWarningSignature === "missing" ? "missing" : readinessWarningSignature === "stale" ? "stale" : "showing warnings"} for this workspace revision.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {readinessPreflightFindings.length > 0 && (
+            <div className="space-y-2 rounded-md border border-border px-3 py-2 text-xs">
+              {readinessPreflightFindings.map((finding) => (
+                <div key={finding.key}>
+                  <div className="font-medium text-foreground">{finding.title}</div>
+                  {finding.summary ? <div className="text-muted-foreground">{finding.summary}</div> : null}
+                </div>
+              ))}
+            </div>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              variant="outline"
+              disabled={runReadinessMutation.isPending}
+              onClick={() => runReadinessMutation.mutate()}
+            >
+              {runReadinessMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
+              Run checks
+            </Button>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                if (typeof window !== "undefined") {
+                  window.localStorage.setItem(readinessPreflightKey, "ack");
+                }
+                const options = readinessPreflightOptions ?? undefined;
+                setReadinessPreflightOptions(null);
+                createPRMutation.mutate(options);
+              }}
+            >
+              Create PR
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {

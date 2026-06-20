@@ -1,11 +1,24 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
@@ -13,7 +26,7 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
 import { useOrgSettingsAutosave } from "@/hooks/use-org-settings-autosave";
-import type { Organization, OrgSettings, SingleResponse } from "@/lib/types";
+import type { Organization, OrgSettings, PRReadinessCustomCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, Repository, SingleResponse } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
@@ -21,10 +34,114 @@ const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
 
+const ORG_READINESS_SCOPE = "__org__";
+const READINESS_CHECKS = [
+  "freshness",
+  "agent_review_clean",
+  "diff_collected",
+  "test_evidence_present",
+  "risk_flags",
+  "dependency_config_risk",
+  "generated_file_churn",
+  "context_complete",
+  "review_packet_draftable",
+] as const;
+const READINESS_ROLES = [
+  { key: "builder", label: "Builder" },
+  { key: "engineer", label: "Engineer" },
+  { key: "admin", label: "Admin" },
+] as const;
+const READINESS_ENFORCEMENTS: PRReadinessEnforcement[] = ["off", "advisory", "blocking"];
+
+function blankReadinessCustomCheck(): PRReadinessCustomCheck {
+  return {
+    check_key: "",
+    name: "",
+    prompt: "",
+    paths: { include: [], exclude: [] },
+    enforcement: { builder: "advisory", engineer: "advisory", admin: "advisory" },
+  };
+}
+
+function readinessLabel(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function csvToList(value: string) {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function listToCsv(value?: string[]) {
+  return (value ?? []).join(", ");
+}
+
+function toggleRole(roles: string[] | undefined, role: string, enabled: boolean) {
+  const set = new Set(roles ?? []);
+  if (enabled) set.add(role);
+  else set.delete(role);
+  return Array.from(set);
+}
+
+function customCheckProvenanceLabel(check: PRReadinessCustomCheck) {
+  if (check.source === "repo_config") {
+    return ".143/config.json";
+  }
+  if (check.repository_id) {
+    return "repo settings";
+  }
+  return "org settings";
+}
+
+function customCheckEditableInScope(check: PRReadinessCustomCheck, scopedRepositoryId?: string) {
+  if (check.source === "repo_config") {
+    return false;
+  }
+  if (scopedRepositoryId) {
+    return check.repository_id === scopedRepositoryId;
+  }
+  return !check.repository_id;
+}
+
+function defaultReadinessChecks(): PRReadinessPolicyConfig["checks"] {
+  const checks: PRReadinessPolicyConfig["checks"] = {};
+  for (const checkKey of READINESS_CHECKS) {
+    checks[checkKey] = {
+      enforcement: {
+        builder: checkKey === "freshness" || checkKey === "agent_review_clean" ? "blocking" : "advisory",
+        engineer: "advisory",
+        admin: "advisory",
+      },
+    };
+  }
+  return checks;
+}
+
 function PRAuthorshipSettings() {
+  const queryClient = useQueryClient();
+  const [readinessScope, setReadinessScope] = useState(ORG_READINESS_SCOPE);
+  const [editingCheckId, setEditingCheckId] = useState<string | null>(null);
+  const [newCheck, setNewCheck] = useState<PRReadinessCustomCheck>(blankReadinessCustomCheck());
+  const scopedRepositoryId = readinessScope === ORG_READINESS_SCOPE ? undefined : readinessScope;
+  const selectReadinessScope = (scope: string) => {
+    setReadinessScope(scope);
+    setEditingCheckId(null);
+    setNewCheck(blankReadinessCustomCheck());
+  };
   const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
+  });
+  const { data: readinessPolicyResponse } = useQuery({
+    queryKey: queryKeys.settings.prReadinessPolicy(scopedRepositoryId ?? null),
+    queryFn: () => api.settings.getPRReadinessPolicy(scopedRepositoryId),
+  });
+  const { data: customChecksResponse } = useQuery({
+    queryKey: queryKeys.settings.prReadinessCustomChecks(scopedRepositoryId ?? null),
+    queryFn: () => api.settings.listPRReadinessCustomChecks(scopedRepositoryId),
+  });
+  const { data: repositoriesResponse } = useQuery({
+    queryKey: ["repositories", "pr-readiness-settings"],
+    queryFn: () => api.repositories.list(),
   });
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
@@ -34,6 +151,71 @@ function PRAuthorshipSettings() {
   const requireBuilderReview = settings.builder_permissions?.require_review_before_pr ?? true;
 
   const { save, status } = useOrgSettingsAutosave();
+  const readinessPolicy = readinessPolicyResponse?.data.config ?? defaultReadinessPolicyConfig();
+  const customChecks = customChecksResponse?.data ?? [];
+  const repositories = repositoriesResponse?.data ?? [];
+  const updateReadinessPolicy = useMutation({
+    mutationFn: (config: PRReadinessPolicyConfig) => api.settings.updatePRReadinessPolicy(config, scopedRepositoryId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.prReadinessPolicy(scopedRepositoryId ?? null) });
+    },
+  });
+  const createCustomCheck = useMutation({
+    mutationFn: (check: PRReadinessCustomCheck) => api.settings.createPRReadinessCustomCheck({ ...check, repository_id: scopedRepositoryId }),
+    onSuccess: () => {
+      setNewCheck(blankReadinessCustomCheck());
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.prReadinessCustomChecks(scopedRepositoryId ?? null) });
+    },
+  });
+  const updateCustomCheck = useMutation({
+    mutationFn: (check: PRReadinessCustomCheck) => api.settings.updatePRReadinessCustomCheck(check.id!, { ...check, repository_id: scopedRepositoryId }),
+    onSuccess: () => {
+      setEditingCheckId(null);
+      setNewCheck(blankReadinessCustomCheck());
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.prReadinessCustomChecks(scopedRepositoryId ?? null) });
+    },
+  });
+  const deleteCustomCheck = useMutation({
+    mutationFn: (id: string) => api.settings.deletePRReadinessCustomCheck(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.settings.prReadinessCustomChecks(scopedRepositoryId ?? null) });
+    },
+  });
+  const patchReadinessPolicy = (patch: Partial<PRReadinessPolicyConfig>) => {
+    updateReadinessPolicy.mutate({ ...readinessPolicy, ...patch });
+  };
+  const engineerReadinessEnabled = Object.values(readinessPolicy.checks ?? {}).some((check) => check.enforcement?.engineer && check.enforcement.engineer !== "off");
+  const setEngineerReadinessEnabled = (enabled: boolean) => {
+    const checks = { ...(readinessPolicy.checks ?? defaultReadinessChecks()) };
+    for (const checkKey of READINESS_CHECKS) {
+      const existing = checks[checkKey]?.enforcement ?? {};
+      checks[checkKey] = {
+        enforcement: {
+          builder: existing.builder ?? "advisory",
+          engineer: enabled ? "advisory" : "off",
+          admin: existing.admin ?? "advisory",
+        },
+      };
+    }
+    patchReadinessPolicy({ checks });
+  };
+  const setCheckEnforcement = (checkKey: string, role: "builder" | "engineer" | "admin", enforcement: PRReadinessEnforcement) => {
+    const existing = readinessPolicy.checks?.[checkKey]?.enforcement ?? {};
+    const next = {
+      builder: existing.builder ?? "advisory",
+      engineer: existing.engineer ?? "advisory",
+      admin: existing.admin ?? "advisory",
+      [role]: enforcement,
+    };
+    patchReadinessPolicy({
+      checks: {
+        ...(readinessPolicy.checks ?? {}),
+        [checkKey]: {
+          enforcement: next,
+        },
+      },
+    });
+  };
 
   return (
     <section className="space-y-3">
@@ -105,9 +287,9 @@ function PRAuthorshipSettings() {
           </div>
           <div className="flex items-start justify-between gap-4 border-t border-border pt-4">
             <div className="space-y-1">
-              <Label htmlFor="builder-review-before-pr">Require builder review before PR</Label>
+              <Label htmlFor="builder-review-before-pr">Legacy builder review compatibility</Label>
               <p className="text-xs text-muted-foreground">
-                Builders must run Review successfully before creating a pull request.
+                Kept for older clients. Explicit readiness policy controls below take precedence.
               </p>
             </div>
             <Switch
@@ -119,10 +301,318 @@ function PRAuthorshipSettings() {
               aria-label="Require builder review before PR"
             />
           </div>
+          <div className="space-y-4 border-t border-border pt-4">
+            <div className="grid gap-3 sm:grid-cols-[240px_1fr]">
+              <div className="space-y-1">
+                <Label htmlFor="readiness-scope">PR readiness policy</Label>
+                <p className="text-xs text-muted-foreground">Configure org defaults or a repository override.</p>
+              </div>
+              <Select value={readinessScope} onValueChange={selectReadinessScope}>
+                <SelectTrigger id="readiness-scope">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ORG_READINESS_SCOPE}>Organization default</SelectItem>
+                  {repositories.map((repo: Repository) => (
+                    <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="readiness-builders">Enable builder readiness policy</Label>
+                <p className="text-xs text-muted-foreground">When disabled, builder enforcement is treated as off for this policy scope.</p>
+              </div>
+              <Switch
+                id="readiness-builders"
+                checked={readinessPolicy.enabled_for_builders}
+                onCheckedChange={(checked) => patchReadinessPolicy({ enabled_for_builders: checked })}
+              />
+            </div>
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="readiness-engineers">Enable advisory checks for engineers</Label>
+                <p className="text-xs text-muted-foreground">When disabled, engineer enforcement is set to off for every built-in check.</p>
+              </div>
+              <Switch
+                id="readiness-engineers"
+                checked={engineerReadinessEnabled}
+                onCheckedChange={setEngineerReadinessEnabled}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Built-in checks</Label>
+              <div className="space-y-2">
+                {READINESS_CHECKS.map((checkKey) => (
+                  <div key={checkKey} className="grid gap-2 rounded-md border border-border px-3 py-2 md:grid-cols-[1fr_repeat(3,140px)]">
+                    <div className="text-xs font-medium">{readinessLabel(checkKey)}</div>
+                    {READINESS_ROLES.map((role) => (
+                      <div key={`${checkKey}-${role.key}`} className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">{role.label}</Label>
+                        <Select
+                          value={readinessPolicy.checks?.[checkKey]?.enforcement?.[role.key] ?? "advisory"}
+                          onValueChange={(value) => setCheckEnforcement(checkKey, role.key, value as PRReadinessEnforcement)}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {READINESS_ENFORCEMENTS.map((mode) => (
+                              <SelectItem key={mode} value={mode}>{mode}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="space-y-1">
+                <Label htmlFor="readiness-large-files">Large diff files</Label>
+                <Input
+                  id="readiness-large-files"
+                  type="number"
+                  value={readinessPolicy.large_diff_file_threshold ?? 25}
+                  onChange={(event) => patchReadinessPolicy({ large_diff_file_threshold: Number(event.target.value) || 25 })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="readiness-large-lines">Large diff lines</Label>
+                <Input
+                  id="readiness-large-lines"
+                  type="number"
+                  value={readinessPolicy.large_diff_line_threshold ?? 500}
+                  onChange={(event) => patchReadinessPolicy({ large_diff_line_threshold: Number(event.target.value) || 500 })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="readiness-sensitive-paths">Sensitive paths</Label>
+                <Input
+                  id="readiness-sensitive-paths"
+                  value={listToCsv(readinessPolicy.sensitive_paths)}
+                  onChange={(event) => patchReadinessPolicy({ sensitive_paths: csvToList(event.target.value) })}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="readiness-generated-allowed">Allowed generated paths</Label>
+                <Input
+                  id="readiness-generated-allowed"
+                  value={listToCsv(readinessPolicy.generated_file_allowed_paths)}
+                  onChange={(event) => patchReadinessPolicy({ generated_file_allowed_paths: csvToList(event.target.value) })}
+                />
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                <Label htmlFor="readiness-bypass" className="text-xs">Bypass enabled</Label>
+                <Switch
+                  id="readiness-bypass"
+                  checked={readinessPolicy.bypass?.enabled ?? true}
+                  onCheckedChange={(checked) => patchReadinessPolicy({ bypass: { ...(readinessPolicy.bypass ?? { enabled: true }), enabled: checked } })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                <Label htmlFor="readiness-auto-complete" className="text-xs">Auto-run on completion</Label>
+                <Switch
+                  id="readiness-auto-complete"
+                  checked={readinessPolicy.auto_run?.after_session_completion ?? false}
+                  onCheckedChange={(checked) => patchReadinessPolicy({ auto_run: { ...(readinessPolicy.auto_run ?? { after_session_completion: false, on_create_pr: false }), after_session_completion: checked } })}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                <Label htmlFor="readiness-auto-pr" className="text-xs">Auto-run on Create PR</Label>
+                <Switch
+                  id="readiness-auto-pr"
+                  checked={readinessPolicy.auto_run?.on_create_pr ?? false}
+                  onCheckedChange={(checked) => patchReadinessPolicy({ auto_run: { ...(readinessPolicy.auto_run ?? { after_session_completion: false, on_create_pr: false }), on_create_pr: checked } })}
+                />
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2 rounded-md border border-border px-3 py-2">
+                <Label>Bypass roles</Label>
+                <div className="flex flex-wrap gap-3">
+                  {["admin", "member", "builder"].map((role) => (
+                    <label key={role} className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={(readinessPolicy.bypass?.allowed_roles ?? ["admin", "member", "builder"]).includes(role)}
+                        onCheckedChange={(checked) => patchReadinessPolicy({
+                          bypass: {
+                            ...(readinessPolicy.bypass ?? { enabled: true }),
+                            allowed_roles: toggleRole(readinessPolicy.bypass?.allowed_roles ?? ["admin", "member", "builder"], role, checked === true),
+                          },
+                        })}
+                      />
+                      {role === "member" ? "engineer" : role}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="readiness-non-bypassable">Non-bypassable checks</Label>
+                <Input
+                  id="readiness-non-bypassable"
+                  value={listToCsv(readinessPolicy.bypass?.non_bypassable_checks)}
+                  onChange={(event) => patchReadinessPolicy({
+                    bypass: {
+                      ...(readinessPolicy.bypass ?? { enabled: true }),
+                      non_bypassable_checks: csvToList(event.target.value),
+                    },
+                  })}
+                />
+              </div>
+            </div>
+            <div className="space-y-2 rounded-md border border-border px-3 py-2">
+              <div className="flex items-center justify-between">
+                <Label>Bypass counts</Label>
+                <Badge variant="outline">{readinessPolicyResponse?.data.bypass_counts?.total ?? 0} total</Badge>
+              </div>
+              <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_repository} empty="No repository bypasses yet" />
+              <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_check} empty="No check bypasses yet" />
+              <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_user} empty="No user bypasses yet" />
+            </div>
+          </div>
+          <div className="space-y-3 border-t border-border pt-4">
+            <div>
+              <Label>Custom prompt checks</Label>
+              <p className="text-xs text-muted-foreground">Settings checks can be edited here. Repo config checks are shown with provenance and refreshed from `.143/config.json`.</p>
+            </div>
+            <div className="space-y-2">
+              {customChecks.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No custom checks configured.</p>
+              ) : customChecks.map((check) => (
+                <div key={check.id ?? check.check_key} className="flex items-start justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div>
+                    <div className="text-xs font-medium">{check.name}</div>
+                    <div className="text-xs text-muted-foreground">{check.check_key} · {customCheckProvenanceLabel(check)}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    {check.id && customCheckEditableInScope(check, scopedRepositoryId) && (
+                      <Button size="xs" variant="outline" onClick={() => {
+                        setEditingCheckId(check.id!);
+                        setNewCheck(check);
+                      }}>
+                        Edit
+                      </Button>
+                    )}
+                    {check.id && customCheckEditableInScope(check, scopedRepositoryId) && (
+                      <Button size="xs" variant="outline" onClick={() => deleteCustomCheck.mutate(check.id!)}>
+                        Delete
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="grid gap-2">
+              <Input
+                value={newCheck.check_key}
+                onChange={(event) => setNewCheck((current) => ({ ...current, check_key: event.target.value }))}
+                placeholder="check_key"
+              />
+              <Input
+                value={newCheck.name}
+                onChange={(event) => setNewCheck((current) => ({ ...current, name: event.target.value }))}
+                placeholder="Check name"
+              />
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Input
+                  value={listToCsv(newCheck.paths?.include)}
+                  onChange={(event) => setNewCheck((current) => ({ ...current, paths: { ...(current.paths ?? {}), include: csvToList(event.target.value) } }))}
+                  placeholder="Include paths"
+                />
+                <Input
+                  value={listToCsv(newCheck.paths?.exclude)}
+                  onChange={(event) => setNewCheck((current) => ({ ...current, paths: { ...(current.paths ?? {}), exclude: csvToList(event.target.value) } }))}
+                  placeholder="Exclude paths"
+                />
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {READINESS_ROLES.map((role) => (
+                  <Select
+                    key={`custom-${role.key}`}
+                    value={newCheck.enforcement?.[role.key] ?? "advisory"}
+                    onValueChange={(value) => setNewCheck((current) => ({
+                      ...current,
+                      enforcement: { ...(current.enforcement ?? {}), [role.key]: value as PRReadinessEnforcement },
+                    }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={`${role.label} enforcement`} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {READINESS_ENFORCEMENTS.map((mode) => (
+                        <SelectItem key={mode} value={mode}>{role.label}: {mode}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ))}
+              </div>
+              <Textarea
+                value={newCheck.prompt}
+                onChange={(event) => setNewCheck((current) => ({ ...current, prompt: event.target.value }))}
+                rows={4}
+                placeholder="Prompt template"
+              />
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  disabled={(editingCheckId ? updateCustomCheck.isPending : createCustomCheck.isPending) || !newCheck.check_key.trim() || !newCheck.name.trim() || !newCheck.prompt.trim()}
+                  onClick={() => editingCheckId ? updateCustomCheck.mutate({ ...newCheck, id: editingCheckId }) : createCustomCheck.mutate(newCheck)}
+                >
+                  {editingCheckId ? "Save custom check" : "Add custom check"}
+                </Button>
+                {editingCheckId && (
+                  <Button size="sm" variant="outline" onClick={() => {
+                    setEditingCheckId(null);
+                    setNewCheck(blankReadinessCustomCheck());
+                  }}>
+                    Cancel
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
     </section>
   );
+}
+
+function BypassCounts({ counts, empty }: { counts?: Array<{ key: string; count: number }>; empty: string }) {
+  if (!counts || counts.length === 0) {
+    return <p className="text-xs text-muted-foreground">{empty}</p>;
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      {counts.slice(0, 6).map((count) => (
+        <Badge key={count.key} variant="secondary">
+          {count.key}: {count.count}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+function defaultReadinessPolicyConfig(): PRReadinessPolicyConfig {
+  return {
+    enabled_for_builders: true,
+    checks: defaultReadinessChecks(),
+    bypass: {
+      enabled: true,
+      allowed_roles: ["admin", "member", "builder"],
+      scopes: ["completed_blocking_checks"],
+      non_bypassable_checks: [],
+    },
+    auto_run: { after_session_completion: false, on_create_pr: false },
+    sensitive_paths: ["*auth*", "*security*", "*billing*", ".github/workflows/**", "deploy/**", "infra/**", "terraform/**"],
+    generated_file_allowed_paths: [],
+    large_diff_file_threshold: 25,
+    large_diff_line_threshold: 500,
+  };
 }
 
 export default function SettingsPage() {

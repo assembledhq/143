@@ -129,12 +129,15 @@ const (
 	AuditActionCredentialDeleted    AuditAction = "credential.deleted" // #nosec G101 -- not a credential
 
 	// Preview secret bundle actions
-	AuditActionPreviewSecretBundleUpdated  AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleDeleted  AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleRevealed AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleResolved AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
-	AuditActionPreviewSecretBundleFailed   AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
-	AuditActionPreviewPolicyUpdated        AuditAction = "preview_policy.updated"
+	AuditActionPreviewSecretBundleUpdated    AuditAction = "preview_secret_bundle.updated"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleDeleted    AuditAction = "preview_secret_bundle.deleted"  // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleRevealed   AuditAction = "preview_secret_bundle.revealed" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleResolved   AuditAction = "preview_secret_bundle.resolved" // #nosec G101 -- not a credential
+	AuditActionPreviewSecretBundleFailed     AuditAction = "preview_secret_bundle.failed"   // #nosec G101 -- not a credential
+	AuditActionPreviewPolicyUpdated          AuditAction = "preview_policy.updated"
+	AuditActionPRReadinessPolicyUpdated      AuditAction = "pr_readiness_policy.updated"
+	AuditActionPRReadinessCustomCheckUpdated AuditAction = "pr_readiness_custom_check.updated"
+	AuditActionPRReadinessBypassed           AuditAction = "pr_readiness.bypassed"
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -202,7 +205,8 @@ func (a AuditAction) Validate() error {
 		AuditActionIntegrationConnected, AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
-		AuditActionPreviewPolicyUpdated,
+		AuditActionPreviewPolicyUpdated, AuditActionPRReadinessPolicyUpdated, AuditActionPRReadinessCustomCheckUpdated,
+		AuditActionPRReadinessBypassed,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
 		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
@@ -221,34 +225,37 @@ func (a AuditAction) Validate() error {
 type AuditResourceType string
 
 const (
-	AuditResourceSession              AuditResourceType = "session"
-	AuditResourceProject              AuditResourceType = "project"
-	AuditResourceProjectTask          AuditResourceType = "project_task"
-	AuditResourceIssue                AuditResourceType = "issue"
-	AuditResourcePMPlan               AuditResourceType = "pm_plan"
-	AuditResourcePMDecision           AuditResourceType = "pm_decision"
-	AuditResourceSettings             AuditResourceType = "settings"
-	AuditResourceTeamMember           AuditResourceType = "team_member"
-	AuditResourceInvitation           AuditResourceType = "invitation"
-	AuditResourceIntegration          AuditResourceType = "integration"
-	AuditResourceCredential           AuditResourceType = "credential"
-	AuditResourceUser                 AuditResourceType = "user"
-	AuditResourceSessionReviewComment AuditResourceType = "session_review_comment"
-	AuditResourcePMDocument           AuditResourceType = "pm_document"
-	AuditResourcePMDocumentSet        AuditResourceType = "pm_document_set"
-	AuditResourceEvalTask             AuditResourceType = "eval_task"
-	AuditResourceEvalRun              AuditResourceType = "eval_run"
-	AuditResourceEvalBatch            AuditResourceType = "eval_batch"
-	AuditResourceAutomation           AuditResourceType = "automation"
-	AuditResourceOrganization         AuditResourceType = "organization"
-	AuditResourcePreviewSecretBundle  AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
-	AuditResourcePreviewPolicy        AuditResourceType = "preview_policy"
-	AuditResourceAPIClient            AuditResourceType = "api_client"
-	AuditResourceAPIToken             AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
-	AuditResourceCLIToken             AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
-	AuditResourceOrgJoinToken         AuditResourceType = "org_join_token" // #nosec G101 -- audit resource type
-	AuditResourceCLITool              AuditResourceType = "cli_tool"
-	AuditResourceOrgDomain            AuditResourceType = "organization_domain"
+	AuditResourceSession                AuditResourceType = "session"
+	AuditResourceProject                AuditResourceType = "project"
+	AuditResourceProjectTask            AuditResourceType = "project_task"
+	AuditResourceIssue                  AuditResourceType = "issue"
+	AuditResourcePMPlan                 AuditResourceType = "pm_plan"
+	AuditResourcePMDecision             AuditResourceType = "pm_decision"
+	AuditResourceSettings               AuditResourceType = "settings"
+	AuditResourceTeamMember             AuditResourceType = "team_member"
+	AuditResourceInvitation             AuditResourceType = "invitation"
+	AuditResourceIntegration            AuditResourceType = "integration"
+	AuditResourceCredential             AuditResourceType = "credential"
+	AuditResourceUser                   AuditResourceType = "user"
+	AuditResourceSessionReviewComment   AuditResourceType = "session_review_comment"
+	AuditResourcePMDocument             AuditResourceType = "pm_document"
+	AuditResourcePMDocumentSet          AuditResourceType = "pm_document_set"
+	AuditResourceEvalTask               AuditResourceType = "eval_task"
+	AuditResourceEvalRun                AuditResourceType = "eval_run"
+	AuditResourceEvalBatch              AuditResourceType = "eval_batch"
+	AuditResourceAutomation             AuditResourceType = "automation"
+	AuditResourceOrganization           AuditResourceType = "organization"
+	AuditResourcePreviewSecretBundle    AuditResourceType = "preview_secret_bundle" // #nosec G101 -- not a credential
+	AuditResourcePreviewPolicy          AuditResourceType = "preview_policy"
+	AuditResourcePRReadinessPolicy      AuditResourceType = "pr_readiness_policy"
+	AuditResourcePRReadinessCustomCheck AuditResourceType = "pr_readiness_custom_check"
+	AuditResourcePRReadinessBypass      AuditResourceType = "pr_readiness_bypass"
+	AuditResourceAPIClient              AuditResourceType = "api_client"
+	AuditResourceAPIToken               AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
+	AuditResourceCLIToken               AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
+	AuditResourceOrgJoinToken           AuditResourceType = "org_join_token" // #nosec G101 -- audit resource type
+	AuditResourceCLITool                AuditResourceType = "cli_tool"
+	AuditResourceOrgDomain              AuditResourceType = "organization_domain"
 )
 
 func (t AuditResourceType) Validate() error {
@@ -260,6 +267,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy,
+		AuditResourcePRReadinessPolicy, AuditResourcePRReadinessCustomCheck, AuditResourcePRReadinessBypass,
 		AuditResourceAPIClient, AuditResourceAPIToken,
 		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,
 		AuditResourceOrgDomain:

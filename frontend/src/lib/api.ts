@@ -500,9 +500,15 @@ export const api = {
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
     getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
     getReadiness: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/readiness`),
+      get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest`),
     runReadiness: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').PRReadinessRun>>(`/api/v1/sessions/${sessionId}/readiness/run`, {}),
+      post<import('./types').SingleResponse<import('./types').PRReadinessRun>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs`, {}),
+    createReadinessBypass: (sessionId: string, reason: string) =>
+      post<import('./types').SingleResponse<import('./types').PRReadinessBypass>>(`/api/v1/sessions/${sessionId}/pr-readiness-bypasses`, { reason }),
+    getReadinessContext: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').PRReadinessContext>>(`/api/v1/sessions/${sessionId}/pr-readiness-context`),
+    updateReadinessContext: (sessionId: string, issueLessReason: string) =>
+      post<import('./types').SingleResponse<import('./types').PRReadinessContext>>(`/api/v1/sessions/${sessionId}/pr-readiness-context`, { issue_less_reason: issueLessReason }),
     createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean }) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
         ...(options.draft !== undefined ? { draft: options.draft } : {}),
@@ -708,6 +714,27 @@ export const api = {
     getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
+    getPRReadinessPolicy: (repositoryId?: string) =>
+      get<import('./types').SingleResponse<import('./types').PRReadinessResolvedPolicy>>(
+        `/api/v1/pr-readiness-policies${repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''}`,
+      ),
+    updatePRReadinessPolicy: (config: import('./types').PRReadinessPolicyConfig, repositoryId?: string) =>
+      request<import('./types').SingleResponse<unknown>>('/api/v1/pr-readiness-policies', {
+        method: 'PUT',
+        body: JSON.stringify({ repository_id: repositoryId, config }),
+      }),
+    listPRReadinessCustomChecks: (repositoryId?: string) =>
+      get<import('./types').ListResponse<import('./types').PRReadinessCustomCheck>>(
+        `/api/v1/pr-readiness-custom-checks${repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''}`,
+      ),
+    createPRReadinessCustomCheck: (check: import('./types').PRReadinessCustomCheck) =>
+      post<import('./types').SingleResponse<import('./types').PRReadinessCustomCheck>>('/api/v1/pr-readiness-custom-checks', check),
+    updatePRReadinessCustomCheck: (id: string, check: import('./types').PRReadinessCustomCheck) =>
+      request<import('./types').SingleResponse<import('./types').PRReadinessCustomCheck>>(`/api/v1/pr-readiness-custom-checks/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(check),
+      }),
+    deletePRReadinessCustomCheck: (id: string) => del<void>(`/api/v1/pr-readiness-custom-checks/${id}`),
   },
   credentials: {
     list: () => get<import('./types').ListResponse<import('./types').CredentialSummary>>('/api/v1/settings/credentials'),

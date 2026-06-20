@@ -89,6 +89,7 @@ type PRService struct {
 	repos           *db.RepositoryStore
 	jobs            *db.JobStore
 	reviewComments  *db.ReviewCommentStore
+	readiness       *db.PRReadinessStore
 	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
 	sessionMessages *db.SessionMessageStore
@@ -185,6 +186,11 @@ func NewPRService(
 // SetReviewCommentStore sets the review comment store for the feedback loop.
 func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 	s.reviewComments = store
+}
+
+// SetReadinessStore wires PR readiness data for best-effort PR body footers.
+func (s *PRService) SetReadinessStore(store *db.PRReadinessStore) {
+	s.readiness = store
 }
 
 // SetIntegrationStore sets the integration store for installation fallback lookups.
@@ -738,6 +744,15 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
 		return nil, fmt.Errorf("store pull request: %w", err)
+	}
+	if s.readiness != nil {
+		if latest, readinessErr := s.readiness.GetLatestBySession(ctx, run.OrgID, run.ID); readinessErr == nil && latest != nil {
+			if attachErr := s.readiness.AttachBypassesToPullRequest(ctx, run.OrgID, latest.ID, pr.ID); attachErr != nil {
+				s.logger.Warn().Err(attachErr).Str("session_id", run.ID.String()).Str("pull_request_id", pr.ID.String()).Msg("failed to attach PR readiness bypasses to pull request")
+			}
+		} else if readinessErr != nil && !errors.Is(readinessErr, pgx.ErrNoRows) {
+			s.logger.Warn().Err(readinessErr).Str("session_id", run.ID.String()).Msg("failed to load PR readiness for bypass attachment")
+		}
 	}
 	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, headSHA); err != nil {
 		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR creation")
@@ -1592,7 +1607,6 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
 }
-
 
 func (s *PRService) enqueuePRPreviewSurfaceSyncForRepo(ctx context.Context, repo models.Repository, event PullRequestEvent) {
 	if s == nil || s.jobs == nil {
@@ -3880,7 +3894,7 @@ func (s *PRService) generatePRContent(ctx context.Context, token, owner, repoNam
 
 	// Append footer to body.
 	if result.Body != "" {
-		result.Body += "\n\n" + s.formatPRFooterLinks(run)
+		result.Body += "\n\n" + s.formatPRFooter(ctx, run)
 	}
 
 	return result, nil
@@ -4033,7 +4047,7 @@ func (s *PRService) getOrFetchPRTemplate(ctx context.Context, token, owner, repo
 
 // formatPRBody builds the default PR body when no repo template is found.
 // It produces a minimal, scannable body: Summary, optional Issue info, and Test plan.
-func (s *PRService) formatPRBody(_ context.Context, run *models.Session, issue *models.Issue) string {
+func (s *PRService) formatPRBody(ctx context.Context, run *models.Session, issue *models.Issue) string {
 	var b strings.Builder
 
 	b.WriteString("## Summary\n\n")
@@ -4059,13 +4073,105 @@ func (s *PRService) formatPRBody(_ context.Context, run *models.Session, issue *
 	b.WriteString("Validated by automated agent run.\n")
 
 	b.WriteString("\n\n")
-	b.WriteString(s.formatPRFooterLinks(run))
+	b.WriteString(s.formatPRFooter(ctx, run))
 
 	return b.String()
 }
 
+func (s *PRService) formatPRFooter(ctx context.Context, run *models.Session) string {
+	footer := s.formatPRFooterLinks(run)
+	if readiness := s.formatPRReadinessFooter(ctx, run); readiness != "" {
+		footer += "\n\n" + readiness
+	}
+	return footer
+}
+
 func (s *PRService) formatPRFooterLinks(run *models.Session) string {
 	return fmt.Sprintf("[143.dev](https://143.dev) | [session %s](%s)", run.ID.String()[:8], s.sessionURL(run.ID))
+}
+
+func (s *PRService) formatPRReadinessFooter(ctx context.Context, run *models.Session) string {
+	if s == nil || s.readiness == nil || run == nil {
+		return ""
+	}
+	latest, err := s.readiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load PR readiness footer")
+		}
+		return "<!-- 143 readiness -->\n**143 readiness:** not available for this revision."
+	}
+	if latest.EvaluatedWorkspaceRevision != run.WorkspaceGeneration || stringPtr(latest.EvaluatedSnapshotKey) != stringPtr(run.SnapshotKey) {
+		return "<!-- 143 readiness -->\n**143 readiness:** not available for this revision."
+	}
+	passed, warnings, blockers := 0, 0, 0
+	for _, check := range latest.Checks {
+		switch check.Status {
+		case models.PRReadinessCheckStatusPassed:
+			passed++
+		case models.PRReadinessCheckStatusWarning:
+			warnings++
+		case models.PRReadinessCheckStatusFailed, models.PRReadinessCheckStatusError:
+			if check.Enforcement == models.PRReadinessEnforcementBlocking || check.EnforcementByRole.EnforcementFor(models.RoleBuilder) == models.PRReadinessEnforcementBlocking {
+				blockers++
+			} else {
+				warnings++
+			}
+		}
+	}
+	lines := []string{
+		"<!-- 143 readiness -->",
+		fmt.Sprintf("**143 readiness:** %s (workspace revision %d; %d passed, %d warnings, %d blockers).", latest.Summary, latest.EvaluatedWorkspaceRevision, passed, warnings, blockers),
+	}
+	if bypassed := readinessBypassedChecks(latest.Bypasses); len(bypassed) > 0 {
+		lines = append(lines, "Bypassed: "+strings.Join(bypassed, ", "))
+		if reasons := readinessBypassReasons(latest.Bypasses); len(reasons) > 0 {
+			lines = append(lines, "Bypass reason: "+strings.Join(reasons, "; "))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func readinessBypassedChecks(bypasses []models.PRReadinessBypass) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, bypass := range bypasses {
+		for _, check := range bypass.BypassedChecks {
+			if _, ok := seen[check]; ok {
+				continue
+			}
+			seen[check] = struct{}{}
+			out = append(out, check)
+		}
+	}
+	return out
+}
+
+func readinessBypassReasons(bypasses []models.PRReadinessBypass) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, bypass := range bypasses {
+		reason := strings.TrimSpace(bypass.Reason)
+		if reason == "" {
+			continue
+		}
+		if len(reason) > 140 {
+			reason = reason[:137] + "..."
+		}
+		if _, ok := seen[reason]; ok {
+			continue
+		}
+		seen[reason] = struct{}{}
+		out = append(out, reason)
+	}
+	return out
+}
+
+func stringPtr(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func buildLabels(issue *models.Issue) []string {

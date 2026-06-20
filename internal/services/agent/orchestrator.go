@@ -335,6 +335,13 @@ type UserLookup interface {
 	GetByID(ctx context.Context, orgID, userID uuid.UUID) (models.User, error)
 }
 
+type PRReadinessStore interface {
+	MaterializeRepoConfigChecks(ctx context.Context, orgID, repositoryID uuid.UUID, checks []models.PRReadinessCustomCheck) error
+	ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, legacyRequireReviewBeforePR *bool) (models.PRReadinessResolvedPolicy, error)
+	GetLatestBySession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PRReadinessRun, error)
+	CreateRun(ctx context.Context, run *models.PRReadinessRun) error
+}
+
 // SandboxAuthServer is the host-side socket server that issues fresh GitHub
 // credentials to the in-sandbox 143-tools helper. Defined as an interface
 // so tests can stub it without spinning real Unix sockets.
@@ -565,6 +572,7 @@ type Orchestrator struct {
 	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
 	issues                     IssueStore
 	repositories               RepositoryStore
+	prReadiness                PRReadinessStore
 	orgs                       OrgStore
 	jobs                       JobStore
 	github                     GitHubTokenProvider
@@ -807,6 +815,7 @@ type OrchestratorConfig struct {
 	AutomationGoalImprovements AutomationGoalImprovementUpdater // optional — updates goal-improvement proposals on analysis session completion
 	Issues                     IssueStore
 	Repositories               RepositoryStore
+	PRReadiness                PRReadinessStore
 	Orgs                       OrgStore
 	Jobs                       JobStore
 	GitHub                     GitHubTokenProvider
@@ -901,6 +910,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		automationGoalImprovements: cfg.AutomationGoalImprovements,
 		issues:                     cfg.Issues,
 		repositories:               cfg.Repositories,
+		prReadiness:                cfg.PRReadiness,
 		orgs:                       cfg.Orgs,
 		jobs:                       cfg.Jobs,
 		github:                     cfg.GitHub,
@@ -1203,7 +1213,7 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 // commands before the agent starts. Missing or malformed config stays
 // best-effort for compatibility. Explicit bootstrap command failures are
 // returned because the workspace is not ready for normal agent work.
-func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
+func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger, sessions ...*models.Session) error {
 	if sandbox == nil || workDir == "" {
 		return nil
 	}
@@ -1211,12 +1221,14 @@ func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sa
 	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
+			o.materializeRepoReadinessChecks(ctx, sessions, nil, log, cfgPath)
 			return nil
 		}
 		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
 		return nil
 	}
 	if len(raw) == 0 {
+		o.materializeRepoReadinessChecks(ctx, sessions, nil, log, cfgPath)
 		return nil
 	}
 	cfg, err := repoconfig.Parse(raw)
@@ -1224,6 +1236,7 @@ func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sa
 		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
 		return nil
 	}
+	o.materializeRepoReadinessChecks(ctx, sessions, repoConfigReadinessChecks(cfg.PRReadiness.Checks), log, cfgPath)
 	if len(cfg.Dependencies) > 0 {
 		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
 			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
@@ -1231,6 +1244,99 @@ func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sa
 		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
 	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+}
+
+func (o *Orchestrator) materializeRepoReadinessChecks(ctx context.Context, sessions []*models.Session, checks []models.PRReadinessCustomCheck, log zerolog.Logger, cfgPath string) {
+	if o.prReadiness == nil || len(sessions) == 0 || sessions[0] == nil || sessions[0].RepositoryID == nil {
+		return
+	}
+	if err := o.prReadiness.MaterializeRepoConfigChecks(ctx, sessions[0].OrgID, *sessions[0].RepositoryID, checks); err != nil {
+		log.Warn().Err(err).Str("path", cfgPath).Msg("failed to materialize repo PR readiness checks")
+	}
+}
+
+func repoConfigReadinessChecks(checks []repoconfig.PRReadinessCheckConfig) []models.PRReadinessCustomCheck {
+	out := make([]models.PRReadinessCustomCheck, 0, len(checks))
+	for _, check := range checks {
+		out = append(out, models.PRReadinessCustomCheck{
+			CheckKey: check.ID,
+			Name:     check.Name,
+			Prompt:   check.Prompt,
+			PathFilters: models.PRReadinessPathFilter{
+				Include: check.Paths.Include,
+				Exclude: check.Paths.Exclude,
+			},
+			Enforcement: check.Enforcement,
+			Source:      models.PRReadinessCustomCheckSourceRepoConfig,
+			Active:      true,
+		})
+	}
+	return out
+}
+
+func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, run *models.Session, result *models.SessionResult, snapshotKey string, log zerolog.Logger) {
+	if o == nil || o.prReadiness == nil || o.jobs == nil || run == nil || result == nil {
+		return
+	}
+	if run.RepositoryID == nil || strings.TrimSpace(snapshotKey) == "" || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
+		return
+	}
+	resolved, err := o.prReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID, o.legacyPRReadinessBuilderSetting(ctx, run.OrgID))
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to resolve PR readiness policy for completion auto-run")
+		return
+	}
+	if !resolved.Config.AutoRun.AfterSessionCompletion {
+		return
+	}
+	latest, err := o.prReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load latest PR readiness before completion auto-run")
+		return
+	}
+	if err == nil && latest != nil &&
+		latest.EvaluatedWorkspaceRevision == run.WorkspaceGeneration &&
+		derefString(latest.EvaluatedSnapshotKey) == snapshotKey {
+		return
+	}
+	readinessRun := &models.PRReadinessRun{
+		OrgID:                      run.OrgID,
+		SessionID:                  run.ID,
+		RepositoryID:               run.RepositoryID,
+		Status:                     models.PRReadinessRunStatusQueued,
+		EvaluatedWorkspaceRevision: run.WorkspaceGeneration,
+		EvaluatedSnapshotKey:       &snapshotKey,
+		Summary:                    "Queued",
+		TriggeredByUserID:          run.TriggeredByUserID,
+	}
+	if err := o.prReadiness.CreateRun(ctx, readinessRun); err != nil {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to create completion PR readiness run")
+		return
+	}
+	payload := map[string]string{
+		"org_id":       run.OrgID.String(),
+		"session_id":   run.ID.String(),
+		"readiness_id": readinessRun.ID.String(),
+	}
+	dedupeKey := "pr_readiness:" + run.ID.String()
+	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Str("readiness_id", readinessRun.ID.String()).Msg("failed to enqueue completion PR readiness run")
+	}
+}
+
+func (o *Orchestrator) legacyPRReadinessBuilderSetting(ctx context.Context, orgID uuid.UUID) *bool {
+	if o == nil || o.orgs == nil {
+		return nil
+	}
+	org, err := o.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return nil
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return nil
+	}
+	return settings.BuilderPermissions.RequireReviewBeforePR
 }
 
 func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
@@ -2705,7 +2811,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		// session resume. Skipped when the auth socket isn't bound (legacy
 		// or non-integration path).
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log, run); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
 		}
@@ -2995,6 +3101,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			log.Warn().Err(err).Msg("failed to persist snapshot metadata")
 		}
 	}
+	o.enqueuePRReadinessAfterCompletion(ctx, run, runResult, snapshotKey, log)
 
 	logAgentRunFinished(log, run, string(status), runStartedAt, func(event *zerolog.Event) {
 		event.
@@ -3974,7 +4081,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		if !reusedExisting {
 			o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-			if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+			if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log, session); err != nil {
 				o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
 				return fmt.Errorf("prepare repository: %w", err)
 			}
@@ -4108,7 +4215,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		authBillingMode = authMode
 		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
-		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log); err != nil {
+		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log, session); err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
 		}

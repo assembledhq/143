@@ -7516,6 +7516,87 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 	}
 }
 
+func TestSessionHandler_PutReadinessPolicyRejectsRepositoryOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	handler.SetReadinessStore(db.NewPRReadinessStore(mock))
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}))
+
+	body, err := json.Marshal(map[string]any{
+		"repository_id": repoID,
+		"config":        models.DefaultPRReadinessPolicyConfig(),
+	})
+	require.NoError(t, err, "readiness policy body should marshal")
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/pr-readiness-policies", strings.NewReader(string(body)))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PutReadinessPolicy(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "PutReadinessPolicy should reject repository IDs outside the active org")
+	require.Contains(t, w.Body.String(), "REPOSITORY_NOT_FOUND", "PutReadinessPolicy should report repository ownership failures as not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository ownership lookup should be required before saving policy")
+}
+
+func TestSessionHandler_CreateReadinessCustomCheckRejectsRepositoryOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	handler.SetReadinessStore(db.NewPRReadinessStore(mock))
+
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}))
+
+	body, err := json.Marshal(models.PRReadinessCustomCheck{
+		RepositoryID: &repoID,
+		CheckKey:     "repo_guard",
+		Name:         "Repo guard",
+		Prompt:       "Check repository-specific policy.",
+		Enforcement: models.PRReadinessEnforcementByRole{
+			Builder:  models.PRReadinessEnforcementBlocking,
+			Engineer: models.PRReadinessEnforcementAdvisory,
+			Admin:    models.PRReadinessEnforcementAdvisory,
+		},
+	})
+	require.NoError(t, err, "readiness custom check body should marshal")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/pr-readiness-custom-checks", strings.NewReader(string(body)))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.CreateReadinessCustomCheck(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "CreateReadinessCustomCheck should reject repository IDs outside the active org")
+	require.Contains(t, w.Body.String(), "REPOSITORY_NOT_FOUND", "CreateReadinessCustomCheck should report repository ownership failures as not found")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository ownership lookup should be required before saving custom checks")
+}
+
 func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	t.Parallel()
 
