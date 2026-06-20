@@ -68,9 +68,9 @@ describe("Agent settings page", () => {
 
     expect(screen.getByText("Coding agents")).toBeInTheDocument();
     expect((await screen.findAllByText("Team seat A")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Organization-wide auths" })).toBeInTheDocument();
+    expect(screen.getByText("Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
-    expect(screen.getByText("The stack runs from top to bottom. Move the auth you want to prefer higher in the list.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
     expect(screen.queryByLabelText("Max concurrent sessions")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Session max time (minutes)")).not.toBeInTheDocument();
@@ -86,7 +86,7 @@ describe("Agent settings page", () => {
     renderWithProviders(<AgentPage />);
 
     expect(await screen.findByText("Read-only view. Only admins can add, edit, or reorder coding auths.")).toBeInTheDocument();
-    expect(screen.getByText("Personal auths run first for each user. If none are available, sessions fall back to this org Coding agents list.")).toBeInTheDocument();
+    expect(screen.getByText("Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom.")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Personal auths" })).toHaveAttribute("href", "/settings/account");
     expect(screen.queryByRole("link", { name: "Sandboxes" })).not.toBeInTheDocument();
   });
