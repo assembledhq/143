@@ -192,13 +192,26 @@ export function VerifiedDomainsSection() {
             {githubOrgsLoading ? (
               <div className="p-4 text-xs text-muted-foreground">Loading GitHub organizations...</div>
             ) : githubOrgs.length === 0 ? (
-              <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
-                <Github className="h-3.5 w-3.5" />
-                <span>
-                  {githubConnected
-                    ? "Install the GitHub App on a GitHub organization to enable organization-based auto-join."
-                    : "Connect GitHub to enable organization-based auto-join."}
-                </span>
+              <div className="flex flex-col gap-2 px-4 py-3 text-xs text-muted-foreground">
+                <div className="flex items-start gap-2">
+                  <Github className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    {githubConnected
+                      ? "GitHub is connected, but the app isn't installed on a GitHub organization yet. Auto-join only works when the app is installed on the organization account itself — not a personal account, and not just on individual repos — and is granted permission to read organization members. Re-run the install below and pick your organization as the target."
+                      : "Connect GitHub and install the app on your organization so members can auto-join. Choose your organization (not a personal account) as the install target and grant access to read members."}
+                  </span>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 self-start text-xs"
+                  onClick={() => api.integrations.loginGitHub()}
+                >
+                  <Github className="mr-1.5 h-3 w-3" />
+                  {githubConnected ? "Install on a GitHub organization" : "Connect GitHub"}
+                  <ExternalLink className="ml-1.5 h-3 w-3" />
+                </Button>
               </div>
             ) : (
               githubOrgs.map((org) => {
