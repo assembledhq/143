@@ -38,7 +38,7 @@ Logs are shipped via Vector to a VictoriaLogs instance and visualized in Grafana
 
 **Error handling**: Never discard errors with `_ =` in Go or empty `.catch()` in TypeScript. If an error cannot be propagated (e.g., best-effort cleanup after the main operation succeeded), log it at `Warn` level with context. In HTTP handlers, use `zerolog.Ctx(r.Context())` to get the request-scoped logger (enriched with org_id, user_id, request_id by the `LogContext` middleware). In services, use `s.logger`. If an error CAN be propagated, return it — prefer bubbling errors to the top of the call stack. Transaction rollback in `defer` is the one exception: `defer func() { _ = tx.Rollback(ctx) }()` is acceptable because rollback after commit is a no-op. Frontend: at minimum log with `console.error`; prefer surfacing errors through TanStack Query error states.
 
-**Multi-tenancy**: Every tenant-scoped table has an `org_id uuid NOT NULL` column. Every query MUST filter by `org_id`. Auth middleware extracts org from the session and sets it in request context. Missing an `org_id` filter is a data isolation bug. FKs are the default; only reviewed hot append-only/event/log/cache/telemetry/runtime tables may omit parent FKs. See `docs/design/implemented/96-foreign-key-policy-and-hot-table-audit.md`.
+**Multi-tenancy**: Every tenant-scoped table has an `org_id uuid NOT NULL` column. Every query MUST filter by `org_id`. Auth middleware extracts org from the session and sets it in request context. Missing an `org_id` filter is a data isolation bug. FKs are the default; only reviewed hot append-only/event/log/cache/telemetry/runtime tables may omit parent FKs.
 
 Two lints enforce this, both run in CI via `make lint-tenancy`:
 
