@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as landingCopy from "./landing-copy";
-import { integrations, platformLayers } from "./landing-copy";
+import { codingAgents, integrations, platformLayers } from "./landing-copy";
 
 describe("landing copy", () => {
   it("keeps hero copy focused instead of exposing summary cards", () => {
@@ -22,8 +22,20 @@ describe("landing copy", () => {
       "/integrations/linear.svg",
       "/integrations/slack.svg",
       "/integrations/sentry.svg",
+      "/integrations/pagerduty.svg",
       "/integrations/notion.svg",
       "/integrations/circleci.svg",
+      "/integrations/mezmo.svg",
+    ]);
+  });
+
+  it("lists the supported coding agents with their brand logos", () => {
+    expect(codingAgents.map((agent) => `${agent.name}:${agent.logo}`)).toEqual([
+      "Codex:/agents/codex.svg",
+      "Claude Code:/agents/claude_code.svg",
+      "Amp:/agents/amp.svg",
+      "Pi:/agents/pi.svg",
+      "OpenCode:/agents/opencode.svg",
     ]);
   });
 
