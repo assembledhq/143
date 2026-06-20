@@ -144,7 +144,7 @@ export default function Why143Page() {
                 color: isDark ? "rgba(255,255,255,0.25)" : "rgba(0,0,0,0.35)",
               }}
             >
-              Why 143
+              Why &ldquo;143&rdquo;?
             </p>
             <h1
               className={`text-2xl sm:text-3xl font-light tracking-tight ${isDark ? "text-white" : "text-slate-900"}`}

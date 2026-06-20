@@ -61,7 +61,7 @@ export default function Footer({ isDark }: FooterProps) {
                     href="/why-143"
                     className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
-                    Why 143
+                    Why &ldquo;143&rdquo;?
                   </Link>
                 </li>
                 <li>
