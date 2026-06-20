@@ -25,6 +25,7 @@ import {
   Plus,
   Minus,
   Square,
+  Settings2,
   PanelRightOpen,
   PanelRightClose,
   Clock,
@@ -647,83 +648,18 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
   );
 }
 
-function PRReadinessCard({ session }: { session: Session }) {
-  const queryClient = useQueryClient();
-  const readinessQuery = useQuery({
-    queryKey: queryKeys.sessions.readiness(session.id),
-    queryFn: () => api.sessions.getReadiness(session.id),
-    refetchInterval: (query) => {
-      const status = query.state.data?.data.latest?.status;
-      return status === "queued" || status === "running" ? pollMs(3000) : false;
-    },
-  });
-  const readiness = readinessQuery.data?.data.latest;
-  const runMutation = useMutation({
-    mutationFn: () => api.sessions.runReadiness(session.id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(session.id) });
-      toast.success("Readiness checks started");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness checks could not be started");
-    },
-  });
-  const status = readiness?.status;
-  const running = status === "queued" || status === "running" || runMutation.isPending;
-  const checks = readiness?.checks ?? [];
-  const passed = checks.filter((check) => check.status === "passed");
-  const warnings = checks.filter((check) => check.status === "warning" || (check.status === "failed" && check.enforcement !== "blocking"));
-  const blocked = checks.filter((check) => check.status === "failed" && check.enforcement === "blocking");
-  const stale = readiness && (
+function groupReadinessChecks(checks: PRReadinessCheck[]) {
+  return {
+    passed: checks.filter((check) => check.status === "passed"),
+    warnings: checks.filter((check) => check.status === "warning" || (check.status === "failed" && check.enforcement !== "blocking")),
+    blocked: checks.filter((check) => check.status === "failed" && check.enforcement === "blocking"),
+  };
+}
+
+function readinessIsStale(readiness: PRReadinessRun | undefined, session: Session) {
+  return !!readiness && (
     readiness.evaluated_workspace_revision !== session.workspace_revision ||
     (readiness.evaluated_snapshot_key ?? "") !== (session.snapshot_key ?? "")
-  );
-  const title = !readiness
-    ? "Not checked yet"
-    : running
-      ? "Checking..."
-      : stale
-        ? "Stale after latest changes"
-        : readiness.summary || readinessStatusLabel(readiness.status);
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle className="text-xs flex items-center gap-2">
-            {readinessStatusIcon(readiness, stale, running)}
-            PR readiness
-          </CardTitle>
-          <Button
-            size="xs"
-            variant={readiness ? "outline" : "default"}
-            onClick={() => runMutation.mutate()}
-            disabled={running || session.status === "running"}
-          >
-            {runMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
-            {readiness ? "Re-run" : "Run readiness checks"}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3 text-xs">
-        <div className="font-medium text-foreground">{title}</div>
-        {running && (
-          <div className="space-y-1 text-muted-foreground">
-            <div>Collecting diff</div>
-            <div>Running agent review</div>
-            <div>Checking test evidence</div>
-            <div>Checking risk signals</div>
-          </div>
-        )}
-        {!running && readiness && (
-          <div className="space-y-3">
-            <ReadinessCheckGroup title="Passed" checks={passed} empty="None" />
-            <ReadinessCheckGroup title="Warnings" checks={warnings} empty="None" />
-            <ReadinessCheckGroup title="Blocked" checks={blocked} empty="None" />
-          </div>
-        )}
-      </CardContent>
-    </Card>
   );
 }
 
@@ -814,8 +750,6 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
   return (
     <div className="space-y-4">
-      <PRReadinessCard session={session} />
-
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
         <Card className="border-l-2 border-l-success bg-success/5">
@@ -3489,7 +3423,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
-  const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
+  const [reviewConfigOpen, setReviewConfigOpen] = useState(false);
   const [reviewPasses, setReviewPasses] = useState(2);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
@@ -4636,6 +4570,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const runReadinessMutation = useMutation({
+    mutationFn: () => api.sessions.runReadiness(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+      toast.success("Readiness checks started");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness checks could not be started");
+    },
+  });
+
   const startReviewLoopMutation = useMutation({
     mutationFn: () =>
       api.sessions.startReviewLoop(id, {
@@ -4646,7 +4591,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }),
     onSuccess: (response) => {
       toast.success("Review loop started");
-      setReviewSetupOpen(false);
+      setReviewConfigOpen(false);
       const reviewThread = buildReviewLoopThreadPreview(response.data, session);
       if (reviewThread) {
         setPendingThreadPreview(reviewThread);
@@ -4677,6 +4622,21 @@ export function SessionDetailContent({ id }: { id: string }) {
   const reviewActionDisabledReason = startReviewLoopMutation.isPending
     ? "Starting review loop..."
     : reviewUnavailableReason;
+
+  const readinessRunning =
+    latestReadiness?.status === "queued" ||
+    latestReadiness?.status === "running" ||
+    runReadinessMutation.isPending;
+  const readinessStale = !!session && readinessIsStale(latestReadiness, session);
+  const readinessGroups = groupReadinessChecks(latestReadiness?.checks ?? []);
+  const readinessHeadline = !latestReadiness
+    ? "Not reviewed yet"
+    : readinessRunning
+      ? "Checking…"
+      : readinessStale
+        ? "Stale after latest changes"
+        : latestReadiness.summary || readinessStatusLabel(latestReadiness.status);
+  const readinessCheckDisabled = readinessRunning || isRunning;
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -6064,42 +6024,83 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
+          {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                        <ClipboardList className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground">Review work</p>
-                        <p className="text-xs text-muted-foreground">
-                          Review and fix with a selected agent before creating a PR.
-                        </p>
-                      </div>
+              <CardContent className="space-y-3 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      {reviewLoopRunning || readinessRunning ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        readinessStatusIcon(latestReadiness, readinessStale, false)
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        {reviewLoopRunning
+                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`
+                          : "Review before PR"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {reviewLoopRunning
+                          ? `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`
+                          : readinessHeadline}
+                      </p>
                     </div>
                   </div>
-                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                  <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="w-full gap-1.5 sm:w-auto"
-                      disabled={reviewActionDisabled}
-                      title={reviewActionDisabledReason}
-                      onClick={() => setReviewSetupOpen(true)}
+                      disabled={readinessCheckDisabled}
+                      onClick={() => runReadinessMutation.mutate()}
                     >
-                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                      {readinessRunning ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
-                        <ClipboardList className="h-3.5 w-3.5" />
+                        <RefreshCw className="h-3.5 w-3.5" />
                       )}
-                      Review
+                      {latestReadiness ? "Re-check" : "Check readiness"}
                     </Button>
-                  </DisabledTooltip>
+                    {canUseNativeReviewLoop ? (
+                      <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="w-full gap-1.5 sm:w-auto"
+                          disabled={reviewActionDisabled}
+                          title={reviewActionDisabledReason}
+                          onClick={() => setReviewConfigOpen(true)}
+                        >
+                          {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Settings2 className="h-3.5 w-3.5" />
+                          )}
+                          Review &amp; fix
+                        </Button>
+                      </DisabledTooltip>
+                    ) : null}
+                  </div>
                 </div>
+                {readinessRunning ? (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <div>Collecting diff</div>
+                    <div>Running agent review</div>
+                    <div>Checking test evidence</div>
+                    <div>Checking risk signals</div>
+                  </div>
+                ) : null}
+                {!readinessRunning && latestReadiness ? (
+                  <div className="space-y-3 text-xs">
+                    <ReadinessCheckGroup title="Passed" checks={readinessGroups.passed} empty="None" />
+                    <ReadinessCheckGroup title="Warnings" checks={readinessGroups.warnings} empty="None" />
+                    <ReadinessCheckGroup title="Blocked" checks={readinessGroups.blocked} empty="None" />
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           ) : null}
@@ -6131,7 +6132,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
                   title: reviewActionDisabledReason,
-                  onClick: () => setReviewSetupOpen(true),
+                  onClick: () => setReviewConfigOpen(true),
                 } : undefined}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
@@ -6529,7 +6530,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
-      <Dialog open={reviewSetupOpen} onOpenChange={setReviewSetupOpen}>
+      <Dialog open={reviewConfigOpen} onOpenChange={setReviewConfigOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Review</DialogTitle>
@@ -6650,7 +6651,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               type="button"
               variant="outline"
               disabled={startReviewLoopMutation.isPending}
-              onClick={() => setReviewSetupOpen(false)}
+              onClick={() => setReviewConfigOpen(false)}
             >
               Cancel
             </Button>
