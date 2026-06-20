@@ -58,6 +58,14 @@ export default function Footer({ isDark }: FooterProps) {
                 </li>
                 <li>
                   <Link
+                    href="/why-143"
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                  >
+                    Why 143
+                  </Link>
+                </li>
+                <li>
+                  <Link
                     href="/docs"
                     className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
