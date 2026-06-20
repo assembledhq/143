@@ -63,6 +63,7 @@ describe("PreviewSettingsPage", () => {
             repository_full_name: "assembledhq/143",
             auto_mode: "off",
             session_prewarm_mode: "off",
+            session_prewarm_untrusted_fork: false,
             open_pr_count: 12,
             updated_at: null,
           },
@@ -71,6 +72,7 @@ describe("PreviewSettingsPage", () => {
             repository_full_name: "assembledhq/docs",
             auto_mode: "warm",
             session_prewarm_mode: "cache",
+            session_prewarm_untrusted_fork: false,
             open_pr_count: 3,
             updated_at: "2026-06-08T12:00:00Z",
           },
@@ -135,6 +137,7 @@ describe("PreviewSettingsPage", () => {
             repository_full_name: "assembledhq/143",
             auto_mode: "warm",
             session_prewarm_mode: "off",
+            session_prewarm_untrusted_fork: false,
             open_pr_count: 5,
             updated_at: "2026-06-08T12:00:00Z",
           },
@@ -174,6 +177,49 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
+  it("autosaves untrusted fork session prewarm policy when speculative slots are configured", async () => {
+    let savedPolicy: unknown;
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Assembled",
+          settings: { preview_auto_pool_max_active: 4, preview_session_prewarm_max_active: 2 },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "smart",
+            session_prewarm_untrusted_fork: false,
+            open_pr_count: 5,
+            updated_at: "2026-06-08T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+      http.put("*/api/v1/repositories/repo-1/preview-policy", async ({ request }) => {
+        savedPolicy = await request.json();
+        return HttpResponse.json({ data: { id: "policy-1", session_prewarm_untrusted_fork: true } });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    await userEvent.click(await screen.findByRole("switch", { name: /allow session prewarm for untrusted forks in assembledhq\/143/i }));
+
+    await waitFor(() => {
+      expect(savedPolicy).toEqual({ session_prewarm_untrusted_fork: true });
+    });
+  });
+
   it("keeps auto-preview rows usable in the mobile stacked layout", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -185,6 +231,7 @@ describe("PreviewSettingsPage", () => {
             repository_full_name: "assembledhq/143",
             auto_mode: "warm",
             session_prewarm_mode: "off",
+            session_prewarm_untrusted_fork: false,
             open_pr_count: 5,
             updated_at: "2026-06-08T12:00:00Z",
           },

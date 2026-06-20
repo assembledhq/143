@@ -87,6 +87,14 @@ type WorkerLoadSample struct {
 	RunningSessionJobs    int64
 }
 
+type SandboxCapacitySummary struct {
+	FreshWorkers      int
+	WorkersWithSlots  int
+	LiveSandboxes     int
+	ReservedSandboxes int
+	MaxSandboxes      int
+}
+
 func NewJobStore(db DBTX) *JobStore {
 	return &JobStore{db: db, logger: zerolog.Nop()}
 }
@@ -1256,6 +1264,41 @@ func (s *JobStore) SelectWorkerWithSandboxCapacity(ctx context.Context, excludeN
 		return nil, fmt.Errorf("select worker with sandbox capacity: %w", err)
 	}
 	return &nodeID, nil
+}
+
+// SandboxCapacitySummary returns best-effort aggregate sandbox capacity from
+// fresh worker heartbeat metadata.
+// lint:allow-no-orgid reason="cross-org worker capacity summary for speculative prewarm classification"
+func (s *JobStore) SandboxCapacitySummary(ctx context.Context) (SandboxCapacitySummary, error) {
+	var summary SandboxCapacitySummary
+	err := s.db.QueryRow(ctx, `
+		WITH fresh_workers AS (
+			SELECT
+				COALESCE(NULLIF(metadata->>'live_sandbox_count', '')::int, 0) AS live_sandboxes,
+				COALESCE(NULLIF(metadata->>'reserved_sandbox_count', '')::int, 0) AS reserved_sandboxes,
+				COALESCE(NULLIF(metadata->>'max_active_sandboxes', '')::int, 0) AS max_active_sandboxes
+			FROM nodes
+			WHERE mode IN ('worker', 'all')
+			  AND status = 'active'
+			  AND last_heartbeat_at >= @dead_before
+			  AND COALESCE(metadata->>'live_sandbox_count_error', '') = ''
+		)
+		SELECT
+			COUNT(*)::int AS fresh_workers,
+			COUNT(*) FILTER (
+				WHERE max_active_sandboxes > 0
+				  AND live_sandboxes + reserved_sandboxes + 2 <= max_active_sandboxes
+			)::int AS workers_with_slots,
+			COALESCE(SUM(live_sandboxes), 0)::int AS live_sandboxes,
+			COALESCE(SUM(reserved_sandboxes), 0)::int AS reserved_sandboxes,
+			COALESCE(SUM(max_active_sandboxes), 0)::int AS max_sandboxes
+		FROM fresh_workers`,
+		pgx.NamedArgs{"dead_before": time.Now().Add(-nodeDeadHeartbeatThreshold)},
+	).Scan(&summary.FreshWorkers, &summary.WorkersWithSlots, &summary.LiveSandboxes, &summary.ReservedSandboxes, &summary.MaxSandboxes)
+	if err != nil {
+		return SandboxCapacitySummary{}, fmt.Errorf("sandbox capacity summary: %w", err)
+	}
+	return summary, nil
 }
 
 func (s *JobStore) execLeaseTerminalUpdate(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {

@@ -393,6 +393,7 @@ export interface PreviewPolicySummary {
   repository_full_name: string;
   auto_mode: "off" | "warm" | "on";
   session_prewarm_mode: "off" | "cache" | "smart";
+  session_prewarm_untrusted_fork: boolean;
   open_pr_count: number;
   updated_at?: string;
 }

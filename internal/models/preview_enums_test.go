@@ -396,7 +396,7 @@ func TestPreviewPolicyEnumsMatchMigrationChecks(t *testing.T) {
 func TestSessionPreviewPrewarmEnumsMatchMigrationChecks(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000205_session_preview_prewarm_policy.up.sql")
+	body, err := os.ReadFile("../../migrations/000207_session_preview_prewarm_policy.up.sql")
 	require.NoError(t, err, "session prewarm migration file should be readable")
 
 	tests := []struct {
@@ -420,6 +420,25 @@ func TestSessionPreviewPrewarmEnumsMatchMigrationChecks(t *testing.T) {
 				string(PreviewSpeculativeDecisionNone),
 				string(PreviewSpeculativeDecisionCache),
 				string(PreviewSpeculativeDecisionWarmCandidate),
+			},
+		},
+		{
+			name:       "session prewarm status",
+			constraint: "session_preview_prewarm_runs_status_check",
+			expected: []string{
+				"decided",
+				"queued",
+				"running",
+				"skipped_capacity",
+				"skipped_superseded",
+				"skipped_user_started",
+				"skipped_cooldown",
+				"skipped_untrusted_fork",
+				"skipped_no_lockfiles",
+				"skipped_no_paths",
+				"classifier_timeout",
+				"succeeded",
+				"failed",
 			},
 		},
 		{

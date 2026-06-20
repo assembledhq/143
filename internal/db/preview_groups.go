@@ -19,14 +19,16 @@ const previewGroupColumns = `id, org_id, repository_id, group_kind, branch, prev
 	pull_request_number, source_type, source_id, source_url, current_target_id,
 	latest_commit_sha, current_status, pinned, created_by_user_id, created_at, last_activity_at`
 
+const previewCurrentEffectiveStatusSQL = `CASE
+		WHEN pg.current_status = 'warm' AND latest.stopped_reason = 'session_prewarm_policy' THEN 'warm'
+		ELSE COALESCE(latest.status, pg.current_status)
+	END`
+
 const previewCurrentSummaryColumns = `pg.id, pg.org_id, pg.repository_id, pg.group_kind, pg.branch, pg.preview_config_name,
 	pg.pull_request_number, pg.source_type, pg.source_id, pg.source_url, pg.current_target_id,
 	pg.latest_commit_sha, pg.current_status, pg.pinned, pg.created_by_user_id, pg.created_at, pg.last_activity_at,
 	repo.full_name AS repository_full_name,
-	CASE
-		WHEN pg.current_status = 'warm' AND latest.stopped_reason = 'session_prewarm_policy' THEN 'warm'
-		ELSE COALESCE(latest.status, pg.current_status)
-	END::text AS status,
+	` + previewCurrentEffectiveStatusSQL + `::text AS status,
 	CASE
 		WHEN pg.pinned THEN 'pinned'
 		WHEN pg.latest_commit_sha = '' THEN 'unknown'
@@ -485,13 +487,13 @@ func (s *PreviewStore) ListPreviewCurrentIndex(ctx context.Context, orgID uuid.U
 func (s *PreviewStore) CountPreviewCurrentIndexScopes(ctx context.Context, orgID uuid.UUID, filters PreviewCurrentIndexFilters) (map[string]int, error) {
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT
-			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) IN ('starting', 'ready', 'partially_ready', 'unhealthy', 'recycling'))::int AS running,
-			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) = 'warm')::int AS resumable,
+			COUNT(*) FILTER (WHERE `+previewCurrentEffectiveStatusSQL+` IN ('starting', 'ready', 'partially_ready', 'unhealthy', 'recycling'))::int AS running,
+			COUNT(*) FILTER (WHERE `+previewCurrentEffectiveStatusSQL+` = 'warm')::int AS resumable,
 			COUNT(*) FILTER (WHERE %s)::int AS attention,
-			COUNT(*) FILTER (WHERE COALESCE(latest.status, pg.current_status) IN ('stopped', 'expired', 'failed', 'unavailable') AND pg.last_activity_at >= now() - interval '7 days')::int AS recent
+			COUNT(*) FILTER (WHERE `+previewCurrentEffectiveStatusSQL+` IN ('stopped', 'expired', 'failed', 'unavailable') AND pg.last_activity_at >= now() - interval '7 days')::int AS recent
 		FROM preview_groups pg
 		LEFT JOIN LATERAL (
-			SELECT status::text, base_commit_sha
+			SELECT status::text, base_commit_sha, stopped_reason
 			FROM preview_instances
 			WHERE org_id = pg.org_id AND preview_target_id = pg.current_target_id
 			ORDER BY created_at DESC
@@ -596,20 +598,20 @@ func (s *PreviewStore) BackfillPreviewGroups(ctx context.Context, orgID uuid.UUI
 func previewCurrentScopePredicate(scope string) string {
 	switch scope {
 	case "running":
-		return "COALESCE(latest.status, pg.current_status) IN ('starting', 'ready', 'partially_ready', 'unhealthy', 'recycling')"
+		return previewCurrentEffectiveStatusSQL + " IN ('starting', 'ready', 'partially_ready', 'unhealthy', 'recycling')"
 	case "resumable":
-		return "COALESCE(latest.status, pg.current_status) = 'warm'"
+		return previewCurrentEffectiveStatusSQL + " = 'warm'"
 	case "attention":
 		return previewCurrentAttentionPredicate()
 	case "recent":
-		return "COALESCE(latest.status, pg.current_status) IN ('stopped', 'expired', 'failed', 'unavailable') AND pg.last_activity_at >= now() - interval '7 days'"
+		return previewCurrentEffectiveStatusSQL + " IN ('stopped', 'expired', 'failed', 'unavailable') AND pg.last_activity_at >= now() - interval '7 days'"
 	default:
 		return "TRUE"
 	}
 }
 
 func previewCurrentAttentionPredicate() string {
-	return `(COALESCE(latest.status, pg.current_status) IN ('failed', 'unavailable', 'blocked', 'capacity_blocked', 'config_invalid', 'outdated')
+	return `(` + previewCurrentEffectiveStatusSQL + ` IN ('failed', 'unavailable', 'blocked', 'capacity_blocked', 'config_invalid', 'outdated')
 		OR pg.latest_commit_sha = ''
 		OR (
 			pg.pinned = false

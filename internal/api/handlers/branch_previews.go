@@ -274,8 +274,9 @@ type restartBranchPreviewRequest struct {
 }
 
 type updatePreviewPolicyRequest struct {
-	AutoMode           *models.PreviewAutoMode           `json:"auto_mode"`
-	SessionPrewarmMode *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
+	AutoMode                    *models.PreviewAutoMode           `json:"auto_mode"`
+	SessionPrewarmMode          *models.PreviewSessionPrewarmMode `json:"session_prewarm_mode"`
+	SessionPrewarmUntrustedFork *bool                             `json:"session_prewarm_untrusted_fork"`
 }
 
 func (h *BranchPreviewHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -2107,7 +2108,7 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
 		return
 	}
-	if req.AutoMode == nil && req.SessionPrewarmMode == nil {
+	if req.AutoMode == nil && req.SessionPrewarmMode == nil && req.SessionPrewarmUntrustedFork == nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_POLICY", "at least one preview policy field is required")
 		return
 	}
@@ -2135,14 +2136,16 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 	}
 	beforeMode := models.PreviewAutoModeOff
 	beforeSessionPrewarmMode := models.PreviewSessionPrewarmModeOff
+	beforeSessionPrewarmUntrustedFork := false
 	if existing, existingErr := h.previews.GetRepositoryPreviewPolicy(r.Context(), orgID, repoID); existingErr == nil && existing != nil {
 		beforeMode = existing.AutoMode
 		beforeSessionPrewarmMode = existing.SessionPrewarmMode
+		beforeSessionPrewarmUntrustedFork = existing.SessionPrewarmUntrustedFork
 	} else if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_LOOKUP_FAILED", "failed to load preview policy", existingErr)
 		return
 	}
-	policy, err := h.previews.UpdateRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, req.AutoMode, req.SessionPrewarmMode)
+	policy, err := h.previews.UpdateRepositoryPreviewPolicy(r.Context(), orgID, repoID, user.ID, req.AutoMode, req.SessionPrewarmMode, req.SessionPrewarmUntrustedFork)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PREVIEW_POLICY_UPDATE_FAILED", "failed to update preview policy", err)
 		return
@@ -2154,6 +2157,9 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 		}
 		if req.SessionPrewarmMode != nil {
 			changes["session_prewarm_mode"] = map[string]any{"before": beforeSessionPrewarmMode, "after": policy.SessionPrewarmMode}
+		}
+		if req.SessionPrewarmUntrustedFork != nil {
+			changes["session_prewarm_untrusted_fork"] = map[string]any{"before": beforeSessionPrewarmUntrustedFork, "after": policy.SessionPrewarmUntrustedFork}
 		}
 		details, marshalErr := json.Marshal(map[string]any{
 			"repository_id": repoID.String(),

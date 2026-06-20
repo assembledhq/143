@@ -124,6 +124,7 @@ type SessionPreviewPrewarmClassifyJobPayload struct {
 	SessionID         uuid.UUID `json:"session_id"`
 	RepositoryID      uuid.UUID `json:"repository_id"`
 	WorkspaceRevision int64     `json:"workspace_revision"`
+	ConfigDigest      string    `json:"config_digest,omitempty"`
 	Phase             string    `json:"phase,omitempty"`
 }
 

@@ -834,6 +834,31 @@ func TestJobStore_ReclaimLostRunningJobs_ReturnsWrappedErrors(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestJobStore_SandboxCapacitySummary(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(3, 2, 5, 1, 12))
+
+	got, err := NewJobStore(mock).SandboxCapacitySummary(context.Background())
+
+	require.NoError(t, err, "SandboxCapacitySummary should scan aggregate node metadata")
+	require.Equal(t, SandboxCapacitySummary{
+		FreshWorkers:      3,
+		WorkersWithSlots:  2,
+		LiveSandboxes:     5,
+		ReservedSandboxes: 1,
+		MaxSandboxes:      12,
+	}, got, "SandboxCapacitySummary should return worker headroom")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_OldestPendingSessionJobAge_UsesRunnableTime(t *testing.T) {
 	t.Parallel()
 

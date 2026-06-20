@@ -1438,9 +1438,9 @@ func TestBranchPreviewHandler_UpdatePolicyEmitsAudit(t *testing.T) {
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(5)...).
+		WithArgs(previewHandlerAnyArgs(6)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"auto_mode":"warm"}`))
@@ -1489,11 +1489,11 @@ func TestBranchPreviewHandler_UpdatePolicySessionPrewarmOnlyPreservesAutoMode(t 
 	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, userID, now, now))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(5)...).
+		WithArgs(previewHandlerAnyArgs(6)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"session_prewarm_mode":"smart"}`))
@@ -1513,8 +1513,63 @@ func TestBranchPreviewHandler_UpdatePolicySessionPrewarmOnlyPreservesAutoMode(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestBranchPreviewHandler_UpdatePolicyUntrustedForkOnlyPreservesModes(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	policyID := uuid.New()
+	now := time.Now()
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	handler.SetAuditEmitter(newAuditEmitterForTest(mock))
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, (*string)(nil), (*string)(nil), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
+	mock.ExpectQuery("INSERT INTO repository_preview_policies").
+		WithArgs(previewHandlerAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), true, userID, now, now))
+	expectAuditInsert(mock)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"session_prewarm_untrusted_fork":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.UpdatePolicy(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "UpdatePolicy should update only the untrusted fork policy")
+	require.Contains(t, rr.Body.String(), `"auto_mode":"warm"`, "UpdatePolicy should preserve the existing auto-preview mode")
+	require.Contains(t, rr.Body.String(), `"session_prewarm_mode":"smart"`, "UpdatePolicy should preserve the existing session prewarm mode")
+	require.Contains(t, rr.Body.String(), `"session_prewarm_untrusted_fork":true`, "UpdatePolicy should return the updated fork policy")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func repositoryPreviewPolicyTestCols() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func repositoryTestCols() []string {
@@ -1756,7 +1811,7 @@ func TestBranchPreviewHandler_ListCurrentReturnsGroupedRows(t *testing.T) {
 		"https://{id}.preview.143.dev",
 	)
 
-	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+COALESCE\\(latest\\.status, pg\\.current_status\\) IN").
+	mock.ExpectQuery("FROM preview_groups pg[\\s\\S]+latest\\.stopped_reason = 'session_prewarm_policy'[\\s\\S]+COALESCE\\(latest\\.status, pg\\.current_status\\)[\\s\\S]+IN").
 		WithArgs(branchPreviewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows(branchPreviewCurrentSummaryTestCols).AddRow(
 			groupID, orgID, repoID, models.PreviewGroupKindBranch, "feature/shared", "",

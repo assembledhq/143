@@ -5343,6 +5343,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 	userID := uuid.New()
 	jobID := uuid.New()
 	workerNodeID := "worker-a"
+	snapshotKey := "snapshots/session.tar.zst"
 	now := time.Now()
 	session := models.Session{
 		ID:                sessionID,
@@ -5350,6 +5351,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		WorkspaceRevision: 3,
+		SnapshotKey:       &snapshotKey,
 	}
 
 	mock.ExpectQuery("SELECT id, name, settings").
@@ -5359,10 +5361,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(1, 1, 1, 0, 4))
 	mock.ExpectQuery("SELECT EXISTS").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
@@ -5436,12 +5442,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 	repoID := uuid.New()
 	userID := uuid.New()
 	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
 	session := models.Session{
 		ID:                sessionID,
 		OrgID:             orgID,
 		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		WorkspaceRevision: 5,
+		SnapshotKey:       &snapshotKey,
 	}
 
 	mock.ExpectQuery("SELECT id, name, settings").
@@ -5451,7 +5459,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
@@ -5482,12 +5490,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	userID := uuid.New()
 	classifyJobID := uuid.New()
 	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
 	session := models.Session{
 		ID:                sessionID,
 		OrgID:             orgID,
 		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		WorkspaceRevision: 4,
+		SnapshotKey:       &snapshotKey,
 	}
 
 	mock.ExpectQuery("SELECT id, name, settings").
@@ -5497,10 +5507,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(1, 1, 1, 0, 4))
 	mock.ExpectQuery("SELECT EXISTS").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
@@ -5517,6 +5531,115 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	}, zerolog.Nop(), session)
 
 	require.NoError(t, mock.ExpectationsWereMet(), "smart-mode session-start prewarm should enqueue a classifier job")
+}
+
+func TestEnqueueSessionPreviewPostTurnClassifier_SkipsWhenUserPreviewAlreadyActive(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Previews = db.NewPreviewStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repoID)
+	setWorkerSessionColumn(sessionRow, "triggered_by_user_id", &userID)
+	setWorkerSessionColumn(sessionRow, "workspace_revision", int64(7))
+	setWorkerSessionColumn(sessionRow, "status", string(models.SessionStatusIdle))
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerPreviewInstanceColumns()).
+			AddRow(newWorkerPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...))
+
+	enqueueSessionPreviewPostTurnClassifier(context.Background(), stores, &Services{
+		PreviewCachePrewarmEnabled:  true,
+		PreviewCachePrewarmPriority: -50,
+	}, zerolog.Nop(), orgID, sessionID)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "post-turn classifier should skip when a user preview is already active")
+}
+
+func TestEnqueueSessionPreviewWarmBuildIfCandidate_TargetsCacheLocalWorkerWithoutLiveSession(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Organizations = db.NewOrganizationStore(mock)
+	stores.Previews = db.NewPreviewStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
+	cacheWorkerID := "worker-cache"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repoID)
+	setWorkerSessionColumn(sessionRow, "triggered_by_user_id", &userID)
+	setWorkerSessionColumn(sessionRow, "workspace_revision", int64(8))
+	setWorkerSessionColumn(sessionRow, "status", string(models.SessionStatusIdle))
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
+	mock.ExpectQuery("SELECT .+ FROM session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
+			AddRow(uuid.New(), orgID, repoID, sessionID, int64(8), "digest", string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate), float64(0.9), "ui_change", "Likely UI.", "decided", nil, nil, nil, json.RawMessage(`{}`), "", now, now, nil, nil, nil))
+	mock.ExpectQuery("SELECT id, name, settings").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
+			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":2}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs[\\s\\S]+SET status = 'failed'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(1, 1, 1, 0, 4))
+	mock.ExpectQuery("INSERT INTO session_preview_prewarm_runs").
+		WithArgs(workerAnyArgs(18)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
+			AddRow(uuid.New(), orgID, repoID, sessionID, int64(8), "digest", string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate), float64(0.9), "ui_change", "Likely UI.", "queued", nil, nil, nil, json.RawMessage(`{}`), "", now, now, nil, nil, nil))
+	mock.ExpectQuery("SELECT cache.worker_node_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id"}).AddRow(cacheWorkerID))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "preview", models.JobTypeSessionPreviewWarmBuild, pgxmock.AnyArg(), -49, pgxmock.AnyArg(), &cacheWorkerID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectQuery("INSERT INTO session_preview_prewarm_runs").
+		WithArgs(workerAnyArgs(18)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
+			AddRow(uuid.New(), orgID, repoID, sessionID, int64(8), "digest", string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate), float64(0.9), "ui_change", "Likely UI.", "queued", &jobID, nil, nil, json.RawMessage(`{}`), "", now, now, nil, nil, nil))
+
+	enqueueSessionPreviewWarmBuildIfCandidate(context.Background(), stores, &Services{
+		PreviewCachePrewarmPriority: -50,
+	}, zerolog.Nop(), orgID, sessionID, "post_turn_classifier")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "warm build should target a cache-local worker when there is no live session worker")
 }
 
 type fakeSessionPrewarmClassifier struct {
@@ -5550,6 +5673,8 @@ func TestSessionPreviewPrewarmClassifyHandler_CacheDecisionEnqueuesPrewarm(t *te
 	setWorkerSessionColumn(sessionRow, "repository_id", &repoID)
 	setWorkerSessionColumn(sessionRow, "triggered_by_user_id", &userID)
 	setWorkerSessionColumn(sessionRow, "workspace_revision", int64(9))
+	snapshotKey := "snapshots/session.tar.zst"
+	setWorkerSessionColumn(sessionRow, "snapshot_key", &snapshotKey)
 	diff := "diff --git a/frontend/src/app/page.tsx b/frontend/src/app/page.tsx\n--- a/frontend/src/app/page.tsx\n+++ b/frontend/src/app/page.tsx\n" +
 		"diff --git a/internal/api/server.go b/internal/api/server.go\n--- a/internal/api/server.go\n+++ b/internal/api/server.go\n"
 	setWorkerSessionColumn(sessionRow, "diff", &diff)
@@ -5690,12 +5815,58 @@ func TestSessionPreviewPrewarmUntrustedFork(t *testing.T) {
 	}
 }
 
+func TestSessionPreviewPrewarmBlockedByUntrustedFork(t *testing.T) {
+	t.Parallel()
+
+	untrustedSession := models.Session{InputManifest: json.RawMessage(`{"github":{"pull_request":{"head":{"repo":{"fork":true}}}}}`)}
+	trustedSession := models.Session{InputManifest: json.RawMessage(`{"github":{"pull_request":{"head":{"repo":{"fork":false}}}}}`)}
+
+	tests := []struct {
+		name     string
+		session  models.Session
+		policy   *models.RepositoryPreviewPolicy
+		expected bool
+	}{
+		{
+			name:     "blocks untrusted fork by default",
+			session:  untrustedSession,
+			policy:   nil,
+			expected: true,
+		},
+		{
+			name:     "blocks untrusted fork when policy disallows it",
+			session:  untrustedSession,
+			policy:   &models.RepositoryPreviewPolicy{SessionPrewarmUntrustedFork: false},
+			expected: true,
+		},
+		{
+			name:     "allows untrusted fork when policy explicitly allows it",
+			session:  untrustedSession,
+			policy:   &models.RepositoryPreviewPolicy{SessionPrewarmUntrustedFork: true},
+			expected: false,
+		},
+		{
+			name:     "allows trusted branch regardless of policy",
+			session:  trustedSession,
+			policy:   nil,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, sessionPreviewPrewarmBlockedByUntrustedFork(tt.session, tt.policy), "fork policy helper should require explicit opt-in only for untrusted fork sessions")
+		})
+	}
+}
+
 func workerOrganizationColumns() []string {
 	return []string{"id", "name", "settings", "created_at", "updated_at"}
 }
 
 func workerRepositoryPreviewPolicyColumns() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func workerRepositoryColumns() []string {
@@ -5708,6 +5879,29 @@ func workerRepositoryColumns() []string {
 func workerSessionPreviewPrewarmRunColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "session_id", "workspace_revision", "config_digest", "mode", "decision", "confidence", "reason", "explanation", "status", "job_id", "preview_id", "preview_group_id", "capacity_snapshot", "error", "created_at", "updated_at", "started_at", "completed_at", "panel_opened_at",
+	}
+}
+
+func workerPreviewInstanceColumns() []string {
+	return []string{
+		"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+		"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+		"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+		"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
+		"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+		"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at",
+		"runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+	}
+}
+
+func newWorkerPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
+	return []any{
+		previewID, sessionID, nil, orgID, userID, "bootstrap", "web", string(models.PreviewStatusReady),
+		"docker", "worker-a", "handle", "web", 3000,
+		"digest", "", now, now.Add(time.Hour), nil,
+		"/", 512, 500, 10240, json.RawMessage(`{}`), json.RawMessage(`{}`),
+		"ready", nil, "", now, now, nil, nil,
+		nil, nil, nil, nil, "", "", false,
 	}
 }
 

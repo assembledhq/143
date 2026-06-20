@@ -395,7 +395,7 @@ func (r *StartRunner) PrewarmPreviewCaches(ctx context.Context, payload PreviewC
 	started := time.Now()
 	if payload.Source == PreviewCachePrewarmSourceSession {
 		defer func() {
-			metrics.RecordSessionPrewarmCost(ctx, payload.OrgID.String(), "cache", "post_turn", time.Since(started))
+			metrics.RecordSessionPrewarmCost(ctx, payload.OrgID.String(), "cache", sessionPrewarmPhaseFromReason(payload.Reason), time.Since(started))
 		}()
 	}
 	timeout := r.prewarmTimeout
@@ -851,6 +851,9 @@ func (r *StartRunner) updateSessionPreviewCachePrewarmRun(ctx context.Context, p
 			Str("error", errMsg).
 			Msg("session preview cache prewarm finished unsuccessfully")
 	}
+	if strings.HasPrefix(status, "skipped_") {
+		metrics.RecordSessionPreviewPrewarmSkipped(ctx, payload.OrgID.String(), strings.TrimPrefix(status, "skipped_"))
+	}
 }
 
 func sessionPreviewPrewarmStatusForCacheStatus(cacheStatus, errMsg string) string {
@@ -859,17 +862,26 @@ func sessionPreviewPrewarmStatusForCacheStatus(cacheStatus, errMsg string) strin
 		return "running"
 	case "succeeded", "skipped_warm":
 		return "succeeded"
-	case "skipped_capacity":
-		return "skipped_capacity"
+	case "skipped_capacity", "skipped_no_lockfiles", "skipped_no_paths":
+		return cacheStatus
 	case "failed":
 		return "failed"
-	case "skipped_no_install", "skipped_disabled", "skipped_no_lockfiles", "skipped_no_paths":
+	case "skipped_no_install", "skipped_disabled":
 		return "failed"
 	default:
 		if errMsg != "" {
 			return "failed"
 		}
 		return ""
+	}
+}
+
+func sessionPrewarmPhaseFromReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "policy_cache", "session_start", "session_start_classifier":
+		return "session_start"
+	default:
+		return "post_turn"
 	}
 }
 
@@ -1061,7 +1073,7 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 	}
 	started := time.Now()
 	defer func() {
-		metrics.RecordSessionPrewarmCost(ctx, payload.OrgID.String(), "warm_build", "post_turn", time.Since(started))
+		metrics.RecordSessionPrewarmCost(ctx, payload.OrgID.String(), "warm_build", sessionPrewarmPhaseFromReason(payload.Reason), time.Since(started))
 	}()
 	run, err := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "running", "", false)
 	if err != nil {
@@ -1088,10 +1100,18 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 		failRun("session snapshot is unavailable")
 		return fmt.Errorf("session snapshot is unavailable")
 	}
+	if r.sandboxCapacity != nil && !r.sandboxCapacity.HasSpeculativeHeadroom(ctx, 2) {
+		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "skipped_capacity", "worker has insufficient headroom for speculative work", true); updateErr != nil {
+			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build capacity skip")
+		}
+		metrics.RecordSessionPreviewPrewarmSkipped(ctx, payload.OrgID.String(), "capacity")
+		return ErrPreviewCapacity
+	}
 	if existing, activeErr := r.previews.GetActivePreviewForSession(ctx, payload.OrgID, payload.SessionID); activeErr == nil && existing != nil {
 		if _, updateErr := r.previews.UpdateSessionPreviewPrewarmRunStatus(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, models.PreviewSpeculativeDecisionWarmCandidate, payload.ConfigDigest, "skipped_user_started", "user preview already active", true); updateErr != nil {
 			r.logger.Warn().Err(updateErr).Str("prewarm_run_id", run.ID.String()).Msg("failed to mark session preview warm build user-started")
 		}
+		metrics.RecordSessionPreviewPrewarmSkipped(ctx, payload.OrgID.String(), "user_started")
 		return nil
 	} else if activeErr != nil && !errors.Is(activeErr, pgx.ErrNoRows) {
 		failRun(fmt.Sprintf("check active preview: %v", activeErr))
@@ -1109,6 +1129,8 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 		UserID:                     userID,
 		Config:                     initialConfig,
 		RepositoryID:               payload.RepositoryID,
+		Initiator:                  "session_prewarm",
+		MetricsSource:              "session_prewarm",
 		WorkspaceRevision:          session.WorkspaceRevision,
 		WorkspaceRevisionUpdatedAt: session.WorkspaceRevisionUpdatedAt,
 	}
@@ -1192,23 +1214,7 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 	if group != nil {
 		groupID = &group.ID
 	}
-	if _, err := r.previews.UpsertSessionPreviewPrewarmRun(ctx, &models.SessionPreviewPrewarmRun{
-		OrgID:             payload.OrgID,
-		RepositoryID:      payload.RepositoryID,
-		SessionID:         payload.SessionID,
-		WorkspaceRevision: payload.WorkspaceRevision,
-		ConfigDigest:      computeConfigDigest(cfg),
-		Mode:              models.PreviewSessionPrewarmModeSmart,
-		Decision:          models.PreviewSpeculativeDecisionWarmCandidate,
-		Confidence:        run.Confidence,
-		Reason:            run.Reason,
-		Explanation:       run.Explanation,
-		Status:            "succeeded",
-		PreviewID:         &previewID,
-		PreviewGroupID:    groupID,
-		CapacitySnapshot:  run.CapacitySnapshot,
-		CompletedAt:       timePtr(time.Now()),
-	}); err != nil {
+	if _, err := r.previews.CompleteSessionPreviewWarmRun(ctx, payload.OrgID, payload.RepositoryID, payload.SessionID, payload.WorkspaceRevision, payload.ConfigDigest, computeConfigDigest(cfg), previewID, groupID); err != nil {
 		return fmt.Errorf("record session preview warm build success: %w", err)
 	}
 	return nil

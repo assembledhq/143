@@ -110,16 +110,17 @@ func SessionPreviewPrewarmClassifierPrompt() string {
 }
 
 type SessionPreviewPrewarmClassifierUserPromptData struct {
-	RepositoryFullName string
-	RepositoryLanguage string
-	SessionSource      string
-	UserPrompt         string
-	IssueLabels        []string
-	IssueType          string
-	PreviewHistory     string
-	CapacitySummary    string
-	Phase              string
-	ChangedFileKinds   []string
+	RepositoryFullName  string
+	RepositoryLanguage  string
+	PreviewConfigDigest string
+	SessionSource       string
+	UserPrompt          string
+	IssueLabels         []string
+	IssueType           string
+	PreviewHistory      string
+	CapacitySummary     string
+	Phase               string
+	ChangedFileKinds    []string
 }
 
 func SessionPreviewPrewarmClassifierUserPrompt(data SessionPreviewPrewarmClassifierUserPromptData) string {

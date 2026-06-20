@@ -61,6 +61,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -212,7 +213,9 @@ function AutoPreviewSection() {
       body: Partial<
         Pick<
           PreviewPolicySummary,
-          "auto_mode" | "session_prewarm_mode"
+          | "auto_mode"
+          | "session_prewarm_mode"
+          | "session_prewarm_untrusted_fork"
         >
       >;
     }) => api.previews.policies.update(repositoryId, body),
@@ -252,6 +255,7 @@ function AutoPreviewSection() {
               <TableHead>Repository</TableHead>
               <TableHead>Mode</TableHead>
               <TableHead>Session Prewarm</TableHead>
+              <TableHead>Forks</TableHead>
               <TableHead>Open PRs</TableHead>
               <TableHead>Updated</TableHead>
             </TableRow>
@@ -260,7 +264,7 @@ function AutoPreviewSection() {
             {policiesQuery.isLoading ? (
               <TableRow>
                 <TableCell
-                  colSpan={5}
+                  colSpan={6}
                   className="py-6 text-sm text-muted-foreground"
                 >
                   Loading preview policies...
@@ -362,6 +366,32 @@ function AutoPreviewSection() {
                       </p>
                     ) : null}
                   </TableCell>
+                  <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={policy.session_prewarm_untrusted_fork}
+                        disabled={!sessionPrewarmEnabled}
+                        aria-label={`Allow session prewarm for untrusted forks in ${policy.repository_full_name}`}
+                        onCheckedChange={(checked) => {
+                          if (
+                            checked === policy.session_prewarm_untrusted_fork ||
+                            !sessionPrewarmEnabled
+                          ) {
+                            return;
+                          }
+                          policyMutation.mutate({
+                            repositoryId: policy.repository_id,
+                            body: {
+                              session_prewarm_untrusted_fork: checked,
+                            },
+                          });
+                        }}
+                      />
+                      <span className="text-xs text-muted-foreground">
+                        Untrusted forks
+                      </span>
+                    </div>
+                  </TableCell>
                   <TableCell className="block px-0 py-1 text-sm md:table-cell md:px-4 md:py-3">
                     <span className="mr-2 font-medium md:hidden">Open PRs</span>
                     {policy.open_pr_count}
@@ -378,7 +408,7 @@ function AutoPreviewSection() {
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={5} className="py-6">
+                <TableCell colSpan={6} className="py-6">
                   <EmptyState
                     icon={MonitorPlay}
                     title="No connected repositories"
