@@ -23,6 +23,7 @@ The answer may be immediate, resumable, starting, failed, stale, or blocked, but
 - `/previews/github/{owner}/{repo}/pull/{number}` is the stable app route for a GitHub PR.
 - `GET /api/v1/previews/github/{owner}/{repo}/pull/{number}` resolves the PR head through GitHub, finds or creates a preview target, starts a runtime when allowed, and reports stale active previews with `new_commits_available`.
 - `OpenPreviewButton` bootstraps access before opening the preview origin. It opens `about:blank` for manual button clicks, loads `<preview-origin>/bootstrap` in a hidden iframe, mints a short-lived token from the app API, posts it to the preview origin, waits for completion, and navigates the popup. Stable PR launch sessions use the same bootstrap flow and then replace the current PR-launch tab with the preview origin.
+- Preview-origin recovery pages for stopped, expired, or disconnected previews hand off through the current tab to the stable app launch route. The app route owns start/restart, progress, diagnostics, bootstrap, and final navigation back to the preview origin.
 - Preview-origin traffic remains isolated from the app origin and is gateway-routed to the worker that owns the runtime.
 
 This is close, but product behavior is still page/button oriented instead of intent oriented. The response does not expose a single launch decision, and the frontend does not have a reusable auto-launch state machine.
@@ -49,6 +50,8 @@ Use the app stable route as the default PR footer link. It is the most reliable 
 
 A preview-origin target URL may remain supported for advanced/direct flows, but it must degrade into the same stable launch controller when the user lacks preview-domain access or no active runtime exists.
 
+When a user lands directly on a stopped, expired, or disconnected preview-origin URL, the gateway should render a lightweight recovery page whose primary action navigates the current tab to the stable app route with `launch=1`. It should not open a secondary app popup; the stable route is responsible for showing startup state and returning the tab to the preview when ready.
+
 ### PR Page Button
 
 In 143 PR surfaces, the primary PR action should be `Preview`.
@@ -73,7 +76,7 @@ Auto-open is allowed only when all are true:
 - The action was initiated by a user gesture on the stable app page or a 143 PR surface.
 - The returned launch decision says the preview represents the latest PR head.
 - The runtime is `ready` or transitions to `ready` during the page's launch session.
-- The launch session came from a stable app route with `launch=1` or from an explicit in-page start/retry action; the PR-launch tab bootstraps access and navigates itself to the preview origin. Manual `Open preview` buttons may still use a popup opened synchronously from the click.
+- The launch session came from a stable app route with `launch=1` or from an explicit in-page start/retry action; the PR-launch tab bootstraps access and navigates itself to the preview origin. Manual in-app `Open preview` buttons may still use a popup opened synchronously from the click so engineers can keep 143 open beside the preview.
 
 Auto-open is not allowed for stale previews, failed previews, permission-blocked previews, or closed PRs.
 
@@ -540,6 +543,7 @@ Behavior:
 
 - On first render from a direct navigation, call `getPullRequest(..., { intent: "open" })`.
 - If user arrived from clicking a 143 `Preview` button, open the stable PR route in a new tab with `launch=1`; that stable page owns bootstrap and replaces its own tab with the preview origin when ready.
+- If user arrived from a preview-origin recovery page, the current tab is already on the stable route with `launch=1`; keep showing launch progress in that tab and replace it with the preview origin when ready.
 - If `launch.action === "open"`, call `launchPreview`.
 - If `launch.action === "wait"` and `launch.auto_open`, poll until `open` or terminal.
 - If `resume/start/start_latest/retry`, show the primary action and optionally execute it immediately only when the original click explicitly requested open.

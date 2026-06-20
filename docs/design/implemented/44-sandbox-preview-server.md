@@ -99,6 +99,8 @@ Instead:
 9. The preview gateway proxies HTTP and WebSocket traffic to the owning worker/provider stream.
 10. Idle previews are stopped automatically based on activity-aware timeouts; the browser must request a fresh bootstrap token to resume.
 
+For branch/PR preview links, stopped, expired, or disconnected preview-origin visits render a lightweight recovery page. Its primary action navigates the current tab to the stable app launch route with `launch=1`; the app route starts or reconnects the preview, shows progress or diagnostics, bootstraps preview-domain access, and then returns the current tab to the preview origin. This keeps preview recovery as a one-window flow while preserving origin isolation.
+
 ## Implementation Status (2026-04-22)
 
 The production contract now differs from the original single-node MVP in a few important ways:
@@ -1670,6 +1672,8 @@ The recommended approach uses `postMessage` to keep the token out of URLs entire
 This keeps the token out of browser history, referrer headers, and server access logs. The `postMessage` origin check on both sides prevents cross-origin token interception.
 
 The gateway should reject token exchange requests that do not arrive as same-origin POST requests from the bootstrap page.
+
+Preview-origin recovery pages must not restart or authenticate previews directly. They should link the current tab to the stable app launch route, where the authenticated control plane can perform the start/restart and bootstrap flow.
 
 ### 6. Access Control
 
