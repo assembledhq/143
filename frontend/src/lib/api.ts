@@ -829,6 +829,66 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').LinearTeamRepoMapping>>('/api/v1/integrations/linear/agent/mappings', body),
     deleteLinearAgentMapping: (id: string) => del(`/api/v1/integrations/linear/agent/mappings/${id}`),
   },
+  privateConnectors: {
+    list: () => get<import('./types').ListResponse<import('./types').PrivateConnectorSummary>>('/api/v1/private-connectors'),
+    create: (body: { name: string; environment: string; gateway_region: string }) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorCreateResult>>('/api/v1/private-connectors', body),
+    updateSettings: (connectorId: string, body: { health_alert_url?: string | null; offline_alert_after_seconds?: number }) =>
+      request<import('./types').SingleResponse<import('./types').PrivateConnectorGroup>>(
+        `/api/v1/private-connectors/${encodeURIComponent(connectorId)}`,
+        { method: 'PATCH', body: JSON.stringify(body) },
+      ),
+    disable: (connectorId: string) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorGroup>>(
+        `/api/v1/private-connectors/${encodeURIComponent(connectorId)}/disable`,
+      ),
+    createDeploymentToken: (connectorId: string, body: {
+      name?: string;
+      preset: 'interactive' | 'automation';
+      max_registrations?: number;
+      allowed_source_cidrs?: string[];
+      no_expiry?: boolean;
+      token_file_path?: string;
+    }) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorDeploymentTokenCreateResult>>(
+        `/api/v1/private-connectors/${encodeURIComponent(connectorId)}/tokens`,
+        body,
+      ),
+    createResource: (connectorId: string, body: {
+      display_name: string;
+      resource_type: import('./types').PrivateConnectorResourceType;
+      mode: import('./types').PrivateConnectorResourceMode;
+      config: Record<string, unknown>;
+    }) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorResource>>(
+        `/api/v1/private-connectors/${encodeURIComponent(connectorId)}/resources`,
+        body,
+      ),
+    testResource: (resourceId: string) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorResource>>(
+        `/api/v1/private-connectors/resources/${encodeURIComponent(resourceId)}/test`,
+      ),
+    revokeDeploymentToken: (tokenId: string) =>
+      del<import('./types').SingleResponse<import('./types').PrivateConnectorDeploymentToken>>(
+        `/api/v1/private-connectors/tokens/${encodeURIComponent(tokenId)}`,
+      ),
+    revokeInstance: (instanceId: string) =>
+      del<import('./types').SingleResponse<import('./types').PrivateConnectorInstance>>(
+        `/api/v1/private-connectors/instances/${encodeURIComponent(instanceId)}`,
+      ),
+    rotateInstance: (instanceId: string) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorInstance>>(
+        `/api/v1/private-connectors/instances/${encodeURIComponent(instanceId)}/rotate`,
+      ),
+    reloadInstance: (instanceId: string) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorInstance>>(
+        `/api/v1/private-connectors/instances/${encodeURIComponent(instanceId)}/reload`,
+      ),
+    updateInstance: (instanceId: string) =>
+      post<import('./types').SingleResponse<import('./types').PrivateConnectorInstance>>(
+        `/api/v1/private-connectors/instances/${encodeURIComponent(instanceId)}/update`,
+      ),
+  },
   codexAuth: {
     // `scope` defaults to "org" on the server; pass "personal" to write the
     // pending-auth row against the caller's user_id in coding_credentials so

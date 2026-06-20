@@ -30,6 +30,7 @@ type Registry struct {
 	automationGoalImprovementCompleters map[string]AutomationGoalImprovementCompleter
 	ciTestInsights                      map[string]CITestInsights
 	logProviders                        map[string]LogProvider
+	databaseProviders                   map[string]DatabaseProvider
 }
 
 // NewRegistry creates an empty integration registry.
@@ -48,6 +49,7 @@ func NewRegistry() *Registry {
 		automationGoalImprovementCompleters: make(map[string]AutomationGoalImprovementCompleter),
 		ciTestInsights:                      make(map[string]CITestInsights),
 		logProviders:                        make(map[string]LogProvider),
+		databaseProviders:                   make(map[string]DatabaseProvider),
 	}
 }
 
@@ -390,6 +392,33 @@ func (r *Registry) LogProvider(name models.ProviderName) (LogProvider, error) {
 	return p, nil
 }
 
+func (r *Registry) RegisterDatabaseProvider(provider DatabaseProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.databaseProviders[string(provider.Name())] = provider
+}
+
+func (r *Registry) DatabaseProviders() []DatabaseProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]DatabaseProvider, 0, len(r.databaseProviders))
+	for _, p := range r.databaseProviders {
+		result = append(result, p)
+	}
+	return result
+}
+
+func (r *Registry) DatabaseProvider(name models.ProviderName) (DatabaseProvider, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	key := string(name)
+	p, ok := r.databaseProviders[key]
+	if !ok {
+		return nil, fmt.Errorf("database provider %q not registered", key)
+	}
+	return p, nil
+}
+
 // HasAny returns true if at least one provider is registered.
 func (r *Registry) HasAny() bool {
 	r.mu.RLock()
@@ -404,7 +433,8 @@ func (r *Registry) HasAny() bool {
 		len(r.sessionTabManagers) > 0 ||
 		len(r.projectProposers) > 0 ||
 		len(r.ciTestInsights) > 0 ||
-		len(r.logProviders) > 0
+		len(r.logProviders) > 0 ||
+		len(r.databaseProviders) > 0
 }
 
 // Summary returns a human-readable summary of registered providers.
@@ -444,6 +474,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.logProviders {
 		m["log_providers"] = append(m["log_providers"], name)
+	}
+	for name := range r.databaseProviders {
+		m["database_providers"] = append(m["database_providers"], name)
 	}
 	return m
 }

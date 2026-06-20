@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/mcp"
 )
 
@@ -27,6 +28,14 @@ type cliToolsLinearTokenResolver interface {
 	GetValidAccessToken(ctx context.Context, orgID uuid.UUID) (string, error)
 }
 
+type cliToolsPrivateConnectorLogProviderSource interface {
+	LogProviders(ctx context.Context, orgID uuid.UUID) ([]integration.LogProvider, error)
+}
+
+type cliToolsPrivateConnectorDatabaseProviderSource interface {
+	DatabaseProviders(ctx context.Context, orgID uuid.UUID) ([]integration.DatabaseProvider, error)
+}
+
 // CLIToolsHandler is the local agent gateway: it exposes the org's
 // integration tool registry to logged-in CLIs, executing every call
 // server-side with org credentials (which never land on laptops) and a
@@ -36,6 +45,8 @@ type cliToolsLinearTokenResolver interface {
 type CLIToolsHandler struct {
 	credentials  cliToolsCredentialProvider
 	linearTokens cliToolsLinearTokenResolver
+	privateLogs  cliToolsPrivateConnectorLogProviderSource
+	privateDBs   cliToolsPrivateConnectorDatabaseProviderSource
 	audit        *db.AuditEmitter
 	logger       zerolog.Logger
 }
@@ -48,6 +59,14 @@ func NewCLIToolsHandler(credentials cliToolsCredentialProvider, logger zerolog.L
 // Optional: without it, Linear tools use the stored access token as-is.
 func (h *CLIToolsHandler) SetLinearTokenResolver(resolver cliToolsLinearTokenResolver) {
 	h.linearTokens = resolver
+}
+
+func (h *CLIToolsHandler) SetPrivateConnectorLogProviderSource(source cliToolsPrivateConnectorLogProviderSource) {
+	h.privateLogs = source
+}
+
+func (h *CLIToolsHandler) SetPrivateConnectorDatabaseProviderSource(source cliToolsPrivateConnectorDatabaseProviderSource) {
+	h.privateDBs = source
 }
 
 func (h *CLIToolsHandler) SetAuditEmitter(audit *db.AuditEmitter) {
@@ -115,7 +134,26 @@ func (h *CLIToolsHandler) buildOrgToolSource(ctx context.Context, orgID uuid.UUI
 		}
 	}
 
-	return mcp.NewToolRegistry(mcp.BuildRegistryFromOrg(orgCreds)), nil
+	registry := mcp.BuildRegistryFromOrg(orgCreds)
+	if h.privateLogs != nil {
+		providers, providerErr := h.privateLogs.LogProviders(ctx, orgID)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+		for _, provider := range providers {
+			registry.RegisterLogProvider(provider)
+		}
+	}
+	if h.privateDBs != nil {
+		providers, providerErr := h.privateDBs.DatabaseProviders(ctx, orgID)
+		if providerErr != nil {
+			return nil, providerErr
+		}
+		for _, provider := range providers {
+			registry.RegisterDatabaseProvider(provider)
+		}
+	}
+	return mcp.NewToolRegistry(registry), nil
 }
 
 // ListTools returns the tool definitions available to this org's local

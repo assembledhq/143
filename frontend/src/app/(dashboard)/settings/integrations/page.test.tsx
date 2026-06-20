@@ -20,6 +20,15 @@ const {
   listSlackChannelsMock,
   updateSlackChannelsMock,
   updateSlackChannelSettingsMock,
+  privateConnectorsListMock,
+  privateConnectorsCreateMock,
+  privateConnectorCreateDeploymentTokenMock,
+  privateConnectorUpdateSettingsMock,
+  privateConnectorCreateResourceMock,
+  privateConnectorRotateInstanceMock,
+  privateConnectorReloadInstanceMock,
+  privateConnectorUpdateInstanceMock,
+  privateConnectorDisableMock,
   teamListMembersMock,
   githubConnectMock,
   currentUserMock,
@@ -50,6 +59,15 @@ const {
     listSlackChannelsMock: vi.fn(),
     updateSlackChannelsMock: vi.fn(),
     updateSlackChannelSettingsMock: vi.fn(),
+    privateConnectorsListMock: vi.fn(),
+    privateConnectorsCreateMock: vi.fn(),
+    privateConnectorCreateDeploymentTokenMock: vi.fn(),
+    privateConnectorUpdateSettingsMock: vi.fn(),
+    privateConnectorCreateResourceMock: vi.fn(),
+    privateConnectorRotateInstanceMock: vi.fn(),
+    privateConnectorReloadInstanceMock: vi.fn(),
+    privateConnectorUpdateInstanceMock: vi.fn(),
+    privateConnectorDisableMock: vi.fn(),
     teamListMembersMock: vi.fn(),
     githubConnectMock: vi.fn(),
     currentUserMock: {
@@ -95,6 +113,17 @@ vi.mock("@/lib/api", () => ({
     repositories: {
       list: repositoriesListMock,
       disconnect: vi.fn(),
+    },
+    privateConnectors: {
+      list: privateConnectorsListMock,
+      create: privateConnectorsCreateMock,
+      createDeploymentToken: privateConnectorCreateDeploymentTokenMock,
+      updateSettings: privateConnectorUpdateSettingsMock,
+      createResource: privateConnectorCreateResourceMock,
+      rotateInstance: privateConnectorRotateInstanceMock,
+      reloadInstance: privateConnectorReloadInstanceMock,
+      updateInstance: privateConnectorUpdateInstanceMock,
+      disable: privateConnectorDisableMock,
     },
     githubStatus: {
       connect: githubConnectMock,
@@ -210,6 +239,55 @@ describe("IntegrationsPage", () => {
     listSlackChannelsMock.mockResolvedValue({ data: [] });
     updateSlackChannelsMock.mockResolvedValue(undefined);
     updateSlackChannelSettingsMock.mockResolvedValue({ data: {} });
+    privateConnectorsListMock.mockResolvedValue({ data: [], meta: {} });
+    privateConnectorsCreateMock.mockResolvedValue({
+      data: {
+        connector: {
+          id: "connector-1",
+          org_id: "org-1",
+          name: "Production VPC",
+          environment: "production",
+          gateway_region: "us",
+          status: "waiting",
+          created_at: "2026-06-19T00:00:00Z",
+          updated_at: "2026-06-19T00:00:00Z",
+        },
+        deployment_token: {
+          id: "token-1",
+          org_id: "org-1",
+          connector_group_id: "connector-1",
+          name: "Interactive install",
+          token_prefix: "143pc_abcd",
+          preset: "interactive",
+          registration_count: 0,
+          created_at: "2026-06-19T00:00:00Z",
+        },
+        deployment_token_value: "143pc_secret",
+        install_command: "curl -fsSL https://get.143.dev/private-connector.sh | sudo 143_CONNECTOR_TOKEN='143pc_secret' bash",
+      },
+    });
+    privateConnectorCreateResourceMock.mockResolvedValue({ data: {} });
+    privateConnectorCreateDeploymentTokenMock.mockResolvedValue({
+      data: {
+        deployment_token: {
+          id: "token-auto",
+          org_id: "org-1",
+          connector_group_id: "connector-1",
+          name: "Automation install",
+          token_prefix: "143pc_auto",
+          preset: "automation",
+          registration_count: 0,
+          created_at: "2026-06-19T00:00:00Z",
+        },
+        deployment_token_value: "143pc_auto_secret",
+        install_command: "curl -fsSL https://get.143.dev/private-connector.sh | sudo 143_CONNECTOR_TOKEN_FILE='/run/secrets/143-connector-token' bash",
+      },
+    });
+    privateConnectorUpdateSettingsMock.mockResolvedValue({ data: {} });
+    privateConnectorRotateInstanceMock.mockResolvedValue({ data: {} });
+    privateConnectorReloadInstanceMock.mockResolvedValue({ data: {} });
+    privateConnectorUpdateInstanceMock.mockResolvedValue({ data: {} });
+    privateConnectorDisableMock.mockResolvedValue({ data: {} });
     claimGitHubRepositoriesMock.mockRejectedValue(
       new ApiErrorMock("GITHUB_USER_AUTH_REQUIRED", "Connect your GitHub account before claiming repositories"),
     );
@@ -231,6 +309,234 @@ describe("IntegrationsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub account" }));
     expect(githubConnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a private connector and shows the install command", async () => {
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findByRole("heading", { name: "Private Connector" })).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add connector" }));
+    await user.clear(screen.getByLabelText("Connector name"));
+    await user.type(screen.getByLabelText("Connector name"), "Production VPC");
+    await user.clear(screen.getByLabelText("Environment"));
+    await user.type(screen.getByLabelText("Environment"), "production");
+    await user.click(screen.getByRole("button", { name: "Create connector" }));
+
+    await waitFor(() => {
+      expect(privateConnectorsCreateMock).toHaveBeenCalledWith({
+        name: "Production VPC",
+        environment: "production",
+        gateway_region: "us",
+      });
+    });
+    expect(await screen.findByText(/143_CONNECTOR_TOKEN='143pc_secret'/)).toBeInTheDocument();
+  });
+
+  it("shows private connector health and resources", async () => {
+    privateConnectorsListMock.mockResolvedValue({
+      data: [
+        {
+          connector: {
+            id: "connector-1",
+            org_id: "org-1",
+            name: "Production VPC",
+            environment: "production",
+            gateway_region: "us",
+            status: "online",
+            created_at: "2026-06-19T00:00:00Z",
+            updated_at: "2026-06-19T00:00:00Z",
+          },
+          instances: [
+            {
+              id: "instance-1",
+              org_id: "org-1",
+              connector_group_id: "connector-1",
+              instance_name: "edge-a",
+              status: "online",
+              version: "v0.1.0",
+              protocol: "websocket",
+              gateway_region: "us",
+              capabilities: ["victorialogs.query"],
+              last_heartbeat_at: "2026-06-19T12:00:00Z",
+              heartbeat_interval_seconds: 5,
+              created_at: "2026-06-19T00:00:00Z",
+              updated_at: "2026-06-19T12:00:00Z",
+            },
+          ],
+          resources: [
+            {
+              id: "resource-1",
+              org_id: "org-1",
+              connector_group_id: "connector-1",
+              display_name: "Production logs",
+              resource_type: "victorialogs",
+              mode: "logs",
+              config: { base_url: "http://victorialogs:9428" },
+              config_source: "ui",
+              config_version: 1,
+              status: "ready",
+              created_at: "2026-06-19T00:00:00Z",
+              updated_at: "2026-06-19T00:00:00Z",
+            },
+          ],
+          deployment_tokens: [],
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findAllByText("Production VPC")).toHaveLength(2);
+    expect(screen.getByText("online")).toBeInTheDocument();
+    expect(screen.getByText("Production logs")).toBeInTheDocument();
+    expect(screen.getByText("ready")).toBeInTheDocument();
+    expect(screen.getByText("edge-a")).toBeInTheDocument();
+  });
+
+  it("manages private connector lifecycle controls", async () => {
+    privateConnectorsListMock.mockResolvedValue({
+      data: [
+        {
+          connector: {
+            id: "connector-1",
+            org_id: "org-1",
+            name: "Production VPC",
+            environment: "production",
+            gateway_region: "us",
+            status: "online",
+            health_alert_url: "https://hooks.example.test/connector",
+            offline_alert_after_seconds: 60,
+            created_at: "2026-06-19T00:00:00Z",
+            updated_at: "2026-06-19T00:00:00Z",
+          },
+          instances: [
+            {
+              id: "instance-1",
+              org_id: "org-1",
+              connector_group_id: "connector-1",
+              instance_name: "edge-a",
+              status: "online",
+              version: "v0.1.0",
+              protocol: "websocket",
+              gateway_region: "us",
+              capabilities: ["victorialogs.query"],
+              heartbeat_interval_seconds: 5,
+              created_at: "2026-06-19T00:00:00Z",
+              updated_at: "2026-06-19T12:00:00Z",
+            },
+          ],
+          resources: [
+            {
+              id: "resource-1",
+              org_id: "org-1",
+              connector_group_id: "connector-1",
+              display_name: "Production logs",
+              resource_type: "victorialogs",
+              mode: "logs",
+              config: { base_url: "http://victorialogs:9428" },
+              config_source: "file",
+              config_version: 1,
+              status: "ready",
+              created_at: "2026-06-19T00:00:00Z",
+              updated_at: "2026-06-19T00:00:00Z",
+            },
+          ],
+          deployment_tokens: [],
+        },
+      ],
+      meta: {},
+    });
+
+    renderWithProviders(<IntegrationsPage />);
+    const user = userEvent.setup();
+
+    expect(await screen.findByText("Managed via config file")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Automation token" }));
+    await waitFor(() => {
+      expect(privateConnectorCreateDeploymentTokenMock).toHaveBeenCalledWith("connector-1", {
+        name: "Automation install",
+        preset: "automation",
+        token_file_path: "/run/secrets/143-connector-token",
+      });
+    });
+    expect(await screen.findByText(/143_CONNECTOR_TOKEN_FILE='\/run\/secrets\/143-connector-token'/)).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("Health alert URL"));
+    await user.type(screen.getByLabelText("Health alert URL"), "https://hooks.example.test/new");
+    await user.clear(screen.getByLabelText("Offline after"));
+    await user.type(screen.getByLabelText("Offline after"), "45");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(privateConnectorUpdateSettingsMock).toHaveBeenCalledWith("connector-1", {
+        health_alert_url: "https://hooks.example.test/new",
+        offline_alert_after_seconds: 45,
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "Rotate identity for edge-a" }));
+    await user.click(screen.getByRole("button", { name: "Reload config for edge-a" }));
+    await user.click(screen.getByRole("button", { name: "Update edge-a" }));
+    await user.click(screen.getByRole("button", { name: "Disable" }));
+
+    expect(privateConnectorRotateInstanceMock).toHaveBeenCalledWith("instance-1");
+    expect(privateConnectorReloadInstanceMock).toHaveBeenCalledWith("instance-1");
+    expect(privateConnectorUpdateInstanceMock).toHaveBeenCalledWith("instance-1");
+    expect(privateConnectorDisableMock).toHaveBeenCalledWith("connector-1");
+  });
+
+  it("creates a Postgres read-only private connector resource", async () => {
+    privateConnectorsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          connector: {
+            id: "connector-1",
+            org_id: "org-1",
+            name: "Production VPC",
+            environment: "production",
+            gateway_region: "us",
+            status: "online",
+            created_at: "2026-06-19T00:00:00Z",
+            updated_at: "2026-06-19T00:00:00Z",
+          },
+          instances: [],
+          resources: [],
+          deployment_tokens: [],
+        },
+      ],
+      meta: {},
+    });
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await screen.findByText("Add private resource");
+    await user.click(screen.getByLabelText("Resource type"));
+    await user.click(await screen.findByRole("option", { name: "Postgres read-only" }));
+    await user.clear(screen.getByLabelText("Display name"));
+    await user.type(screen.getByLabelText("Display name"), "Production DB");
+    await user.type(screen.getByLabelText("DSN env var"), "PROD_READONLY_DATABASE_URL");
+    await user.type(screen.getByLabelText("Allowed schemas"), "public, analytics");
+    await user.type(screen.getByLabelText("Denied tables"), "public.password_resets");
+    await user.type(screen.getByLabelText("PII columns"), "email, phone");
+    await user.click(screen.getByRole("button", { name: "Add resource" }));
+
+    await waitFor(() => {
+      expect(privateConnectorCreateResourceMock).toHaveBeenCalledWith("connector-1", {
+        display_name: "Production DB",
+        resource_type: "postgres",
+        mode: "agent_readonly",
+        config: {
+          dsn_env: "PROD_READONLY_DATABASE_URL",
+          allowed_schemas: ["public", "analytics"],
+          denied_tables: ["public.password_resets"],
+          pii_columns: ["email", "phone"],
+          max_rows: 100,
+          query_timeout: "10s",
+          allow_sample_rows: false,
+        },
+      });
+    });
   });
 
   it("keeps GitHub repository claiming controls inside the manage sidesheet", async () => {

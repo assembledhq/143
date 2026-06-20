@@ -59,6 +59,10 @@ type Config struct {
 	// routes serve from here; they 404 when the directory is absent
 	// (e.g. `go run` in local dev without `make build-cli`).
 	CLIDistDir string `env:"CLI_DIST_DIR" envDefault:"/opt/143/cli"`
+	// PrivateConnectorActionSigningKey is a base64-encoded Ed25519 private key
+	// used by the API gateway to sign private connector action requests.
+	// Connectors pin the matching public key locally before accepting actions.
+	PrivateConnectorActionSigningKey string `env:"PRIVATE_CONNECTOR_ACTION_SIGNING_KEY"`
 	// CLIMinSupportedVersion, when set to an orderable version (dotted
 	// numerics, e.g. "1.4.0"), causes authenticated requests from a CLI
 	// advertising an older `User-Agent: 143-tools/<version>` to fail with

@@ -3,7 +3,7 @@
 import { useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CircleHelp, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
+import { CircleHelp, Copy, Download, ExternalLink, Plus, RefreshCw, RotateCcw, Server, Trash2, Zap } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ErrorNotice, ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
@@ -57,6 +58,7 @@ import type {
   GitHubRepositoryClaimCandidate,
   LinearTeamKey,
   LinearTeamRepoMapping,
+  PrivateConnectorSummary,
   Repository,
   SlackBotSettingsUpdate,
   SlackChannel,
@@ -1400,6 +1402,719 @@ function IntegrationDetailSheet({
   );
 }
 
+function PrivateConnectorSection({ readOnly }: { readOnly: boolean }) {
+  const queryClient = useQueryClient();
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("Production VPC");
+  const [environment, setEnvironment] = useState("production");
+  const [gatewayRegion, setGatewayRegion] = useState("us");
+  const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const [resourceConnectorID, setResourceConnectorID] = useState("");
+  const [resourceKind, setResourceKind] = useState<"victorialogs" | "postgres_readonly" | "postgres_preview">("victorialogs");
+  const [resourceName, setResourceName] = useState("Production logs");
+  const [victoriaLogsURL, setVictoriaLogsURL] = useState("");
+  const [defaultFilter, setDefaultFilter] = useState("");
+  const [maxQueryWindow, setMaxQueryWindow] = useState("24h");
+  const [maxSeriesCardinality, setMaxSeriesCardinality] = useState("1000");
+  const [maxRequestsPerMinute, setMaxRequestsPerMinute] = useState("60");
+  const [allowedLogFields, setAllowedLogFields] = useState("");
+  const [deniedLogFields, setDeniedLogFields] = useState("");
+  const [redactFields, setRedactFields] = useState("");
+  const [maxRows, setMaxRows] = useState("100");
+  const [queryTimeout, setQueryTimeout] = useState("10s");
+  const [tokenEnv, setTokenEnv] = useState("");
+  const [tokenFile, setTokenFile] = useState("");
+  const [dsnEnv, setDsnEnv] = useState("");
+  const [dsnFile, setDsnFile] = useState("");
+  const [allowedSchemas, setAllowedSchemas] = useState("");
+  const [deniedTables, setDeniedTables] = useState("");
+  const [piiColumns, setPiiColumns] = useState("");
+  const [piiColumnPatterns, setPiiColumnPatterns] = useState("");
+  const [allowSampleRows, setAllowSampleRows] = useState(false);
+  const [targetHost, setTargetHost] = useState("");
+  const [targetPort, setTargetPort] = useState("5432");
+  const [targetDatabase, setTargetDatabase] = useState("");
+  const [allowedPreviewRepositories, setAllowedPreviewRepositories] = useState("");
+  const [maxActiveLeases, setMaxActiveLeases] = useState("10");
+  const [maxLeaseDuration, setMaxLeaseDuration] = useState("8h");
+
+  const connectorsQuery = useQuery({
+    queryKey: queryKeys.integrations.privateConnectors,
+    queryFn: () => api.privateConnectors.list(),
+  });
+  const connectors = connectorsQuery.data?.data ?? [];
+  const selectedConnectorID = resourceConnectorID || connectors[0]?.connector.id || "";
+
+  const createConnectorMutation = useMutation({
+    mutationFn: () => api.privateConnectors.create({
+      name: name.trim(),
+      environment: environment.trim(),
+      gateway_region: gatewayRegion,
+    }),
+    onSuccess: (response) => {
+      setInstallCommand(response.data.install_command);
+      setShowCreate(false);
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.privateConnectors });
+    },
+  });
+
+  const createResourceMutation = useMutation({
+    mutationFn: () => {
+      const rows = Number.parseInt(maxRows, 10);
+      const timeout = queryTimeout.trim();
+      const seriesCardinality = Number.parseInt(maxSeriesCardinality, 10);
+      const requestRate = Number.parseInt(maxRequestsPerMinute, 10);
+      let resourceType: "victorialogs" | "postgres" = "victorialogs";
+      let mode: "logs" | "agent_readonly" | "preview_runtime" = "logs";
+      const config: Record<string, unknown> = {};
+      if (resourceKind === "victorialogs") {
+        config.base_url = victoriaLogsURL.trim();
+        config.max_rows = Number.isFinite(rows) ? rows : 100;
+        config.query_timeout = timeout || "10s";
+        config.limits = {
+          max_rows: Number.isFinite(rows) ? rows : 100,
+          max_time_range: maxQueryWindow.trim() || "24h",
+          timeout: timeout || "10s",
+          max_series_cardinality: Number.isFinite(seriesCardinality) ? seriesCardinality : 1000,
+          max_requests_per_minute: Number.isFinite(requestRate) ? requestRate : 60,
+        };
+        if (defaultFilter.trim()) config.default_filter = defaultFilter.trim();
+        const allowedFields = commaList(allowedLogFields);
+        const deniedFields = commaList(deniedLogFields);
+        const redacted = commaList(redactFields);
+        if (allowedFields.length > 0) config.allowed_fields = allowedFields;
+        if (deniedFields.length > 0) config.denied_fields = deniedFields;
+        if (redacted.length > 0) config.redact_fields = redacted;
+        if (tokenEnv.trim()) config.token_env = tokenEnv.trim();
+        if (tokenFile.trim()) config.token_file = tokenFile.trim();
+      } else if (resourceKind === "postgres_readonly") {
+        resourceType = "postgres";
+        mode = "agent_readonly";
+        if (dsnEnv.trim()) config.dsn_env = dsnEnv.trim();
+        if (dsnFile.trim()) config.dsn_file = dsnFile.trim();
+        const schemas = commaList(allowedSchemas);
+        const denied = commaList(deniedTables);
+        const columns = commaList(piiColumns);
+        const patterns = commaList(piiColumnPatterns);
+        if (schemas.length > 0) config.allowed_schemas = schemas;
+        if (denied.length > 0) config.denied_tables = denied;
+        if (columns.length > 0) config.pii_columns = columns;
+        if (patterns.length > 0) config.pii_column_patterns = patterns;
+        config.max_rows = Number.isFinite(rows) ? rows : 100;
+        config.query_timeout = timeout || "10s";
+        config.allow_sample_rows = allowSampleRows;
+      } else {
+        resourceType = "postgres";
+        mode = "preview_runtime";
+        const activeLeases = Number.parseInt(maxActiveLeases, 10);
+        const allowedRepos = commaList(allowedPreviewRepositories);
+        config.target_host = targetHost.trim();
+        config.target_port = Number.parseInt(targetPort, 10) || 5432;
+        config.target_database = targetDatabase.trim();
+        if (allowedRepos.length > 0) config.allowed_repositories = allowedRepos;
+        if (Number.isFinite(activeLeases)) config.max_active_leases = activeLeases;
+        if (maxLeaseDuration.trim()) config.max_lease_duration = maxLeaseDuration.trim();
+        if (dsnEnv.trim()) config.admin_dsn_env = dsnEnv.trim();
+        if (dsnFile.trim()) config.admin_dsn_file = dsnFile.trim();
+      }
+      return api.privateConnectors.createResource(selectedConnectorID, {
+        display_name: resourceName.trim(),
+        resource_type: resourceType,
+        mode,
+        config,
+      });
+    },
+    onSuccess: () => {
+      setResourceName("Production logs");
+      setResourceKind("victorialogs");
+      setVictoriaLogsURL("");
+      setDefaultFilter("");
+      setMaxQueryWindow("24h");
+      setMaxSeriesCardinality("1000");
+      setMaxRequestsPerMinute("60");
+      setAllowedLogFields("");
+      setDeniedLogFields("");
+      setRedactFields("");
+      setMaxRows("100");
+      setQueryTimeout("10s");
+      setTokenEnv("");
+      setTokenFile("");
+      setDsnEnv("");
+      setDsnFile("");
+      setAllowedSchemas("");
+      setDeniedTables("");
+      setPiiColumns("");
+      setPiiColumnPatterns("");
+      setAllowSampleRows(false);
+      setTargetHost("");
+      setTargetPort("5432");
+      setTargetDatabase("");
+      setAllowedPreviewRepositories("");
+      setMaxActiveLeases("10");
+      setMaxLeaseDuration("8h");
+      queryClient.invalidateQueries({ queryKey: queryKeys.integrations.privateConnectors });
+    },
+  });
+
+  const canCreateConnector = name.trim() !== "" && environment.trim() !== "" && !readOnly;
+  const resourceReady = resourceKind === "victorialogs"
+    ? victoriaLogsURL.trim() !== ""
+    : resourceKind === "postgres_readonly"
+      ? dsnEnv.trim() !== "" || dsnFile.trim() !== ""
+      : targetHost.trim() !== "" && targetDatabase.trim() !== "";
+  const canCreateResource = selectedConnectorID !== "" && resourceName.trim() !== "" && resourceReady && !readOnly;
+
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-base font-semibold tracking-normal">Private Connector</h2>
+          <p className="text-sm text-muted-foreground">
+            Keep private systems private with outbound-only, scoped access for logs and preview resources.
+          </p>
+        </div>
+        {!readOnly ? (
+          <Button size="sm" variant="outline" onClick={() => setShowCreate((value) => !value)}>
+            <Plus className="h-4 w-4" />
+            Add connector
+          </Button>
+        ) : null}
+      </div>
+
+      {showCreate ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Add connector</CardTitle>
+            <CardDescription>Create a short-lived deployment token for one-command installation.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 md:grid-cols-[1fr_1fr_auto]">
+            <div className="grid gap-1.5">
+              <Label htmlFor="private-connector-name">Connector name</Label>
+              <Input id="private-connector-name" value={name} onChange={(event) => setName(event.target.value)} />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="private-connector-environment">Environment</Label>
+              <Input id="private-connector-environment" value={environment} onChange={(event) => setEnvironment(event.target.value)} />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="private-connector-region">Region</Label>
+              <Select value={gatewayRegion} onValueChange={setGatewayRegion}>
+                <SelectTrigger id="private-connector-region" className="w-28">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="us">US</SelectItem>
+                  <SelectItem value="eu">EU</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-3">
+              <Button
+                size="sm"
+                disabled={!canCreateConnector || createConnectorMutation.isPending}
+                loading={createConnectorMutation.isPending}
+                onClick={() => createConnectorMutation.mutate()}
+              >
+                Create connector
+              </Button>
+              {createConnectorMutation.isError ? (
+                <ErrorText className="mt-2">{createConnectorMutation.error.message}</ErrorText>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {installCommand ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Install command</CardTitle>
+            <CardDescription>The token is shown once. Run this inside the private network.</CardDescription>
+            <CardAction>
+              <Button size="icon" variant="ghost" aria-label="Copy install command" onClick={() => copyToClipboard(installCommand)}>
+                <Copy className="h-4 w-4" />
+              </Button>
+            </CardAction>
+          </CardHeader>
+          <CardContent>
+            <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs text-foreground">
+              <code>{installCommand}</code>
+            </pre>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {connectors.length > 0 ? (
+        <div className="grid gap-3">
+          {connectors.map((summary) => (
+            <PrivateConnectorSummaryCard
+              key={summary.connector.id}
+              summary={summary}
+              readOnly={readOnly}
+              onInstallCommand={setInstallCommand}
+            />
+          ))}
+        </div>
+      ) : connectorsQuery.isLoading ? (
+        <Card>
+          <CardContent className="text-sm text-muted-foreground">Loading private connectors...</CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="flex items-center gap-3 text-sm text-muted-foreground">
+            <Server className="h-4 w-4" />
+            No private connectors installed.
+          </CardContent>
+        </Card>
+      )}
+
+      {connectors.length > 0 && !readOnly ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Add private resource</CardTitle>
+            <CardDescription>Use local endpoints and secret references. Inline credentials are rejected server-side.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="private-resource-connector">Connector</Label>
+              <Select value={selectedConnectorID} onValueChange={setResourceConnectorID}>
+                <SelectTrigger id="private-resource-connector">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {connectors.map((summary) => (
+                    <SelectItem key={summary.connector.id} value={summary.connector.id}>
+                      {summary.connector.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="private-resource-name">Display name</Label>
+              <Input id="private-resource-name" value={resourceName} onChange={(event) => setResourceName(event.target.value)} />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="private-resource-kind">Resource type</Label>
+              <Select value={resourceKind} onValueChange={(value) => setResourceKind(value as typeof resourceKind)}>
+                <SelectTrigger id="private-resource-kind">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="victorialogs">VictoriaLogs</SelectItem>
+                  <SelectItem value="postgres_readonly">Postgres read-only</SelectItem>
+                  <SelectItem value="postgres_preview">Postgres preview DB</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {resourceKind === "victorialogs" ? (
+              <>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-url">Local VictoriaLogs URL</Label>
+                  <Input id="private-resource-url" placeholder="http://victorialogs:9428" value={victoriaLogsURL} onChange={(event) => setVictoriaLogsURL(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-filter">Default filter</Label>
+                  <Input id="private-resource-filter" placeholder="environment:production" value={defaultFilter} onChange={(event) => setDefaultFilter(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-max-window">Max query window</Label>
+                  <Input id="private-resource-max-window" value={maxQueryWindow} onChange={(event) => setMaxQueryWindow(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-cardinality">Max series cardinality</Label>
+                  <Input id="private-resource-cardinality" inputMode="numeric" value={maxSeriesCardinality} onChange={(event) => setMaxSeriesCardinality(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-rate">Requests per minute</Label>
+                  <Input id="private-resource-rate" inputMode="numeric" value={maxRequestsPerMinute} onChange={(event) => setMaxRequestsPerMinute(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-allowed-fields">Allowed fields</Label>
+                  <Input id="private-resource-allowed-fields" placeholder="service, level, trace_id" value={allowedLogFields} onChange={(event) => setAllowedLogFields(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-denied-fields">Denied fields</Label>
+                  <Input id="private-resource-denied-fields" placeholder="authorization, cookie" value={deniedLogFields} onChange={(event) => setDeniedLogFields(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-redact-fields">Redact fields</Label>
+                  <Input id="private-resource-redact-fields" placeholder="authorization, cookie" value={redactFields} onChange={(event) => setRedactFields(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-token-env">Token env var</Label>
+                  <Input id="private-resource-token-env" placeholder="VICTORIALOGS_TOKEN" value={tokenEnv} onChange={(event) => setTokenEnv(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-token-file">Token file</Label>
+                  <Input id="private-resource-token-file" placeholder="/etc/143/victorialogs.token" value={tokenFile} onChange={(event) => setTokenFile(event.target.value)} />
+                </div>
+              </>
+            ) : resourceKind === "postgres_readonly" ? (
+              <>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-dsn-env">DSN env var</Label>
+                  <Input id="private-resource-dsn-env" placeholder="PROD_READONLY_DATABASE_URL" value={dsnEnv} onChange={(event) => setDsnEnv(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-dsn-file">DSN file</Label>
+                  <Input id="private-resource-dsn-file" placeholder="/run/secrets/prod-readonly-dsn" value={dsnFile} onChange={(event) => setDsnFile(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-allowed-schemas">Allowed schemas</Label>
+                  <Input id="private-resource-allowed-schemas" placeholder="public, analytics" value={allowedSchemas} onChange={(event) => setAllowedSchemas(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-denied-tables">Denied tables</Label>
+                  <Input id="private-resource-denied-tables" placeholder="public.password_resets" value={deniedTables} onChange={(event) => setDeniedTables(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-pii-columns">PII columns</Label>
+                  <Input id="private-resource-pii-columns" placeholder="email, phone" value={piiColumns} onChange={(event) => setPiiColumns(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-pii-patterns">PII column patterns</Label>
+                  <Input id="private-resource-pii-patterns" placeholder=".*_email$" value={piiColumnPatterns} onChange={(event) => setPiiColumnPatterns(event.target.value)} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="private-resource-sample-rows" checked={allowSampleRows} onCheckedChange={(checked) => setAllowSampleRows(checked === true)} />
+                  <Label htmlFor="private-resource-sample-rows">Allow sample rows</Label>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-target-host">Target host</Label>
+                  <Input id="private-resource-target-host" placeholder="preview-db.internal" value={targetHost} onChange={(event) => setTargetHost(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-target-port">Target port</Label>
+                  <Input id="private-resource-target-port" inputMode="numeric" value={targetPort} onChange={(event) => setTargetPort(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-target-database">Target database</Label>
+                  <Input id="private-resource-target-database" placeholder="preview_template" value={targetDatabase} onChange={(event) => setTargetDatabase(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-preview-repos">Allowed repositories</Label>
+                  <Input id="private-resource-preview-repos" placeholder="github.com/acme/app" value={allowedPreviewRepositories} onChange={(event) => setAllowedPreviewRepositories(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-active-leases">Max active leases</Label>
+                  <Input id="private-resource-active-leases" inputMode="numeric" value={maxActiveLeases} onChange={(event) => setMaxActiveLeases(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-lease-duration">Max lease duration</Label>
+                  <Input id="private-resource-lease-duration" value={maxLeaseDuration} onChange={(event) => setMaxLeaseDuration(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-admin-dsn-env">Admin DSN env var</Label>
+                  <Input id="private-resource-admin-dsn-env" placeholder="PREVIEW_DB_ADMIN_URL" value={dsnEnv} onChange={(event) => setDsnEnv(event.target.value)} />
+                </div>
+              </>
+            )}
+            {resourceKind !== "postgres_preview" ? (
+              <>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-max-rows">Max rows</Label>
+                  <Input id="private-resource-max-rows" inputMode="numeric" value={maxRows} onChange={(event) => setMaxRows(event.target.value)} />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="private-resource-timeout">Query timeout</Label>
+                  <Input id="private-resource-timeout" value={queryTimeout} onChange={(event) => setQueryTimeout(event.target.value)} />
+                </div>
+              </>
+            ) : null}
+            <div className="md:col-span-2">
+              <Button
+                size="sm"
+                disabled={!canCreateResource || createResourceMutation.isPending}
+                loading={createResourceMutation.isPending}
+                onClick={() => createResourceMutation.mutate()}
+              >
+                Add resource
+              </Button>
+              {createResourceMutation.isError ? (
+                <ErrorText className="mt-2">{createResourceMutation.error.message}</ErrorText>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+    </section>
+  );
+}
+
+function PrivateConnectorSummaryCard({
+  summary,
+  readOnly,
+  onInstallCommand,
+}: {
+  summary: PrivateConnectorSummary;
+  readOnly: boolean;
+  onInstallCommand: (command: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const latestInstance = summary.instances[0];
+  const fileManaged = summary.resources.some((resource) => resource.config_source === "file");
+  const [healthAlertURL, setHealthAlertURL] = useState(summary.connector.health_alert_url ?? "");
+  const [offlineAlertAfterSeconds, setOfflineAlertAfterSeconds] = useState(
+    String(summary.connector.offline_alert_after_seconds || 60),
+  );
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.integrations.privateConnectors });
+  const testResourceMutation = useMutation({
+    mutationFn: (resourceID: string) => api.privateConnectors.testResource(resourceID),
+    onSuccess: invalidate,
+  });
+  const revokeInstanceMutation = useMutation({
+    mutationFn: (instanceID: string) => api.privateConnectors.revokeInstance(instanceID),
+    onSuccess: invalidate,
+  });
+  const createAutomationTokenMutation = useMutation({
+    mutationFn: () => api.privateConnectors.createDeploymentToken(summary.connector.id, {
+      name: "Automation install",
+      preset: "automation",
+      token_file_path: "/run/secrets/143-connector-token",
+    }),
+    onSuccess: (response) => {
+      onInstallCommand(response.data.install_command);
+      invalidate();
+    },
+  });
+  const updateSettingsMutation = useMutation({
+    mutationFn: () => api.privateConnectors.updateSettings(summary.connector.id, {
+      health_alert_url: healthAlertURL.trim() || null,
+      offline_alert_after_seconds: Number.parseInt(offlineAlertAfterSeconds, 10) || 60,
+    }),
+    onSuccess: invalidate,
+  });
+  const rotateInstanceMutation = useMutation({
+    mutationFn: (instanceID: string) => api.privateConnectors.rotateInstance(instanceID),
+    onSuccess: invalidate,
+  });
+  const reloadInstanceMutation = useMutation({
+    mutationFn: (instanceID: string) => api.privateConnectors.reloadInstance(instanceID),
+    onSuccess: invalidate,
+  });
+  const updateInstanceMutation = useMutation({
+    mutationFn: (instanceID: string) => api.privateConnectors.updateInstance(instanceID),
+    onSuccess: invalidate,
+  });
+  const disableConnectorMutation = useMutation({
+    mutationFn: () => api.privateConnectors.disable(summary.connector.id),
+    onSuccess: invalidate,
+  });
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex min-w-0 items-center gap-2 text-sm">
+          <span className="truncate">{summary.connector.name}</span>
+          <Badge variant={summary.connector.status === "online" ? "secondary" : "outline"} className="rounded-md text-xs">
+            {summary.connector.status}
+          </Badge>
+          {fileManaged ? (
+            <Badge variant="outline" className="rounded-md text-xs">
+              Managed via config file
+            </Badge>
+          ) : null}
+        </CardTitle>
+        <CardDescription>
+          {summary.connector.environment || "environment"} · {summary.connector.gateway_region.toUpperCase()}
+        </CardDescription>
+        {!readOnly ? (
+          <CardAction className="flex flex-wrap gap-1">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={createAutomationTokenMutation.isPending}
+              onClick={() => createAutomationTokenMutation.mutate()}
+            >
+              <Download className="h-4 w-4" />
+              Automation token
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={disableConnectorMutation.isPending || summary.connector.status === "disabled"}
+              onClick={() => disableConnectorMutation.mutate()}
+            >
+              <Trash2 className="h-4 w-4" />
+              Disable
+            </Button>
+          </CardAction>
+        ) : null}
+      </CardHeader>
+      <CardContent className="grid gap-3 text-sm md:grid-cols-3">
+        <div>
+          <div className="text-xs font-medium text-muted-foreground">Instance</div>
+          <div className="mt-1 flex min-w-0 items-center gap-2">
+            <span className="truncate">{latestInstance?.instance_name ?? "Waiting for connector"}</span>
+            {latestInstance && !readOnly && latestInstance.status !== "revoked" ? (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7 shrink-0"
+                aria-label={`Revoke ${latestInstance.instance_name}`}
+                disabled={revokeInstanceMutation.isPending}
+                onClick={() => revokeInstanceMutation.mutate(latestInstance.id)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
+          {latestInstance ? (
+            <>
+              <div className="text-xs text-muted-foreground">{latestInstance.version || "version unknown"}</div>
+              {!readOnly && latestInstance.status !== "revoked" ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-7 w-7"
+                    aria-label={`Rotate identity for ${latestInstance.instance_name}`}
+                    disabled={rotateInstanceMutation.isPending}
+                    onClick={() => rotateInstanceMutation.mutate(latestInstance.id)}
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-7 w-7"
+                    aria-label={`Reload config for ${latestInstance.instance_name}`}
+                    disabled={reloadInstanceMutation.isPending}
+                    onClick={() => reloadInstanceMutation.mutate(latestInstance.id)}
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-7 w-7"
+                    aria-label={`Update ${latestInstance.instance_name}`}
+                    disabled={updateInstanceMutation.isPending}
+                    onClick={() => updateInstanceMutation.mutate(latestInstance.id)}
+                  >
+                    <Zap className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+        <div>
+          <div className="text-xs font-medium text-muted-foreground">Resources</div>
+          <div className="mt-1 space-y-1">
+            {summary.resources.length > 0 ? summary.resources.map((resource) => (
+              <div key={resource.id} className="flex min-w-0 items-center gap-2">
+                <span className="truncate">{resource.display_name}</span>
+                <Badge variant="outline" className="rounded-md text-xs">{resource.status}</Badge>
+                {!readOnly ? (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-7 w-7 shrink-0"
+                    aria-label={`Test ${resource.display_name}`}
+                    disabled={testResourceMutation.isPending}
+                    onClick={() => testResourceMutation.mutate(resource.id)}
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </Button>
+                ) : null}
+              </div>
+            )) : <span className="text-muted-foreground">No resources</span>}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs font-medium text-muted-foreground">Capabilities</div>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {(latestInstance?.capabilities ?? []).slice(0, CARD_PILL_LIMIT).map((capability) => (
+              <Badge key={capability} variant="secondary" className="max-w-44 truncate rounded-md text-xs">
+                {capability}
+              </Badge>
+            ))}
+            {(latestInstance?.capabilities?.length ?? 0) > CARD_PILL_LIMIT ? (
+              <Badge variant="outline" className="rounded-md text-xs">
+                +{(latestInstance?.capabilities?.length ?? 0) - CARD_PILL_LIMIT}
+              </Badge>
+            ) : null}
+          </div>
+        </div>
+        {!readOnly ? (
+          <div className="grid gap-2 border-t border-border pt-3 md:col-span-3 md:grid-cols-[1fr_9rem_auto]">
+            <div className="grid gap-1.5">
+              <Label htmlFor={`health-url-${summary.connector.id}`}>Health alert URL</Label>
+              <Input
+                id={`health-url-${summary.connector.id}`}
+                value={healthAlertURL}
+                placeholder="https://hooks.example.com/connector"
+                onChange={(event) => setHealthAlertURL(event.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor={`offline-after-${summary.connector.id}`}>Offline after</Label>
+              <Input
+                id={`offline-after-${summary.connector.id}`}
+                inputMode="numeric"
+                value={offlineAlertAfterSeconds}
+                onChange={(event) => setOfflineAlertAfterSeconds(event.target.value)}
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={updateSettingsMutation.isPending}
+                loading={updateSettingsMutation.isPending}
+                onClick={() => updateSettingsMutation.mutate()}
+              >
+                Save
+              </Button>
+            </div>
+            {updateSettingsMutation.isError ? (
+              <ErrorText className="md:col-span-3">{updateSettingsMutation.error.message}</ErrorText>
+            ) : null}
+          </div>
+        ) : null}
+        {(summary.recent_actions?.length ?? 0) > 0 ? (
+          <div className="border-t border-border pt-3 md:col-span-3">
+            <div className="text-xs font-medium text-muted-foreground">Audit events</div>
+            <div className="mt-1 grid gap-1">
+              {summary.recent_actions?.slice(0, 3).map((action) => (
+                <div key={action.id} className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="font-medium text-foreground">{action.capability}</span>
+                  <Badge variant={action.status === "succeeded" ? "secondary" : "outline"} className="rounded-md text-xs">
+                    {action.status}
+                  </Badge>
+                  {typeof action.result_count === "number" ? (
+                    <span className="text-muted-foreground">{action.result_count} results</span>
+                  ) : null}
+                  {typeof action.duration_ms === "number" ? (
+                    <span className="text-muted-foreground">{action.duration_ms}ms</span>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function copyToClipboard(value: string) {
+  navigator.clipboard?.writeText(value).catch((err) => {
+    console.error("failed to copy private connector install command", err);
+  });
+}
+
+function commaList(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 type TokenDialogField = {
   id: string;
   label: string;
@@ -1688,6 +2403,7 @@ export default function IntegrationsPage() {
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
         readOnly={!isAdmin}
       />
+      <PrivateConnectorSection readOnly={!isAdmin} />
       </div>
 
       <IntegrationDetailSheet

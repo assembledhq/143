@@ -3,9 +3,11 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"net/http"
@@ -27,6 +29,20 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestParsePrivateConnectorActionSigningKey(t *testing.T) {
+	t.Parallel()
+
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err, "test signing key should be generated")
+
+	parsed, err := parsePrivateConnectorActionSigningKey(base64.StdEncoding.EncodeToString(privateKey))
+	require.NoError(t, err, "parsePrivateConnectorActionSigningKey should parse base64 Ed25519 private keys")
+	require.Equal(t, privateKey, parsed, "parsePrivateConnectorActionSigningKey should return the decoded key")
+
+	_, err = parsePrivateConnectorActionSigningKey(base64.StdEncoding.EncodeToString([]byte("short")))
+	require.Error(t, err, "parsePrivateConnectorActionSigningKey should reject invalid key lengths")
+}
 
 func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 	t.Parallel()

@@ -801,6 +801,159 @@ describe('api client', () => {
     });
   });
 
+  describe('private connectors', () => {
+    it('lists private connector groups', async () => {
+      const mockData = {
+        data: [
+          {
+            connector: {
+              id: 'connector-1',
+              org_id: 'org-1',
+              name: 'Production VPC',
+              environment: 'production',
+              gateway_region: 'us',
+              status: 'online',
+              created_at: '2026-06-19T00:00:00Z',
+              updated_at: '2026-06-19T00:00:00Z',
+            },
+            instances: [],
+            resources: [],
+            deployment_tokens: [],
+          },
+        ],
+        meta: {},
+      };
+      server.use(http.get('/api/v1/private-connectors', () => HttpResponse.json(mockData)));
+
+      const result = await api.privateConnectors.list();
+
+      expect(result.data[0].connector.name).toBe('Production VPC');
+      expect(result.data[0].connector.status).toBe('online');
+    });
+
+    it('creates a private connector install token', async () => {
+      let body: unknown;
+      server.use(
+        http.post('/api/v1/private-connectors', async ({ request }) => {
+          body = await request.json();
+          return HttpResponse.json({
+            data: {
+              connector: {
+                id: 'connector-1',
+                org_id: 'org-1',
+                name: 'Production VPC',
+                environment: 'production',
+                gateway_region: 'us',
+                status: 'waiting',
+                created_at: '2026-06-19T00:00:00Z',
+                updated_at: '2026-06-19T00:00:00Z',
+              },
+              deployment_token: {
+                id: 'token-1',
+                org_id: 'org-1',
+                connector_group_id: 'connector-1',
+                name: 'Interactive install',
+                token_prefix: '143pc_abcd',
+                preset: 'interactive',
+                registration_count: 0,
+                created_at: '2026-06-19T00:00:00Z',
+              },
+              deployment_token_value: '143pc_secret',
+              install_command: "curl -fsSL https://get.143.dev/private-connector.sh | sudo 143_CONNECTOR_TOKEN='143pc_secret' bash",
+            },
+          });
+        }),
+      );
+
+      const result = await api.privateConnectors.create({
+        name: 'Production VPC',
+        environment: 'production',
+        gateway_region: 'us',
+      });
+
+      expect(body).toEqual({ name: 'Production VPC', environment: 'production', gateway_region: 'us' });
+      expect(result.data.install_command).toContain('143_CONNECTOR_TOKEN');
+    });
+
+    it('creates a private connector resource without inline secrets', async () => {
+      let body: unknown;
+      server.use(
+        http.post('/api/v1/private-connectors/:id/resources', async ({ params, request }) => {
+          expect(params.id).toBe('connector-1');
+          body = await request.json();
+          return HttpResponse.json({
+            data: {
+              id: 'resource-1',
+              org_id: 'org-1',
+              connector_group_id: 'connector-1',
+              display_name: 'Production logs',
+              resource_type: 'victorialogs',
+              mode: 'logs',
+              config: { base_url: 'http://victorialogs:9428' },
+              config_source: 'ui',
+              config_version: 1,
+              status: 'configured',
+              created_at: '2026-06-19T00:00:00Z',
+              updated_at: '2026-06-19T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      const result = await api.privateConnectors.createResource('connector-1', {
+        display_name: 'Production logs',
+        resource_type: 'victorialogs',
+        mode: 'logs',
+        config: { base_url: 'http://victorialogs:9428', token_env: 'VICTORIALOGS_TOKEN' },
+      });
+
+      expect(body).toEqual({
+        display_name: 'Production logs',
+        resource_type: 'victorialogs',
+        mode: 'logs',
+        config: { base_url: 'http://victorialogs:9428', token_env: 'VICTORIALOGS_TOKEN' },
+      });
+      expect(result.data.status).toBe('configured');
+    });
+
+    it('tests and revokes private connector resources', async () => {
+      server.use(
+        http.post('/api/v1/private-connectors/resources/:id/test', ({ params }) => {
+          expect(params.id).toBe('resource-1');
+          return HttpResponse.json({
+            data: {
+              id: 'resource-1',
+              org_id: 'org-1',
+              connector_group_id: 'connector-1',
+              display_name: 'Production logs',
+              resource_type: 'victorialogs',
+              mode: 'logs',
+              config: {},
+              config_source: 'ui',
+              config_version: 1,
+              status: 'ready',
+              last_test_status: 'success',
+              created_at: '2026-06-19T00:00:00Z',
+              updated_at: '2026-06-19T00:00:00Z',
+            },
+          });
+        }),
+        http.delete('/api/v1/private-connectors/tokens/:id', ({ params }) => {
+          expect(params.id).toBe('token-1');
+          return HttpResponse.json({ data: { id: 'token-1', org_id: 'org-1', connector_group_id: 'connector-1', name: 'Interactive install', token_prefix: '143pc_abcd', preset: 'interactive', registration_count: 0, revoked_at: '2026-06-19T00:00:00Z', created_at: '2026-06-19T00:00:00Z' } });
+        }),
+        http.delete('/api/v1/private-connectors/instances/:id', ({ params }) => {
+          expect(params.id).toBe('instance-1');
+          return HttpResponse.json({ data: { id: 'instance-1', org_id: 'org-1', connector_group_id: 'connector-1', instance_name: 'host-a', status: 'revoked', version: 'v0.1.0', protocol: 'websocket', gateway_region: 'us', capabilities: [], heartbeat_interval_seconds: 5, revoked_at: '2026-06-19T00:00:00Z', created_at: '2026-06-19T00:00:00Z', updated_at: '2026-06-19T00:00:00Z' } });
+        }),
+      );
+
+      await expect(api.privateConnectors.testResource('resource-1')).resolves.toMatchObject({ data: { status: 'ready' } });
+      await expect(api.privateConnectors.revokeDeploymentToken('token-1')).resolves.toMatchObject({ data: { revoked_at: '2026-06-19T00:00:00Z' } });
+      await expect(api.privateConnectors.revokeInstance('instance-1')).resolves.toMatchObject({ data: { status: 'revoked' } });
+    });
+  });
+
   describe('memories', () => {
     it('fetches memories by repo', async () => {
       const mockData = {
@@ -2094,6 +2247,54 @@ describe('api client', () => {
       expect(url.searchParams.get('anchor_message_id')).toBeNull();
       expect(url.searchParams.get('anchor_turn_number')).toBeNull();
       expect(url.searchParams.get('limit_turns')).toBeNull();
+    });
+  });
+
+  describe('private connectors', () => {
+    it('calls lifecycle and token endpoints', async () => {
+      const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+      server.use(
+        http.patch('/api/v1/private-connectors/:connectorId', async ({ request }) => {
+          calls.push({ method: request.method, path: new URL(request.url).pathname, body: await request.json() });
+          return HttpResponse.json({ data: { id: 'connector-1' } });
+        }),
+        http.post('/api/v1/private-connectors/:connectorId/disable', ({ request }) => {
+          calls.push({ method: request.method, path: new URL(request.url).pathname });
+          return HttpResponse.json({ data: { id: 'connector-1' } });
+        }),
+        http.post('/api/v1/private-connectors/:connectorId/tokens', async ({ request }) => {
+          calls.push({ method: request.method, path: new URL(request.url).pathname, body: await request.json() });
+          return HttpResponse.json({ data: { install_command: 'install' } });
+        }),
+        http.post('/api/v1/private-connectors/instances/:instanceId/rotate', ({ request }) => {
+          calls.push({ method: request.method, path: new URL(request.url).pathname });
+          return HttpResponse.json({ data: { id: 'instance-1' } });
+        }),
+        http.post('/api/v1/private-connectors/instances/:instanceId/reload', ({ request }) => {
+          calls.push({ method: request.method, path: new URL(request.url).pathname });
+          return HttpResponse.json({ data: { id: 'instance-1' } });
+        }),
+        http.post('/api/v1/private-connectors/instances/:instanceId/update', ({ request }) => {
+          calls.push({ method: request.method, path: new URL(request.url).pathname });
+          return HttpResponse.json({ data: { id: 'instance-1' } });
+        }),
+      );
+
+      await api.privateConnectors.updateSettings('connector-1', { health_alert_url: 'https://hooks.example.test', offline_alert_after_seconds: 45 });
+      await api.privateConnectors.disable('connector-1');
+      await api.privateConnectors.createDeploymentToken('connector-1', { preset: 'automation', token_file_path: '/run/secrets/token' });
+      await api.privateConnectors.rotateInstance('instance-1');
+      await api.privateConnectors.reloadInstance('instance-1');
+      await api.privateConnectors.updateInstance('instance-1');
+
+      expect(calls).toEqual([
+        { method: 'PATCH', path: '/api/v1/private-connectors/connector-1', body: { health_alert_url: 'https://hooks.example.test', offline_alert_after_seconds: 45 } },
+        { method: 'POST', path: '/api/v1/private-connectors/connector-1/disable' },
+        { method: 'POST', path: '/api/v1/private-connectors/connector-1/tokens', body: { preset: 'automation', token_file_path: '/run/secrets/token' } },
+        { method: 'POST', path: '/api/v1/private-connectors/instances/instance-1/rotate' },
+        { method: 'POST', path: '/api/v1/private-connectors/instances/instance-1/reload' },
+        { method: 'POST', path: '/api/v1/private-connectors/instances/instance-1/update' },
+      ]);
     });
   });
 });

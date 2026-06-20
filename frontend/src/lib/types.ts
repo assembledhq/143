@@ -455,6 +455,122 @@ export interface Integration {
   created_at: string;
 }
 
+export type PrivateConnectorStatus = "waiting" | "online" | "reconnecting" | "offline" | "disabled";
+export type PrivateConnectorInstanceStatus = "online" | "reconnecting" | "offline" | "revoked";
+export type PrivateConnectorResourceType = "victorialogs" | "postgres";
+export type PrivateConnectorResourceMode = "logs" | "agent_readonly" | "preview_runtime";
+export type PrivateConnectorResourceStatus = "configured" | "ready" | "error" | "disabled";
+
+export interface PrivateConnectorGroup {
+  id: string;
+  org_id: string;
+  name: string;
+  environment: string;
+  gateway_region: string;
+  status: PrivateConnectorStatus;
+  health_alert_url?: string;
+  offline_alert_after_seconds?: number;
+  disabled_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PrivateConnectorDeploymentToken {
+  id: string;
+  org_id: string;
+  connector_group_id: string;
+  name: string;
+  token_prefix: string;
+  preset: "interactive" | "automation";
+  max_registrations?: number;
+  registration_count: number;
+  allowed_source_cidrs?: string[];
+  allowed_gateway_region?: string;
+  expires_at?: string;
+  last_used_at?: string;
+  revoked_at?: string;
+  created_at: string;
+}
+
+export interface PrivateConnectorInstance {
+  id: string;
+  org_id: string;
+  connector_group_id: string;
+  deployment_token_id?: string;
+  instance_name: string;
+  status: PrivateConnectorInstanceStatus;
+  version: string;
+  protocol: "websocket" | "grpc";
+  gateway_region: string;
+  capabilities: string[];
+  last_heartbeat_at?: string;
+  heartbeat_interval_seconds: number;
+  online_at?: string;
+  offline_at?: string;
+  revoked_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PrivateConnectorResource {
+  id: string;
+  org_id: string;
+  connector_group_id: string;
+  display_name: string;
+  resource_type: PrivateConnectorResourceType;
+  mode: PrivateConnectorResourceMode;
+  config: Record<string, unknown>;
+  config_source: "file" | "ui";
+  config_version: number;
+  status: PrivateConnectorResourceStatus;
+  last_test_status?: string;
+  last_test_error?: string;
+  last_successful_request_at?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PrivateConnectorAction {
+  id: string;
+  org_id: string;
+  connector_group_id: string;
+  connector_instance_id?: string;
+  resource_id: string;
+  capability: string;
+  actor_type: string;
+  actor_id: string;
+  request_fingerprint: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "denied";
+  error_code?: string;
+  error_message?: string;
+  result_count?: number;
+  duration_ms?: number;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface PrivateConnectorSummary {
+  connector: PrivateConnectorGroup;
+  instances: PrivateConnectorInstance[];
+  resources: PrivateConnectorResource[];
+  deployment_tokens: PrivateConnectorDeploymentToken[];
+  recent_actions?: PrivateConnectorAction[];
+}
+
+export interface PrivateConnectorCreateResult {
+  connector: PrivateConnectorGroup;
+  deployment_token: PrivateConnectorDeploymentToken;
+  deployment_token_value: string;
+  install_command: string;
+}
+
+export interface PrivateConnectorDeploymentTokenCreateResult {
+  deployment_token: PrivateConnectorDeploymentToken;
+  deployment_token_value: string;
+  install_command: string;
+}
+
 export type SlackRoutingMode = "auto" | "answer_only" | "start_work";
 export type SlackResponseVisibility = "thread" | "dm";
 export type SlackNotificationPreset =

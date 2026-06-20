@@ -134,6 +134,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("PR_PREVIEW_SURFACES_ENABLED", "false")
 	t.Setenv("GITHUB_APP_ID", "12345")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "registry.example.com/health/busybox:1.36.1")
+	t.Setenv("PRIVATE_CONNECTOR_ACTION_SIGNING_KEY", "private-key-b64")
 
 	cfg := Load()
 
@@ -153,6 +154,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 45*time.Minute, cfg.PreviewIdleTimeout, "Load should read PREVIEW_IDLE_TIMEOUT from the environment")
 	require.False(t, cfg.PRPreviewSurfacesEnabled, "Load should read PR_PREVIEW_SURFACES_ENABLED from the environment")
 	require.Equal(t, "registry.example.com/health/busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should read SANDBOX_HEALTH_CHECK_IMAGE from the environment")
+	require.Equal(t, "private-key-b64", cfg.PrivateConnectorActionSigningKey, "Load should read PRIVATE_CONNECTOR_ACTION_SIGNING_KEY from the environment")
 }
 
 //nolint:paralleltest // uses t.Setenv

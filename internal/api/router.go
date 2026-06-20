@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -42,6 +44,7 @@ import (
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	"github.com/assembledhq/143/internal/services/preview"
+	privateconnector "github.com/assembledhq/143/internal/services/privateconnector"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -139,6 +142,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	nodeStore := db.NewNodeStore(pool)
 	auditLogStore := db.NewAuditLogStore(pool)
 	auditEmitter := db.NewAuditEmitter(auditLogStore, logger)
+	privateConnectorStore := db.NewPrivateConnectorStore(pool)
 
 	// Create credential store with optional encryption.
 	var cryptoSvc *crypto.Service
@@ -255,6 +259,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	)
 	integrationHandler.SetLinearJobStore(jobStore)
 	integrationHandler.SetGitHubRosterJobStore(jobStore)
+	privateConnectorActionSigningKey, err := parsePrivateConnectorActionSigningKey(cfg.PrivateConnectorActionSigningKey)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	privateConnectorGateway := privateconnector.NewGateway(logger, privateconnector.GatewayConfig{})
+	privateConnectorService := privateconnector.NewService(privateConnectorStore, privateconnector.Config{
+		ActionGateway:    privateConnectorGateway,
+		ActionSigningKey: privateConnectorActionSigningKey,
+	})
+	privateConnectorGateway.SetHeartbeatRecorder(privateConnectorService)
+	privateConnectorGateway.SetConfigProvider(privateConnectorService)
+	privateConnectorHandler := handlers.NewPrivateConnectorHandler(privateConnectorService)
+	privateConnectorHandler.SetGateway(privateConnectorGateway)
+	go privateConnectorService.StartHealthMonitor(contextFromShutdown(shutdownCh), 10*time.Second, logger)
+	cliToolsHandler.SetPrivateConnectorLogProviderSource(privateConnectorService)
+	cliToolsHandler.SetPrivateConnectorDatabaseProviderSource(privateConnectorService)
 	webhookHandler := handlers.NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, prService)
 	webhookHandler.SetGitHubInstallationStore(githubInstallationStore)
 	slackbotHandler := handlers.NewSlackbotHandler(
@@ -903,6 +923,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/linear", ingestionWebhookHandler.HandleLinear)
 		})
 
+		// Private connector bootstrap routes (no browser auth). The deployment
+		// token or connector instance signature is the credential on these paths.
+		r.Post("/api/v1/private-connector/register", privateConnectorHandler.RegisterInstance)
+		r.Post("/api/v1/private-connector/instances/{id}/identity", privateConnectorHandler.RotateInstanceIdentity)
+		r.Post("/api/v1/private-connector/instances/{id}/heartbeat", privateConnectorHandler.Heartbeat)
+		r.Get("/api/v1/private-connector/instances/{id}/session", privateConnectorHandler.Session)
+
 		// Internal API routes (token-based auth — called by sandbox agents)
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
@@ -1546,6 +1573,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/integrations/circleci/disconnect", integrationHandler.DisconnectIntegration)
 				r.Post("/api/v1/integrations/mezmo/connect", integrationHandler.ConnectMezmo)
 				r.Delete("/api/v1/integrations/mezmo/disconnect", integrationHandler.DisconnectIntegration)
+				r.Get("/api/v1/private-connectors", privateConnectorHandler.ListConnectors)
+				r.Post("/api/v1/private-connectors", privateConnectorHandler.CreateConnector)
+				r.Patch("/api/v1/private-connectors/{id}", privateConnectorHandler.UpdateConnectorSettings)
+				r.Post("/api/v1/private-connectors/{id}/disable", privateConnectorHandler.DisableConnector)
+				r.Post("/api/v1/private-connectors/{id}/tokens", privateConnectorHandler.CreateDeploymentToken)
+				r.Delete("/api/v1/private-connectors/tokens/{id}", privateConnectorHandler.RevokeDeploymentToken)
+				r.Post("/api/v1/private-connectors/instances/{id}/rotate", privateConnectorHandler.RequestIdentityRotation)
+				r.Post("/api/v1/private-connectors/instances/{id}/reload", privateConnectorHandler.RequestConfigReload)
+				r.Post("/api/v1/private-connectors/instances/{id}/update", privateConnectorHandler.RequestConnectorUpdate)
+				r.Delete("/api/v1/private-connectors/instances/{id}", privateConnectorHandler.RevokeInstance)
+				r.Post("/api/v1/private-connectors/{id}/resources", privateConnectorHandler.CreateResource)
+				r.Post("/api/v1/private-connectors/resources/{id}/test", privateConnectorHandler.TestResource)
 
 				// Eval write routes (admin-only — creating tasks shapes org-wide eval setup).
 				r.Post("/api/v1/evals/tasks", evalHandler.CreateTask)
@@ -1567,6 +1606,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	r.Mount("/", apiRoutes)
 
 	return r, gwSrv, recycleWorker, inspectorCloser, previewManager, nil
+}
+
+func parsePrivateConnectorActionSigningKey(raw string) (ed25519.PrivateKey, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode private connector action signing key: %w", err)
+	}
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("decode private connector action signing key: expected %d bytes, got %d", ed25519.PrivateKeySize, len(key))
+	}
+	return ed25519.PrivateKey(key), nil
 }
 
 // linearAgentOrgWriterAdapter persists the per-org Enabled flag by

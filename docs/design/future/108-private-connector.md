@@ -1,7 +1,7 @@
 # Design: 143 Private Connector
 
-> **Status:** Future
-> **Last reviewed:** 2026-06-06
+> **Status:** Partially Implemented
+> **Last reviewed:** 2026-06-20
 
 143 needs to help coding agents and previews work with production-adjacent systems that live inside customer private networks: logs, databases, and preview dependencies. The product problem is that those systems are intentionally behind firewalls, private VPCs, VPNs, or office networks, and customers should not have to expose them broadly to the public internet just so 143 can debug issues or run realistic previews.
 
@@ -12,6 +12,35 @@ The first supported capabilities are:
 1. VictoriaLogs querying for coding agents and operators.
 2. Read-only database inspection/querying for coding agents.
 3. Preview database access for running preview applications, including write-capable access to preview-safe databases.
+
+## Implementation Status
+
+Core product surface implemented as of 2026-06-20:
+
+- Control-plane schema, models, stores, and API routes for connector groups, deployment tokens, connector instances, resources, and action audit rows.
+- Settings -> Integrations -> Private Connector UI for creating interactive or automation install tokens, showing one-time or token-file install commands, displaying connector health/resources/recent audit events, adding VictoriaLogs, Postgres read-only, and Postgres preview DB resource records with secret references rather than inline secrets, testing resources, and operating connector lifecycle controls.
+- Short-lived deployment-token bootstrap exchange, durable Ed25519 connector instance identity, persisted local identity/state files, signed heartbeat requests, and signed WebSocket session authentication.
+- `cmd/private-connector` daemon bootstrap plus WebSocket gateway session loop with signed action verification, heartbeat-only fallback, provider env parsing, and a systemd-oriented installer script that performs one-time token bootstrap before starting a tokenless persistent service.
+- Connector-side signed action verification primitives, nonce replay cache, expiry/skew checks, and a modular provider registry.
+- Phase-1 VictoriaLogs provider boundary for `victorialogs.query`, `victorialogs.context`, `victorialogs.fields`, and `victorialogs.stats`, including resource authorization, row caps, metadata, field allow/deny lists, max query window, max cardinality/request-rate policy, default filters, and field redaction.
+- Server-side WebSocket gateway registry with active session tracking, capability-aware dispatch, signed action requests, signed UI-managed config pushes, action audit rows using fingerprints instead of raw params, and correlated action/config responses.
+- Connector-backed `integration.LogProvider` abstraction wired into org tool registries so existing `143-tools logs`/MCP tooling can use private VictoriaLogs resources.
+- Read-only Postgres connector provider for `postgres.query`/`postgres.read_query`, `postgres.schema`, `postgres.explain`, `postgres.indexes`, and opt-in `postgres.sample_rows`, including resource authorization, explicit `READ ONLY` transactions, statement timeout, row caps, COPY/multi-statement denial, schema/table allow/deny policy, null-preserving PII redaction, normalized SQL fingerprints, and MCP `database_query`, `database_schema`, `database_explain`, `database_indexes`, and `database_sample_rows` tools through org tool registries.
+- Resource test connection controls for VictoriaLogs and Postgres, and lifecycle controls for deployment-token and connector-instance revocation.
+- Connector group health settings, per-group offline thresholds, health alert webhooks for offline/online transitions, disable controls, connector identity rotation, connector config reload, and explicit UI-triggered connector update actions.
+- Deployment-token policy enforcement for allowed gateway region and source CIDR happens inside the atomic token-consume update. Registration and WebSocket heartbeats update connector group status to online.
+- Config hierarchy is enforced in the daemon: a present local config file wins and rejects UI pushes; otherwise signed `config_push` frames can atomically replace the in-memory provider registry and immediately advertise updated capabilities.
+- Preview runtime lease scaffold: schema/model/store/service support for org/repository/preview/runtime/resource-scoped Postgres TCP leases, bounded expiry, allowed target host/port/database, max connection/idle/byte policy, one-time lease tokens stored only by hash, revocation, token-based data-plane authorization lookup, repository allowlists, active lease caps, and max lease duration policy.
+- Provider-aware install script behavior that persists lifecycle/update and provider policy environment, and selects provider-specific artifact variants from configured provider types so customers only download the integration code they requested at the artifact level.
+
+Deliberate deviations from the full design:
+
+- The runtime remains a modular monolith. The installer now selects provider-specific artifact variants, but actual per-provider subprocess IPC, independently running provider binaries, per-provider systemd units, and seccomp/network confinement remain future work; the Postgres provider was added in-process to avoid hardening a process boundary before the runtime contract has production usage.
+- The installer script requires release automation to embed the real cosign public key before publishing to `get.143.dev`; local-binary installs work for development, but network downloads fail closed if the key is absent.
+- Config pushes are signed with the gateway action-signing key and scoped to org/connector/version/expiry. This is separate from connector session auth, but it is not yet the doc's stronger org-admin-scoped authorization token; org-admin authorization is currently enforced when the UI writes the resource config server-side.
+- Preview DB leases are durable and token-authorized, but the scoped TCP relay/data channel, connector-side lease preparation/cleanup, preview env injection, and preview startup diagnostics are still future work.
+- WebSocket with signed Ed25519 connector identity remains the implemented gateway transport. The secondary gRPC-over-443/mTLS transport path described by the design is still future work beyond protocol/config placeholders.
+- Full gateway health-weighted routing remains a future phase.
 
 ## Product Problem
 

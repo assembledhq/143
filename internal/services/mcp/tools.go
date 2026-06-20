@@ -353,6 +353,9 @@ func (tr *ToolRegistry) ListTools() []Tool {
 	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
 		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
+	if databaseProviders := tr.integrations.DatabaseProviders(); len(databaseProviders) > 0 {
+		tools = append(tools, databaseToolDefinitions(databaseProviders)...)
+	}
 
 	for _, pp := range tr.integrations.ProjectProposers() {
 		prefix := pp.Name()
@@ -487,6 +490,8 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 	switch name {
 	case "log_query", "log_context", "log_fields", "log_stats":
 		return tr.callLogTool(ctx, name, args)
+	case "database_query", "database_schema", "database_explain", "database_indexes", "database_sample_rows":
+		return tr.callDatabaseTool(ctx, name, args)
 	}
 
 	// Try each integration category. The tool name is prefixed with the
