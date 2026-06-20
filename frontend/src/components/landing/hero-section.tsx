@@ -41,7 +41,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <Button
             asChild
             variant="ghost"
-            className={`${type.button} ${
+            className={`${type.button} px-3 ${
               isDark
                 ? "text-white/60 hover:bg-white/5 hover:text-white"
                 : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
@@ -52,7 +52,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <Button
             asChild
             variant="ghost"
-            className={`hidden ${type.button} sm:inline-flex ${
+            className={`hidden ${type.button} px-3 sm:inline-flex ${
               isDark
                 ? "text-white/60 hover:bg-white/5 hover:text-white"
                 : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
@@ -84,7 +84,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
               isDark ? "text-white" : "text-slate-900"
             }`}
           >
-            Shared coding agent automations, not private prompts
+            Where your whole team builds software together
           </h1>
 
           <p
