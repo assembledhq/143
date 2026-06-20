@@ -43,14 +43,16 @@ function statusBadge(status: JoinToken["status"]) {
 
 // CLIJoinTokensCard is the admin "CLI install link" surface on the Members
 // settings page: create a join link, copy the one-liner, list and revoke
-// active links. The plaintext token is only available in the create
-// response, so the copy affordance lives in the post-create dialog.
+// active links. Existing links are copied through an explicit recovery
+// request so the list response does not carry bearer join URLs.
 export function CLIJoinTokensCard() {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [role, setRole] = useState("member");
   const [created, setCreated] = useState<CreatedJoinToken | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
+  const [copyingTokenId, setCopyingTokenId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const { data } = useQuery<ListResponse<JoinToken>>({
@@ -82,6 +84,32 @@ export function CLIJoinTokensCard() {
       captureError(err);
       setError("Failed to revoke the install link.");
     },
+  });
+
+  const copyExistingMutation = useMutation({
+    mutationFn: async (token: JoinToken) => {
+      const resp = await api.cli.getJoinTokenLink(token.id);
+      return { token, installCommand: resp.data.install_command };
+    },
+    onMutate: (token) => {
+      setCopyingTokenId(token.id);
+      setError("");
+    },
+    onSuccess: async ({ token, installCommand }) => {
+      try {
+        await navigator.clipboard.writeText(installCommand);
+        setCopiedTokenId(token.id);
+        setTimeout(() => setCopiedTokenId(null), 2000);
+      } catch (err) {
+        captureError(err);
+        setError("Failed to copy the install link.");
+      }
+    },
+    onError: (err) => {
+      captureError(err);
+      setError("Failed to recover the install link.");
+    },
+    onSettled: () => setCopyingTokenId(null),
   });
 
   const copyInstallCommand = async () => {
@@ -127,9 +155,9 @@ export function CLIJoinTokensCard() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="member">Member</SelectItem>
-                  <SelectItem value="builder">Builder</SelectItem>
-                  <SelectItem value="viewer">Viewer</SelectItem>
+                  <SelectItem value="member">{roleLabel("member")}</SelectItem>
+                  <SelectItem value="builder">{roleLabel("builder")}</SelectItem>
+                  <SelectItem value="viewer">{roleLabel("viewer")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -164,15 +192,29 @@ export function CLIJoinTokensCard() {
                     </div>
                   </div>
                   {token.status === "active" && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      disabled={revokeMutation.isPending}
-                      onClick={() => revokeMutation.mutate(token.id)}
-                    >
-                      Revoke
-                    </Button>
+                    <div className="flex items-center gap-1 self-start sm:self-auto">
+                      {token.can_reveal && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className={copiedTokenId === token.id ? "text-primary" : undefined}
+                          disabled={copyingTokenId === token.id}
+                          aria-label={`Copy install link for ${token.name || token.token_prefix}`}
+                          onClick={() => copyExistingMutation.mutate(token)}
+                        >
+                          {copiedTokenId === token.id ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        disabled={revokeMutation.isPending}
+                        onClick={() => revokeMutation.mutate(token.id)}
+                      >
+                        Revoke
+                      </Button>
+                    </div>
                   )}
                 </div>
               ))}
@@ -182,20 +224,27 @@ export function CLIJoinTokensCard() {
       </Card>
 
       <AlertDialog open={created !== null} onOpenChange={(open) => !open && setCreated(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-xl">
           <AlertDialogHeader>
             <AlertDialogTitle>Install link created</AlertDialogTitle>
             <AlertDialogDescription>
-              Copy the one-liner below and share it with your team. The full
-              link is shown only once — after this dialog closes, only its
-              prefix remains visible.
+              Copy the one-liner below and share it with your team. You can
+              copy active links again later from this list.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="flex items-center gap-2">
-            <code className="block flex-1 overflow-x-auto whitespace-nowrap rounded-md bg-muted px-3 py-2 text-xs">
-              {created?.install_command}
-            </code>
-            <Button variant="outline" size="sm" onClick={copyInstallCommand}>
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="min-w-0 flex-1 rounded-md bg-muted px-3 py-2">
+              <code className="block break-all font-mono text-xs leading-relaxed">
+                {created?.install_command}
+              </code>
+            </div>
+            <Button
+              aria-label="Copy install command"
+              variant="outline"
+              size="icon"
+              className="size-9 shrink-0"
+              onClick={copyInstallCommand}
+            >
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             </Button>
           </div>

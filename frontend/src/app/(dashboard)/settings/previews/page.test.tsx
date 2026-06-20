@@ -100,7 +100,7 @@ describe("PreviewSettingsPage", () => {
     renderWithProviders(<PreviewSettingsPage />);
 
     expect(await screen.findByRole("tab", { name: "Auto-start policy" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByText("assembledhq/143")).toBeInTheDocument();
+    expect(await screen.findAllByText("assembledhq/143")).not.toHaveLength(0);
     expect(screen.getByText("12")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("radio", { name: /use warm auto-preview for assembledhq\/143/i }));
@@ -242,7 +242,10 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    const row = (await screen.findByText("assembledhq/143")).closest("tr");
+    const repoLabels = await screen.findAllByText("assembledhq/143");
+    const row = repoLabels
+      .map((repoLabel) => repoLabel.closest("tr"))
+      .find((candidate) => candidate && within(candidate as HTMLElement).queryByText("Open PRs"));
     expect(row).not.toBeNull();
     expect(within(row as HTMLElement).getByText("Open PRs")).toBeInTheDocument();
     expect(within(row as HTMLElement).getByText("Updated")).toBeInTheDocument();
@@ -900,6 +903,65 @@ describe("PreviewSettingsPage", () => {
     await userEvent.click((await screen.findAllByRole("button", { name: /edit assembled-dev/i }))[0]);
 
     expect(screen.queryByRole("button", { name: "Test bundle" })).not.toBeInTheDocument();
+  });
+
+  it("starts a policy test preview with the selected preview config", async () => {
+    let testPreviewBody: unknown;
+
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "off",
+            pr_preview_surfaces_enabled: false,
+            github_pr_comment_enabled: true,
+            github_commit_status_enabled: true,
+            preview_configured: true,
+            preview_success_recorded: false,
+            preview_config_names: ["web", "admin"],
+            preview_config_default_name: "web",
+            preview_config_requires_selection: true,
+            preview_ready: false,
+            preview_readiness_missing_reason:
+              "Select a preview config and run a successful test preview before enabling GitHub PR links",
+            github_pr_comment_permission_ok: true,
+            github_commit_status_permission_ok: true,
+            open_pr_count: 1,
+            updated_at: null,
+          },
+        ],
+        meta: {},
+      })),
+      http.post("*/api/v1/repositories/repo-1/preview-policy/test-preview", async ({ request }) => {
+        testPreviewBody = await request.json();
+        return HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            repository_id: "repo-1",
+            branch: "main",
+            commit_sha: "abc",
+            status: "target_created",
+            stable_url: "https://app.143.dev/previews/target-1",
+            preview_url: null,
+            expires_at: null,
+            resumable: false,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(await screen.findAllByText("assembledhq/143")).not.toHaveLength(0);
+    await userEvent.click(await screen.findByRole("button", { name: /test preview/i }));
+
+    await waitFor(() => {
+      expect(testPreviewBody).toEqual({ preview_config_name: "web" });
+    });
   });
 
 });

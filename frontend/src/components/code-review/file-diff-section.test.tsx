@@ -178,6 +178,16 @@ describe("FileDiffSection", () => {
     expect(container.querySelector(".overflow-x-auto")).toHaveClass("[container-type:inline-size]");
   });
 
+  it("contains wide diff content inside the file section instead of widening the page", () => {
+    const { container } = render(<FileDiffSection file={makeDiffFile()} viewMode="unified" />);
+    const section = container.firstElementChild;
+    const horizontalViewport = container.querySelector(".overflow-x-auto");
+
+    expect(section).toHaveClass("min-w-0", "max-w-full");
+    expect(section).not.toHaveClass("overflow-hidden");
+    expect(horizontalViewport).toHaveClass("min-w-0", "max-w-full", "overscroll-x-contain");
+  });
+
   it("renders line content in unified mode", () => {
     render(<FileDiffSection file={makeDiffFile()} viewMode="unified" />);
     expect(screen.getByText(/line 1\|old:1\|new:1/)).toBeInTheDocument();

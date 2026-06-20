@@ -71,7 +71,7 @@ services:
     depends_on:
       - api
     healthcheck:
-      # node -e avoids needing wget/curl in the minimal node:22-alpine image.
+      # node -e avoids needing wget/curl in the minimal node:24-alpine image.
       test:
         - "CMD-SHELL"
         - "node -e \"require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""

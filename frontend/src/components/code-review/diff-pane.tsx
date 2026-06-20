@@ -221,7 +221,7 @@ export const DiffPane = forwardRef<DiffPaneHandle, DiffPaneProps>(
         key={resetScrollKey ?? "all-files"}
         ref={containerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-3 pb-3 pt-0 space-y-3 md:px-4 md:pb-4 md:pt-0 md:space-y-4"
+        className="flex-1 min-w-0 max-w-full overflow-y-auto overflow-x-hidden px-3 pb-3 pt-0 space-y-3 md:px-4 md:pb-4 md:pt-0 md:space-y-4"
       >
         {files.map((file, i) => (
           <FileDiffSection

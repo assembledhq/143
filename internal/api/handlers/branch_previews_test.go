@@ -31,6 +31,35 @@ type fakeBranchPreviewGitHub struct {
 	configContent string
 }
 
+type fakeBranchPreviewGitHubWithDetails struct {
+	fakeBranchPreviewGitHub
+	details ghservice.InstallationDetails
+}
+
+func (f fakeBranchPreviewGitHubWithDetails) GetInstallationDetails(context.Context, int64) (ghservice.InstallationDetails, error) {
+	return f.details, nil
+}
+
+type fakeBranchPreviewGitHubWithErrors struct {
+	fakeBranchPreviewGitHub
+	tokenErr      error
+	configErr     error
+}
+
+func (f fakeBranchPreviewGitHubWithErrors) GetInstallationToken(context.Context, int64) (string, error) {
+	if f.tokenErr != nil {
+		return "", f.tokenErr
+	}
+	return f.fakeBranchPreviewGitHub.token, nil
+}
+
+func (f fakeBranchPreviewGitHubWithErrors) GetFileContent(context.Context, string, string, string, string, string) (string, error) {
+	if f.configErr != nil {
+		return "", f.configErr
+	}
+	return f.fakeBranchPreviewGitHub.GetFileContent(context.Background(), "", "", "", "", "")
+}
+
 func branchPreviewAnyArgs(n int) []any {
 	args := make([]any, n)
 	for i := range args {
@@ -1438,9 +1467,9 @@ func TestBranchPreviewHandler_UpdatePolicyEmitsAudit(t *testing.T) {
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(6)...).
+		WithArgs(previewHandlerAnyArgs(9)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, false, true, true, userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"auto_mode":"warm"}`))
@@ -1456,6 +1485,54 @@ func TestBranchPreviewHandler_UpdatePolicyEmitsAudit(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code, "UpdatePolicy should update the repository policy")
 	require.Contains(t, rr.Body.String(), `"auto_mode":"warm"`, "UpdatePolicy should return the updated mode")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_UpdatePolicyRejectsMissingSelectedGitHubPermission(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	details := ghservice.InstallationDetails{}
+	details.Permissions.Issues = "write"
+	details.Permissions.Statuses = "read"
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHubWithDetails{details: details},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, (*string)(nil), (*string)(nil), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"pr_preview_surfaces_enabled":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.UpdatePolicy(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "UpdatePolicy should reject enabled status surfacing without statuses write permission")
+	require.Contains(t, rr.Body.String(), "GITHUB_PERMISSION_MISSING", "response should identify the missing GitHub permission")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1489,11 +1566,11 @@ func TestBranchPreviewHandler_UpdatePolicySessionPrewarmOnlyPreservesAutoMode(t 
 	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeOff), false, false, true, true, userID, now, now))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(6)...).
+		WithArgs(previewHandlerAnyArgs(9)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"session_prewarm_mode":"smart"}`))
@@ -1543,11 +1620,11 @@ func TestBranchPreviewHandler_UpdatePolicyUntrustedForkOnlyPreservesModes(t *tes
 	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
 		WithArgs(previewHandlerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, userID, now, now))
 	mock.ExpectQuery("INSERT INTO repository_preview_policies").
-		WithArgs(previewHandlerAnyArgs(6)...).
+		WithArgs(previewHandlerAnyArgs(9)...).
 		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
-			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), true, userID, now, now))
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), true, false, true, true, userID, now, now))
 	expectAuditInsert(mock)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"session_prewarm_untrusted_fork":true}`))
@@ -1568,8 +1645,105 @@ func TestBranchPreviewHandler_UpdatePolicyUntrustedForkOnlyPreservesModes(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestBranchPreviewHandler_TestPolicyPreviewStartsDefaultBranchTarget(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "token", head: headSHA},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, (*string)(nil), (*string)(nil), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	mock.ExpectQuery("SELECT .+ FROM preview_targets[\\s\\S]+source_type = @source_type").
+		WithArgs(previewHandlerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols))
+	mock.ExpectQuery("INSERT INTO preview_targets").
+		WithArgs(previewHandlerAnyArgs(11)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).
+			AddRow(targetID, orgID, repoID, "main", headSHA, "web", "", models.PreviewSourceTypeManual, fmt.Sprintf("preview-policy-test:%s:main:%s:web", repoID, headSHA), "https://github.com/acme/app/tree/main", userID, (*string)(nil), (*uuid.UUID)(nil), now))
+	expectBranchPreviewGroupUpsert(mock, orgID, repoID, targetID, userID, "main", headSHA, "web", models.PreviewSourceTypeManual, fmt.Sprintf("preview-policy-test:%s:main:%s:web", repoID, headSHA), "https://github.com/acme/app/tree/main", now)
+	mock.ExpectQuery("INSERT INTO preview_links").
+		WithArgs(previewHandlerAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewLinkTestCols).
+			AddRow(uuid.New(), orgID, targetID, models.PreviewLinkTypeTarget, targetID.String(), &repoID, (*int)(nil), now, now))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/repositories/"+repoID.String()+"/preview-policy/test-preview", bytes.NewBufferString(`{}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.TestPolicyPreview(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "TestPolicyPreview should create a branch preview target for the default branch")
+	require.Contains(t, rr.Body.String(), `"status":"target_created"`, "response should return the target-created preview when no worker runtime is configured")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestGitHubPreviewSurfacePermissionHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		permissions ghservice.InstallationPermissions
+		wantComment bool
+		wantStatus  bool
+	}{
+		{
+			name:        "issues write and statuses write allow both surfaces",
+			permissions: ghservice.InstallationPermissions{Issues: "write", Statuses: "write"},
+			wantComment: true,
+			wantStatus:  true,
+		},
+		{
+			name:        "pull request write can publish comments",
+			permissions: ghservice.InstallationPermissions{PullRequests: "write", Statuses: "read"},
+			wantComment: true,
+			wantStatus:  false,
+		},
+		{
+			name:        "read permissions cannot publish surfaces",
+			permissions: ghservice.InstallationPermissions{Issues: "read", PullRequests: "read", Statuses: "read"},
+			wantComment: false,
+			wantStatus:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.wantComment, githubPRCommentPermissionOK(tt.permissions), "comment permission helper should match selected GitHub permissions")
+			require.Equal(t, tt.wantStatus, githubCommitStatusPermissionOK(tt.permissions), "status permission helper should match selected GitHub permissions")
+		})
+	}
+}
+
 func repositoryPreviewPolicyTestCols() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func repositoryTestCols() []string {
@@ -2841,4 +3015,79 @@ func TestBranchPreviewHandler_EnrichSessionPreviewResponseReturnsCopy(t *testing
 	require.Equal(t, repoID, enriched.RepositoryID, "enriched copy should include the owning session repository ID")
 	require.Equal(t, "assembledhq/assembled", enriched.RepositoryFullName, "enriched copy should include repository metadata")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestEnrichPreviewPolicyConfigReadiness_PreservesReadinessOnTransientError verifies that
+// transient GitHub errors (token fetch failure, API outage) do not demote DB-computed
+// preview readiness. A repo with proven previews should not flash "not ready" during
+// temporary GitHub unavailability.
+func TestEnrichPreviewPolicyConfigReadiness_PreservesReadinessOnTransientError(t *testing.T) {
+	t.Parallel()
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(nil),
+		db.NewRepositoryStore(nil),
+		fakeBranchPreviewGitHubWithErrors{
+			fakeBranchPreviewGitHub: fakeBranchPreviewGitHub{token: "ghs_test"},
+			tokenErr:                fmt.Errorf("GitHub API unavailable"),
+		},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	repo := models.Repository{
+		FullName:      "acme/app",
+		DefaultBranch: "main",
+	}
+	policy := &models.RepositoryPreviewPolicySummary{
+		PreviewConfigured:    true,
+		PreviewSuccessRecorded: true,
+		PreviewReady:         true,
+	}
+
+	handler.enrichPreviewPolicyConfigReadiness(context.Background(), repo, policy)
+
+	require.True(t, policy.PreviewReady, "transient token fetch error should not demote DB-computed preview readiness")
+	require.True(t, policy.PreviewConfigured, "transient token fetch error should not demote DB-computed preview configured flag")
+	require.Empty(t, policy.PreviewReadinessMissingReason, "transient error should not set a readiness missing reason")
+}
+
+// TestEnrichPreviewPolicyConfigReadiness_SetsNotConfiguredOnMissingFile verifies that
+// a definitive 404 from GitHub (the config file does not exist on the default branch)
+// correctly marks the repository as not configured and not ready.
+func TestEnrichPreviewPolicyConfigReadiness_SetsNotConfiguredOnMissingFile(t *testing.T) {
+	t.Parallel()
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(nil),
+		db.NewRepositoryStore(nil),
+		fakeBranchPreviewGitHubWithErrors{
+			fakeBranchPreviewGitHub: fakeBranchPreviewGitHub{token: "ghs_test"},
+			configErr: &ghservice.GitHubAPIError{
+				Method:     http.MethodGet,
+				Path:       "/repos/acme/app/contents/.143/config.json",
+				StatusCode: http.StatusNotFound,
+			},
+		},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	repo := models.Repository{
+		FullName:      "acme/app",
+		DefaultBranch: "main",
+	}
+	policy := &models.RepositoryPreviewPolicySummary{
+		PreviewConfigured:    true,
+		PreviewSuccessRecorded: true,
+		PreviewReady:         true,
+	}
+
+	handler.enrichPreviewPolicyConfigReadiness(context.Background(), repo, policy)
+
+	require.False(t, policy.PreviewConfigured, "404 on config file should mark the repository as not configured")
+	require.False(t, policy.PreviewReady, "404 on config file should mark the repository as not ready")
+	require.Equal(t, "Add .143/config.json first", policy.PreviewReadinessMissingReason)
 }

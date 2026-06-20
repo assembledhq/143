@@ -93,7 +93,7 @@ describe("session PR action state", () => {
       {
         name: "review required",
         input: { ...base, builderReviewAllowsPR: false },
-        reason: "Run Review successfully before creating a PR",
+        reason: "Run readiness checks successfully before creating a PR",
       },
       {
         name: "snapshot missing",

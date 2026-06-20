@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import {
   Eye,
+  GitPullRequest,
   HelpCircle,
   KeyRound,
   MonitorPlay,
@@ -187,6 +188,7 @@ export default function PreviewSettingsPage() {
 function AutoPreviewSection() {
   const queryClient = useQueryClient();
   const autosave = useOrgSettingsAutosave();
+  const [selectedPreviewConfigs, setSelectedPreviewConfigs] = useState<Record<string, string>>({});
   const policiesQuery = useQuery<ListResponse<PreviewPolicySummary>>({
     queryKey: ["preview-policies"],
     queryFn: () => api.previews.policies.list(),
@@ -210,14 +212,7 @@ function AutoPreviewSection() {
       body,
     }: {
       repositoryId: string;
-      body: Partial<
-        Pick<
-          PreviewPolicySummary,
-          | "auto_mode"
-          | "session_prewarm_mode"
-          | "session_prewarm_untrusted_fork"
-        >
-      >;
+      body: Parameters<typeof api.previews.policies.update>[1];
     }) => api.previews.policies.update(repositoryId, body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["preview-policies"] });
@@ -227,6 +222,32 @@ function AutoPreviewSection() {
         error instanceof ApiError
           ? error.message
           : "Preview policy could not be saved.",
+      );
+    },
+  });
+
+  const testPreviewMutation = useMutation({
+    mutationFn: ({
+      repositoryId,
+      previewConfigName,
+    }: {
+      repositoryId: string;
+      previewConfigName?: string;
+    }) =>
+      api.previews.policies.testPreview(
+        repositoryId,
+        previewConfigName ? { preview_config_name: previewConfigName } : undefined,
+      ),
+    onSuccess: () => {
+      toast.success("Test preview started.");
+      void queryClient.invalidateQueries({ queryKey: ["preview-policies"] });
+      void queryClient.invalidateQueries({ queryKey: ["branch-previews"] });
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Test preview could not be started.",
       );
     },
   });
@@ -290,9 +311,7 @@ function AutoPreviewSection() {
                         if (!value || value === policy.auto_mode) return;
                         policyMutation.mutate({
                           repositoryId: policy.repository_id,
-                          body: {
-                            auto_mode: value as PreviewPolicySummary["auto_mode"],
-                          },
+                          body: { auto_mode: value as PreviewPolicySummary["auto_mode"] },
                         });
                       }}
                       className="justify-start"
@@ -420,6 +439,199 @@ function AutoPreviewSection() {
             )}
           </TableBody>
         </Table>
+      </div>
+
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <h3 className="text-sm font-medium text-foreground">
+            PR preview links
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Publish stable 143 preview entry points to GitHub pull requests.
+          </p>
+        </div>
+        <div className="overflow-hidden rounded-md border border-border">
+          <Table>
+            <TableHeader className="hidden md:table-header-group">
+              <TableRow>
+                <TableHead>Repository</TableHead>
+                <TableHead>Links</TableHead>
+                <TableHead>Surfaces</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {policiesQuery.isLoading ? (
+                <TableRow>
+                  <TableCell colSpan={4} className="py-6 text-sm text-muted-foreground">
+                    Loading preview link policies...
+                  </TableCell>
+                </TableRow>
+              ) : policies.length ? (
+                policies.map((policy) => {
+                  const missingPermissions =
+                    (policy.github_pr_comment_enabled &&
+                      !policy.github_pr_comment_permission_ok) ||
+                    (policy.github_commit_status_enabled &&
+                      !policy.github_commit_status_permission_ok);
+                  const showTestPreview =
+                    policy.preview_configured &&
+                    (!policy.preview_success_recorded ||
+                      policy.preview_config_requires_selection);
+                  const selectedPreviewConfig =
+                    selectedPreviewConfigs[policy.repository_id] ||
+                    policy.preview_config_default_name ||
+                    policy.preview_config_names?.[0] ||
+                    "";
+                  const testPreviewDisabled =
+                    (testPreviewMutation.isPending && testPreviewMutation.variables?.repositoryId === policy.repository_id) ||
+                    Boolean(policy.preview_config_requires_selection && !selectedPreviewConfig);
+                  const disabledReason = !policy.preview_ready
+                    ? policy.preview_readiness_missing_reason || "Run a successful test preview before enabling GitHub PR links"
+                    : missingPermissions
+                      ? "GitHub App permissions are missing for one or more selected surfaces"
+                      : "";
+                  const canEnable = policy.preview_ready && !missingPermissions;
+                  return (
+                    <TableRow key={`${policy.repository_id}-links`} className="block border-b p-3 md:table-row md:p-0">
+                      <TableCell className="block px-0 py-1 md:table-cell md:px-4 md:py-3">
+                        <div className="flex items-center gap-2 font-medium text-foreground">
+                          <GitPullRequest className="h-4 w-4 text-muted-foreground" />
+                          {policy.repository_full_name}
+                        </div>
+                        {disabledReason ? (
+                          <p className="mt-1 text-xs text-muted-foreground">{disabledReason}</p>
+                        ) : null}
+                        {policy.preview_config_names?.length ? (
+                          <div className="mt-2 max-w-56">
+                            <Select
+                              value={selectedPreviewConfig}
+                              onValueChange={(value) => {
+                                setSelectedPreviewConfigs((current) => ({
+                                  ...current,
+                                  [policy.repository_id]: value,
+                                }));
+                              }}
+                            >
+                              <SelectTrigger
+                                aria-label={`Select preview config for ${policy.repository_full_name}`}
+                              >
+                                <SelectValue placeholder="Preview config" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {policy.preview_config_names.map((name) => (
+                                  <SelectItem key={name} value={name}>
+                                    {name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        ) : null}
+                        {showTestPreview ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="mt-2"
+                            disabled={testPreviewDisabled}
+                            onClick={() => {
+                              testPreviewMutation.mutate({
+                                repositoryId: policy.repository_id,
+                                previewConfigName: selectedPreviewConfig || undefined,
+                              });
+                            }}
+                          >
+                            <MonitorPlay className="mr-2 h-4 w-4" />
+                            Test preview
+                          </Button>
+                        ) : null}
+                      </TableCell>
+                      <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
+                        <div className="flex items-center gap-2">
+                          <Switch
+                            aria-label={`Enable PR preview links for ${policy.repository_full_name}`}
+                            checked={policy.pr_preview_surfaces_enabled}
+                            disabled={!canEnable && !policy.pr_preview_surfaces_enabled}
+                            onCheckedChange={(checked) => {
+                              policyMutation.mutate({
+                                repositoryId: policy.repository_id,
+                                body: { pr_preview_surfaces_enabled: checked },
+                              });
+                            }}
+                          />
+                          <span className="text-sm text-muted-foreground">
+                            {policy.pr_preview_surfaces_enabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
+                        <div className="flex flex-wrap gap-3">
+                          <div className="flex items-center gap-2 text-sm">
+                            <Switch
+                              aria-label={`Enable PR comment preview link for ${policy.repository_full_name}`}
+                              checked={policy.github_pr_comment_enabled}
+                              disabled={
+                                !policy.pr_preview_surfaces_enabled ||
+                                !policy.github_pr_comment_permission_ok
+                              }
+                              onCheckedChange={(checked) => {
+                                policyMutation.mutate({
+                                  repositoryId: policy.repository_id,
+                                  body: { github_pr_comment_enabled: checked },
+                                });
+                              }}
+                            />
+                            Comment
+                          </div>
+                          <div className="flex items-center gap-2 text-sm">
+                            <Switch
+                              aria-label={`Enable commit status preview link for ${policy.repository_full_name}`}
+                              checked={policy.github_commit_status_enabled}
+                              disabled={
+                                !policy.pr_preview_surfaces_enabled ||
+                                !policy.github_commit_status_permission_ok
+                              }
+                              onCheckedChange={(checked) => {
+                                policyMutation.mutate({
+                                  repositoryId: policy.repository_id,
+                                  body: { github_commit_status_enabled: checked },
+                                });
+                              }}
+                            />
+                            Status
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="block px-0 py-1 text-sm text-muted-foreground md:table-cell md:px-4 md:py-3">
+                        {policy.last_surface_sync_error ? (
+                          <span className="text-destructive">{policy.last_surface_sync_error}</span>
+                        ) : policy.last_surface_sync_at ? (
+                          `Synced ${new Date(policy.last_surface_sync_at).toLocaleDateString()}`
+                        ) : policy.preview_ready ? (
+                          "Ready"
+                        ) : (
+                          "Not ready"
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={4} className="py-6">
+                    <EmptyState
+                      icon={GitPullRequest}
+                      title="No connected repositories"
+                      description="Connect a repository before configuring PR preview links."
+                      variant="inline"
+                    />
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
       </div>
 
       <div className="space-y-3 rounded-md border border-border p-4">

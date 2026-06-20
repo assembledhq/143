@@ -140,7 +140,8 @@ describe("ReviewDiffView", () => {
   });
 
   it("renders DiffToolbar, DiffPane, and KeyboardHelpOverlay when files exist", () => {
-    render(<ReviewDiffView {...defaultProps()} />);
+    const { container } = render(<ReviewDiffView {...defaultProps()} />);
+    expect(container.firstElementChild).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
     expect(screen.getByTestId("diff-toolbar")).toBeInTheDocument();
     expect(screen.getByTestId("diff-pane")).toBeInTheDocument();
     expect(screen.getByTestId("keyboard-help")).toBeInTheDocument();

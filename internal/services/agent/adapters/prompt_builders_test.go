@@ -163,6 +163,31 @@ func TestBuildSystemPrompt_ManualSessionSkipsBaseTemplate(t *testing.T) {
 	require.Contains(t, prompt, "Use Go 1.22")
 }
 
+func TestBuildSystemPrompt_AnswerOnlyUsesAnswerPreamble(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		PromptStyle: agent.PromptStyleAnswerOnly,
+		UserMessage: "does our slack bot post notifications when a job finishes?",
+		PMContext: &agent.PMTaskContext{
+			Approach:  "This should not appear",
+			Reasoning: "Neither should this",
+		},
+		ContextDocs: []string{"Use Go 1.24"},
+	}
+
+	systemPrompt := buildSystemPrompt(input)
+	userPrompt := buildUserPrompt(input)
+
+	require.Contains(t, systemPrompt, "answer-only", "answer-only prompts should use the dedicated answer preamble")
+	require.Contains(t, systemPrompt, "Do not modify files", "answer-only prompts should forbid file modifications")
+	require.NotContains(t, systemPrompt, "Write tests", "answer-only prompts should not include coding-task test instructions")
+	require.NotContains(t, systemPrompt, "Product Manager Analysis", "answer-only prompts should not include PM implementation framing")
+	require.Contains(t, systemPrompt, "Repository Conventions", "answer-only prompts should still include repo conventions")
+	require.Contains(t, systemPrompt, "Use Go 1.24", "answer-only prompts should preserve repository context docs")
+	require.Equal(t, "does our slack bot post notifications when a job finishes?", userPrompt, "answer-only prompts should pass through the raw Slack question")
+}
+
 func TestBuildSystemPrompt_IncludesLinkedIssuesContext(t *testing.T) {
 	t.Parallel()
 

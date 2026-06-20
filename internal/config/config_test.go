@@ -131,6 +131,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("WORKER_MAX_ACTIVE_SANDBOXES", "7")
 	t.Setenv("WORKER_PREVIEW_DRAIN_TIMEOUT", "90m")
 	t.Setenv("PREVIEW_IDLE_TIMEOUT", "45m")
+	t.Setenv("PR_PREVIEW_SURFACES_ENABLED", "false")
 	t.Setenv("GITHUB_APP_ID", "12345")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "registry.example.com/health/busybox:1.36.1")
 
@@ -150,6 +151,7 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 7, cfg.WorkerMaxActiveSandboxes, "Load should parse WORKER_MAX_ACTIVE_SANDBOXES from the environment")
 	require.Equal(t, 90*time.Minute, cfg.WorkerPreviewDrainTimeout, "Load should parse WORKER_PREVIEW_DRAIN_TIMEOUT from the environment")
 	require.Equal(t, 45*time.Minute, cfg.PreviewIdleTimeout, "Load should read PREVIEW_IDLE_TIMEOUT from the environment")
+	require.False(t, cfg.PRPreviewSurfacesEnabled, "Load should read PR_PREVIEW_SURFACES_ENABLED from the environment")
 	require.Equal(t, "registry.example.com/health/busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should read SANDBOX_HEALTH_CHECK_IMAGE from the environment")
 }
 

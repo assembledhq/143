@@ -299,7 +299,7 @@ export const ReviewDiffView = memo(function ReviewDiffView({
   // Explorer mode takes over
   if (explorerMode) {
     return (
-      <div className="flex flex-col h-full">
+      <div className="flex h-full min-w-0 max-w-full flex-col overflow-hidden">
         <RepoExplorer
           sessionId={sessionId}
           diffFiles={allFiles}
@@ -312,7 +312,7 @@ export const ReviewDiffView = memo(function ReviewDiffView({
 
   if (files.length === 0) {
     return (
-      <div className="flex flex-col h-full">
+      <div className="flex h-full min-w-0 max-w-full flex-col overflow-hidden">
         <DiffToolbar
           onBack={onBack}
           viewMode={effectiveViewMode}
@@ -338,7 +338,7 @@ export const ReviewDiffView = memo(function ReviewDiffView({
   }
 
   return (
-      <div className="flex flex-col h-full">
+    <div className="flex h-full min-w-0 max-w-full flex-col overflow-hidden">
       <DiffToolbar
         onBack={onBack}
         viewMode={effectiveViewMode}

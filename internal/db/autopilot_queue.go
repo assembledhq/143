@@ -453,7 +453,6 @@ func buildAutopilotQueueQuery(orgID uuid.UUID, filters AutopilotQueueFilters, li
 			i.pr_head_sha,
 			i.preview_target_id,
 			i.preview_id,
-			i.preview_url,
 			i.preview_status,
 			i.preview_commit_sha,
 			i.sort_score,

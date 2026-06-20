@@ -394,6 +394,21 @@ export interface PreviewPolicySummary {
   auto_mode: "off" | "warm" | "on";
   session_prewarm_mode: "off" | "cache" | "smart";
   session_prewarm_untrusted_fork: boolean;
+  pr_preview_surfaces_enabled: boolean;
+  github_pr_comment_enabled: boolean;
+  github_commit_status_enabled: boolean;
+  preview_configured: boolean;
+  preview_success_recorded: boolean;
+  preview_config_names?: string[];
+  preview_config_default_name?: string;
+  preview_config_requires_selection?: boolean;
+  preview_ready: boolean;
+  preview_readiness_missing_reason?: string;
+  github_pr_comment_permission_ok: boolean;
+  github_commit_status_permission_ok: boolean;
+  last_surface_sync_sha?: string;
+  last_surface_sync_at?: string;
+  last_surface_sync_error?: string;
   open_pr_count: number;
   updated_at?: string;
 }
@@ -991,6 +1006,57 @@ export interface SessionWorkspaceGenerationChangedEvent {
   workspace_revision: number;
   workspace_revision_updated_at: string;
   reason?: string;
+}
+
+export type PRReadinessRunStatus = "queued" | "running" | "passed" | "warnings" | "blocked" | "failed";
+export type PRReadinessCheckStatus = "passed" | "warning" | "failed" | "skipped";
+export type PRReadinessEnforcement = "off" | "advisory" | "blocking";
+export type PRReadinessCheckType =
+  | "freshness"
+  | "agent_review_clean"
+  | "diff_collected"
+  | "test_evidence_present"
+  | "risk_flags"
+  | "dependency_config_risk"
+  | "generated_file_churn"
+  | "context_complete"
+  | "review_packet_draftable";
+
+export interface PRReadinessCheck {
+  id: string;
+  org_id: string;
+  run_id: string;
+  session_id: string;
+  check_type: PRReadinessCheckType;
+  status: PRReadinessCheckStatus;
+  enforcement: PRReadinessEnforcement;
+  title: string;
+  summary: string;
+  details?: unknown;
+  action?: string;
+  created_at: string;
+}
+
+export interface PRReadinessRun {
+  id: string;
+  org_id: string;
+  session_id: string;
+  repository_id?: string;
+  status: PRReadinessRunStatus;
+  evaluated_workspace_revision: number;
+  evaluated_snapshot_key?: string;
+  summary?: string;
+  review_packet?: unknown;
+  triggered_by_user_id?: string;
+  started_at: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+  checks?: PRReadinessCheck[];
+}
+
+export interface PRReadinessResponse {
+  latest?: PRReadinessRun;
 }
 
 export interface SessionThreadFileEvent {
@@ -1807,6 +1873,7 @@ export interface InvitationResponse {
 export interface JoinToken {
   id: string;
   token_prefix: string;
+  can_reveal: boolean;
   name: string;
   role: string;
   max_uses?: number | null;
@@ -1817,7 +1884,7 @@ export interface JoinToken {
 }
 
 // CreatedJoinToken is the create response: the plaintext token and the
-// ready-to-paste install command, shown exactly once.
+// ready-to-paste install command.
 export interface CreatedJoinToken {
   id: string;
   token: string;
@@ -1826,6 +1893,12 @@ export interface CreatedJoinToken {
   name: string;
   expires_at?: string | null;
   max_uses?: number | null;
+  install_command: string;
+}
+
+export interface JoinTokenLink {
+  id: string;
+  token_prefix: string;
   install_command: string;
 }
 

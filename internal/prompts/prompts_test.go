@@ -163,6 +163,16 @@ func TestCodingTaskPreamble(t *testing.T) {
 	assert.Contains(t, result, "untrusted external content")
 }
 
+func TestAnswerOnlyPreamble(t *testing.T) {
+	t.Parallel()
+
+	result := AnswerOnlyPreamble()
+	assert.NotEmpty(t, result)
+	assert.Contains(t, result, "answer")
+	assert.Contains(t, result, "Do not modify files")
+	assert.NotContains(t, result, "Write tests")
+}
+
 func TestSessionTitlePrompt(t *testing.T) {
 	t.Parallel()
 
