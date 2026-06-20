@@ -71,16 +71,14 @@ export default function AboutPage() {
                 and ship fixes without waiting on a sprint.
               </p>
               <p>
-                The name comes from the 143 days it took a small team of
-                Lockheed engineers to build America&apos;s first jet fighter in
-                1943 &mdash;{" "}
                 <Link
                   href="/why-143"
                   className={`underline underline-offset-2 ${isDark ? "hover:text-white/70" : "hover:text-slate-800"} transition-colors`}
                 >
-                  the story behind the name
-                </Link>
-                .
+                  The name comes from
+                </Link>{" "}
+                the 143 days it took a small team of Lockheed engineers to build
+                America&apos;s first jet fighter.
               </p>
             </section>
 
