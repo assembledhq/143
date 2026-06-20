@@ -115,7 +115,7 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
   }
 }
 
-function OrgAuthsHeader({ isAdmin, showReorderHint }: { isAdmin: boolean; showReorderHint?: boolean }) {
+function OrgAuthsHeader({ showReorderHint }: { showReorderHint?: boolean }) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div className="space-y-1.5">
@@ -127,13 +127,8 @@ function OrgAuthsHeader({ isAdmin, showReorderHint }: { isAdmin: boolean; showRe
       </div>
       <div className="flex flex-wrap gap-2">
         <Button asChild variant="outline" size="sm">
-          <Link href="/settings/account">Personal auths</Link>
+          <Link href="/settings/account">View personal auths</Link>
         </Button>
-        {isAdmin && (
-          <Button asChild variant="outline" size="sm">
-            <Link href="/settings/runtime">Sandboxes</Link>
-          </Button>
-        )}
       </div>
     </div>
   );
@@ -364,7 +359,7 @@ export default function AgentPage() {
             Read-only view. Only admins can add, edit, or reorder coding auths.
           </div>
           <section className="space-y-3">
-            <OrgAuthsHeader isAdmin={isAdmin} />
+            <OrgAuthsHeader />
             {rows.length === 0 ? (
               <Card>
                 <EmptyState
@@ -447,7 +442,7 @@ export default function AgentPage() {
           )}
         />
         <section className="space-y-4">
-          <OrgAuthsHeader isAdmin={isAdmin} showReorderHint />
+          <OrgAuthsHeader showReorderHint />
           <CodingAuthStack
             rows={rows}
             selectedId={selectedId}
