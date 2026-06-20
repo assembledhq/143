@@ -645,15 +645,6 @@ func testLoggerPagerDutyWebhook() zerolog.Logger {
 	return zerolog.Nop()
 }
 
-func decodePagerDutyWebhookPayload(t *testing.T, payload any) map[string]string {
-	t.Helper()
-	raw, err := json.Marshal(payload)
-	require.NoError(t, err, "webhook job payload should marshal")
-	var out map[string]string
-	require.NoError(t, json.Unmarshal(raw, &out), "webhook job payload should be a string map")
-	return out
-}
-
 type pagerDutyWebhookIssueIngesterFake struct {
 	orgID      uuid.UUID
 	normalized ingestion.NormalizedIssue

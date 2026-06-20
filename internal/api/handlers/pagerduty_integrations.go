@@ -28,6 +28,7 @@ const (
 	pagerDutyAuthorizeURL                = "https://identity.pagerduty.com/oauth/authorize"
 	pagerDutyTokenURL                    = "https://identity.pagerduty.com/oauth/token" // #nosec G101 -- OAuth endpoint URL, not credentials
 	pagerDutyIntegrationOAuthStateCookie = "pagerduty_integration_oauth_state"
+	pagerDutyLegacyCredentialRef         = "org_credential:pagerduty" // #nosec G101 -- database credential row reference, not a secret
 )
 
 type pagerDutyGenericIntegrationStore interface {
@@ -316,7 +317,7 @@ func (h *PagerDutyIntegrationHandler) Connect(w http.ResponseWriter, r *http.Req
 	if credentialID != nil {
 		credentialRef = "org_credential:" + credentialID.String()
 	} else {
-		credentialRef = "org_credential:pagerduty"
+		credentialRef = pagerDutyLegacyCredentialRef
 	}
 	install := &models.PagerDutyIntegration{
 		OrgID:               orgID,
@@ -441,7 +442,7 @@ func (h *PagerDutyIntegrationHandler) HandleOAuthCallback(w http.ResponseWriter,
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_FAILED", "failed to lookup PagerDuty provider integration", err)
 		return
 	}
-	credentialRef := "org_credential:pagerduty"
+	credentialRef := pagerDutyLegacyCredentialRef
 	if credentialID != nil {
 		credentialRef = "org_credential:" + credentialID.String()
 	}

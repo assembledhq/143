@@ -447,7 +447,7 @@ func (s *PagerDutyIncidentStore) List(ctx context.Context, orgID uuid.UUID, filt
 		"integration_id": filter.IntegrationID,
 		"status":         filter.Status,
 		"service_id":     filter.ServiceID,
-		"limit":          int32(limit),
+		"limit":          int32(limit), // #nosec G115 -- limit is clamped to [1,100] above
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query pagerduty incidents: %w", err)

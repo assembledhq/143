@@ -197,7 +197,7 @@ func TestCodingCredentialsVersioningMigrationUsesInsertOnlyRuntimeState(t *testi
 func TestPagerDutyIntegrationAccountUniqueIndexTreatsNullAccountsAsEqual(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000209_pagerduty_integration.up.sql")
+	body, err := os.ReadFile("../../migrations/000213_pagerduty_integration.up.sql")
 	require.NoError(t, err, "test should read the PagerDuty integration migration")
 
 	sql := string(body)
