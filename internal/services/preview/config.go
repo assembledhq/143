@@ -75,6 +75,12 @@ const (
 
 var ErrInvalidConfig = errors.New("invalid preview config")
 
+// ErrPreviewConfigNotFound reports that a requested named preview config is
+// absent from .143/config.json. Callers that source the name from stored state
+// (e.g. a saved build profile that has since been renamed) can fall back to the
+// default config instead of failing the build.
+var ErrPreviewConfigNotFound = errors.New("preview config not found")
+
 func InvalidConfigMessage(err error) string {
 	detail := "unknown error"
 	if err != nil {
@@ -341,7 +347,7 @@ func selectNamedPreviewSection(previewData []byte, name string) ([]byte, bool, e
 	}
 	selected, ok := probe.Configs[selectedName]
 	if !ok {
-		return nil, false, fmt.Errorf("preview config %q not found; available configs: %s", selectedName, strings.Join(names, ", "))
+		return nil, false, fmt.Errorf("%w: %q; available configs: %s", ErrPreviewConfigNotFound, selectedName, strings.Join(names, ", "))
 	}
 	merged, err := mergeNamedPreviewSection(previewData, selected)
 	if err != nil {
