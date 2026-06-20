@@ -76,8 +76,7 @@ import {
   availableAgentModelGroups,
   isAgentAvailable,
 } from "@/lib/agents";
-import { NoReposWarning } from "@/components/no-repos-warning";
-import { AgentKeyRequiredBanner } from "@/components/agent-key-required-banner";
+import { SetupRequirementsCard } from "@/components/setup-requirements-card";
 import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
@@ -1180,18 +1179,14 @@ export function ManualSessionComposer({
 
       {heroSlot}
 
-      {reposLoaded && repositories.length === 0 && (
+      {(shouldShowAgentKeyRequiredBanner || (reposLoaded && repositories.length === 0)) && (
         <div className="shrink-0 px-0">
           <div className={cn("w-full mx-auto", innerClassName)}>
-            <NoReposWarning />
-          </div>
-        </div>
-      )}
-
-      {shouldShowAgentKeyRequiredBanner && (
-        <div className="shrink-0 px-0">
-          <div className={cn("w-full mx-auto", innerClassName)}>
-            <AgentKeyRequiredBanner agentType={effectiveAgentType} />
+            <SetupRequirementsCard
+              showAgentRow={shouldShowAgentKeyRequiredBanner}
+              agentType={effectiveAgentType}
+              showRepoRow={reposLoaded && repositories.length === 0}
+            />
           </div>
         </div>
       )}
