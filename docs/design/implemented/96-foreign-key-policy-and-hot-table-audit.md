@@ -24,9 +24,9 @@ Implemented:
 
 - Root/internal agent guidance now states that FKs are the default and hot append-only tables need an exception process.
 - `cmd/lint-schema` requires `org_id uuid NOT NULL` and still defaults to `REFERENCES organizations(id)`, with a reviewed hot-table marker for exceptions.
-- `session_logs` no longer has DB FKs to `sessions`, `organizations`, or `session_threads` as of migration `000210_hot_table_fk_removal`.
+- `session_logs` no longer has DB FKs to `sessions`, `organizations`, or `session_threads` as of migration `000211_hot_table_fk_removal`.
 - `SessionLogStore.Create` now validates the parent session/org with a normal read before inserting a log row. `thread_id` is retained as attribution metadata but does not require a `session_threads` lookup on the hot write path.
-- `preview_dependency_cache_locations` no longer has DB FKs to `organizations` or `repositories` as of migration `000210_hot_table_fk_removal`.
+- `preview_dependency_cache_locations` no longer has DB FKs to `organizations` or `repositories` as of migration `000211_hot_table_fk_removal`.
 
 Follow-up work:
 
@@ -63,8 +63,8 @@ Production DB stats were not available during this pass. The findings below are 
 
 | Table | Recommendation |
 |-------|----------------|
-| `session_logs` | **Implemented.** FKs dropped in migration `000210`. `SessionLogStore.Create` validates session/org ownership before insert; `thread_id` remains best-effort attribution metadata. Monitor for orphan rows and failed log inserts after deploy. |
-| `preview_dependency_cache_locations` | **Implemented.** FKs dropped in migration `000210`. Stale/orphan rows handled by TTL/worker cleanup and runtime verification. |
+| `session_logs` | **Implemented.** FKs dropped in migration `000211`. `SessionLogStore.Create` validates session/org ownership before insert; `thread_id` remains best-effort attribution metadata. Monitor for orphan rows and failed log inserts after deploy. |
+| `preview_dependency_cache_locations` | **Implemented.** FKs dropped in migration `000211`. Stale/orphan rows handled by TTL/worker cleanup and runtime verification. |
 | `session_messages` | **Do not drop without prod stats.** High-growth transcript table; product source-of-truth. If MultiXact pressure is confirmed, consider removing attribution FKs (`org_id`, `user_id`) before touching session/thread integrity FKs. |
 | `thread_inbox_entries` | **Do not prioritize FK removal.** `AppendForMessage` already takes a `session_threads FOR UPDATE` lock for sequencing; FK removal alone would not address the main contention point. |
 | `thread_runtimes` / `session_sandbox_holders` | **Keep FKs.** Lifecycle/lease tables with bounded row counts; integrity value exceeds write pressure. |
