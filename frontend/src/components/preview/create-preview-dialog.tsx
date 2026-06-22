@@ -96,6 +96,7 @@ function CreatePreviewForm({
   });
 
   const repositories = useMemo(() => repositoriesQuery.data?.data ?? [], [repositoriesQuery.data?.data]);
+  const defaultRepositoryId = repositoriesQuery.data?.meta.default_repository_id;
   const filteredRepositories = useMemo(
     () => repositories.filter((repo) => repo.full_name.toLowerCase().includes(repoSearch.trim().toLowerCase())),
     [repositories, repoSearch],
@@ -103,9 +104,11 @@ function CreatePreviewForm({
   const selectedRepo = useMemo(() => {
     const explicit = repositories.find((repo) => repo.id === repositoryId);
     if (explicit) return explicit;
+    const defaultRepo = repositories.find((repo) => repo.id === defaultRepositoryId);
+    if (!repositoryId && defaultRepo) return defaultRepo;
     if (!repositoryId && repositories.length === 1) return repositories[0];
     return undefined;
-  }, [repositories, repositoryId]);
+  }, [defaultRepositoryId, repositories, repositoryId]);
   const selectedRepositoryId = repositoryId || selectedRepo?.id || "";
   const selectedBranch = branch || selectedRepo?.default_branch || "";
 
