@@ -203,8 +203,8 @@ describe("PreviewsPage", () => {
     expect(screen.getAllByText("Ready")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Failed")[0]).toBeInTheDocument();
-    expect(screen.getByText("resumes in ~30s")).toBeInTheDocument();
-    expect(screen.getByText("stopped after error")).toBeInTheDocument();
+    expect(screen.getByText("Resumes in ~30s")).toBeInTheDocument();
+    expect(screen.getByText("Stopped after error")).toBeInTheDocument();
     expect(screen.getAllByText("PR #17")[0]).toBeInTheDocument();
   });
 
@@ -498,7 +498,7 @@ describe("PreviewsPage", () => {
     ).not.toBeInTheDocument();
     expect(within(runningSection).getAllByText("Out of date")[0]).toBeInTheDocument();
     expect(
-      within(runningSection).getAllByText(/running aabb1122, branch is ccdd3344/)[0],
+      within(runningSection).getAllByText(/Running aabb1122, branch is ccdd3344/)[0],
     ).toBeInTheDocument();
     expect(
       within(runningSection).getAllByRole("button", { name: /restart/i })[0],
