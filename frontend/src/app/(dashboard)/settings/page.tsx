@@ -18,6 +18,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
@@ -53,6 +60,16 @@ const READINESS_ROLES = [
   { key: "admin", label: "Admin" },
 ] as const;
 const READINESS_ENFORCEMENTS: PRReadinessEnforcement[] = ["off", "advisory", "blocking"];
+type ReadinessRole = "builder" | "engineer" | "admin";
+type ReadinessPresetValue = "off" | "advisory" | "builder_guarded" | "strict" | "custom";
+
+const READINESS_PRESETS: Array<{ value: ReadinessPresetValue; label: string; description: string }> = [
+  { value: "off", label: "Off", description: "Do not enforce readiness checks before PR creation." },
+  { value: "advisory", label: "Advisory", description: "Run checks as guidance without blocking PR creation." },
+  { value: "builder_guarded", label: "Builder guarded", description: "Block builders on freshness and clean agent review checks." },
+  { value: "strict", label: "Strict", description: "Block builders on every built-in readiness check." },
+  { value: "custom", label: "Custom", description: "Use the per-check and per-role settings below." },
+];
 
 function blankReadinessCustomCheck(): PRReadinessCustomCheck {
   return {
@@ -129,11 +146,102 @@ function defaultReadinessChecks(): PRReadinessPolicyConfig["checks"] {
   return checks;
 }
 
+function checksWithEnforcement(
+  builder: PRReadinessEnforcement,
+  engineer: PRReadinessEnforcement,
+  admin: PRReadinessEnforcement,
+): PRReadinessPolicyConfig["checks"] {
+  const checks: PRReadinessPolicyConfig["checks"] = {};
+  for (const checkKey of READINESS_CHECKS) {
+    checks[checkKey] = {
+      enforcement: { builder, engineer, admin },
+    };
+  }
+  return checks;
+}
+
+function strictReadinessChecks(): PRReadinessPolicyConfig["checks"] {
+  const checks: PRReadinessPolicyConfig["checks"] = {};
+  for (const checkKey of READINESS_CHECKS) {
+    checks[checkKey] = {
+      enforcement: { builder: "blocking", engineer: "advisory", admin: "advisory" },
+    };
+  }
+  return checks;
+}
+
+function getCheckEnforcement(
+  checks: PRReadinessPolicyConfig["checks"] | undefined,
+  checkKey: string,
+  role: ReadinessRole,
+): PRReadinessEnforcement {
+  return checks?.[checkKey]?.enforcement?.[role] ?? "advisory";
+}
+
+function checksMatch(a: PRReadinessPolicyConfig["checks"] | undefined, b: PRReadinessPolicyConfig["checks"] | undefined) {
+  return READINESS_CHECKS.every((checkKey) =>
+    READINESS_ROLES.every((role) => getCheckEnforcement(a, checkKey, role.key) === getCheckEnforcement(b, checkKey, role.key)),
+  );
+}
+
+function readinessPresetValue(config: PRReadinessPolicyConfig): ReadinessPresetValue {
+  const checks = config.checks ?? defaultReadinessChecks();
+  if (!config.enabled_for_builders && checksMatch(checks, checksWithEnforcement("off", "off", "off"))) {
+    return "off";
+  }
+  if (config.enabled_for_builders && checksMatch(checks, checksWithEnforcement("advisory", "advisory", "advisory"))) {
+    return "advisory";
+  }
+  if (config.enabled_for_builders && checksMatch(checks, defaultReadinessChecks())) {
+    return "builder_guarded";
+  }
+  if (config.enabled_for_builders && checksMatch(checks, strictReadinessChecks())) {
+    return "strict";
+  }
+  return "custom";
+}
+
+function applyReadinessPreset(config: PRReadinessPolicyConfig, preset: ReadinessPresetValue): PRReadinessPolicyConfig {
+  if (preset === "custom") return config;
+  if (preset === "off") {
+    return {
+      ...config,
+      enabled_for_builders: false,
+      checks: checksWithEnforcement("off", "off", "off"),
+    };
+  }
+  if (preset === "advisory") {
+    return {
+      ...config,
+      enabled_for_builders: true,
+      checks: checksWithEnforcement("advisory", "advisory", "advisory"),
+    };
+  }
+  if (preset === "strict") {
+    return {
+      ...config,
+      enabled_for_builders: true,
+      checks: strictReadinessChecks(),
+    };
+  }
+  return {
+    ...config,
+    enabled_for_builders: true,
+    checks: defaultReadinessChecks(),
+  };
+}
+
+function countRoleEnforcement(config: PRReadinessPolicyConfig, role: ReadinessRole, enforcement: PRReadinessEnforcement) {
+  const checks = config.checks ?? defaultReadinessChecks();
+  return READINESS_CHECKS.filter((checkKey) => getCheckEnforcement(checks, checkKey, role) === enforcement).length;
+}
+
 function PRAuthorshipSettings() {
   const queryClient = useQueryClient();
   const [readinessScope, setReadinessScope] = useState(ORG_READINESS_SCOPE);
   const [editingCheckId, setEditingCheckId] = useState<string | null>(null);
   const [newCheck, setNewCheck] = useState<PRReadinessCustomCheck>(blankReadinessCustomCheck());
+  const [readinessSheetOpen, setReadinessSheetOpen] = useState(false);
   const scopedRepositoryId = readinessScope === ORG_READINESS_SCOPE ? undefined : readinessScope;
   const selectReadinessScope = (scope: string) => {
     setReadinessScope(scope);
@@ -187,6 +295,11 @@ function PRAuthorshipSettings() {
   const readinessPolicy = readinessPolicyResponse?.data.config ?? defaultReadinessPolicyConfig();
   const customChecks = customChecksResponse?.data ?? [];
   const repositories = repositoriesResponse?.data ?? [];
+  const readinessPreset = readinessPresetValue(readinessPolicy);
+  const readinessPresetLabel = READINESS_PRESETS.find((preset) => preset.value === readinessPreset)?.label ?? "Custom";
+  const builderBlockingChecks = countRoleEnforcement(readinessPolicy, "builder", "blocking");
+  const engineerAdvisoryChecks = countRoleEnforcement(readinessPolicy, "engineer", "advisory");
+  const customCheckLabel = `${customChecks.length} custom ${customChecks.length === 1 ? "check" : "checks"}`;
   const updateReadinessPolicy = useMutation({
     mutationFn: (config: PRReadinessPolicyConfig) => api.settings.updatePRReadinessPolicy(config, scopedRepositoryId),
     onSuccess: () => {
@@ -216,6 +329,9 @@ function PRAuthorshipSettings() {
   });
   const patchReadinessPolicy = (patch: Partial<PRReadinessPolicyConfig>) => {
     updateReadinessPolicy.mutate({ ...readinessPolicy, ...patch });
+  };
+  const setReadinessPreset = (preset: ReadinessPresetValue) => {
+    updateReadinessPolicy.mutate(applyReadinessPreset(readinessPolicy, preset));
   };
   const engineerReadinessEnabled = Object.values(readinessPolicy.checks ?? {}).some((check) => check.enforcement?.engineer && check.enforcement.engineer !== "off");
   const setEngineerReadinessEnabled = (enabled: boolean) => {
@@ -344,7 +460,67 @@ function PRAuthorshipSettings() {
               aria-label="Require builder review before PR"
             />
           </div>
-          <div className="space-y-4 border-t border-border pt-4">
+          <div className="space-y-3 border-t border-border pt-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label>PR readiness</Label>
+                <p className="text-xs text-muted-foreground">
+                  {readinessPresetLabel} policy for {readinessScope === ORG_READINESS_SCOPE ? "Organization default" : repositories.find((repo: Repository) => repo.id === readinessScope)?.full_name ?? "selected repository"}.
+                </p>
+              </div>
+              <Button size="sm" variant="outline" aria-label="Manage readiness policy" onClick={() => setReadinessSheetOpen(true)}>
+                Manage
+              </Button>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-4">
+              <div className="rounded-md border border-border px-3 py-2">
+                <div className="text-xs text-muted-foreground">Scope</div>
+                <div className="text-xs font-medium">Organization default</div>
+              </div>
+              <div className="rounded-md border border-border px-3 py-2">
+                <div className="text-xs text-muted-foreground">Builder blocks</div>
+                <div className="text-xs font-medium">{builderBlockingChecks} checks</div>
+              </div>
+              <div className="rounded-md border border-border px-3 py-2">
+                <div className="text-xs text-muted-foreground">Engineer advisory</div>
+                <div className="text-xs font-medium">{engineerAdvisoryChecks} checks</div>
+              </div>
+              <div className="rounded-md border border-border px-3 py-2">
+                <div className="text-xs text-muted-foreground">Bypasses</div>
+                <div className="flex items-center gap-2 text-xs font-medium">
+                  <span>{readinessPolicyResponse?.data.bypass_counts?.total ?? 0} total</span>
+                  <span className="text-muted-foreground">{customCheckLabel}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <Sheet open={readinessSheetOpen} onOpenChange={setReadinessSheetOpen}>
+            <SheetContent className="w-full sm:max-w-3xl">
+              <SheetHeader>
+                <SheetTitle>PR readiness policy</SheetTitle>
+                <SheetDescription>
+                  Configure pre-PR checks, bypass behavior, and prompt-based checks for organization defaults or repository overrides.
+                </SheetDescription>
+              </SheetHeader>
+              <div className="space-y-5 pt-4">
+                <div className="space-y-2">
+                  <Label htmlFor="readiness-preset">Policy preset</Label>
+                  <Select value={readinessPreset} onValueChange={(value) => setReadinessPreset(value as ReadinessPresetValue)}>
+                    <SelectTrigger id="readiness-preset">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {READINESS_PRESETS.map((preset) => (
+                        <SelectItem key={preset.value} value={preset.value}>
+                          {preset.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {READINESS_PRESETS.find((preset) => preset.value === readinessPreset)?.description ?? READINESS_PRESETS.at(-1)?.description}
+                  </p>
+                </div>
             <div className="grid gap-3 sm:grid-cols-[240px_1fr]">
               <div className="space-y-1">
                 <Label htmlFor="readiness-scope">PR readiness policy</Label>
@@ -619,6 +795,8 @@ function PRAuthorshipSettings() {
               </div>
             </div>
           </div>
+            </SheetContent>
+          </Sheet>
         </CardContent>
       </Card>
     </section>

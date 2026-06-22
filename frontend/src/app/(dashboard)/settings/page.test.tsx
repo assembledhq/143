@@ -399,21 +399,62 @@ describe('SettingsPage', () => {
     expect(screen.queryByLabelText('Active previews per user')).not.toBeInTheDocument();
   });
 
-  it('renders PR readiness policy controls and bypass counters', async () => {
+  it('renders a compact PR readiness summary by default', async () => {
     renderWithProviders(<SettingsPage />);
 
-    expect(await screen.findByText('PR readiness policy')).toBeInTheDocument();
+    expect(await screen.findByText('PR readiness')).toBeInTheDocument();
     expect(screen.getByText('Organization default')).toBeInTheDocument();
+    expect(await screen.findByText('2 total')).toBeInTheDocument();
+    expect(await screen.findByText('1 custom check')).toBeInTheDocument();
+    expect(screen.queryByText('Built-in checks')).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Prompt template')).not.toBeInTheDocument();
+  });
+
+  it('opens detailed PR readiness controls in the manage sheet', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
+
+    expect(await screen.findByRole('dialog', { name: 'PR readiness policy' })).toBeInTheDocument();
+    expect(screen.getByText('Built-in checks')).toBeInTheDocument();
     expect(await screen.findByText('No schema drift')).toBeInTheDocument();
-    expect(screen.getByText('2 total')).toBeInTheDocument();
+    expect(screen.getAllByText('2 total')).toHaveLength(2);
     expect(screen.getByText('repo-1: 1')).toBeInTheDocument();
     expect(screen.getByText('no_schema_drift · .143/config.json')).toBeInTheDocument();
+  });
+
+  it('applies PR readiness presets from the manage sheet', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
+    await user.click(await screen.findByRole('combobox', { name: /Policy preset/i }));
+    await user.click(screen.getByRole('option', { name: 'Strict' }));
+
+    await waitFor(() => {
+      expect(readinessPolicyUpdateMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          enabled_for_builders: true,
+          checks: expect.objectContaining({
+            freshness: expect.objectContaining({
+              enforcement: expect.objectContaining({ builder: 'blocking' }),
+            }),
+            review_packet_draftable: expect.objectContaining({
+              enforcement: expect.objectContaining({ builder: 'blocking' }),
+            }),
+          }),
+        }),
+        undefined,
+      );
+    });
   });
 
   it('lets admins disable advisory readiness for engineers as a group', async () => {
     renderWithProviders(<SettingsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
     await user.click(await screen.findByLabelText('Enable advisory checks for engineers'));
 
     await waitFor(() => {
@@ -462,6 +503,9 @@ describe('SettingsPage', () => {
 
     renderWithProviders(<SettingsPage />);
 
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
+
     expect(await screen.findByText('No schema drift')).toBeInTheDocument();
     expect(await screen.findByText('Repository docs')).toBeInTheDocument();
     expect(screen.getByText('no_schema_drift · .143/config.json')).toBeInTheDocument();
@@ -498,6 +542,7 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
     await user.click(await screen.findByRole('combobox', { name: /PR readiness policy/i }));
     await user.click(screen.getByRole('option', { name: 'acme/app' }));
 
@@ -518,6 +563,7 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
     await user.click(await screen.findByLabelText('Auto-run on Create PR'));
 
     await waitFor(() => {
@@ -534,6 +580,7 @@ describe('SettingsPage', () => {
     renderWithProviders(<SettingsPage />);
 
     const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
     await user.type(await screen.findByPlaceholderText('check_key'), 'review_docs');
     await user.type(screen.getByPlaceholderText('Check name'), 'Review docs');
     await user.type(screen.getByPlaceholderText('Include paths'), 'docs/**');
