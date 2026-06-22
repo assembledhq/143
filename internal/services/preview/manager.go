@@ -1191,6 +1191,28 @@ func looksLikeOOMFailure(errMsg string) bool {
 		strings.Contains(m, "cannot allocate memory")
 }
 
+// maxOriginalFailureRunes bounds the raw provider failure text appended to an
+// OOM explanation. The raw text can carry a long captured stdout/stderr tail,
+// which would otherwise bloat the instance error rendered on the launch page.
+const maxOriginalFailureRunes = 500
+
+// oomFailureExplanation returns the plain-English OOM explanation used across
+// the preview failure surfaces, including the memory cap when known
+// (memoryLimitMB > 0). It is a sentence fragment beginning "ran out of
+// memory…" so callers can prepend their own subject.
+func oomFailureExplanation(memoryLimitMB int) string {
+	capText := ""
+	if memoryLimitMB > 0 {
+		capText = fmt.Sprintf(" The preview is capped at %d MiB of memory.", memoryLimitMB)
+	}
+	return fmt.Sprintf(
+		"ran out of memory and was killed (OOM, exit code 137 / SIGKILL).%s "+
+			"Reduce the workload's memory use — e.g. run fewer concurrent build "+
+			"steps, or serve a production build instead of a dev server.",
+		capText,
+	)
+}
+
 // annotatePreviewFailure prefixes OOM failures with a plain-English
 // explanation (and the memory cap, when known) so preview errors are
 // debuggable without decoding exit codes. Non-OOM messages pass through
@@ -1199,17 +1221,11 @@ func annotatePreviewFailure(errMsg string, memoryLimitMB int) string {
 	if !looksLikeOOMFailure(errMsg) {
 		return errMsg
 	}
-	capText := ""
-	if memoryLimitMB > 0 {
-		capText = fmt.Sprintf(" The preview is capped at %d MiB of memory.", memoryLimitMB)
-	}
-	return fmt.Sprintf(
-		"ran out of memory and was killed (OOM, exit code 137 / SIGKILL).%s "+
-			"Reduce the workload's memory use — e.g. run fewer concurrent build "+
-			"steps, or serve a production build instead of a dev server. "+
-			"Original failure: %s",
-		capText, errMsg,
-	)
+	// truncateRunes (defined in session_prewarm_classifier.go) trims and bounds
+	// the raw provider text so a long captured stdout/stderr tail can't bloat
+	// the instance error rendered on the launch page.
+	return oomFailureExplanation(memoryLimitMB) +
+		" Original failure: " + truncateRunes(errMsg, maxOriginalFailureRunes)
 }
 
 func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {

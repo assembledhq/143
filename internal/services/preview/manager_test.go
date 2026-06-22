@@ -3428,6 +3428,11 @@ func TestManagerServiceObserver_OnServiceFailed_PrimaryServiceDemotesInstance(t 
 			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
 		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
 	// Instance is demoted via UpdatePreviewStatusIfActive (non-terminal path).
+	// On a non-terminal transition with rows affected, the store then calls
+	// syncPreviewGroupStatusForPreview, which issues a follow-up query we don't
+	// mock here. That unmatched query errors and is swallowed as a warn inside
+	// the store (the demotion itself still succeeds), so the test only asserts
+	// the demotion UPDATE and intentionally leaves the group-sync unexpected.
 	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -3454,6 +3459,16 @@ func TestAnnotatePreviewFailure(t *testing.T) {
 		got := annotatePreviewFailure("signal: killed", 0)
 		require.Contains(t, got, "ran out of memory")
 		require.NotContains(t, got, "capped at")
+	})
+
+	t.Run("a long original failure tail is truncated", func(t *testing.T) {
+		t.Parallel()
+		// A huge captured stdout/stderr tail must not bloat the message.
+		raw := "exited with code 137; last output: " + strings.Repeat("x", 5000)
+		got := annotatePreviewFailure(raw, 8192)
+		require.Contains(t, got, "ran out of memory")
+		require.Less(t, len([]rune(got)), len([]rune(raw)), "the raw tail should be truncated")
+		require.Contains(t, got, "8192 MiB")
 	})
 
 	t.Run("non-oom failures pass through unchanged", func(t *testing.T) {

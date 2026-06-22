@@ -581,11 +581,11 @@ func (h *PreviewHandler) requireInspector(w http.ResponseWriter, r *http.Request
 // and map each to a stable, debuggable error code. The user-visible message
 // always includes the underlying cause so an operator can act on it without
 // digging through Grafana.
-func classifyLaunchError(err error) *previewHTTPError {
+func classifyLaunchError(err error, memoryLimitMB int) *previewHTTPError {
 	if err == nil {
 		return nil
 	}
-	classified := preview.ClassifyLaunchFailure(err)
+	classified := preview.ClassifyLaunchFailure(err, memoryLimitMB)
 	return newPreviewHTTPError(http.StatusUnprocessableEntity, classified.Code, classified.Message, err)
 }
 
@@ -866,7 +866,7 @@ func (h *PreviewHandler) startPreviewLocal(ctx context.Context, orgID, userID, s
 	if err != nil {
 		h.manager.AbortReservation(ctx, reservation, hydratedID, fmt.Sprintf("launch: %v", err))
 		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("preview launch failed")
-		return nil, classifyLaunchError(err)
+		return nil, classifyLaunchError(err, reservation.MemoryLimitMB)
 	}
 
 	if h.localNodeID != "" && (acq.Hydrated || (session.ContainerID != nil && *session.ContainerID != "")) {
