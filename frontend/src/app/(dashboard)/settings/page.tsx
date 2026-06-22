@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CircleHelp } from "lucide-react";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { Card, CardContent } from "@/components/ui/card";
@@ -26,7 +27,16 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
@@ -60,6 +70,49 @@ const READINESS_ROLES = [
   { key: "admin", label: "Admin" },
 ] as const;
 const READINESS_ENFORCEMENTS: PRReadinessEnforcement[] = ["off", "advisory", "blocking"];
+const READINESS_ENFORCEMENT_LABELS: Record<PRReadinessEnforcement, string> = {
+  off: "Off",
+  advisory: "Advisory",
+  blocking: "Blocking",
+};
+const READINESS_CHECK_DETAILS: Record<(typeof READINESS_CHECKS)[number], { label: string; description: string }> = {
+  freshness: {
+    label: "Freshness",
+    description: "Confirms the readiness run was produced for the current workspace revision before a PR is created.",
+  },
+  agent_review_clean: {
+    label: "Agent Review Clean",
+    description: "Requires the latest agent review to finish without unresolved blocking findings.",
+  },
+  diff_collected: {
+    label: "Diff Collected",
+    description: "Verifies 143 captured the final diff so reviewers and custom checks inspect the intended change.",
+  },
+  test_evidence_present: {
+    label: "Test Evidence Present",
+    description: "Looks for test, lint, or validation evidence that supports the change before publishing.",
+  },
+  risk_flags: {
+    label: "Risk Flags",
+    description: "Surfaces large diffs, sensitive paths, and other signals that deserve extra attention.",
+  },
+  dependency_config_risk: {
+    label: "Dependency Config Risk",
+    description: "Flags package, lockfile, CI, deployment, or infrastructure config changes that can affect runtime behavior.",
+  },
+  generated_file_churn: {
+    label: "Generated File Churn",
+    description: "Warns when generated files changed outside the allowed generated-path list.",
+  },
+  context_complete: {
+    label: "Context Complete",
+    description: "Checks whether the session has enough linked issue, repository, and change context for PR reviewers.",
+  },
+  review_packet_draftable: {
+    label: "Review Packet Draftable",
+    description: "Confirms 143 can prepare a concise reviewer packet with summary, evidence, and notable risks.",
+  },
+};
 type ReadinessRole = "builder" | "engineer" | "admin";
 type ReadinessPresetValue = "off" | "advisory" | "builder_guarded" | "strict" | "custom";
 
@@ -79,10 +132,6 @@ function blankReadinessCustomCheck(): PRReadinessCustomCheck {
     paths: { include: [], exclude: [] },
     enforcement: { builder: "advisory", engineer: "advisory", admin: "advisory" },
   };
-}
-
-function readinessLabel(value: string) {
-  return value.replaceAll("_", " ");
 }
 
 function csvToList(value: string) {
@@ -234,6 +283,29 @@ function applyReadinessPreset(config: PRReadinessPolicyConfig, preset: Readiness
 function countRoleEnforcement(config: PRReadinessPolicyConfig, role: ReadinessRole, enforcement: PRReadinessEnforcement) {
   const checks = config.checks ?? defaultReadinessChecks();
   return READINESS_CHECKS.filter((checkKey) => getCheckEnforcement(checks, checkKey, role) === enforcement).length;
+}
+
+function ReadinessCheckInfo({ checkKey }: { checkKey: (typeof READINESS_CHECKS)[number] }) {
+  const check = READINESS_CHECK_DETAILS[checkKey];
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5 rounded-full text-muted-foreground hover:text-foreground"
+          aria-label={`About ${check.label}`}
+        >
+          <CircleHelp className="h-3.5 w-3.5" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="max-w-80">
+        {check.description}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 function PRAuthorshipSettings() {
@@ -485,299 +557,356 @@ function PRAuthorshipSettings() {
                   Configure pre-PR checks, bypass behavior, and prompt-based checks for organization defaults or repository overrides.
                 </SheetDescription>
               </SheetHeader>
-              <div className="space-y-5 pt-4">
-                <div className="space-y-2">
-                  <Label htmlFor="readiness-preset">Policy preset</Label>
-                  <Select value={readinessPreset} onValueChange={(value) => setReadinessPreset(value as ReadinessPresetValue)}>
-                    <SelectTrigger id="readiness-preset">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {READINESS_PRESETS.map((preset) => (
-                        <SelectItem key={preset.value} value={preset.value}>
-                          {preset.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {READINESS_PRESETS.find((preset) => preset.value === readinessPreset)?.description ?? READINESS_PRESETS.at(-1)?.description}
-                  </p>
-                </div>
-            <div className="grid gap-3 sm:grid-cols-[240px_1fr]">
-              <div className="space-y-1">
-                <Label htmlFor="readiness-scope">PR readiness policy</Label>
-                <p className="text-xs text-muted-foreground">Configure org defaults or a repository override.</p>
-              </div>
-              <Select value={readinessScope} onValueChange={selectReadinessScope}>
-                <SelectTrigger id="readiness-scope">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ORG_READINESS_SCOPE}>Organization default</SelectItem>
-                  {repositories.map((repo: Repository) => (
-                    <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                <Label htmlFor="readiness-builders">Enable builder readiness policy</Label>
-                <p className="text-xs text-muted-foreground">When disabled, builder enforcement is treated as off for this policy scope.</p>
-              </div>
-              <Switch
-                id="readiness-builders"
-                checked={readinessPolicy.enabled_for_builders}
-                onCheckedChange={(checked) => patchReadinessPolicy({ enabled_for_builders: checked })}
-              />
-            </div>
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                <Label htmlFor="readiness-engineers">Enable advisory checks for engineers</Label>
-                <p className="text-xs text-muted-foreground">When disabled, engineer enforcement is set to off for every built-in check.</p>
-              </div>
-              <Switch
-                id="readiness-engineers"
-                checked={engineerReadinessEnabled}
-                onCheckedChange={setEngineerReadinessEnabled}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Built-in checks</Label>
-              <div className="space-y-2">
-                {READINESS_CHECKS.map((checkKey) => (
-                  <div key={checkKey} className="grid gap-2 rounded-md border border-border px-3 py-2 md:grid-cols-[1fr_repeat(3,140px)]">
-                    <div className="text-xs font-medium">{readinessLabel(checkKey)}</div>
-                    {READINESS_ROLES.map((role) => (
-                      <div key={`${checkKey}-${role.key}`} className="space-y-1">
-                        <Label className="text-xs text-muted-foreground">{role.label}</Label>
-                        <Select
-                          value={readinessPolicy.checks?.[checkKey]?.enforcement?.[role.key] ?? "advisory"}
-                          onValueChange={(value) => setCheckEnforcement(checkKey, role.key, value as PRReadinessEnforcement)}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {READINESS_ENFORCEMENTS.map((mode) => (
-                              <SelectItem key={mode} value={mode}>{mode}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+              <TooltipProvider delayDuration={150}>
+                <div className="space-y-6 pt-4">
+                  <div className="grid gap-4 rounded-md border border-border bg-muted/20 p-4 lg:grid-cols-[1fr_1fr]">
+                    <div className="space-y-2">
+                      <Label htmlFor="readiness-scope">Policy scope</Label>
+                      <Select value={readinessScope} onValueChange={selectReadinessScope}>
+                        <SelectTrigger id="readiness-scope">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={ORG_READINESS_SCOPE}>Organization default</SelectItem>
+                          {repositories.map((repo: Repository) => (
+                            <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Start with the organization default, then override only the repositories that need a different publishing bar.
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="readiness-preset">Preset</Label>
+                      <Select value={readinessPreset} onValueChange={(value) => setReadinessPreset(value as ReadinessPresetValue)}>
+                        <SelectTrigger id="readiness-preset">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {READINESS_PRESETS.map((preset) => (
+                            <SelectItem key={preset.value} value={preset.value}>
+                              {preset.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        {READINESS_PRESETS.find((preset) => preset.value === readinessPreset)?.description ?? READINESS_PRESETS.at(-1)?.description}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="flex items-start justify-between gap-4 rounded-md border border-border px-4 py-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-builders">Builder enforcement</Label>
+                        <p className="text-xs leading-5 text-muted-foreground">When off, builders are never blocked by this policy scope.</p>
                       </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="space-y-1">
-                <Label htmlFor="readiness-large-files">Large diff files</Label>
-                <DebouncedInput
-                  id="readiness-large-files"
-                  type="number"
-                  serverValue={String(readinessPolicy.large_diff_file_threshold ?? 25)}
-                  onCommit={(value) => patchReadinessPolicy({ large_diff_file_threshold: parseThreshold(value) })}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="readiness-large-lines">Large diff lines</Label>
-                <DebouncedInput
-                  id="readiness-large-lines"
-                  type="number"
-                  serverValue={String(readinessPolicy.large_diff_line_threshold ?? 500)}
-                  onCommit={(value) => patchReadinessPolicy({ large_diff_line_threshold: parseThreshold(value) })}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="readiness-sensitive-paths">Sensitive paths</Label>
-                <DebouncedInput
-                  id="readiness-sensitive-paths"
-                  serverValue={listToCsv(readinessPolicy.sensitive_paths)}
-                  onCommit={(value) => patchReadinessPolicy({ sensitive_paths: csvToList(value) })}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="readiness-generated-allowed">Allowed generated paths</Label>
-                <DebouncedInput
-                  id="readiness-generated-allowed"
-                  serverValue={listToCsv(readinessPolicy.generated_file_allowed_paths)}
-                  onCommit={(value) => patchReadinessPolicy({ generated_file_allowed_paths: csvToList(value) })}
-                />
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                <Label htmlFor="readiness-bypass" className="text-xs">Bypass enabled</Label>
-                <Switch
-                  id="readiness-bypass"
-                  checked={readinessPolicy.bypass?.enabled ?? true}
-                  onCheckedChange={(checked) => patchReadinessPolicy({ bypass: { ...(readinessPolicy.bypass ?? { enabled: true }), enabled: checked } })}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                <Label htmlFor="readiness-auto-complete" className="text-xs">Auto-run on completion</Label>
-                <Switch
-                  id="readiness-auto-complete"
-                  checked={readinessPolicy.auto_run?.after_session_completion ?? false}
-                  onCheckedChange={(checked) => patchReadinessPolicy({ auto_run: { ...(readinessPolicy.auto_run ?? { after_session_completion: false, on_create_pr: false }), after_session_completion: checked } })}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                <Label htmlFor="readiness-auto-pr" className="text-xs">Auto-run on Create PR</Label>
-                <Switch
-                  id="readiness-auto-pr"
-                  checked={readinessPolicy.auto_run?.on_create_pr ?? false}
-                  onCheckedChange={(checked) => patchReadinessPolicy({ auto_run: { ...(readinessPolicy.auto_run ?? { after_session_completion: false, on_create_pr: false }), on_create_pr: checked } })}
-                />
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-2 rounded-md border border-border px-3 py-2">
-                <Label>Bypass roles</Label>
-                <div className="flex flex-wrap gap-3">
-                  {["admin", "member", "builder"].map((role) => (
-                    <label key={role} className="flex items-center gap-2 text-xs">
-                      <Checkbox
-                        checked={(readinessPolicy.bypass?.allowed_roles ?? ["admin", "member", "builder"]).includes(role)}
-                        onCheckedChange={(checked) => patchReadinessPolicy({
-                          bypass: {
-                            ...(readinessPolicy.bypass ?? { enabled: true }),
-                            allowed_roles: toggleRole(readinessPolicy.bypass?.allowed_roles ?? ["admin", "member", "builder"], role, checked === true),
-                          },
-                        })}
+                      <Switch
+                        id="readiness-builders"
+                        checked={readinessPolicy.enabled_for_builders}
+                        onCheckedChange={(checked) => patchReadinessPolicy({ enabled_for_builders: checked })}
                       />
-                      {role === "member" ? "engineer" : role}
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="readiness-non-bypassable">Non-bypassable checks</Label>
-                <DebouncedInput
-                  id="readiness-non-bypassable"
-                  serverValue={listToCsv(readinessPolicy.bypass?.non_bypassable_checks)}
-                  onCommit={(value) => patchReadinessPolicy({
-                    bypass: {
-                      ...(readinessPolicy.bypass ?? { enabled: true }),
-                      non_bypassable_checks: csvToList(value),
-                    },
-                  })}
-                />
-              </div>
-            </div>
-            <div className="space-y-2 rounded-md border border-border px-3 py-2">
-              <div className="flex items-center justify-between">
-                <Label>Bypass counts</Label>
-                <Badge variant="outline">{readinessPolicyResponse?.data.bypass_counts?.total ?? 0} total</Badge>
-              </div>
-              <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_repository} empty="No repository bypasses yet" />
-              <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_check} empty="No check bypasses yet" />
-              <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_user} empty="No user bypasses yet" />
-            </div>
-          </div>
-          <div className="space-y-3 border-t border-border pt-4">
-            <div>
-              <Label>Custom prompt checks</Label>
-              <p className="text-xs text-muted-foreground">Settings checks can be edited here. Repo config checks are shown with provenance and refreshed from `.143/config.json`.</p>
-            </div>
-            <div className="space-y-2">
-              {customChecks.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No custom checks configured.</p>
-              ) : customChecks.map((check) => (
-                <div key={check.id ?? check.check_key} className="flex items-start justify-between gap-3 rounded-md border border-border px-3 py-2">
-                  <div>
-                    <div className="text-xs font-medium">{check.name}</div>
-                    <div className="text-xs text-muted-foreground">{check.check_key} · {customCheckProvenanceLabel(check)}</div>
+                    </div>
+                    <div className="flex items-start justify-between gap-4 rounded-md border border-border px-4 py-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-engineers">Engineer advisory checks</Label>
+                        <p className="text-xs leading-5 text-muted-foreground">When off, engineer enforcement is set to off for every built-in check.</p>
+                      </div>
+                      <Switch
+                        id="readiness-engineers"
+                        checked={engineerReadinessEnabled}
+                        onCheckedChange={setEngineerReadinessEnabled}
+                      />
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    {check.id && customCheckEditableInScope(check, scopedRepositoryId) && (
-                      <Button size="xs" variant="outline" onClick={() => {
-                        setEditingCheckId(check.id!);
-                        setNewCheck(check);
-                      }}>
-                        Edit
-                      </Button>
-                    )}
-                    {check.id && customCheckEditableInScope(check, scopedRepositoryId) && (
-                      <Button size="xs" variant="outline" onClick={() => deleteCustomCheck.mutate(check.id!)}>
-                        Delete
-                      </Button>
-                    )}
+
+                  <div className="space-y-2">
+                    <div>
+                      <Label>Built-in checks</Label>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Set the enforcement level each role sees before creating or updating a PR.
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-border">
+                      <Table aria-label="Built-in readiness checks">
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="min-w-56">Check</TableHead>
+                            {READINESS_ROLES.map((role) => (
+                              <TableHead key={role.key} className="w-40">{role.label}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {READINESS_CHECKS.map((checkKey) => {
+                            const check = READINESS_CHECK_DETAILS[checkKey];
+                            return (
+                              <TableRow key={checkKey}>
+                                <TableCell>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-medium">{check.label}</span>
+                                    <ReadinessCheckInfo checkKey={checkKey} />
+                                  </div>
+                                </TableCell>
+                                {READINESS_ROLES.map((role) => {
+                                  const enforcement = readinessPolicy.checks?.[checkKey]?.enforcement?.[role.key] ?? "advisory";
+                                  return (
+                                  <TableCell key={`${checkKey}-${role.key}`}>
+                                    <Select
+                                      value={enforcement}
+                                      onValueChange={(value) => setCheckEnforcement(checkKey, role.key, value as PRReadinessEnforcement)}
+                                    >
+                                      <SelectTrigger aria-label={`${check.label} ${role.label} enforcement`} className="h-8">
+                                        <SelectValue>{READINESS_ENFORCEMENT_LABELS[enforcement]}</SelectValue>
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {READINESS_ENFORCEMENTS.map((mode) => (
+                                          <SelectItem key={mode} value={mode}>{READINESS_ENFORCEMENT_LABELS[mode]}</SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </TableCell>
+                                  );
+                                })}
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-            <div className="grid gap-2">
-              <Input
-                value={newCheck.check_key}
-                onChange={(event) => setNewCheck((current) => ({ ...current, check_key: event.target.value }))}
-                placeholder="check_key"
-              />
-              <Input
-                value={newCheck.name}
-                onChange={(event) => setNewCheck((current) => ({ ...current, name: event.target.value }))}
-                placeholder="Check name"
-              />
-              <div className="grid gap-2 sm:grid-cols-2">
-                <Input
-                  value={listToCsv(newCheck.paths?.include)}
-                  onChange={(event) => setNewCheck((current) => ({ ...current, paths: { ...(current.paths ?? {}), include: csvToList(event.target.value) } }))}
-                  placeholder="Include paths"
-                />
-                <Input
-                  value={listToCsv(newCheck.paths?.exclude)}
-                  onChange={(event) => setNewCheck((current) => ({ ...current, paths: { ...(current.paths ?? {}), exclude: csvToList(event.target.value) } }))}
-                  placeholder="Exclude paths"
-                />
-              </div>
-              <div className="grid gap-2 sm:grid-cols-3">
-                {READINESS_ROLES.map((role) => (
-                  <Select
-                    key={`custom-${role.key}`}
-                    value={newCheck.enforcement?.[role.key] ?? "advisory"}
-                    onValueChange={(value) => setNewCheck((current) => ({
-                      ...current,
-                      enforcement: { ...(current.enforcement ?? {}), [role.key]: value as PRReadinessEnforcement },
-                    }))}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder={`${role.label} enforcement`} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {READINESS_ENFORCEMENTS.map((mode) => (
-                        <SelectItem key={mode} value={mode}>{role.label}: {mode}</SelectItem>
+
+                  <div className="space-y-3 border-t border-border pt-4">
+                    <div>
+                      <Label>Signals and automation</Label>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Tune what the checks consider risky and when readiness should run automatically.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-large-files">Large diff files</Label>
+                        <DebouncedInput
+                          id="readiness-large-files"
+                          type="number"
+                          serverValue={String(readinessPolicy.large_diff_file_threshold ?? 25)}
+                          onCommit={(value) => patchReadinessPolicy({ large_diff_file_threshold: parseThreshold(value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-large-lines">Large diff lines</Label>
+                        <DebouncedInput
+                          id="readiness-large-lines"
+                          type="number"
+                          serverValue={String(readinessPolicy.large_diff_line_threshold ?? 500)}
+                          onCommit={(value) => patchReadinessPolicy({ large_diff_line_threshold: parseThreshold(value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-sensitive-paths">Sensitive paths</Label>
+                        <DebouncedInput
+                          id="readiness-sensitive-paths"
+                          serverValue={listToCsv(readinessPolicy.sensitive_paths)}
+                          onCommit={(value) => patchReadinessPolicy({ sensitive_paths: csvToList(value) })}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-generated-allowed">Allowed generated paths</Label>
+                        <DebouncedInput
+                          id="readiness-generated-allowed"
+                          serverValue={listToCsv(readinessPolicy.generated_file_allowed_paths)}
+                          onCommit={(value) => patchReadinessPolicy({ generated_file_allowed_paths: csvToList(value) })}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                        <Label htmlFor="readiness-bypass" className="text-xs">Bypass enabled</Label>
+                        <Switch
+                          id="readiness-bypass"
+                          checked={readinessPolicy.bypass?.enabled ?? true}
+                          onCheckedChange={(checked) => patchReadinessPolicy({ bypass: { ...(readinessPolicy.bypass ?? { enabled: true }), enabled: checked } })}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                        <Label htmlFor="readiness-auto-complete" className="text-xs">Auto-run on completion</Label>
+                        <Switch
+                          id="readiness-auto-complete"
+                          checked={readinessPolicy.auto_run?.after_session_completion ?? false}
+                          onCheckedChange={(checked) => patchReadinessPolicy({ auto_run: { ...(readinessPolicy.auto_run ?? { after_session_completion: false, on_create_pr: false }), after_session_completion: checked } })}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                        <Label htmlFor="readiness-auto-pr" className="text-xs">Auto-run on Create PR</Label>
+                        <Switch
+                          id="readiness-auto-pr"
+                          checked={readinessPolicy.auto_run?.on_create_pr ?? false}
+                          onCheckedChange={(checked) => patchReadinessPolicy({ auto_run: { ...(readinessPolicy.auto_run ?? { after_session_completion: false, on_create_pr: false }), on_create_pr: checked } })}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-3 border-t border-border pt-4">
+                    <div>
+                      <Label>Bypasses</Label>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Let trusted roles ship through completed blocking checks when they provide a reason.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-2 rounded-md border border-border px-3 py-2">
+                        <Label>Bypass roles</Label>
+                        <div className="flex flex-wrap gap-3">
+                          {["admin", "member", "builder"].map((role) => (
+                            <label key={role} className="flex items-center gap-2 text-xs">
+                              <Checkbox
+                                checked={(readinessPolicy.bypass?.allowed_roles ?? ["admin", "member", "builder"]).includes(role)}
+                                onCheckedChange={(checked) => patchReadinessPolicy({
+                                  bypass: {
+                                    ...(readinessPolicy.bypass ?? { enabled: true }),
+                                    allowed_roles: toggleRole(readinessPolicy.bypass?.allowed_roles ?? ["admin", "member", "builder"], role, checked === true),
+                                  },
+                                })}
+                              />
+                              {role === "member" ? "engineer" : role}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="readiness-non-bypassable">Non-bypassable checks</Label>
+                        <DebouncedInput
+                          id="readiness-non-bypassable"
+                          serverValue={listToCsv(readinessPolicy.bypass?.non_bypassable_checks)}
+                          onCommit={(value) => patchReadinessPolicy({
+                            bypass: {
+                              ...(readinessPolicy.bypass ?? { enabled: true }),
+                              non_bypassable_checks: csvToList(value),
+                            },
+                          })}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2 rounded-md border border-border px-3 py-2">
+                      <div className="flex items-center justify-between">
+                        <Label>Bypass counts</Label>
+                        <Badge variant="outline">{readinessPolicyResponse?.data.bypass_counts?.total ?? 0} total</Badge>
+                      </div>
+                      <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_repository} empty="No repository bypasses yet" />
+                      <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_check} empty="No check bypasses yet" />
+                      <BypassCounts counts={readinessPolicyResponse?.data.bypass_counts?.by_user} empty="No user bypasses yet" />
+                    </div>
+                  </div>
+                  <div className="space-y-3 border-t border-border pt-4">
+                    <div>
+                      <Label>Custom prompt checks</Label>
+                      <p className="text-xs leading-5 text-muted-foreground">Settings checks can be edited here. Repo config checks are shown with provenance and refreshed from `.143/config.json`.</p>
+                    </div>
+                    <div className="space-y-2">
+                      {customChecks.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No custom checks configured.</p>
+                      ) : customChecks.map((check) => (
+                        <div key={check.id ?? check.check_key} className="flex items-start justify-between gap-3 rounded-md border border-border px-3 py-2">
+                          <div>
+                            <div className="text-xs font-medium">{check.name}</div>
+                            <div className="text-xs text-muted-foreground">{check.check_key} · {customCheckProvenanceLabel(check)}</div>
+                          </div>
+                          <div className="flex gap-2">
+                            {check.id && customCheckEditableInScope(check, scopedRepositoryId) && (
+                              <Button size="xs" variant="outline" onClick={() => {
+                                setEditingCheckId(check.id!);
+                                setNewCheck(check);
+                              }}>
+                                Edit
+                              </Button>
+                            )}
+                            {check.id && customCheckEditableInScope(check, scopedRepositoryId) && (
+                              <Button size="xs" variant="outline" onClick={() => deleteCustomCheck.mutate(check.id!)}>
+                                Delete
+                              </Button>
+                            )}
+                          </div>
+                        </div>
                       ))}
-                    </SelectContent>
-                  </Select>
-                ))}
-              </div>
-              <Textarea
-                value={newCheck.prompt}
-                onChange={(event) => setNewCheck((current) => ({ ...current, prompt: event.target.value }))}
-                rows={4}
-                placeholder="Prompt template"
-              />
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  disabled={(editingCheckId ? updateCustomCheck.isPending : createCustomCheck.isPending) || !newCheck.check_key.trim() || !newCheck.name.trim() || !newCheck.prompt.trim()}
-                  onClick={() => editingCheckId ? updateCustomCheck.mutate({ ...newCheck, id: editingCheckId }) : createCustomCheck.mutate(newCheck)}
-                >
-                  {editingCheckId ? "Save custom check" : "Add custom check"}
-                </Button>
-                {editingCheckId && (
-                  <Button size="sm" variant="outline" onClick={() => {
-                    setEditingCheckId(null);
-                    setNewCheck(blankReadinessCustomCheck());
-                  }}>
-                    Cancel
-                  </Button>
-                )}
-              </div>
-            </div>
-          </div>
+                    </div>
+                    <div className="grid gap-2">
+                      <Input
+                        value={newCheck.check_key}
+                        onChange={(event) => setNewCheck((current) => ({ ...current, check_key: event.target.value }))}
+                        placeholder="check_key"
+                      />
+                      <Input
+                        value={newCheck.name}
+                        onChange={(event) => setNewCheck((current) => ({ ...current, name: event.target.value }))}
+                        placeholder="Check name"
+                      />
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <Input
+                          value={listToCsv(newCheck.paths?.include)}
+                          onChange={(event) => setNewCheck((current) => ({ ...current, paths: { ...(current.paths ?? {}), include: csvToList(event.target.value) } }))}
+                          placeholder="Include paths"
+                        />
+                        <Input
+                          value={listToCsv(newCheck.paths?.exclude)}
+                          onChange={(event) => setNewCheck((current) => ({ ...current, paths: { ...(current.paths ?? {}), exclude: csvToList(event.target.value) } }))}
+                          placeholder="Exclude paths"
+                        />
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        {READINESS_ROLES.map((role) => {
+                          const enforcement = newCheck.enforcement?.[role.key] ?? "advisory";
+                          return (
+                            <Select
+                              key={`custom-${role.key}`}
+                              value={enforcement}
+                              onValueChange={(value) => setNewCheck((current) => ({
+                                ...current,
+                                enforcement: { ...(current.enforcement ?? {}), [role.key]: value as PRReadinessEnforcement },
+                              }))}
+                            >
+                              <SelectTrigger aria-label={`${role.label} enforcement`}>
+                                <SelectValue placeholder={`${role.label} enforcement`}>
+                                  {role.label}: {READINESS_ENFORCEMENT_LABELS[enforcement]}
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectContent>
+                                {READINESS_ENFORCEMENTS.map((mode) => (
+                                  <SelectItem key={mode} value={mode}>{role.label}: {READINESS_ENFORCEMENT_LABELS[mode]}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          );
+                        })}
+                      </div>
+                      <Textarea
+                        value={newCheck.prompt}
+                        onChange={(event) => setNewCheck((current) => ({ ...current, prompt: event.target.value }))}
+                        rows={4}
+                        placeholder="Prompt template"
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          disabled={(editingCheckId ? updateCustomCheck.isPending : createCustomCheck.isPending) || !newCheck.check_key.trim() || !newCheck.name.trim() || !newCheck.prompt.trim()}
+                          onClick={() => editingCheckId ? updateCustomCheck.mutate({ ...newCheck, id: editingCheckId }) : createCustomCheck.mutate(newCheck)}
+                        >
+                          {editingCheckId ? "Save custom check" : "Add custom check"}
+                        </Button>
+                        {editingCheckId && (
+                          <Button size="sm" variant="outline" onClick={() => {
+                            setEditingCheckId(null);
+                            setNewCheck(blankReadinessCustomCheck());
+                          }}>
+                            Cancel
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </TooltipProvider>
             </SheetContent>
           </Sheet>
         </CardContent>
