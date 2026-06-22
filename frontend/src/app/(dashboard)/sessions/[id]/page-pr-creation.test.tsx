@@ -604,7 +604,7 @@ describe('SessionDetailPage PR creation', () => {
     expect(screen.getByText('Readiness is stale')).toBeInTheDocument();
   });
 
-  it('lists readiness warnings in the engineer preflight dialog', async () => {
+  it('creates a PR directly when readiness has advisory warnings', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'completed',
@@ -642,10 +642,16 @@ describe('SessionDetailPage PR creation', () => {
       bypasses: [],
     };
 
+    let createPRCalled = false;
+
     server.use(
       http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>)),
       http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
       http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => HttpResponse.json({ data: { latest } })),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        createPRCalled = true;
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
     );
 
     const user = userEvent.setup();
@@ -653,8 +659,10 @@ describe('SessionDetailPage PR creation', () => {
 
     await user.click(await screen.findByRole('button', { name: /Create PR/ }));
 
-    const dialog = await screen.findByRole('alertdialog', { name: 'Review readiness before creating PR?' });
-    expect(within(dialog).getByText('No test evidence found')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(createPRCalled).toBe(true);
+    });
+    expect(screen.queryByRole('alertdialog', { name: 'Review readiness before creating PR?' })).not.toBeInTheDocument();
   });
 
   it('shows exact readiness blockers in the bypass dialog', async () => {
@@ -1156,7 +1164,7 @@ describe('SessionDetailPage PR creation', () => {
     });
   });
 
-  it('shows a one-time advisory readiness preflight for missing readiness', async () => {
+  it('creates a PR directly when readiness is missing', async () => {
     const sessionWithSnapshot: Session = {
       ...mockSessions[0],
       status: 'completed',
@@ -1191,15 +1199,11 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     await user.click(await screen.findByRole('button', { name: 'Create PR' }));
-    expect(await screen.findByRole('alertdialog', { name: 'Review readiness before creating PR?' })).toBeInTheDocument();
-    expect(screen.getByText(/PR readiness is missing/)).toBeInTheDocument();
-    expect(createPRCalled).toBe(false);
-
-    await user.click(screen.getByRole('button', { name: 'Create PR' }));
 
     await waitFor(() => {
       expect(createPRCalled).toBe(true);
     });
+    expect(screen.queryByRole('alertdialog', { name: 'Review readiness before creating PR?' })).not.toBeInTheDocument();
   });
 
   it('calls createPR API with merge_when_ready when Create PR and enable auto-merge is clicked', async () => {

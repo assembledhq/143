@@ -3735,7 +3735,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [pendingMergeWhenReady, setPendingMergeWhenReady] = useState(false);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
-  const [readinessPreflightOptions, setReadinessPreflightOptions] = useState<{ draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean } | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isDocumentVisible = useDocumentVisible();
@@ -4628,7 +4627,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const runReadinessMutation = useMutation({
     mutationFn: () => api.sessions.runReadiness(id),
     onSuccess: () => {
-      setReadinessPreflightOptions(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
       toast.success("Readiness checks queued");
     },
@@ -4683,28 +4681,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const canCreatePR = canAttemptCreatePR && createPRAllowsSubmission;
   const canCreateBranch = canAttemptCreatePR && builderReviewAllowsPR;
-  const readinessWarningSignature = !latestReadiness
-    ? "missing"
-    : latestReadinessStale
-      ? "stale"
-      : (latestReadiness.checks ?? [])
-        .filter((check) => check.status === "warning" || check.status === "failed" || check.status === "error")
-        .map((check) => `${check.check_key || check.check_type}:${check.status}`)
-        .sort()
-        .join("|") || "none";
-  const readinessPreflightKey = `pr-readiness-preflight:${user?.id ?? "anon"}:${id}:${session?.workspace_revision ?? 0}:${readinessWarningSignature}`;
-  const shouldShowReadinessPreflight = (user?.role === "admin" || user?.role === "member") &&
-    canAttemptCreatePR &&
-    readinessWarningSignature !== "none";
-  const readinessPreflightFindings = latestReadinessStale
-    ? [{ key: "stale", title: "Readiness is stale", summary: "Re-run checks before relying on this result." }]
-    : (latestReadiness?.checks ?? [])
-      .filter((check) => check.status === "warning" || check.status === "failed" || check.status === "error")
-      .map((check) => ({
-        key: check.check_key || check.check_type,
-        title: check.title,
-        summary: check.summary,
-      }));
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
@@ -4816,12 +4792,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
 
   const submitCreatePR = useCallback((options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean }) => {
-    if (shouldShowReadinessPreflight && typeof window !== "undefined" && window.localStorage.getItem(readinessPreflightKey) !== "ack") {
-      setReadinessPreflightOptions(options ?? {});
-      return;
-    }
     createPRMutation.mutate(options);
-  }, [createPRMutation, readinessPreflightKey, shouldShowReadinessPreflight]);
+  }, [createPRMutation]);
 
   const startReviewLoopMutation = useMutation({
     mutationFn: () =>
@@ -7244,55 +7216,6 @@ export function SessionDetailContent({ id }: { id: string }) {
         onOpenChange={setKeyboardHelpOpen}
         canShipPR={canShipPR}
       />
-      <AlertDialog
-        open={readinessPreflightOptions !== null}
-        onOpenChange={(open) => {
-          if (!open) setReadinessPreflightOptions(null);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Review readiness before creating PR?</AlertDialogTitle>
-            <AlertDialogDescription>
-              PR readiness is {readinessWarningSignature === "missing" ? "missing" : readinessWarningSignature === "stale" ? "stale" : "showing warnings"} for this workspace revision.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {readinessPreflightFindings.length > 0 && (
-            <div className="space-y-2 rounded-md border border-border px-3 py-2 text-xs">
-              {readinessPreflightFindings.map((finding) => (
-                <div key={finding.key}>
-                  <div className="font-medium text-foreground">{finding.title}</div>
-                  {finding.summary ? <div className="text-muted-foreground">{finding.summary}</div> : null}
-                </div>
-              ))}
-            </div>
-          )}
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button
-              variant="outline"
-              disabled={runReadinessMutation.isPending}
-              onClick={() => runReadinessMutation.mutate()}
-            >
-              {runReadinessMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
-              Run checks
-            </Button>
-            <AlertDialogAction
-              onClick={(event) => {
-                event.preventDefault();
-                if (typeof window !== "undefined") {
-                  window.localStorage.setItem(readinessPreflightKey, "ack");
-                }
-                const options = readinessPreflightOptions ?? undefined;
-                setReadinessPreflightOptions(null);
-                createPRMutation.mutate(options);
-              }}
-            >
-              Create PR
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
       <AlertDialog
         open={!!prAuthPrompt}
         onOpenChange={(open) => {
