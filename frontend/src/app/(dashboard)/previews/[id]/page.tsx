@@ -39,7 +39,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
-import { ACTIVE_PREVIEW_STATUSES, CONTROLLABLE_PREVIEW_STATUSES, formatPreviewStatus, type PreviewStatus } from "@/lib/preview-types";
+import { ACTIVE_PREVIEW_STATUSES, formatPreviewStatus, type PreviewStatus } from "@/lib/preview-types";
 import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
   PREVIEW_BOOTSTRAP_READY_EVENT,
@@ -91,7 +91,15 @@ export function PreviewLandingContent({ id }: { id: string }) {
     queryFn: () => api.previews.get(id),
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      return status === "starting" ? pollMs(3000) : false;
+      if (status === "starting") return pollMs(3000);
+      // Keep a slow poll while the preview is nominally up so a runtime
+      // crash that demotes it to "unhealthy"/"failed" (e.g. an OOM kill at
+      // serve time) is observed, instead of leaving the launch iframe
+      // spinning forever against a dead process.
+      if (status === "ready" || status === "partially_ready" || status === "unhealthy") {
+        return pollMs(15000);
+      }
+      return false;
     },
   });
 
@@ -118,7 +126,12 @@ export function PreviewLandingContent({ id }: { id: string }) {
   const isFailed = preview?.status === "failed";
   const isStarting = preview?.status === "starting" || restartPreview.isPending;
   const isActive = Boolean(previewStatus && ACTIVE_PREVIEW_STATUSES.includes(previewStatus));
-  const isReady = Boolean(previewStatus && CONTROLLABLE_PREVIEW_STATUSES.includes(previewStatus));
+  // "unhealthy" is intentionally excluded: the primary service has crashed, so
+  // the preview can't actually serve and we must not try to bootstrap/iframe
+  // into it. It's surfaced as an error (see isUnhealthy / launchError) while
+  // lifecycle controls stay available via isActive.
+  const isReady = previewStatus === "ready" || previewStatus === "partially_ready";
+  const isUnhealthy = previewStatus === "unhealthy";
   const previewUrl = safeExternalUrl(preview?.preview_url);
   const previewOrigin = useMemo(() => {
     if (!previewUrl) return "";
@@ -145,8 +158,11 @@ export function PreviewLandingContent({ id }: { id: string }) {
   const launchTargetId = preview?.preview_id ?? preview?.target_id;
   const launchError =
     bootstrapError ??
-    (preview?.status === "failed" ? preview.error || "Preview failed to start." : null);
-  const commandIsFailed = isFailed || Boolean(bootstrapError);
+    (preview?.status === "failed" ? preview.error || "Preview failed to start." : null) ??
+    (isUnhealthy
+      ? preview?.error || "The preview stopped responding — a service crashed (often out of memory). Restart to try again."
+      : null);
+  const commandIsFailed = isFailed || isUnhealthy || Boolean(bootstrapError);
 
   const shouldStartForLaunch =
     launchMode &&

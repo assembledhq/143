@@ -658,7 +658,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if metricsSource == "" {
 		metricsSource = input.Initiator
 	}
-	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName)
+	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName, input.Config.Primary)
 	defer observer.Close()
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:        input.OrgID,
@@ -860,18 +860,19 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // callbacks fired after StartPreview returns (progressive support services,
 // the startService goroutine catching a non-zero exit) still land in the DB
 // even if the request context has already been canceled.
-func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo string) *managerServiceObserver {
+func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo, primaryService string) *managerServiceObserver {
 	observer := &managerServiceObserver{
-		manager:       m,
-		orgID:         orgID,
-		previewID:     previewID,
-		source:        strings.TrimSpace(metricsSource),
-		repository:    strings.TrimSpace(metricsRepo),
-		phaseStarts:   make(map[string]time.Time),
-		outputCh:      make(chan previewServiceOutput, serviceOutputBufferSize),
-		outputDone:    make(chan struct{}),
-		lifecycleCh:   make(chan previewLifecycleLog, lifecycleLogBufferSize),
-		lifecycleDone: make(chan struct{}),
+		manager:        m,
+		orgID:          orgID,
+		previewID:      previewID,
+		source:         strings.TrimSpace(metricsSource),
+		repository:     strings.TrimSpace(metricsRepo),
+		primaryService: strings.TrimSpace(primaryService),
+		phaseStarts:    make(map[string]time.Time),
+		outputCh:       make(chan previewServiceOutput, serviceOutputBufferSize),
+		outputDone:     make(chan struct{}),
+		lifecycleCh:    make(chan previewLifecycleLog, lifecycleLogBufferSize),
+		lifecycleDone:  make(chan struct{}),
 	}
 	go observer.runServiceOutputWriter()
 	go observer.runLifecycleLogWriter()
@@ -879,20 +880,25 @@ func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, 
 }
 
 type managerServiceObserver struct {
-	manager       *Manager
-	orgID         uuid.UUID
-	previewID     uuid.UUID
-	source        string
-	repository    string
-	phaseMu       sync.Mutex
-	phaseStarts   map[string]time.Time
-	outputCh      chan previewServiceOutput
-	outputDone    chan struct{}
-	lifecycleCh   chan previewLifecycleLog
-	lifecycleDone chan struct{}
-	outputMu      sync.Mutex
-	outputClosed  bool
-	closeOnce     sync.Once
+	manager    *Manager
+	orgID      uuid.UUID
+	previewID  uuid.UUID
+	source     string
+	repository string
+	// primaryService is the name of the config's primary service. When that
+	// service dies, the whole preview can no longer serve, so OnServiceFailed
+	// demotes the instance to "unhealthy" (see below). Empty for flows that
+	// don't supply it (the demotion is then skipped).
+	primaryService string
+	phaseMu        sync.Mutex
+	phaseStarts    map[string]time.Time
+	outputCh       chan previewServiceOutput
+	outputDone     chan struct{}
+	lifecycleCh    chan previewLifecycleLog
+	lifecycleDone  chan struct{}
+	outputMu       sync.Mutex
+	outputClosed   bool
+	closeOnce      sync.Once
 }
 
 const observerWriteTimeout = 5 * time.Second
@@ -1134,6 +1140,28 @@ func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []str
 			Str("preview_id", o.previewID.String()).
 			Str("service", name).
 			Msg("observer: failed to write preview log")
+	}
+
+	// When the primary service dies the preview can no longer serve, but the
+	// instance row is left at whatever status it last reached (typically
+	// "ready"). A crash *after* readiness — e.g. an OOM kill at serve time —
+	// otherwise leaves the instance stuck at "ready" forever, so the launch
+	// page renders the iframe against a dead process and spins indefinitely.
+	// Demote the instance to "unhealthy" so consumers (the launch page, the
+	// gateway, listings) can surface the failure and offer a restart.
+	// UpdatePreviewStatusIfActive only transitions non-terminal rows, so this
+	// never clobbers a concurrent stop/expire and stays reversible: a later
+	// readiness write can promote it back to ready/partially_ready.
+	if o.primaryService != "" && name == o.primaryService {
+		demoteErr := fmt.Sprintf("primary service %q stopped: %s", name, errMsg)
+		if _, err := o.manager.store.UpdatePreviewStatusIfActive(
+			ctx, o.orgID, o.previewID, models.PreviewStatusUnhealthy, demoteErr,
+		); err != nil {
+			o.manager.logger.Warn().Err(err).
+				Str("preview_id", o.previewID.String()).
+				Str("service", name).
+				Msg("observer: failed to demote preview to unhealthy after primary service failure")
+		}
 	}
 }
 
@@ -1903,7 +1931,7 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("warm resume: failed to revoke access sessions")
 	}
 
-	observer := m.newServiceObserver(orgID, previewID, "", "")
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService)
 	defer observer.Close()
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
@@ -2098,7 +2126,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	// Restart via provider with same sandbox and config. Use the existing
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
-	observer := m.newServiceObserver(orgID, previewID, "", "")
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService)
 	defer observer.Close()
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
