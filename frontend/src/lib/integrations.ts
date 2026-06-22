@@ -11,7 +11,7 @@ export const INTEGRATIONS: IntegrationDefinition[] = [
   {
     key: "github",
     name: "GitHub",
-    description: "Sync repositories and open PRs.",
+    description: "Install the 143 app so it can access your repositories and open PRs.",
     logoSrc: "/integrations/github.svg",
   },
   {
