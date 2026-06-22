@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -17,11 +18,16 @@ import (
 
 type RepositoryHandler struct {
 	repoStore *db.RepositoryStore
+	orgStore  *db.OrganizationStore
 	prService *ghservice.PRService
 }
 
-func NewRepositoryHandler(repoStore *db.RepositoryStore) *RepositoryHandler {
-	return &RepositoryHandler{repoStore: repoStore}
+func NewRepositoryHandler(repoStore *db.RepositoryStore, orgStores ...*db.OrganizationStore) *RepositoryHandler {
+	h := &RepositoryHandler{repoStore: repoStore}
+	if len(orgStores) > 0 {
+		h.orgStore = orgStores[0]
+	}
+	return h
 }
 
 func (h *RepositoryHandler) SetPRService(svc *ghservice.PRService) {
@@ -44,7 +50,41 @@ func (h *RepositoryHandler) List(w http.ResponseWriter, r *http.Request) {
 	if repos == nil {
 		repos = []models.Repository{}
 	}
-	writeJSON(w, http.StatusOK, models.ListResponse[models.Repository]{Data: repos})
+	meta := models.PaginationMeta{}
+	if !filters.IncludeDisconnected {
+		defaultRepositoryID, err := h.defaultRepositoryID(r.Context(), orgID, repos)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "DEFAULT_REPOSITORY_FAILED", "failed to resolve default repository", err)
+			return
+		}
+		meta.DefaultRepositoryID = defaultRepositoryID
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.Repository]{Data: repos, Meta: meta})
+}
+
+func (h *RepositoryHandler) defaultRepositoryID(ctx context.Context, orgID uuid.UUID, repos []models.Repository) (string, error) {
+	if len(repos) == 0 || h.orgStore == nil {
+		return "", nil
+	}
+	org, err := h.orgStore.GetByID(ctx, orgID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return "", err
+	}
+	if settings.DefaultWorkRepositoryID != nil {
+		for _, repo := range repos {
+			if repo.ID == *settings.DefaultWorkRepositoryID {
+				return settings.DefaultWorkRepositoryID.String(), nil
+			}
+		}
+	}
+	return "", nil
 }
 
 func (h *RepositoryHandler) Get(w http.ResponseWriter, r *http.Request) {

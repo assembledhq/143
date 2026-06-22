@@ -213,7 +213,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	cliToolsHandler := handlers.NewCLIToolsHandler(credentialStore, logger)
 	cliToolsHandler.SetAuditEmitter(auditEmitter)
 	organizationsHandler := handlers.NewOrganizationsHandler(pool)
-	repoHandler := handlers.NewRepositoryHandler(repoStore)
+	repoHandler := handlers.NewRepositoryHandler(repoStore, orgStore)
 	if prService != nil {
 		repoHandler.SetPRService(prService)
 	}
