@@ -2004,7 +2004,7 @@ func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr mod
 		s.logger.Warn().Err(err).Str("org_id", pr.OrgID.String()).Msg("failed to parse org settings for auto-archive")
 		return
 	}
-	if !settings.AutoArchiveOnPRClose {
+	if !settings.EffectiveAutoArchiveOnPRClose() {
 		return
 	}
 

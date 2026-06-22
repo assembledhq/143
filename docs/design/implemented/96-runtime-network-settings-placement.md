@@ -246,7 +246,7 @@ Keep these controls where they are:
 - Coding-agent auth stacks: Coding agents.
 - Default agent type and provider-specific auth setup: Coding agents.
 - Preview secrets and preview API tokens: Preview.
-- PR authorship, draft PR default, auto-archive, and builder PR review gate: General / Pull requests.
+- PR authorship, draft PR default, auto-archive, and builder PR review gate: General / Pull requests. Auto-archive defaults on for new organizations while explicit opt-out remains supported.
 - LLM model defaults: LLM or Coding agents, depending on the existing page contract.
 
 The implementation also:
