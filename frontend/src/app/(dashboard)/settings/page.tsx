@@ -819,7 +819,7 @@ function PRAuthorshipSettings() {
                   <div className="space-y-3 border-t border-border pt-4">
                     <div>
                       <Label>Custom prompt checks</Label>
-                      <p className="text-xs text-muted-foreground">Settings checks can be edited here. Repo config checks are shown with provenance and refreshed from `.143/config.json`.</p>
+                      <p className="text-xs leading-5 text-muted-foreground">Settings checks can be edited here. Repo config checks are shown with provenance and refreshed from `.143/config.json`.</p>
                     </div>
                     <div className="space-y-2">
                       {customChecks.length === 0 ? (
