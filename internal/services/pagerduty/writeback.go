@@ -69,7 +69,7 @@ func NewWritebackService(deps WritebackDeps) *WritebackService {
 }
 
 func (s *WritebackService) OnSessionStarted(ctx context.Context, orgID uuid.UUID, incident models.PagerDutyIncident, session models.Session) error {
-	note := "143 session started for PagerDuty incident " + incident.IncidentID + "."
+	note := PagerDutyWritebackNotePrefix + "session started for PagerDuty incident " + incident.IncidentID + "."
 	if sessionURL := s.sessionURL(session.ID); sessionURL != "" {
 		note += "\nSession: " + sessionURL
 	}
@@ -91,7 +91,7 @@ func (s *WritebackService) OnAutomationSessionComplete(ctx context.Context, sess
 	if status != models.SessionStatusCompleted {
 		outcome = "failed"
 	}
-	note := fmt.Sprintf("143 automation session %s for PagerDuty incident %s.", outcome, incident.IncidentID)
+	note := fmt.Sprintf("%sautomation session %s for PagerDuty incident %s.", PagerDutyWritebackNotePrefix, outcome, incident.IncidentID)
 	if summary = strings.TrimSpace(summary); summary != "" {
 		note += "\nSummary: " + truncateWritebackText(summary, 800)
 	}
@@ -116,7 +116,7 @@ func (s *WritebackService) OnSessionComplete(ctx context.Context, session models
 		}
 		return err
 	}
-	body := fmt.Sprintf("143 session %s for PagerDuty incident %s.", outcome, incident.IncidentID)
+	body := fmt.Sprintf("%ssession %s for PagerDuty incident %s.", PagerDutyWritebackNotePrefix, outcome, incident.IncidentID)
 	if summary = strings.TrimSpace(summary); summary != "" {
 		body += "\nSummary: " + truncateWritebackText(summary, 800)
 	}
@@ -137,7 +137,7 @@ func (s *WritebackService) OnPROpened(ctx context.Context, session models.Sessio
 		}
 		return err
 	}
-	note := fmt.Sprintf("143 opened a pull request for PagerDuty incident %s.", incident.IncidentID)
+	note := fmt.Sprintf("%sopened a pull request for PagerDuty incident %s.", PagerDutyWritebackNotePrefix, incident.IncidentID)
 	if pr.GitHubPRURL != "" {
 		note += "\nPR: " + pr.GitHubPRURL
 	}

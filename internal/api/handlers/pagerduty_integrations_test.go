@@ -343,6 +343,7 @@ func (s *pagerDutyCredentialReaderFake) GetByID(context.Context, uuid.UUID, uuid
 type pagerDutyCredentialDisablerFake struct {
 	disabledProvider        models.ProviderName
 	disabledLabeledProvider models.ProviderName
+	disabledID              uuid.UUID
 }
 
 func (s *pagerDutyCredentialDisablerFake) Disable(_ context.Context, _ uuid.UUID, provider models.ProviderName) error {
@@ -352,6 +353,11 @@ func (s *pagerDutyCredentialDisablerFake) Disable(_ context.Context, _ uuid.UUID
 
 func (s *pagerDutyCredentialDisablerFake) DisableLabeled(_ context.Context, _ uuid.UUID, provider models.ProviderName) error {
 	s.disabledLabeledProvider = provider
+	return nil
+}
+
+func (s *pagerDutyCredentialDisablerFake) DisableByID(_ context.Context, _ uuid.UUID, id uuid.UUID) error {
+	s.disabledID = id
 	return nil
 }
 

@@ -569,15 +569,29 @@ func parseLatestNote(m map[string]any) *string {
 // new occurrences (they re-observe existing incidents on every poll).
 const pagerDutySyncEventIDPrefix = "pagerduty_sync:"
 
-// eventCanTriggerAutomations reports whether an inbound event type may fan out
-// to automation runs. incident.annotated and incident.status_update_published
-// are excluded because our own writeback (notes and status updates) generates
-// exactly those event types — letting them trigger automations would create a
-// writeback → webhook → automation → writeback feedback loop.
-func eventCanTriggerAutomations(eventType models.PagerDutyEventType) bool {
+// PagerDutyWritebackNotePrefix is the leading marker on every note and status
+// update that 143 writes back to PagerDuty (see the writeback service). It is
+// used to recognize — and skip — our own annotation/status-update events so they
+// don't re-trigger automations.
+const PagerDutyWritebackNotePrefix = "143 "
+
+// IsWritebackAuthoredNote reports whether a note/status-update body looks like
+// one 143 wrote back to PagerDuty.
+func IsWritebackAuthoredNote(note string) bool {
+	return strings.HasPrefix(strings.TrimSpace(note), PagerDutyWritebackNotePrefix)
+}
+
+// eventCanTriggerAutomations reports whether an inbound event may fan out to
+// automation runs. incident.annotated and incident.status_update_published are
+// the event types our own writeback generates, so letting them trigger
+// automations risks a writeback → webhook → automation → writeback loop. For
+// those types we allow triggering only when we can positively confirm the
+// triggering note was NOT authored by 143 (i.e. a human annotation): an absent
+// or 143-marked note is treated as ours and blocked, guaranteeing no loop.
+func eventCanTriggerAutomations(eventType models.PagerDutyEventType, latestNote *string) bool {
 	switch eventType {
 	case models.PagerDutyEventIncidentAnnotated, models.PagerDutyEventIncidentStatusUpdatePublished:
-		return false
+		return latestNote != nil && !IsWritebackAuthoredNote(*latestNote)
 	default:
 		return true
 	}

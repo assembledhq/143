@@ -83,8 +83,11 @@ type TokenService struct {
 	tokenURL    string
 	logger      zerolog.Logger
 
-	mu       sync.Mutex
-	credLock map[uuid.UUID]*sync.Mutex
+	// credLock holds one mutex per credential id to single-flight refreshes.
+	// A sync.Map (rather than a map+mutex) keeps lookups lock-free on the hot
+	// path; entries are not evicted, but the key space is bounded by the small
+	// number of distinct PagerDuty credentials an org holds.
+	credLock sync.Map // map[uuid.UUID]*sync.Mutex
 }
 
 // NewTokenService builds a PagerDuty token refresh service.
@@ -96,22 +99,12 @@ func NewTokenService(credentials pagerDutyCredentialByIDReader, writer pagerDuty
 		httpClient:  &http.Client{Timeout: pagerDutyRefreshHTTPTimeout},
 		tokenURL:    pagerDutyTokenURL,
 		logger:      logger,
-		credLock:    make(map[uuid.UUID]*sync.Mutex),
 	}
 }
 
 func (s *TokenService) lockFor(credentialID uuid.UUID) *sync.Mutex {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.credLock == nil {
-		s.credLock = make(map[uuid.UUID]*sync.Mutex)
-	}
-	lock, ok := s.credLock[credentialID]
-	if !ok {
-		lock = &sync.Mutex{}
-		s.credLock[credentialID] = lock
-	}
-	return lock
+	lock, _ := s.credLock.LoadOrStore(credentialID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 // EnsureFresh returns a PagerDuty config whose access token is valid now. When

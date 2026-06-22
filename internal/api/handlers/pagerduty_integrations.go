@@ -29,6 +29,10 @@ const (
 	pagerDutyTokenURL                    = "https://identity.pagerduty.com/oauth/token" // #nosec G101 -- OAuth endpoint URL, not credentials
 	pagerDutyIntegrationOAuthStateCookie = "pagerduty_integration_oauth_state"
 	pagerDutyLegacyCredentialRef         = "org_credential:pagerduty" // #nosec G101 -- database credential row reference, not a secret
+	// pagerDutySigningSecretMinLen is the minimum webhook secret length PagerDuty
+	// accepts for delivery-method signing. Secrets at least this long are
+	// registered as the signing secret so PagerDuty HMAC-signs each delivery.
+	pagerDutySigningSecretMinLen = 16
 )
 
 type pagerDutyGenericIntegrationStore interface {
@@ -74,6 +78,7 @@ type pagerDutyCredentialReader interface {
 type pagerDutyCredentialDisabler interface {
 	Disable(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
 	DisableLabeled(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) error
+	DisableByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 }
 
 type pagerDutyWebhookFailureReader interface {
@@ -337,6 +342,19 @@ func (h *PagerDutyIntegrationHandler) Connect(w http.ResponseWriter, r *http.Req
 		install.Scopes = strings.Fields(strings.ReplaceAll(cfg.Scope, ",", " "))
 	}
 	if err := h.pagerDutyIntegrations.Create(r.Context(), install); err != nil {
+		// The connect flow is not a single transaction (the credential,
+		// generic-integration, and provider-integration writes go to different
+		// stores). If the final write fails we'd otherwise leave an orphaned,
+		// active credential. Best-effort disable it so we don't accumulate
+		// dangling credentials; a retry re-activates it via UpsertWithLabel.
+		if credentialID != nil && h.credentialDisabler != nil {
+			if cleanupErr := h.credentialDisabler.DisableByID(r.Context(), orgID, *credentialID); cleanupErr != nil {
+				h.logger.Warn().Err(cleanupErr).
+					Str("org_id", orgID.String()).
+					Str("credential_id", credentialID.String()).
+					Msg("failed to clean up orphaned PagerDuty credential after provider-integration create failure")
+			}
+		}
 		writeError(w, r, http.StatusInternalServerError, "CONNECT_FAILED", "failed to create PagerDuty provider integration", err)
 		return
 	}
@@ -1467,40 +1485,54 @@ func (c pagerDutyRESTClient) TestCredential(ctx context.Context, cfg models.Page
 }
 
 func (c pagerDutyRESTClient) ListServices(ctx context.Context, cfg models.PagerDutyConfig) ([]models.PagerDutyServiceSummary, error) {
-	var out struct {
-		Services []struct {
-			ID               string `json:"id"`
-			Summary          string `json:"summary"`
-			HTMLURL          string `json:"html_url"`
-			EscalationPolicy struct {
-				Summary string `json:"summary"`
-			} `json:"escalation_policy"`
-			Teams []struct {
-				ID string `json:"id"`
-			} `json:"teams"`
-		} `json:"services"`
-	}
-	if err := c.do(ctx, cfg, http.MethodGet, "/services?limit=100", nil, &out); err != nil {
-		c.recordAPIRequest(ctx, "list_services", err)
-		return nil, err
+	// Page through the full service list rather than capping at one page, so
+	// orgs with more than a page of services get complete repo-mapping options.
+	// A page cap bounds the worst case (PagerDuty's classic REST limit is 100).
+	const pageLimit = 100
+	const maxPages = 50
+	services := make([]models.PagerDutyServiceSummary, 0, pageLimit)
+	offset := 0
+	for page := 0; page < maxPages; page++ {
+		var out struct {
+			Services []struct {
+				ID               string `json:"id"`
+				Summary          string `json:"summary"`
+				HTMLURL          string `json:"html_url"`
+				EscalationPolicy struct {
+					Summary string `json:"summary"`
+				} `json:"escalation_policy"`
+				Teams []struct {
+					ID string `json:"id"`
+				} `json:"teams"`
+			} `json:"services"`
+			More bool `json:"more"`
+		}
+		path := fmt.Sprintf("/services?limit=%d&offset=%d", pageLimit, offset)
+		if err := c.do(ctx, cfg, http.MethodGet, path, nil, &out); err != nil {
+			c.recordAPIRequest(ctx, "list_services", err)
+			return nil, err
+		}
+		for _, service := range out.Services {
+			teamIDs := make([]string, 0, len(service.Teams))
+			for _, team := range service.Teams {
+				if strings.TrimSpace(team.ID) != "" {
+					teamIDs = append(teamIDs, team.ID)
+				}
+			}
+			services = append(services, models.PagerDutyServiceSummary{
+				ID:               service.ID,
+				Summary:          service.Summary,
+				HTMLURL:          service.HTMLURL,
+				EscalationPolicy: service.EscalationPolicy.Summary,
+				TeamIDs:          teamIDs,
+			})
+		}
+		if !out.More || len(out.Services) == 0 {
+			break
+		}
+		offset += len(out.Services)
 	}
 	c.recordAPIRequest(ctx, "list_services", nil)
-	services := make([]models.PagerDutyServiceSummary, 0, len(out.Services))
-	for _, service := range out.Services {
-		teamIDs := make([]string, 0, len(service.Teams))
-		for _, team := range service.Teams {
-			if strings.TrimSpace(team.ID) != "" {
-				teamIDs = append(teamIDs, team.ID)
-			}
-		}
-		services = append(services, models.PagerDutyServiceSummary{
-			ID:               service.ID,
-			Summary:          service.Summary,
-			HTMLURL:          service.HTMLURL,
-			EscalationPolicy: service.EscalationPolicy.Summary,
-			TeamIDs:          teamIDs,
-		})
-	}
 	return services, nil
 }
 
@@ -1509,20 +1541,29 @@ func (c pagerDutyRESTClient) CreateWebhookSubscription(ctx context.Context, cfg 
 	for _, event := range req.Events {
 		events = append(events, string(event))
 	}
+	deliveryMethod := map[string]any{
+		"type": "http_delivery_method",
+		"url":  req.WebhookURL,
+		"custom_headers": []map[string]string{{
+			"name":  "X-143-PagerDuty-Secret",
+			"value": req.Secret,
+		}},
+	}
+	// When the secret is long enough for PagerDuty to sign with, register it as
+	// the delivery-method signing secret so PagerDuty stamps each delivery with
+	// an `X-PagerDuty-Signature: v1=...` HMAC over the raw body. The webhook
+	// handler prefers that body-bound signature over the shared-secret header.
+	// PagerDuty requires the signing secret to be at least pagerDutySigningSecretMinLen.
+	if len(req.Secret) >= pagerDutySigningSecretMinLen {
+		deliveryMethod["secret"] = req.Secret
+	}
 	body := map[string]any{
 		"webhook_subscription": map[string]any{
-			"type":        "webhook_subscription",
-			"active":      true,
-			"description": req.Description,
-			"events":      events,
-			"delivery_method": map[string]any{
-				"type": "http_delivery_method",
-				"url":  req.WebhookURL,
-				"custom_headers": []map[string]string{{
-					"name":  "X-143-PagerDuty-Secret",
-					"value": req.Secret,
-				}},
-			},
+			"type":            "webhook_subscription",
+			"active":          true,
+			"description":     req.Description,
+			"events":          events,
+			"delivery_method": deliveryMethod,
 			"filter": map[string]string{
 				"id":   req.FilterID,
 				"type": req.FilterType,

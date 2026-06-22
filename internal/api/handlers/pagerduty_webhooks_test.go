@@ -2,6 +2,9 @@ package handlers
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +18,29 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+// pagerDutyV1Signature builds a valid PagerDuty `v1=<hmac>` signature header for
+// a body and secret, mirroring how PagerDuty signs webhook deliveries.
+func pagerDutyV1Signature(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "v1=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func TestVerifyPagerDutyV1Signature(t *testing.T) {
+	t.Parallel()
+
+	secret := "this-is-a-signing-secret"
+	body := []byte(`{"event":{"id":"evt-1"}}`)
+	valid := pagerDutyV1Signature(secret, body)
+
+	require.True(t, verifyPagerDutyV1Signature(secret, body, valid), "a correct v1 signature should verify")
+	require.True(t, verifyPagerDutyV1Signature(secret, body, "v1=deadbeef,"+valid), "any matching signature in a rotation list should verify")
+	require.False(t, verifyPagerDutyV1Signature("other-secret", body, valid), "a signature under a different secret should not verify")
+	require.False(t, verifyPagerDutyV1Signature(secret, []byte(`{"event":{"id":"evt-2"}}`), valid), "a signature over a different body should not verify (body binding)")
+	require.False(t, verifyPagerDutyV1Signature(secret, body, "v1=not-hex"), "a malformed signature should not verify")
+	require.False(t, verifyPagerDutyV1Signature(secret, body, ""), "an empty signature header should not verify")
+}
 
 func TestPagerDutyWebhookHandler_HandlePersistsLedgerAndEnqueuesJob(t *testing.T) {
 	t.Parallel()
@@ -346,8 +372,8 @@ func TestPagerDutyWebhookHandler_HandleStartSessionActionStartsMappedIncidentSes
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/pagerduty/start-session?integration_id="+genericIntegrationID.String(), stringsReaderPagerDutyWebhook(payload))
-	req.Header.Set("X-143-PagerDuty-Secret", secret)
-	req.Header.Set("X-PagerDuty-Signature", "signature-value")
+	signature := pagerDutyV1Signature(secret, []byte(payload))
+	req.Header.Set("X-PagerDuty-Signature", signature)
 	rec := httptest.NewRecorder()
 
 	handler.HandleStartSessionAction(rec, req)
@@ -361,7 +387,7 @@ func TestPagerDutyWebhookHandler_HandleStartSessionActionStartsMappedIncidentSes
 	require.Equal(t, "Investigate from PagerDuty", starter.input.Message, "custom action should pass the responder message")
 	require.Equal(t, "incident.action.start_session", webhooks.delivery.EventType, "custom action should record a webhook delivery ledger row")
 	require.NotContains(t, string(webhooks.delivery.Headers), "pd-secret", "custom action delivery headers should redact PagerDuty shared secret")
-	require.NotContains(t, string(webhooks.delivery.Headers), "signature-value", "custom action delivery headers should redact PagerDuty signatures")
+	require.NotContains(t, string(webhooks.delivery.Headers), signature, "custom action delivery headers should redact PagerDuty signatures")
 	require.Equal(t, webhooks.delivery.ID, webhooks.processedID, "custom action should mark the delivery processed after session start")
 	var resp models.SingleResponse[models.Session]
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "custom action response should be valid JSON")

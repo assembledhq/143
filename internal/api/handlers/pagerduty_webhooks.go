@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -184,7 +186,7 @@ func (h *PagerDutyWebhookHandler) Handle(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	signatureValid, err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, r.Header)
+	signatureValid, err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, body, r.Header)
 	if err != nil {
 		result = "signature_failed"
 		// Do not echo the specific verification failure to an unauthenticated
@@ -344,7 +346,7 @@ func (h *PagerDutyWebhookHandler) HandleStartSessionAction(w http.ResponseWriter
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "PagerDuty integration is inactive")
 		return
 	}
-	if _, err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, r.Header); err != nil {
+	if _, err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, body, r.Header); err != nil {
 		h.logger.Warn().Err(err).
 			Str("org_id", integration.OrgID.String()).
 			Msg("PagerDuty start-session action signature verification failed")
@@ -694,14 +696,22 @@ func (h *PagerDutyWebhookHandler) emitStartSessionActionAudit(r *http.Request, o
 	})
 }
 
-// verifySignature authenticates an inbound webhook. We register subscriptions
-// with PagerDuty using a custom header (X-143-PagerDuty-Secret) carrying a
-// per-integration shared secret (see CreateWebhookSubscription), so that header
-// is the authentication mechanism — there is no PagerDuty-native HMAC signature
-// to validate. It returns whether the request was actually verified; (false,
-// nil) means verification was intentionally skipped (no secret configured in a
+// verifySignature authenticates an inbound webhook. Two mechanisms are
+// supported, preferring the stronger one:
+//
+//  1. PagerDuty-native HMAC: when the subscription was registered with a signing
+//     secret, PagerDuty signs each delivery with
+//     `X-PagerDuty-Signature: v1=<hmac>,...` over the RAW request body. This is
+//     the preferred path — the signature is bound to the body, so it can't be
+//     replayed against a forged payload.
+//  2. Shared-secret fallback: a custom header (X-143-PagerDuty-Secret) carrying
+//     the per-integration secret, for subscriptions registered before native
+//     signing or with a secret too short for PagerDuty to sign with.
+//
+// It returns whether the request was actually verified; (false, nil) means
+// verification was intentionally skipped (no secret configured in a
 // non-production environment) and is recorded as such for audit.
-func (h *PagerDutyWebhookHandler) verifySignature(ctx context.Context, orgID uuid.UUID, integration models.PagerDutyIntegration, headers http.Header) (bool, error) {
+func (h *PagerDutyWebhookHandler) verifySignature(ctx context.Context, orgID uuid.UUID, integration models.PagerDutyIntegration, body []byte, headers http.Header) (bool, error) {
 	secret, err := h.resolveSecret(ctx, orgID, integration)
 	if err != nil {
 		return false, err
@@ -713,14 +723,46 @@ func (h *PagerDutyWebhookHandler) verifySignature(ctx context.Context, orgID uui
 		// No secret configured outside production: accept but flag as unverified.
 		return false, nil
 	}
+	// Preferred: PagerDuty-native body-bound HMAC.
+	if sig := strings.TrimSpace(headers.Get("X-PagerDuty-Signature")); sig != "" {
+		if verifyPagerDutyV1Signature(secret, body, sig) {
+			return true, nil
+		}
+		return false, errors.New("invalid PagerDuty webhook signature")
+	}
+	// Fallback: shared-secret custom header.
 	provided := strings.TrimSpace(headers.Get("X-143-PagerDuty-Secret"))
 	if provided == "" {
-		return false, errors.New("missing PagerDuty webhook secret header")
+		return false, errors.New("missing PagerDuty webhook signature")
 	}
 	if !hmac.Equal([]byte(provided), []byte(secret)) {
 		return false, errors.New("invalid PagerDuty webhook secret")
 	}
 	return true, nil
+}
+
+// verifyPagerDutyV1Signature checks a PagerDuty v3 `X-PagerDuty-Signature`
+// header against an HMAC-SHA256 of the raw body keyed by the signing secret. The
+// header is a comma-separated list of `v1=<hex>` values (multiple appear during
+// secret rotation); the request is valid if any one matches.
+func verifyPagerDutyV1Signature(secret string, body []byte, header string) bool {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	expected := mac.Sum(nil)
+	for _, part := range strings.Split(header, ",") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(part), "v1=")
+		if !ok {
+			continue
+		}
+		sig, err := hex.DecodeString(strings.TrimSpace(value))
+		if err != nil {
+			continue
+		}
+		if hmac.Equal(sig, expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *PagerDutyWebhookHandler) resolveSecret(ctx context.Context, orgID uuid.UUID, integration models.PagerDutyIntegration) (string, error) {

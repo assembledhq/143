@@ -165,3 +165,35 @@ func TestNormalizeResolvedIncidentClosesIssue(t *testing.T) {
 	require.Equal(t, &occurredAt, normalized.Incident.ResolvedAt, "incident mirror should set resolved_at from the event time")
 	require.Equal(t, "low", normalized.Issue.Severity, "low urgency without a priority should normalize as low severity")
 }
+
+func TestEventCanTriggerAutomations(t *testing.T) {
+	t.Parallel()
+	humanNote := "Investigating elevated error rate"
+	writebackNote := PagerDutyWritebackNotePrefix + "session started for PagerDuty incident PABC."
+
+	// Non-annotation events always trigger.
+	if !eventCanTriggerAutomations(models.PagerDutyEventIncidentTriggered, nil) {
+		t.Fatal("triggered events should always be allowed to trigger automations")
+	}
+	// Human annotation triggers; 143-authored annotation does not (loop break).
+	if !eventCanTriggerAutomations(models.PagerDutyEventIncidentAnnotated, &humanNote) {
+		t.Fatal("a human annotation should be allowed to trigger automations")
+	}
+	if eventCanTriggerAutomations(models.PagerDutyEventIncidentAnnotated, &writebackNote) {
+		t.Fatal("a 143-authored annotation must not trigger automations")
+	}
+	// Safe default: an annotation with no resolvable note is treated as ours.
+	if eventCanTriggerAutomations(models.PagerDutyEventIncidentStatusUpdatePublished, nil) {
+		t.Fatal("a status update with no note should be blocked (safe default, no loop)")
+	}
+}
+
+func TestIsWritebackAuthoredNote(t *testing.T) {
+	t.Parallel()
+	if !IsWritebackAuthoredNote("  " + PagerDutyWritebackNotePrefix + "opened a pull request...") {
+		t.Fatal("a 143-prefixed note should be recognized as writeback-authored")
+	}
+	if IsWritebackAuthoredNote("143-incidents are noisy today") {
+		t.Fatal("a note that merely contains 143 should not be misclassified")
+	}
+}

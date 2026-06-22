@@ -139,7 +139,7 @@ func (p *Processor) ProcessInboundEvent(ctx context.Context, orgID, eventID uuid
 		return p.failEvent(ctx, orgID, eventID, fmt.Errorf("update pagerduty issue status: %w", err))
 	}
 
-	if p.deps.Triggers != nil && eventCanTriggerAutomations(parsed.EventType) {
+	if p.deps.Triggers != nil && eventCanTriggerAutomations(parsed.EventType, normalized.Incident.LatestNote) {
 		if err := p.deps.Triggers.TriggerPagerDutyEvent(ctx, EventTriggerRequest{
 			OrgID:           orgID,
 			PagerDuty:       integration,
