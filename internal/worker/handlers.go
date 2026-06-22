@@ -8850,7 +8850,12 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 
 		// Regenerate title if due (every 3 turns). Non-fatal — log and continue.
 		if services.TitleService != nil {
-			if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID); titleErr != nil {
+			var completedThreadID *uuid.UUID
+			if hasThread {
+				threadIDLocal := threadID
+				completedThreadID = &threadIDLocal
+			}
+			if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
