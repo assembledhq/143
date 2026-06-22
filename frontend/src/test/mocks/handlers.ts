@@ -452,6 +452,76 @@ export const handlers = [
     return HttpResponse.json({ data } satisfies SingleResponse<PullRequest | null>);
   }),
 
+  http.get('/api/v1/sessions/:id/readiness', () => {
+    return HttpResponse.json({ data: {} });
+  }),
+
+  http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => {
+    return HttpResponse.json({ data: {} });
+  }),
+
+  http.post('/api/v1/sessions/:id/pr-readiness-runs', ({ params }) => {
+    return HttpResponse.json({
+      data: {
+        id: 'readiness-run-1',
+        org_id: 'org-1',
+        session_id: params.id,
+        status: 'queued',
+        summary: 'Queued',
+        started_at: '2026-02-17T07:10:00Z',
+        created_at: '2026-02-17T07:10:00Z',
+        updated_at: '2026-02-17T07:10:00Z',
+        checks: [],
+      },
+    }, { status: 202 });
+  }),
+
+  http.get('/api/v1/sessions/:id/pr-readiness-context', ({ params }) => {
+    return HttpResponse.json({
+      data: {
+        org_id: 'org-1',
+        session_id: params.id,
+        issue_less_reason: '',
+      },
+    });
+  }),
+
+  http.post('/api/v1/sessions/:id/pr-readiness-context', async ({ params, request }) => {
+    const body = await request.json() as { issue_less_reason?: string };
+    return HttpResponse.json({
+      data: {
+        org_id: 'org-1',
+        session_id: params.id,
+        issue_less_reason: body.issue_less_reason ?? '',
+      },
+    });
+  }),
+
+  http.get('/api/v1/pr-readiness-policies', () => {
+    return HttpResponse.json({
+      data: {
+        source: 'default',
+        config: {
+          enabled_for_builders: true,
+          checks: {
+            freshness: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+            agent_review_clean: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+          },
+          bypass: {
+            enabled: true,
+            allowed_roles: ['admin', 'member', 'builder'],
+            scopes: ['completed_blocking_checks'],
+          },
+          auto_run: { after_session_completion: false, on_create_pr: false },
+          sensitive_paths: [],
+          large_diff_file_threshold: 25,
+          large_diff_line_threshold: 500,
+        },
+        bypass_counts: { total: 0 },
+      },
+    });
+  }),
+
   http.get('/api/v1/pull-requests/:id/health', () => {
     return HttpResponse.json({ data: mockPRHealth } satisfies SingleResponse<PullRequestHealthResponse>);
   }),
