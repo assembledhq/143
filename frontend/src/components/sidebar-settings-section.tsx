@@ -10,7 +10,6 @@ import {
   Sparkles,
   Target,
   Activity,
-  FlaskConical,
   Users,
   ScrollText,
   BarChart3,
@@ -83,7 +82,6 @@ const settingsGroups: SettingsGroup[] = [
     items: [
       { label: "Usage", icon: BarChart3, href: "/settings/usage", adminOnly: true },
       { label: "Audit log", icon: ScrollText, href: "/settings/audit-log", adminOnly: true },
-      { label: "Evals", icon: FlaskConical, href: "/settings/evals", hideForRoles: ["viewer", "builder"] },
     ],
   },
 ];
