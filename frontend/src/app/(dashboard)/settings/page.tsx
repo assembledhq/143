@@ -273,7 +273,7 @@ function PRAuthorshipSettings() {
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const currentAuthorship = settings.pr_authorship ?? "user_preferred";
   const currentDraftDefault = settings.pr_draft_default ?? false;
-  const currentAutoArchive = settings.auto_archive_on_pr_close ?? false;
+  const currentAutoArchive = settings.auto_archive_on_pr_close ?? true;
   const requireBuilderReview = settings.builder_permissions?.require_review_before_pr ?? true;
 
   const accountConnected = githubAccountStatus?.connected ?? false;
