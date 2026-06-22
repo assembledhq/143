@@ -141,7 +141,7 @@ describe("public docs source", () => {
   it("keeps the homepage benefits bullets with team-level automation wording", () => {
     const raw = getRawPublicDocBySlug([]);
 
-    expect(raw.content).toContain("built for engineering teams");
+    expect(raw.content).toContain("engineers and non-engineers");
     expect(raw.content).toContain("defaults to team-level workflows");
     expect(raw.content).toContain("**A shared execution layer:**");
     expect(raw.content).toContain("**Team-level automation:**");

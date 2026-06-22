@@ -433,7 +433,7 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.click(await screen.findByRole('combobox', { name: /Policy preset/i }));
+    await user.click(await screen.findByRole('combobox', { name: /Preset/i }));
     await user.click(screen.getByRole('option', { name: 'Strict' }));
 
     await waitFor(() => {
@@ -459,7 +459,7 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.click(await screen.findByLabelText('Enable advisory checks for engineers'));
+    await user.click(await screen.findByLabelText('Engineer advisory checks'));
 
     await waitFor(() => {
       expect(readinessPolicyUpdateMock).toHaveBeenCalledWith(
@@ -547,7 +547,7 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.click(await screen.findByRole('combobox', { name: /PR readiness policy/i }));
+    await user.click(await screen.findByRole('combobox', { name: /Policy scope/i }));
     await user.click(screen.getByRole('option', { name: 'acme/app' }));
 
     expect(await screen.findByText('org_policy · org settings')).toBeInTheDocument();
