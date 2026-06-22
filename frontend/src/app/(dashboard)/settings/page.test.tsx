@@ -6,6 +6,13 @@ const {
   settingsGetMock,
   settingsUpdateMock,
   settingsNetworkStatusMock,
+  readinessPolicyGetMock,
+  readinessPolicyUpdateMock,
+  readinessCustomChecksListMock,
+  readinessCustomCheckCreateMock,
+  readinessCustomCheckUpdateMock,
+  readinessCustomCheckDeleteMock,
+  repositoriesListMock,
   auditLogsListMock,
   teamListMembersMock,
   useAuthMock,
@@ -35,6 +42,65 @@ const {
       static_egress_public_ip: '203.0.113.10',
     },
   }),
+  readinessPolicyGetMock: vi.fn().mockResolvedValue({
+    data: {
+      source: 'default',
+      config: {
+        enabled_for_builders: true,
+        checks: {
+          freshness: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+          agent_review_clean: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+        },
+        bypass: {
+          enabled: true,
+          allowed_roles: ['admin', 'member', 'builder'],
+          scopes: ['completed_blocking_checks'],
+          non_bypassable_checks: [],
+        },
+        auto_run: { after_session_completion: false, on_create_pr: false },
+        sensitive_paths: ['infra/**'],
+        large_diff_file_threshold: 25,
+        large_diff_line_threshold: 500,
+      },
+      bypass_counts: {
+        total: 2,
+        by_repository: [{ key: 'repo-1', count: 1 }],
+        by_check: [{ key: 'agent_review_clean', count: 2 }],
+        by_user: [{ key: 'user-1', count: 2 }],
+      },
+    },
+  }),
+  readinessPolicyUpdateMock: vi.fn().mockResolvedValue({ data: {} }),
+  readinessCustomChecksListMock: vi.fn().mockResolvedValue({
+    data: [{
+      id: 'check-1',
+      check_key: 'no_schema_drift',
+      name: 'No schema drift',
+      prompt: 'Check schema compatibility.',
+      paths: { include: ['analytics/**'] },
+      enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' },
+      source: 'repo_config',
+      active: true,
+    }],
+  }),
+  readinessCustomCheckCreateMock: vi.fn().mockResolvedValue({
+    data: {
+      id: 'check-2',
+      check_key: 'review_docs',
+      name: 'Review docs',
+      prompt: 'Check docs.',
+      paths: { include: ['docs/**'] },
+      enforcement: { builder: 'advisory', engineer: 'advisory', admin: 'advisory' },
+      source: 'org_settings',
+      active: true,
+    },
+  }),
+  readinessCustomCheckUpdateMock: vi.fn().mockResolvedValue({ data: {} }),
+  readinessCustomCheckDeleteMock: vi.fn().mockResolvedValue(undefined),
+  repositoriesListMock: vi.fn().mockResolvedValue({
+    data: [{ id: 'repo-1', full_name: 'acme/app' }],
+    meta: {},
+  }),
   auditLogsListMock: vi.fn().mockResolvedValue({ data: [] }),
   teamListMembersMock: vi.fn().mockResolvedValue({ data: [] }),
   useAuthMock: vi.fn(() => ({
@@ -48,6 +114,15 @@ vi.mock('@/lib/api', () => ({
       get: settingsGetMock,
       update: settingsUpdateMock,
       getNetworkStatus: settingsNetworkStatusMock,
+      getPRReadinessPolicy: readinessPolicyGetMock,
+      updatePRReadinessPolicy: readinessPolicyUpdateMock,
+      listPRReadinessCustomChecks: readinessCustomChecksListMock,
+      createPRReadinessCustomCheck: readinessCustomCheckCreateMock,
+      updatePRReadinessCustomCheck: readinessCustomCheckUpdateMock,
+      deletePRReadinessCustomCheck: readinessCustomCheckDeleteMock,
+    },
+    repositories: {
+      list: repositoriesListMock,
     },
     auditLogs: {
       list: auditLogsListMock,
@@ -67,6 +142,13 @@ describe('SettingsPage', () => {
     settingsGetMock.mockClear();
     settingsUpdateMock.mockClear();
     settingsNetworkStatusMock.mockClear();
+    readinessPolicyGetMock.mockClear();
+    readinessPolicyUpdateMock.mockClear();
+    readinessCustomChecksListMock.mockClear();
+    readinessCustomCheckCreateMock.mockClear();
+    readinessCustomCheckUpdateMock.mockClear();
+    readinessCustomCheckDeleteMock.mockClear();
+    repositoriesListMock.mockClear();
     useAuthMock.mockReset();
     useAuthMock.mockReturnValue({
       user: { role: 'admin' },
@@ -86,6 +168,63 @@ describe('SettingsPage', () => {
         static_egress_enabled: true,
         static_egress_public_ip: '203.0.113.10',
       },
+    });
+    readinessPolicyGetMock.mockResolvedValue({
+      data: {
+        source: 'default',
+        config: {
+          enabled_for_builders: true,
+          checks: {
+            freshness: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+            agent_review_clean: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+          },
+          bypass: {
+            enabled: true,
+            allowed_roles: ['admin', 'member', 'builder'],
+            scopes: ['completed_blocking_checks'],
+            non_bypassable_checks: [],
+          },
+          auto_run: { after_session_completion: false, on_create_pr: false },
+          sensitive_paths: ['infra/**'],
+          large_diff_file_threshold: 25,
+          large_diff_line_threshold: 500,
+        },
+        bypass_counts: {
+          total: 2,
+          by_repository: [{ key: 'repo-1', count: 1 }],
+          by_check: [{ key: 'agent_review_clean', count: 2 }],
+          by_user: [{ key: 'user-1', count: 2 }],
+        },
+      },
+    });
+    readinessPolicyUpdateMock.mockResolvedValue({ data: {} });
+    readinessCustomChecksListMock.mockResolvedValue({
+      data: [{
+        id: 'check-1',
+        check_key: 'no_schema_drift',
+        name: 'No schema drift',
+        prompt: 'Check schema compatibility.',
+        paths: { include: ['analytics/**'] },
+        enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' },
+        source: 'repo_config',
+        active: true,
+      }],
+    });
+    readinessCustomCheckCreateMock.mockResolvedValue({
+      data: {
+        id: 'check-2',
+        check_key: 'review_docs',
+        name: 'Review docs',
+        prompt: 'Check docs.',
+        paths: { include: ['docs/**'] },
+        enforcement: { builder: 'advisory', engineer: 'advisory', admin: 'advisory' },
+        source: 'org_settings',
+        active: true,
+      },
+    });
+    repositoriesListMock.mockResolvedValue({
+      data: [{ id: 'repo-1', full_name: 'acme/app' }],
+      meta: {},
     });
     auditLogsListMock.mockClear();
     teamListMembersMock.mockClear();
@@ -258,5 +397,157 @@ describe('SettingsPage', () => {
     expect(screen.queryByText('Network access')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Use static egress IP for sessions and previews')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Active previews per user')).not.toBeInTheDocument();
+  });
+
+  it('renders PR readiness policy controls and bypass counters', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText('PR readiness policy')).toBeInTheDocument();
+    expect(screen.getByText('Organization default')).toBeInTheDocument();
+    expect(await screen.findByText('No schema drift')).toBeInTheDocument();
+    expect(screen.getByText('2 total')).toBeInTheDocument();
+    expect(screen.getByText('repo-1: 1')).toBeInTheDocument();
+    expect(screen.getByText('no_schema_drift · .143/config.json')).toBeInTheDocument();
+  });
+
+  it('lets admins disable advisory readiness for engineers as a group', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByLabelText('Enable advisory checks for engineers'));
+
+    await waitFor(() => {
+      expect(readinessPolicyUpdateMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          checks: expect.objectContaining({
+            freshness: expect.objectContaining({
+              enforcement: expect.objectContaining({ engineer: 'off' }),
+            }),
+            agent_review_clean: expect.objectContaining({
+              enforcement: expect.objectContaining({ engineer: 'off' }),
+            }),
+          }),
+        }),
+        undefined,
+      );
+    });
+  });
+
+  it('distinguishes repository settings checks from config-file checks', async () => {
+    readinessCustomChecksListMock.mockResolvedValue({
+      data: [
+        {
+          id: 'check-1',
+          check_key: 'no_schema_drift',
+          name: 'No schema drift',
+          prompt: 'Check schema compatibility.',
+          paths: { include: ['analytics/**'] },
+          enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' },
+          source: 'repo_config',
+          active: true,
+        },
+        {
+          id: 'check-2',
+          repository_id: 'repo-1',
+          check_key: 'repo_docs',
+          name: 'Repository docs',
+          prompt: 'Check docs.',
+          paths: { include: ['docs/**'] },
+          enforcement: { builder: 'advisory', engineer: 'advisory', admin: 'advisory' },
+          source: 'org_settings',
+          active: true,
+        },
+      ],
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    expect(await screen.findByText('No schema drift')).toBeInTheDocument();
+    expect(await screen.findByText('Repository docs')).toBeInTheDocument();
+    expect(screen.getByText('no_schema_drift · .143/config.json')).toBeInTheDocument();
+    expect(screen.getByText('repo_docs · repo settings')).toBeInTheDocument();
+  });
+
+  it('keeps inherited custom checks read-only in repository readiness scope', async () => {
+    readinessCustomChecksListMock.mockResolvedValue({
+      data: [
+        {
+          id: 'org-check',
+          check_key: 'org_policy',
+          name: 'Org policy',
+          prompt: 'Check org policy.',
+          paths: { include: ['src/**'] },
+          enforcement: { builder: 'advisory', engineer: 'advisory', admin: 'advisory' },
+          source: 'org_settings',
+          active: true,
+        },
+        {
+          id: 'repo-check',
+          repository_id: 'repo-1',
+          check_key: 'repo_policy',
+          name: 'Repo policy',
+          prompt: 'Check repo policy.',
+          paths: { include: ['repo/**'] },
+          enforcement: { builder: 'advisory', engineer: 'advisory', admin: 'advisory' },
+          source: 'org_settings',
+          active: true,
+        },
+      ],
+    });
+
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('combobox', { name: /PR readiness policy/i }));
+    await user.click(screen.getByRole('option', { name: 'acme/app' }));
+
+    expect(await screen.findByText('org_policy · org settings')).toBeInTheDocument();
+    expect(screen.getByText('repo_policy · repo settings')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Edit' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(readinessCustomCheckDeleteMock).toHaveBeenCalledWith('repo-check');
+    });
+    expect(readinessCustomCheckDeleteMock).not.toHaveBeenCalledWith('org-check');
+  });
+
+  it('updates PR readiness auto-run policy controls', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByLabelText('Auto-run on Create PR'));
+
+    await waitFor(() => {
+      expect(readinessPolicyUpdateMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          auto_run: expect.objectContaining({ on_create_pr: true }),
+        }),
+        undefined,
+      );
+    });
+  });
+
+  it('creates custom PR readiness prompt checks with path filters', async () => {
+    renderWithProviders(<SettingsPage />);
+
+    const user = userEvent.setup();
+    await user.type(await screen.findByPlaceholderText('check_key'), 'review_docs');
+    await user.type(screen.getByPlaceholderText('Check name'), 'Review docs');
+    await user.type(screen.getByPlaceholderText('Include paths'), 'docs/**');
+    await user.type(screen.getByPlaceholderText('Prompt template'), 'Check docs for reviewer context.');
+    await user.click(screen.getByRole('button', { name: 'Add custom check' }));
+
+    await waitFor(() => {
+      expect(readinessCustomCheckCreateMock).toHaveBeenCalledWith(expect.objectContaining({
+        check_key: 'review_docs',
+        name: 'Review docs',
+        prompt: 'Check docs for reviewer context.',
+        repository_id: undefined,
+        paths: expect.objectContaining({ include: ['docs/**'] }),
+      }));
+    });
   });
 });
