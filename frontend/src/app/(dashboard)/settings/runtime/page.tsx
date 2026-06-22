@@ -13,6 +13,7 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { CopyButton } from "@/components/copy-button";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -1192,6 +1193,10 @@ export default function RuntimeSettingsPage() {
           <CapacityLimitsSection />
           <SessionsAndCleanupSection />
           <ResourceDefaultsSection />
+          <SettingsLastActivity
+            scopes={{ resource_type: "settings" }}
+            title="Sandbox settings activity"
+          />
         </div>
       </TooltipProvider>
     </PageContainer>

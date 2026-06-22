@@ -43,7 +43,7 @@ import { PageContainer } from "@/components/page-container";
 import { VerifiedDomainsSection } from "@/components/settings/verified-domains-section";
 import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
-import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { roleLabel } from "@/lib/roles";
 import type {
   User,
@@ -517,11 +517,15 @@ export default function TeamSettingsPage() {
       {/* CLI install links (admin-only: creating one hands out membership) */}
       {canManageTeam && <CLIJoinTokensCard />}
 
-      <AuditLogTrigger
-        filters={{ resource_type: "team_member" }}
+      <SettingsLastActivity
+        scopes={[
+          { resource_type: "team_member" },
+          { resource_type: "invitation" },
+          { resource_type: "organization_domain" },
+          { resource_type: "org_join_token" },
+        ]}
         members={members}
         title="Team activity"
-        variant="footer"
       />
 
       {/* Invite Member Dialog */}

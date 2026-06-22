@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
@@ -339,6 +340,11 @@ export default function AutopilotSettingsPage() {
             </div>
           )}
         </section>
+
+        <SettingsLastActivity
+          scopes={{ resource_type: "settings" }}
+          title="Autopilot settings activity"
+        />
       </div>
     </PageContainer>
   );

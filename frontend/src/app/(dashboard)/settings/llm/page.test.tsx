@@ -10,6 +10,8 @@ const {
   settingsUpdateMock,
   llmModelsMock,
   llmDefaultsMock,
+  auditLogsListMock,
+  teamListMembersMock,
 } = vi.hoisted(() => ({
   settingsGetMock: vi.fn().mockResolvedValue({
     data: {
@@ -35,6 +37,8 @@ const {
   llmDefaultsMock: vi.fn().mockResolvedValue({
     data: { openai: "sk-...plat" },
   }),
+  auditLogsListMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
+  teamListMembersMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -49,6 +53,12 @@ vi.mock("@/lib/api", () => ({
       list: credentialsListMock,
       update: credentialsUpdateMock,
       delete: credentialsDeleteMock,
+    },
+    auditLogs: {
+      list: auditLogsListMock,
+    },
+    team: {
+      listMembers: teamListMembersMock,
     },
   },
 }));
@@ -79,6 +89,10 @@ describe("LLMPage", () => {
     llmModelsMock.mockClear();
     llmDefaultsMock.mockClear();
     llmDefaultsMock.mockResolvedValue({ data: { openai: "sk-...plat" } });
+    auditLogsListMock.mockClear();
+    auditLogsListMock.mockResolvedValue({ data: [], meta: {} });
+    teamListMembersMock.mockClear();
+    teamListMembersMock.mockResolvedValue({ data: [], meta: {} });
   });
 
   it("renders the page header", async () => {

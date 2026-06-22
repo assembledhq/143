@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import {
@@ -323,6 +324,11 @@ export default function LLMPage() {
             ))}
           </div>
         </section>
+
+        <SettingsLastActivity
+          scopes={[{ resource_type: "settings" }, { resource_type: "credential" }]}
+          title="App LLM settings activity"
+        />
       </div>
 
       {editingProvider && editingInfo && (
