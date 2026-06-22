@@ -52,7 +52,7 @@ import type {
 } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
 
-type PreviewScope = "running" | "resumable" | "attention" | "recent";
+type PreviewScope = "running" | "resumable" | "recent";
 
 const SECTIONS: {
   scope: PreviewScope;
@@ -73,12 +73,6 @@ const SECTIONS: {
     interval: 30000,
   },
   {
-    scope: "attention",
-    title: "Needs attention",
-    empty: "No previews need attention.",
-    interval: 30000,
-  },
-  {
     scope: "recent",
     title: "Recent",
     empty: "No recent preview activity.",
@@ -96,6 +90,57 @@ function sourceLabel(preview: PreviewCurrentResponse): string {
   if (preview.source_type === "api") return "API";
   if (preview.source_type === "automation") return "Automation";
   return "Manual";
+}
+
+function previewNeedsAttention(preview: PreviewCurrentResponse): boolean {
+  return (
+    preview.status === "failed" ||
+    preview.status === "unavailable" ||
+    preview.status === "blocked" ||
+    preview.status === "capacity_blocked" ||
+    preview.status === "config_invalid" ||
+    preview.status === "outdated" ||
+    preview.freshness === "outdated" ||
+    preview.freshness === "unknown" ||
+    preview.latest_commit_sha === ""
+  );
+}
+
+function previewIsRunning(preview: PreviewCurrentResponse): boolean {
+  return (
+    preview.status === "starting" ||
+    preview.status === "ready" ||
+    preview.status === "partially_ready" ||
+    preview.status === "unhealthy" ||
+    preview.status === "recycling"
+  );
+}
+
+function sortAttentionFirst(
+  previews: PreviewCurrentResponse[],
+): PreviewCurrentResponse[] {
+  return [...previews].sort((a, b) => {
+    const attentionDelta =
+      Number(previewNeedsAttention(b)) - Number(previewNeedsAttention(a));
+    if (attentionDelta !== 0) return attentionDelta;
+    if (a.status === "failed" && b.status !== "failed") return -1;
+    if (a.status !== "failed" && b.status === "failed") return 1;
+    return 0;
+  });
+}
+
+function mergePreviewRows(
+  primary: PreviewCurrentResponse[],
+  additions: PreviewCurrentResponse[],
+): PreviewCurrentResponse[] {
+  const seen = new Set(primary.map((preview) => preview.preview_group_id));
+  const merged = [...primary];
+  for (const preview of additions) {
+    if (seen.has(preview.preview_group_id)) continue;
+    seen.add(preview.preview_group_id);
+    merged.push(preview);
+  }
+  return merged;
 }
 
 function stoppedReasonLabel(
@@ -301,6 +346,16 @@ function SectionRows({
                           Stop
                         </Button>
                       ) : null}
+                      {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onStartLatest(preview)}
+                        >
+                          <RotateCw className="h-4 w-4" />
+                          Start latest
+                        </Button>
+                      ) : null}
                       {canMutate && scope === "resumable" ? (
                         <Button
                           size="sm"
@@ -385,6 +440,16 @@ function SectionRows({
                     >
                       <Square className="h-4 w-4" />
                       Stop
+                    </Button>
+                  ) : null}
+                  {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onStartLatest(preview)}
+                    >
+                      <RotateCw className="h-4 w-4" />
+                      Start latest
                     </Button>
                   ) : null}
                   {canMutate && scope === "resumable" ? (
@@ -490,9 +555,10 @@ export default function PreviewsPage() {
     refetchInterval: pollMs(30000),
     placeholderData: (previous) => previous,
   });
-  const sectionQueries = [runningQuery, resumableQuery, attentionQuery, recentQuery];
+  const allSectionQueries = [runningQuery, resumableQuery, attentionQuery, recentQuery];
+  const visibleSectionQueries = [runningQuery, resumableQuery, recentQuery];
 
-  const firstMeta = sectionQueries.find((item) => item.data?.meta)?.data?.meta;
+  const firstMeta = allSectionQueries.find((item) => item.data?.meta)?.data?.meta;
   // A query that has only ever errored holds no data, and React Query resets
   // no-data queries to pending (clearing the error) on every interval refetch.
   // isError alone would therefore blink off for the duration of each poll —
@@ -500,15 +566,15 @@ export default function PreviewsPage() {
   // Sections that already hold rows keep showing them through refetch
   // failures: stale-but-real previews beat an error card, and the poll loop
   // refreshes them as soon as the backend recovers.
-  const sectionFailed = (query: (typeof sectionQueries)[number]) =>
+  const sectionFailed = (query: (typeof allSectionQueries)[number]) =>
     query.data === undefined && (query.isError || query.errorUpdateCount > 0);
-  const previewSectionsSettled = sectionQueries.every(
+  const previewSectionsSettled = allSectionQueries.every(
     (item) => item.data !== undefined || sectionFailed(item),
   );
   // Only successfully settled, genuinely empty sections count toward the
   // page-level empty state; loading or failed sections must not flip the page
   // to "No previews yet".
-  const allEmpty = sectionQueries.every(
+  const allEmpty = allSectionQueries.every(
     (item) => item.data !== undefined && item.data.data.length === 0,
   );
   const repositories = useMemo(
@@ -516,14 +582,49 @@ export default function PreviewsPage() {
     [repositoriesQuery.data?.data],
   );
 
-  const recentPreviews = useMemo(() => {
-    const data = recentQuery.data?.data ?? [];
-    return [...data].sort((a, b) => {
-      if (a.status === "failed" && b.status !== "failed") return -1;
-      if (a.status !== "failed" && b.status === "failed") return 1;
-      return 0;
-    });
-  }, [recentQuery.data?.data]);
+  const attentionPreviews = useMemo(
+    () => attentionQuery.data?.data ?? [],
+    [attentionQuery.data?.data],
+  );
+  const runningPreviews = useMemo(
+    () =>
+      sortAttentionFirst(
+        mergePreviewRows(
+          runningQuery.data?.data ?? [],
+          attentionPreviews.filter(previewIsRunning),
+        ),
+      ),
+    [attentionPreviews, runningQuery.data?.data],
+  );
+  const resumablePreviews = useMemo(
+    () =>
+      sortAttentionFirst(
+        mergePreviewRows(
+          resumableQuery.data?.data ?? [],
+          attentionPreviews.filter(
+            (preview) => preview.resumable && !previewIsRunning(preview),
+          ),
+        ),
+      ),
+    [attentionPreviews, resumableQuery.data?.data],
+  );
+  const recentPreviews = useMemo(
+    () =>
+      sortAttentionFirst(
+        mergePreviewRows(
+          recentQuery.data?.data ?? [],
+          attentionPreviews.filter(
+            (preview) => !previewIsRunning(preview) && !preview.resumable,
+          ),
+        ),
+      ),
+    [attentionPreviews, recentQuery.data?.data],
+  );
+  const previewsByScope: Record<PreviewScope, PreviewCurrentResponse[]> = {
+    running: runningPreviews,
+    resumable: resumablePreviews,
+    recent: recentPreviews,
+  };
 
   const stopPreview = useMutation({
     mutationFn: (preview: PreviewCurrentResponse) =>
@@ -603,11 +704,9 @@ export default function PreviewsPage() {
         ) : (
           <div className="space-y-7">
             {SECTIONS.map((section, index) => {
-              const sectionQuery = sectionQueries[index];
-              const count =
-                firstMeta?.counts?.[section.scope] ??
-                sectionQuery.data?.data.length ??
-                0;
+              const sectionQuery = visibleSectionQueries[index];
+              const sectionPreviews = previewsByScope[section.scope];
+              const count = sectionPreviews.length;
               return (
                 <section
                   key={section.scope}
@@ -647,9 +746,7 @@ export default function PreviewsPage() {
                   <SectionRows
                     scope={section.scope}
                     previews={
-                      section.scope === "recent"
-                        ? recentPreviews
-                        : (sectionQuery.data?.data ?? [])
+                      sectionPreviews
                     }
                     isLoading={
                       sectionQuery.isLoading && !sectionFailed(sectionQuery)
