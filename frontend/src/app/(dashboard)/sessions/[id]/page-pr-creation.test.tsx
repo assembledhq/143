@@ -444,7 +444,7 @@ describe('SessionDetailPage PR creation', () => {
     expect(toast.success).toHaveBeenCalledWith('Readiness checks queued');
   });
 
-  it('preserves existing issue-less readiness context when saving without edits', async () => {
+  it('does not render the issue-less readiness context editor in the review before PR card', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       status: 'completed',
@@ -453,7 +453,7 @@ describe('SessionDetailPage PR creation', () => {
       snapshot_key: 'snap-abc',
       linked_issues: [],
     };
-    let submittedReason = '';
+    let contextSaveRequested = false;
 
     server.use(
       http.get('/api/v1/sessions/:id', () => {
@@ -474,14 +474,13 @@ describe('SessionDetailPage PR creation', () => {
           },
         });
       }),
-      http.post('/api/v1/sessions/:id/pr-readiness-context', async ({ params, request }) => {
-        const body = await request.json() as { issue_less_reason?: string };
-        submittedReason = body.issue_less_reason ?? '';
+      http.post('/api/v1/sessions/:id/pr-readiness-context', () => {
+        contextSaveRequested = true;
         return HttpResponse.json({
           data: {
             org_id: 'org-1',
-            session_id: params.id,
-            issue_less_reason: submittedReason,
+            session_id: sessionWithDiff.id,
+            issue_less_reason: 'Maintenance follow-up requested in Slack',
           },
         });
       }),
@@ -489,12 +488,12 @@ describe('SessionDetailPage PR creation', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    await screen.findByDisplayValue('Maintenance follow-up requested in Slack');
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Save context' }));
+    expect(await screen.findByText('Review before PR')).toBeInTheDocument();
+    expect(screen.queryByText('Issue-less context')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('Maintenance follow-up requested in Slack')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save context' })).not.toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(submittedReason).toBe('Maintenance follow-up requested in Slack');
-    });
+    expect(contextSaveRequested).toBe(false);
   });
 
   it('renders readiness check actions and expandable evidence', async () => {
