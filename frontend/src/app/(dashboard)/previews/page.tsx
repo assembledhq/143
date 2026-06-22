@@ -205,6 +205,22 @@ function relativeTime(value?: string): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+// Formats a timestamp that may be in the past or future as "in 29m" / "5m ago".
+function expiresIn(value?: string): string {
+  if (!value) return "";
+  const ms = Date.parse(value) - Date.now();
+  if (Number.isNaN(ms)) return "";
+  const future = ms > 0;
+  const minutes = Math.max(1, Math.round(Math.abs(ms) / 60000));
+  let amount: string;
+  if (minutes < 60) amount = `${minutes}m`;
+  else {
+    const hours = Math.round(minutes / 60);
+    amount = hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+  }
+  return future ? `in ${amount}` : `${amount} ago`;
+}
+
 function SectionRows({
   scope,
   previews,
@@ -327,7 +343,7 @@ function SectionRows({
                         : scope === "recent"
                           ? stoppedReasonLabel(preview.stopped_reason)
                           : preview.expires_at
-                            ? `expires ${relativeTime(preview.expires_at)}`
+                            ? `expires ${expiresIn(preview.expires_at)}`
                             : preview.current_phase || ""}
                     </p>
                   </TableCell>
