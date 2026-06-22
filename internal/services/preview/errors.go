@@ -43,6 +43,10 @@ var (
 	// preview command likely crashed at boot or never bound to its declared
 	// port.
 	ErrServiceNotReady = errors.New("preview service readiness probe failed")
+
+	// ErrServiceBuildFailed means a service's build command (preview build
+	// phase) exited non-zero or timed out before any service was started.
+	ErrServiceBuildFailed = errors.New("preview service build failed")
 )
 
 type CapacityScope string

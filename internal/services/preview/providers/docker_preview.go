@@ -136,14 +136,27 @@ type previewState struct {
 
 	deferredCacheSaves []func()
 
-	// Build-artifact cache slot for this launch. The fields are written once
+	// Build-artifact cache slots for this launch. The fields are written once
 	// during the install phase (before service goroutines start) and read by
-	// the post-ready save, so they need no locking. buildCacheSaveOnce
-	// guarantees a single save regardless of which readiness path triggers it.
+	// the save paths, so they need no locking. The *SaveOnce guards guarantee a
+	// single save per set regardless of which path (checkpoint, post-ready, or
+	// failure flush) triggers it.
+	//
+	// The workdir set holds workspace-relative build-tool caches (e.g. turbo),
+	// populated while services boot, saved after readiness. The home set holds
+	// $HOME-rooted compiled-artifact caches (Go's GOCACHE/GOMODCACHE), populated
+	// by the build phase, saved synchronously at the build checkpoint so an
+	// expensive cold compile warms subsequent launches even if this one later
+	// fails its readiness probe.
 	buildCacheKey              string
 	buildCachePaths            []string
 	buildCacheRestoredChecksum string
 	buildCacheSaveOnce         sync.Once
+
+	buildCacheHomeKey              string
+	buildCacheHomePaths            []string
+	buildCacheHomeRestoredChecksum string
+	buildCacheHomeSaveOnce         sync.Once
 }
 
 // serviceState tracks a running application service process.
@@ -183,6 +196,19 @@ func (s *previewState) runDeferredCacheSaves() {
 // that the provider keeps so it can replay the tail to the observer when a
 // service exits non-zero.
 const serviceTailLines = 200
+
+// defaultServiceBuildTimeout bounds a single service's build command. Cold
+// monorepo compiles (e.g. a from-scratch `go build`) can run for several
+// minutes, so the default is generous; the build cache makes warm builds far
+// faster.
+const defaultServiceBuildTimeout = 30 * time.Minute
+
+// defaultServiceReadinessTimeout is how long a service has to pass its
+// readiness probe when the config does not set ready.timeout_seconds. With the
+// build phase compiling artifacts ahead of start, services should bind quickly;
+// the default still leaves generous headroom for first-request warmup. Configs
+// with unusually slow boots should set ready.timeout_seconds explicitly.
+const defaultServiceReadinessTimeout = 300 * time.Second
 
 // serviceExitTailLines is the number of trailing non-blank stdout/stderr
 // lines folded into the user-visible exit error from formatServiceExitError.
@@ -366,7 +392,23 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		// after install — install commands like `npm ci` wipe node_modules and
 		// would delete a tree restored earlier — and before services start so
 		// boot-time builds get cache hits. Failures degrade to a cold build.
+		// The home-rooted set (Go's GOCACHE/GOMODCACHE) is restored alongside so
+		// the build phase's `go build` is incremental.
 		d.restorePreviewBuildCache(ctx, state, cfg.Install, opts, observer)
+		d.restorePreviewBuildCacheHome(ctx, state, cfg.Install, opts, observer)
+
+		// Phase 4.6: Run per-service build commands. This is deliberately before
+		// runtime secret files (so build steps cannot read app secrets) and
+		// before services start (so compilation happens off the readiness-probe
+		// hot path). The home build cache is checkpointed synchronously here so
+		// an expensive cold compile warms subsequent launches even if this one
+		// later fails to become ready.
+		if err := d.runServiceBuilds(ctx, state, cfg, opts, observer); err != nil {
+			d.savePreviewBuildCacheHome(ctx, state, cfg.Install, opts, observer)
+			phaseErr = fmt.Errorf("%w: %v", preview.ErrServiceBuildFailed, err)
+			return phaseErr
+		}
+		d.savePreviewBuildCacheHome(ctx, state, cfg.Install, opts, observer)
 
 		// Phase 5: Write generated runtime secret files after install so install
 		// hooks cannot read preview-runtime app secrets.
@@ -420,6 +462,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		}
 		return nil
 	}(); err != nil {
+		d.flushBuildCachesBeforeCleanup(svcCtx, state, cfg.Install, opts, observer)
 		d.cleanupState(handle)
 		return nil, err
 	}
@@ -444,7 +487,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		if cfg.Progressive && len(cfg.Services) > 1 {
 			// Wait for primary first.
 			if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
-				timeout := 90 * time.Second
+				timeout := defaultServiceReadinessTimeout
 				if primaryCfg.Ready.TimeoutSeconds > 0 {
 					timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
 				}
@@ -478,7 +521,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					if name == cfg.Primary {
 						continue
 					}
-					timeout := 90 * time.Second
+					timeout := defaultServiceReadinessTimeout
 					if svcCfg.Ready.TimeoutSeconds > 0 {
 						timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 					}
@@ -509,7 +552,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 
 		// Standard: wait for all services before reporting ready.
 		for name, svcCfg := range cfg.Services {
-			timeout := 90 * time.Second
+			timeout := defaultServiceReadinessTimeout
 			if svcCfg.Ready.TimeoutSeconds > 0 {
 				timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
 			}
@@ -542,6 +585,11 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		d.savePreviewBuildCache(svcCtx, state, cfg.Install, opts, observer)
 		return nil
 	}(); err != nil {
+		// Readiness failed, but boot-time builds may have populated their
+		// caches (and a cold compile in the build phase certainly did). Persist
+		// them synchronously before the sandbox is torn down so the next launch
+		// is warm instead of repeating the work that just timed out.
+		d.flushBuildCachesBeforeCleanup(svcCtx, state, cfg.Install, opts, observer)
 		d.cleanupState(handle)
 		return nil, err
 	}
@@ -1635,61 +1683,167 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	d.logger.Info().Str("cache_key", cacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview build cache restored")
 }
 
-// savePreviewBuildCache archives the build-artifact paths once services have
-// reported ready — the only point in a launch where boot-time builds (turbo
-// and friends) have populated their caches. The key is latest-wins: each save
-// overwrites the same slot, and the build tool's own content hashing makes a
-// stale blob degrade to partial hits rather than wrong output. SkipIfChecksum
-// avoids re-uploading when the tree is byte-identical to what was restored.
+// restorePreviewBuildCacheHome restores the home-rooted build-artifact blob
+// (Go's GOCACHE/GOMODCACHE) into $HOME after install and before the build
+// phase, so `go build` gets incremental cache hits instead of recompiling the
+// world. It mirrors restorePreviewBuildCache but targets the home root and a
+// distinct cache slot. The key/paths are recorded on state even on a miss so
+// the build checkpoint can save the freshly-populated cache. Failures degrade
+// to a cold build.
+func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
+	pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
+	if d.dependencyCache == nil || !hasPathCache || opts.OrgID == uuid.Nil || opts.RepositoryID == uuid.Nil {
+		return
+	}
+	paths, enabled := preview.ResolvePreviewBuildCacheHomePaths(install)
+	if !enabled {
+		return
+	}
+	configDigest := opts.ConfigDigest
+	if configDigest == "" {
+		if digest, digestErr := preview.ComputePreviewConfigDigest(state.config); digestErr == nil {
+			configDigest = digest
+		}
+	}
+	cacheKey, err := preview.ComputePreviewBuildCacheHomeKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, paths)
+	if err != nil {
+		d.logger.Warn().Err(err).Msg("preview home build cache key unavailable; continuing cold")
+		return
+	}
+	state.buildCacheHomeKey = cacheKey
+	state.buildCacheHomePaths = paths
+
+	lookupStarted := time.Now()
+	notifyPhaseStart(observer, "build_cache_home_lookup")
+	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
+	notifyPhaseEnd(observer, "build_cache_home_lookup", findErr)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_home_lookup", time.Since(lookupStarted))
+	if findErr != nil {
+		d.logger.Warn().Err(findErr).Str("cache_key", cacheKey).Msg("preview home build cache lookup failed; continuing cold")
+		return
+	}
+	if hit == nil {
+		notifyBuildCacheRestore(observer, "miss", cacheKey, 0, nil)
+		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "miss", time.Since(lookupStarted))
+		d.logger.Info().Str("cache_key", cacheKey).Msg("preview home build cache miss")
+		return
+	}
+	restoreStarted := time.Now()
+	notifyPhaseStart(observer, "build_cache_home_restore")
+	restoreErr := pathCache.RestorePathCache(ctx, state.sandbox, hit, models.PreviewCacheRootHomeDir)
+	notifyPhaseEnd(observer, "build_cache_home_restore", restoreErr)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_home_restore", time.Since(restoreStarted))
+	if restoreErr != nil {
+		d.logger.Warn().Err(restoreErr).Str("cache_key", cacheKey).Msg("preview home build cache restore failed; continuing cold")
+		return
+	}
+	var restoredMeta preview.DependencyCacheMetadata
+	if err := json.Unmarshal(hit.Entry.Metadata, &restoredMeta); err == nil {
+		state.buildCacheHomeRestoredChecksum = restoredMeta.ChecksumSHA256
+	}
+	notifyBuildCacheRestore(observer, "restored", cacheKey, hit.Entry.SizeBytes, nil)
+	metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "restored", time.Since(restoreStarted))
+	d.logger.Info().Str("cache_key", cacheKey).Int64("size_bytes", hit.Entry.SizeBytes).Msg("preview home build cache restored")
+}
+
+// saveBuildCacheSet synchronously archives one build-artifact cache set (either
+// the workdir or home root) under a latest-wins key: each save overwrites the
+// same slot, and the build tool's own content hashing makes a stale blob
+// degrade to partial hits rather than wrong output. SkipIfChecksum avoids
+// re-uploading when the tree is byte-identical to what was restored. It is safe
+// to call from a goroutine; idempotency across call sites is the caller's job
+// (via the per-set sync.Once).
+func (d *DockerPreviewProvider) saveBuildCacheSet(ctx context.Context, state *previewState, opts preview.StartPreviewOptions, observer preview.ServiceObserver, install *models.PreviewInstallConfig, root models.PreviewCacheRoot, cacheKey string, paths []string, skipIfChecksum string) {
+	pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
+	if d.dependencyCache == nil || !hasPathCache || install == nil || cacheKey == "" || len(paths) == 0 {
+		notifyBuildCacheSave(observer, "skipped", cacheKey, 0, nil)
+		if opts.OrgID != uuid.Nil {
+			metrics.RecordSessionBuildCacheSave(context.Background(), opts.OrgID.String(), "skipped", 0)
+		}
+		return
+	}
+	metadata := preview.DependencyCacheMetadata{
+		Kind:           models.PreviewCacheKindBuildArtifact,
+		Root:           root,
+		OrgID:          opts.OrgID,
+		RepoID:         opts.RepositoryID,
+		SessionID:      opts.SessionID,
+		PlacementKey:   cacheKey,
+		InstallCommand: append([]string(nil), install.Command...),
+		EffectivePaths: append([]string(nil), paths...),
+	}
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	defer cancel()
+	started := time.Now()
+	result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
+		Kind:           models.PreviewCacheKindBuildArtifact,
+		Root:           root,
+		CacheKey:       cacheKey,
+		Paths:          paths,
+		Metadata:       metadata,
+		SkipIfChecksum: skipIfChecksum,
+	})
+	switch {
+	case err != nil:
+		notifyBuildCacheSave(observer, "save_failed", cacheKey, 0, err)
+		metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "save_failed", time.Since(started))
+		d.logger.Warn().Err(err).Str("cache_key", cacheKey).Msg("preview build cache save failed")
+	case result.Unchanged:
+		notifyBuildCacheSave(observer, "unchanged", cacheKey, result.SizeBytes, nil)
+		metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "unchanged", time.Since(started))
+	case result.SizeBytes == 0:
+		notifyBuildCacheSave(observer, "skipped_no_paths", cacheKey, 0, nil)
+		metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "skipped_no_paths", time.Since(started))
+	default:
+		notifyBuildCacheSave(observer, "saved", cacheKey, result.SizeBytes, nil)
+		metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
+		d.logger.Info().Str("cache_key", cacheKey).Int64("size_bytes", result.SizeBytes).Msg("preview build cache saved")
+	}
+}
+
+// savePreviewBuildCache archives the workdir build-artifact paths (turbo and
+// friends) once services have reported ready — the point in a launch where
+// boot-time builds have populated their workspace-relative caches. The save
+// runs asynchronously so it does not delay reporting the ready preview.
 func (d *DockerPreviewProvider) savePreviewBuildCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
 	state.buildCacheSaveOnce.Do(func() {
-		pathCache, hasPathCache := d.dependencyCache.(preview.PreviewPathCache)
-		if d.dependencyCache == nil || !hasPathCache || install == nil || state.buildCacheKey == "" || len(state.buildCachePaths) == 0 {
-			notifyBuildCacheSave(observer, "skipped", state.buildCacheKey, 0, nil)
-			if opts.OrgID != uuid.Nil {
-				metrics.RecordSessionBuildCacheSave(context.Background(), opts.OrgID.String(), "skipped", 0)
-			}
+		go d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootWorkDir, state.buildCacheKey, state.buildCachePaths, state.buildCacheRestoredChecksum)
+	})
+}
+
+// savePreviewBuildCacheHome archives the home-rooted build-artifact paths (Go's
+// GOCACHE/GOMODCACHE) at the build checkpoint. Unlike the workdir save this is
+// synchronous: it is the only point at which a (potentially multi-minute) cold
+// compile is durably captured, and running it before the build phase returns
+// guarantees the cache survives even if the launch later fails its readiness
+// probe or the sandbox is torn down. SkipIfChecksum keeps a warm, incremental
+// build's save to a near no-op.
+func (d *DockerPreviewProvider) savePreviewBuildCacheHome(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
+	state.buildCacheHomeSaveOnce.Do(func() {
+		// No home build cache configured for this launch (no Go lockfile): stay
+		// silent rather than emitting a misleading "skipped" save event.
+		if state.buildCacheHomeKey == "" {
 			return
 		}
-		metadata := preview.DependencyCacheMetadata{
-			Kind:           models.PreviewCacheKindBuildArtifact,
-			Root:           models.PreviewCacheRootWorkDir,
-			OrgID:          opts.OrgID,
-			RepoID:         opts.RepositoryID,
-			SessionID:      opts.SessionID,
-			PlacementKey:   state.buildCacheKey,
-			InstallCommand: append([]string(nil), install.Command...),
-			EffectivePaths: append([]string(nil), state.buildCachePaths...),
+		d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootHomeDir, state.buildCacheHomeKey, state.buildCacheHomePaths, state.buildCacheHomeRestoredChecksum)
+	})
+}
+
+// flushBuildCachesBeforeCleanup synchronously persists any not-yet-saved build
+// caches on a failure path, before the sandbox is torn down. The home set is
+// usually already saved at the build checkpoint (its sync.Once short-circuits
+// here); the workdir set, which would otherwise only save after readiness, is
+// captured here so a launch that compiled and booted but missed its readiness
+// deadline still warms the next launch instead of repeating cold work.
+func (d *DockerPreviewProvider) flushBuildCachesBeforeCleanup(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
+	state.buildCacheHomeSaveOnce.Do(func() {
+		if state.buildCacheHomeKey == "" {
+			return
 		}
-		go func() {
-			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-			defer cancel()
-			started := time.Now()
-			result, err := pathCache.SavePathCache(saveCtx, state.sandbox, preview.PreviewPathCacheSaveSpec{
-				Kind:           models.PreviewCacheKindBuildArtifact,
-				Root:           models.PreviewCacheRootWorkDir,
-				CacheKey:       state.buildCacheKey,
-				Paths:          state.buildCachePaths,
-				Metadata:       metadata,
-				SkipIfChecksum: state.buildCacheRestoredChecksum,
-			})
-			switch {
-			case err != nil:
-				notifyBuildCacheSave(observer, "save_failed", state.buildCacheKey, 0, err)
-				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "save_failed", time.Since(started))
-				d.logger.Warn().Err(err).Str("cache_key", state.buildCacheKey).Msg("preview build cache save failed")
-			case result.Unchanged:
-				notifyBuildCacheSave(observer, "unchanged", state.buildCacheKey, result.SizeBytes, nil)
-				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "unchanged", time.Since(started))
-			case result.SizeBytes == 0:
-				notifyBuildCacheSave(observer, "skipped_no_paths", state.buildCacheKey, 0, nil)
-				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "skipped_no_paths", time.Since(started))
-			default:
-				notifyBuildCacheSave(observer, "saved", state.buildCacheKey, result.SizeBytes, nil)
-				metrics.RecordSessionBuildCacheSave(saveCtx, opts.OrgID.String(), "saved", time.Since(started))
-				d.logger.Info().Str("cache_key", state.buildCacheKey).Int64("size_bytes", result.SizeBytes).Msg("preview build cache saved")
-			}
-		}()
+		d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootHomeDir, state.buildCacheHomeKey, state.buildCacheHomePaths, state.buildCacheHomeRestoredChecksum)
+	})
+	state.buildCacheSaveOnce.Do(func() {
+		d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootWorkDir, state.buildCacheKey, state.buildCachePaths, state.buildCacheRestoredChecksum)
 	})
 }
 
@@ -2083,6 +2237,104 @@ func truncatedTail(outputTail []string, maxLines, maxRunes int) string {
 		}
 	}
 	return joined
+}
+
+// previewServiceBuildOrder returns service names with the primary last, so
+// support services build before the primary (which may depend on their
+// artifacts), matching the start ordering. Support services are sorted for
+// deterministic, reproducible build order.
+func previewServiceBuildOrder(cfg *models.PreviewConfig) []string {
+	names := make([]string, 0, len(cfg.Services))
+	for name := range cfg.Services {
+		if name == cfg.Primary {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if _, ok := cfg.Services[cfg.Primary]; ok {
+		names = append(names, cfg.Primary)
+	}
+	return names
+}
+
+// runServiceBuilds runs each service's optional Build command to completion,
+// in dependency order, before any service starts. It is the place to compile
+// artifacts (e.g. `go build`) so the start command can exec a prebuilt binary
+// off the readiness-probe hot path. Build commands run with the service's own
+// Env (no injected platform credentials or runtime secrets) so build steps
+// cannot read app secrets. A non-zero exit or timeout fails the launch.
+func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *previewState, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
+	hasBuild := false
+	for _, svcCfg := range cfg.Services {
+		if len(svcCfg.Build) > 0 {
+			hasBuild = true
+			break
+		}
+	}
+	if !hasBuild {
+		return nil
+	}
+
+	notifyPhaseStart(observer, "service_build")
+	phaseStarted := time.Now()
+	for _, name := range previewServiceBuildOrder(cfg) {
+		svcCfg := cfg.Services[name]
+		if len(svcCfg.Build) == 0 {
+			continue
+		}
+
+		var cmdParts []string
+		if svcCfg.Cwd != "" {
+			cmdParts = append(cmdParts, "cd", shellEscape(svcCfg.Cwd), "&&")
+		}
+		envKeys := make([]string, 0, len(svcCfg.Env))
+		for k := range svcCfg.Env {
+			envKeys = append(envKeys, k)
+		}
+		sort.Strings(envKeys)
+		for _, k := range envKeys {
+			cmdParts = append(cmdParts, fmt.Sprintf("%s=%s", k, shellEscape(svcCfg.Env[k])))
+		}
+		escapedCmd := make([]string, len(svcCfg.Build))
+		for i, c := range svcCfg.Build {
+			escapedCmd[i] = shellEscape(c)
+		}
+		cmdParts = append(cmdParts, strings.Join(escapedCmd, " "))
+		cmd := strings.Join(cmdParts, " ")
+
+		outputTail := make([]string, 0, serviceTailLines)
+		appendTail := func(line []byte) {
+			text := string(line)
+			if len(outputTail) >= serviceTailLines {
+				outputTail = outputTail[1:]
+			}
+			outputTail = append(outputTail, text)
+			notifyServiceOutput(observer, name, text)
+			d.logger.Debug().Str("service", name).Str("output", text).Msg("service build output")
+		}
+		stderrSplitter := &previewLineSplitter{onLine: appendTail}
+		buildCtx, cancel := context.WithTimeout(ctx, defaultServiceBuildTimeout)
+		exitCode, err := d.executor.ExecStream(buildCtx, state.sandbox, cmd, appendTail, stderrSplitter)
+		stderrSplitter.flush()
+		cancel()
+		if err != nil || exitCode != 0 {
+			var errMsg string
+			if err != nil {
+				errMsg = fmt.Sprintf("service %q build: %v", name, err)
+			} else {
+				errMsg = fmt.Sprintf("service %q build: %s", name, formatServiceExitError(exitCode, outputTail))
+			}
+			notifyServiceFailed(observer, name, errMsg, append([]string(nil), outputTail...))
+			notifyPhaseEnd(observer, "service_build", fmt.Errorf("%s", errMsg))
+			metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "service_build", time.Since(phaseStarted))
+			return fmt.Errorf("%s", errMsg)
+		}
+		d.logger.Info().Str("service", name).Msg("service build completed")
+	}
+	notifyPhaseEnd(observer, "service_build", nil)
+	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "service_build", time.Since(phaseStarted))
+	return nil
 }
 
 func (d *DockerPreviewProvider) startService(

@@ -3132,3 +3132,25 @@ func TestStartPreview_DependencyCacheSaveExcludesBuildCachePaths(t *testing.T) {
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
 }
+
+func TestPreviewServiceBuildOrder(t *testing.T) {
+	t.Parallel()
+
+	cfg := &models.PreviewConfig{
+		Primary: "webserver",
+		Services: map[string]models.ServiceConfig{
+			"webserver": {Command: []string{"./webserver"}},
+			"worker":    {Command: []string{"./worker"}},
+			"frontend":  {Command: []string{"npm", "start"}},
+		},
+	}
+
+	order := previewServiceBuildOrder(cfg)
+	require.Equal(t, []string{"frontend", "worker", "webserver"}, order,
+		"support services build first in sorted order, primary last")
+
+	// Missing primary entry: only support services, still sorted.
+	cfg.Primary = "absent"
+	require.Equal(t, []string{"frontend", "webserver", "worker"}, previewServiceBuildOrder(cfg),
+		"absent primary should not be appended")
+}
