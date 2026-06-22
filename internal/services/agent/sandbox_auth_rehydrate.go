@@ -30,9 +30,10 @@ const (
 // needed by the rehydrate pass. ListContainerHoldingSessions is scoped to the
 // local worker node, keyset-paginated by session id (pass uuid.Nil as the
 // cursor for the first page) with the caller-provided limit, and returns
-// sessions where container_id is set and a preview hold is in place — i.e.
-// the ones whose containers survive worker restarts and whose in-sandbox
-// tooling will dial a dead socket until we Listen again.
+// sessions where container_id is set and a hold (preview, or a running /
+// recovering turn) keeps the container alive — i.e. the ones whose containers
+// survive worker restarts and whose in-sandbox tooling will dial a dead socket
+// until we Listen again.
 type ContainerHoldingSessionLister interface {
 	ListContainerHoldingSessions(ctx context.Context, workerNodeID string, afterID uuid.UUID, limit int) ([]models.Session, error)
 }
@@ -52,7 +53,8 @@ type SandboxAuthRehydrater interface {
 
 // RehydrateSandboxAuthListeners is a one-shot startup pass that re-opens the
 // per-session GitHub credential socket listener for sessions whose containers
-// are still alive across a worker restart (preview holds keep them running).
+// are still alive across a worker restart (a preview hold, or a running /
+// recovering turn hold, keeps them running).
 //
 // Why this exists: the host-side sandboxauth.Server holds its listeners in
 // process memory, so a worker restart leaves their sockets on disk with no
@@ -66,7 +68,9 @@ type SandboxAuthRehydrater interface {
 //
 // Per session we:
 //  1. Probe IsAlive (cheap docker inspect). Containers that report dead are
-//     skipped — the orphan reconciler clears those rows separately.
+//     skipped — there is no socket worth opening for a gone container. The
+//     orphan reconciler clears (preview-held) or recovery handles (turn-held)
+//     those rows separately.
 //  2. Load the repo + org settings the resolver needs.
 //  3. Call sandboxAuth.Listen, which removes any stale socket file at the
 //     deterministic path and binds a fresh one. The bind-mount inside the
