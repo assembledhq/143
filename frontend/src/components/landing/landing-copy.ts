@@ -57,27 +57,22 @@ export const codingAgents = [
   {
     name: "Codex",
     logo: "/agents/codex.svg",
-    description: "OpenAI Codex on the GPT-5 models.",
   },
   {
     name: "Claude Code",
     logo: "/agents/claude_code.svg",
-    description: "Anthropic Claude — Fable, Opus, Sonnet, and Haiku.",
   },
   {
     name: "Amp",
     logo: "/agents/amp.svg",
-    description: "Sourcegraph Amp, run by mode.",
   },
   {
     name: "Pi",
     logo: "/agents/pi.svg",
-    description: "Pi coding agent with its own provider auth.",
   },
   {
     name: "OpenCode",
     logo: "/agents/opencode.svg",
-    description: "Multi-provider agent across OpenAI, Anthropic, Gemini, and more.",
   },
 ];
 

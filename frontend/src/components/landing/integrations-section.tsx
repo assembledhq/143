@@ -12,7 +12,7 @@ interface IntegrationsSectionProps {
 interface ToolItem {
   name: string;
   logo: string;
-  description: string;
+  description?: string;
 }
 
 export default function IntegrationsSection({
@@ -23,13 +23,13 @@ export default function IntegrationsSection({
   const body = isDark ? "text-white/50" : "text-slate-600";
 
   const renderGrid = (items: ToolItem[]) => (
-    <div className="grid gap-px overflow-hidden rounded-lg border border-border/60 bg-border/60 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="flex flex-wrap justify-center gap-3">
       {items.map((item) => (
         <Card
           key={item.name}
-          className={`min-h-44 rounded-none border-0 ${
-            isDark ? "bg-[#0d0d15]" : "bg-white/80"
-          }`}
+          className={`w-full flex-none sm:w-[calc(50%_-_0.375rem)] lg:w-[calc(33.333%_-_0.5rem)] ${
+            item.description ? "min-h-44" : ""
+          } ${isDark ? "bg-[#0d0d15]" : "bg-white/80"}`}
         >
           <CardContent className="p-5">
             <div className="flex items-center gap-3">
@@ -55,7 +55,9 @@ export default function IntegrationsSection({
                 {item.name}
               </h3>
             </div>
-            <p className={`mt-5 ${type.body} ${body}`}>{item.description}</p>
+            {item.description && (
+              <p className={`mt-5 ${type.body} ${body}`}>{item.description}</p>
+            )}
           </CardContent>
         </Card>
       ))}
