@@ -113,6 +113,47 @@ func TestGitHubStatusHandler_GetStatus_Connected(t *testing.T) {
 	require.True(t, resp.HasRepoScope, "app-user credential should be treated as PR-capable")
 	require.Equal(t, "testuser", resp.GitHubLogin, "response should include the user's GitHub login")
 	require.Equal(t, "user_preferred", resp.PRAuthorshipMode, "response should echo org PR authorship mode")
+	require.Equal(t, "recommended", resp.AccountRequirement, "user_preferred should make the account connection recommended")
+}
+
+func TestGitHubStatusHandler_GetStatus_AccountRequirementByMode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"user_required", "required"},
+		{"user_preferred", "recommended"},
+		{"app_only", "optional"},
+		{"", "recommended"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Parallel()
+			orgID := uuid.New()
+			userID := uuid.New()
+			orgReader := &stubGHOrgReader{
+				org: models.Organization{
+					Settings: json.RawMessage(`{"pr_authorship":"` + tc.mode + `"}`),
+				},
+			}
+			handler := NewGitHubStatusHandler(&stubGHCredentialStore{err: context.DeadlineExceeded}, orgReader, "", "", "", "")
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+			ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+			handler.GetStatus(rr, req)
+
+			require.Equal(t, http.StatusOK, rr.Code)
+			var resp GitHubStatusResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			require.Equal(t, tc.want, resp.AccountRequirement, "account requirement should follow authorship mode")
+		})
+	}
 }
 
 func TestGitHubStatusHandler_GetStatus_NotConnected(t *testing.T) {
