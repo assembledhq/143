@@ -213,3 +213,40 @@ func TestComputePreviewBuildCacheKey_LatestWinsAcrossLockfileContents(t *testing
 	require.NoError(t, err, "dependency placement key should compute")
 	require.NotEqual(t, key1, placementKey, "build cache keys must not collide with dependency placement keys")
 }
+
+func TestComputePreviewBuildCacheHomeKey_DistinctSlot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	install := &models.PreviewInstallConfig{
+		Command:   []string{"npm", "ci"},
+		Lockfiles: []string{"package-lock.json", "go.mod"},
+	}
+	homePaths := []string{".cache/go-build", "go/pkg/mod"}
+	workdirPaths := []string{"node_modules/.cache/turbo", ".turbo/cache"}
+
+	homeKey, err := ComputePreviewBuildCacheHomeKey(orgID, repoID, "app", "digest-a", install, homePaths)
+	require.NoError(t, err, "home build cache key should compute")
+	require.NotEmpty(t, homeKey, "home build cache key should not be empty")
+
+	// Stable across recomputation: latest-wins like the workdir variant.
+	homeKey2, err := ComputePreviewBuildCacheHomeKey(orgID, repoID, "app", "digest-a", install, homePaths)
+	require.NoError(t, err, "home build cache key should recompute")
+	require.Equal(t, homeKey, homeKey2, "identical inputs should map to the same home slot")
+
+	// Must not collide with the workdir build cache slot even when all other
+	// inputs match: the distinct runtime version keeps the two blobs separate.
+	workdirKey, err := ComputePreviewBuildCacheKey(orgID, repoID, "app", "digest-a", install, workdirPaths)
+	require.NoError(t, err, "workdir build cache key should compute")
+	require.NotEqual(t, homeKey, workdirKey, "home and workdir build caches must occupy distinct slots")
+
+	// Even with identical effective paths, the runtime version differs.
+	workdirSamePaths, err := ComputePreviewBuildCacheKey(orgID, repoID, "app", "digest-a", install, homePaths)
+	require.NoError(t, err, "workdir build cache key should compute with home paths")
+	require.NotEqual(t, homeKey, workdirSamePaths, "distinct runtime version must separate the slots regardless of paths")
+
+	differentDigest, err := ComputePreviewBuildCacheHomeKey(orgID, repoID, "app", "digest-b", install, homePaths)
+	require.NoError(t, err, "home build cache key should compute for different config digest")
+	require.NotEqual(t, homeKey, differentDigest, "config changes should map to a different home slot")
+}
