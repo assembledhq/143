@@ -357,7 +357,7 @@ func (p *PagerDutyIncidentProvider) do(ctx context.Context, method, endpoint str
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("pagerduty API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 			if attempt < pagerDutyMaxAttempts-1 {
 				if sleepErr := sleepWithContext(ctx, pagerDutyBackoff(attempt+1, retryAfter)); sleepErr != nil {
@@ -369,7 +369,7 @@ func (p *PagerDutyIncidentProvider) do(ctx context.Context, method, endpoint str
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if len(raw) > 0 {
 				return fmt.Errorf("pagerduty API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 			}
