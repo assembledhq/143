@@ -118,6 +118,10 @@ The base font size is `text-[13px]` (set globally on `body`). The project uses a
 | Labels | `text-[13px]` (via `<Label>` component) |
 | Code/mono text | `font-mono text-xs` |
 
+#### Copy casing
+
+Helper text, status details, empty-state copy, and inline explanatory messages should read like polished product copy. Prefer sentence-case strings that start with a capital letter whenever the text is user-facing and prose-like. Do not surface raw API enum values (`running`, `expired`, `pending_auth`) directly; format them first with the appropriate label helper, such as `formatPreviewStatus`, or a local formatter that handles casing consistently.
+
 #### Quantitative columns
 
 Numbers that users compare or scan (counts, costs, durations, dates in tables/metric rows) always get `tabular-nums`, and quantitative table columns are **right-aligned — header cell included**. Don't right-align the data cells while leaving the header left-aligned.
