@@ -230,7 +230,7 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 		if svcName == "" {
 			svcName = "app"
 		}
-		ready := models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 300}
+		ready := models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 180}
 		if raw.Ready != nil {
 			ready = *raw.Ready
 		}
@@ -1005,6 +1005,14 @@ func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]stri
 // Inference is gated on a Go lockfile (go.mod/go.sum) being declared in
 // preview.install.lockfiles, the same signal the package-manager cache uses to
 // enable Go caching. Build caching must also not be explicitly disabled.
+//
+// To avoid double-caching the module cache, go/pkg/mod is dropped from the home
+// set when the install *command* already runs go (e.g. `go mod download`): in
+// that case the package-manager cache captures the modules post-install, so the
+// home set only needs the compiled-object cache (.cache/go-build) that the build
+// phase uniquely warms. When install does not run go (the common case: a JS
+// install that happens to sit beside a go.mod), the build phase is the only
+// thing that downloads modules, so the home set owns go/pkg/mod too.
 func ResolvePreviewBuildCacheHomePaths(install *models.PreviewInstallConfig) ([]string, bool) {
 	if install == nil || len(install.Lockfiles) == 0 {
 		return nil, false
@@ -1025,11 +1033,23 @@ func ResolvePreviewBuildCacheHomePaths(install *models.PreviewInstallConfig) ([]
 	if !hasGoLockfile {
 		return nil, false
 	}
-	// Both are home-rooted: GOCACHE defaults to ~/.cache/go-build (compiled
-	// objects — the dominant cold-compile cost) and GOMODCACHE to ~/go/pkg/mod
-	// (downloaded modules). Capturing both after the build phase means a launch
-	// that compiled cold still warms every subsequent launch.
-	return []string{".cache/go-build", "go/pkg/mod"}, true
+	// .cache/go-build (GOCACHE) is the compiled-object cache — the dominant
+	// cold-compile cost — and is only populated by an actual build, so the home
+	// build cache always owns it.
+	paths := []string{".cache/go-build"}
+	installRunsGo := false
+	for _, part := range install.Command {
+		if manager, ok := inferPreviewPackageManagerFromCommandPart(part); ok && manager == "go" {
+			installRunsGo = true
+			break
+		}
+	}
+	if !installRunsGo {
+		// Nothing else populates the module cache, so capture it here too.
+		paths = append(paths, "go/pkg/mod")
+	}
+	sort.Strings(paths)
+	return paths, true
 }
 
 // CacheRestorablePreviewInstallVerifyPaths returns the verify paths that can

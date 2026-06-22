@@ -2191,6 +2191,15 @@ func TestResolvePreviewBuildCacheHomePaths(t *testing.T) {
 			enabled: true,
 		},
 		{
+			name: "install command running go leaves modules to the package-manager cache",
+			install: &models.PreviewInstallConfig{
+				Command:   []string{"go", "mod", "download"},
+				Lockfiles: []string{"go.mod"},
+			},
+			want:    []string{".cache/go-build"},
+			enabled: true,
+		},
+		{
 			name: "cache disabled flag disables home build caching",
 			install: &models.PreviewInstallConfig{
 				Lockfiles: []string{"go.mod"},

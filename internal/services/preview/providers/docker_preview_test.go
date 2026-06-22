@@ -3154,3 +3154,151 @@ func TestPreviewServiceBuildOrder(t *testing.T) {
 	require.Equal(t, []string{"frontend", "webserver", "worker"}, previewServiceBuildOrder(cfg),
 		"absent primary should not be appended")
 }
+
+// goBuildPreviewConfig is a Go service with a build step and a go.mod lockfile,
+// so the build phase runs and the home build cache (GOCACHE/GOMODCACHE) is
+// active. The install command is JS-only, so the home set owns go/pkg/mod and
+// install is a no-op cache hit in these tests.
+func goBuildPreviewConfig() *models.PreviewConfig {
+	return &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Install: &models.PreviewInstallConfig{
+			Command:     []string{"npm", "ci"},
+			Lockfiles:   []string{"package-lock.json", "go.mod"},
+			VerifyPaths: []string{"node_modules/.bin/next"},
+		},
+		Services: map[string]models.ServiceConfig{
+			"web": {
+				Build:   []string{"go", "build", "-o", "bin/web", "./cmd/web"},
+				Command: []string{"./bin/web"},
+				Port:    3000,
+				Ready:   models.ReadinessProbe{HTTPPath: "/"},
+			},
+		},
+	}
+}
+
+// TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache covers the happy
+// path: the build command compiles before the service starts, GOCACHE/GOMODCACHE
+// are pinned to the archived default locations, and the home build cache is
+// saved (asynchronously) after a successful launch.
+func TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var order []string
+	var buildCmd string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			// The build command is shell-escaped per-arg, so match on the build
+			// target path rather than a "go build" substring.
+			if strings.Contains(cmd, "cmd/web") {
+				mu.Lock()
+				order = append(order, "build")
+				buildCmd = cmd
+				mu.Unlock()
+				return 0, nil
+			}
+			// Service run: block so the preview stays "running" until released.
+			mu.Lock()
+			order = append(order, "run")
+			mu.Unlock()
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return []byte("ok"), nil
+		},
+	}
+	// findHit makes install a no-op cache hit so ExecStream only sees the build
+	// and the service run; buildFindHit nil so the build cache misses and saves.
+	cache := &fakeDependencyCache{findHit: &preview.DependencyCacheHit{}}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, goBuildPreviewConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.NoError(t, err, "StartPreview should succeed")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	mu.Lock()
+	require.NotEmpty(t, order, "an exec should have run")
+	require.Equal(t, "build", order[0], "the build phase must run before any service starts")
+	require.Contains(t, buildCmd, "cmd/web", "the build command should be the service Build")
+	require.Contains(t, buildCmd, `GOCACHE="$HOME/.cache/go-build"`, "build env should pin GOCACHE to the archived default")
+	require.Contains(t, buildCmd, `GOMODCACHE="$HOME/go/pkg/mod"`, "build env should pin GOMODCACHE to the archived default")
+	mu.Unlock()
+
+	// The home build cache (Root=HomeDir) is saved asynchronously after readiness.
+	require.Eventually(t, func() bool {
+		_, _, _, _, specs := cache.pathCounts()
+		for _, spec := range specs {
+			if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 10*time.Millisecond, "home build cache should be saved after a successful launch")
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+// TestStartPreview_BuildFailureFlushesHomeCache covers the save-on-checkpoint
+// guarantee: when the build command fails, the launch fails with
+// ErrServiceBuildFailed but the home build cache is still flushed synchronously,
+// so even a failed compile warms the next launch.
+func TestStartPreview_BuildFailureFlushesHomeCache(t *testing.T) {
+	t.Parallel()
+
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(_ context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "cmd/web") {
+				return 1, nil // build fails
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return []byte("ok"), nil
+		},
+	}
+	cache := &fakeDependencyCache{findHit: &preview.DependencyCacheHit{}}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+	obs := &recordingObserver{}
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, goBuildPreviewConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, obs)
+	require.Error(t, err, "StartPreview should fail when the build fails")
+	require.ErrorIs(t, err, preview.ErrServiceBuildFailed, "failure should be classified as a build failure")
+	require.Nil(t, handle, "no handle on a failed launch")
+
+	// The flush is synchronous on the failure path, so the home save is already
+	// recorded by the time StartPreview returns.
+	_, _, _, _, specs := cache.pathCounts()
+	foundHomeSave := false
+	for _, spec := range specs {
+		if spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootHomeDir {
+			foundHomeSave = true
+		}
+	}
+	require.True(t, foundHomeSave, "a failed build should still flush the home build cache before cleanup")
+}
