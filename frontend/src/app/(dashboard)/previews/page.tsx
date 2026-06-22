@@ -38,6 +38,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api } from "@/lib/api";
@@ -53,6 +59,9 @@ import type {
 import { safeExternalUrl } from "@/lib/utils";
 
 type PreviewScope = "running" | "resumable" | "recent";
+
+const RESTART_LATEST_LABEL = "Restart";
+const RESTART_LATEST_TOOLTIP = "Restart preview from the latest source state";
 
 const SECTIONS: {
   scope: PreviewScope;
@@ -347,14 +356,7 @@ function SectionRows({
                         </Button>
                       ) : null}
                       {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onStartLatest(preview)}
-                        >
-                          <RotateCw className="h-4 w-4" />
-                          Start latest
-                        </Button>
+                        <RestartLatestButton onClick={() => onStartLatest(preview)} />
                       ) : null}
                       {canMutate && scope === "resumable" ? (
                         <Button
@@ -367,14 +369,7 @@ function SectionRows({
                         </Button>
                       ) : null}
                       {canMutate && scope !== "running" ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onStartLatest(preview)}
-                        >
-                          <RotateCw className="h-4 w-4" />
-                          Start latest
-                        </Button>
+                        <RestartLatestButton onClick={() => onStartLatest(preview)} />
                       ) : null}
                     </div>
                   </TableCell>
@@ -443,14 +438,7 @@ function SectionRows({
                     </Button>
                   ) : null}
                   {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onStartLatest(preview)}
-                    >
-                      <RotateCw className="h-4 w-4" />
-                      Start latest
-                    </Button>
+                    <RestartLatestButton onClick={() => onStartLatest(preview)} />
                   ) : null}
                   {canMutate && scope === "resumable" ? (
                     <Button
@@ -463,14 +451,7 @@ function SectionRows({
                     </Button>
                   ) : null}
                   {canMutate && scope !== "running" ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onStartLatest(preview)}
-                    >
-                      <RotateCw className="h-4 w-4" />
-                      Start latest
-                    </Button>
+                    <RestartLatestButton onClick={() => onStartLatest(preview)} />
                   ) : null}
                 </div>
               </CardContent>
@@ -479,6 +460,31 @@ function SectionRows({
         })}
       </div>
     </>
+  );
+}
+
+function RestartLatestButton({
+  onClick,
+}: {
+  onClick: () => void;
+}) {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label={RESTART_LATEST_TOOLTIP}
+            onClick={onClick}
+          >
+            <RotateCw className="h-4 w-4" />
+            {RESTART_LATEST_LABEL}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{RESTART_LATEST_TOOLTIP}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 

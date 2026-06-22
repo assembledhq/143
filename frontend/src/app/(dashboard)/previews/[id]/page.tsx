@@ -557,7 +557,7 @@ function PreviewActions({
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onStartLatest} disabled={restartPending || isStarting}>
           <GitBranch className="h-4 w-4" />
-          Start latest
+          Restart
         </DropdownMenuItem>
         {canRestart ? (
           <DropdownMenuItem onSelect={onRestart} disabled={restartPending}>
