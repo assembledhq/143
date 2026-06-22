@@ -228,12 +228,17 @@ func (h *RepositoryHandler) ListBranches(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ghBranches, err := h.prService.ListBranches(r.Context(), token, parts[0], parts[1])
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	ghBranches, err := h.prService.SearchBranches(r.Context(), token, parts[0], parts[1], query)
 	if err != nil {
 		writeError(w, r, http.StatusBadGateway, "GITHUB_API_FAILED", "failed to list branches from GitHub")
 		return
 	}
 
+	// Protected is always false here: the GraphQL refs search doesn't return
+	// branch-protection state cheaply (it needs admin:read, which the App lacks),
+	// so the field is retained for response-shape stability but no longer
+	// populated. The branch picker only used it as a search keyword.
 	branches := make([]branchResponse, len(ghBranches))
 	for i, b := range ghBranches {
 		branches[i] = branchResponse{Name: b.Name, Protected: b.Protected}

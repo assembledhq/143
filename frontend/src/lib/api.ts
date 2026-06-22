@@ -243,7 +243,10 @@ export const api = {
     reconnect: (id: string) =>
       post<import('./types').SingleResponse<import('./types').Repository>>(`/api/v1/repositories/${id}/reconnect`),
     summary: () => get<import('./types').ListResponse<import('./types').RepoSummary>>('/api/v1/repositories/summary'),
-    branches: (id: string) => get<import('./types').ListResponse<{ name: string; protected: boolean }>>(`/api/v1/repositories/${id}/branches`),
+    branches: (id: string, query?: string) =>
+      get<import('./types').ListResponse<{ name: string; protected: boolean }>>(
+        `/api/v1/repositories/${id}/branches${query ? `?query=${encodeURIComponent(query)}` : ''}`,
+      ),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
     previewSecretBundles: {
       list: (id: string) =>

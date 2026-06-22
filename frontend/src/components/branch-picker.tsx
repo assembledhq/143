@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronsUpDown, GitBranch } from "lucide-react";
 
@@ -50,19 +50,48 @@ export function BranchPicker({
   disabled = false,
 }: BranchPickerProps) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+
+  // Debounce the search box so each keystroke doesn't fire its own GitHub
+  // request. The query itself runs server-side (GitHub GraphQL refs search),
+  // which is what lets repos with thousands of branches find an arbitrary
+  // branch — client-side filtering can only narrow what was already fetched.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(search), 250);
+    return () => clearTimeout(handle);
+  }, [search]);
 
   const { data, isLoading, isError, refetch } = useQuery<ListResponse<BranchInfo>>({
-    queryKey: queryKeys.repositories.branches(repositoryId),
-    queryFn: () => api.repositories.branches(repositoryId),
+    queryKey: queryKeys.repositories.branches(repositoryId, debouncedSearch),
+    queryFn: () => api.repositories.branches(repositoryId, debouncedSearch),
     enabled: !!repositoryId && open,
     staleTime: 0,
+    // Keep the previous results visible while the next *search* request is in
+    // flight so the list doesn't flicker to a loading state on every keystroke.
+    // Scope this to the same repository: keepPreviousData would otherwise show
+    // the prior repo's branches when repositoryId changes (the query key's repo
+    // segment is at index 1), so only reuse the placeholder when it matches.
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[1] === repositoryId ? previousData : undefined,
   });
 
   const branches = useMemo(() => data?.data ?? [], [data]);
   const selectedBranch = value || defaultBranch || "";
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Reset the search when the picker closes so reopening starts from the
+        // default (recently-committed) branch list rather than a stale query.
+        if (!next) {
+          setSearch("");
+          setDebouncedSearch("");
+        }
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           type="button"
@@ -81,8 +110,12 @@ export function BranchPicker({
         </Button>
       </PopoverTrigger>
       <PopoverContent className={cn("w-[var(--radix-popover-trigger-width)] p-0", contentClassName)}>
-        <Command>
-          <CommandInput placeholder="Search branches..." />
+        {/* shouldFilter={false}: branches are filtered server-side, so cmdk
+            must render exactly what the query returned without re-filtering it
+            against the input text (which would re-hide matches whose names
+            don't fuzzy-match the raw query string). */}
+        <Command shouldFilter={false}>
+          <CommandInput placeholder="Search branches..." value={search} onValueChange={setSearch} />
           <CommandList>
             {isLoading && (
               <div className="px-3 py-4 text-sm text-muted-foreground">Loading branches...</div>
