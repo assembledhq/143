@@ -12,11 +12,15 @@ const {
   settingsUpdateMock,
   settingsNetworkStatusMock,
   settingsRuntimeStatusMock,
+  auditLogsListMock,
+  teamListMembersMock,
 } = vi.hoisted(() => ({
   settingsGetMock: vi.fn(),
   settingsUpdateMock: vi.fn(),
   settingsNetworkStatusMock: vi.fn(),
   settingsRuntimeStatusMock: vi.fn(),
+  auditLogsListMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
+  teamListMembersMock: vi.fn().mockResolvedValue({ data: [], meta: {} }),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -26,6 +30,12 @@ vi.mock("@/lib/api", () => ({
       update: settingsUpdateMock,
       getNetworkStatus: settingsNetworkStatusMock,
       getRuntimeStatus: settingsRuntimeStatusMock,
+    },
+    auditLogs: {
+      list: auditLogsListMock,
+    },
+    team: {
+      listMembers: teamListMembersMock,
     },
   },
 }));
@@ -45,6 +55,10 @@ describe("RuntimeSettingsPage", () => {
     settingsUpdateMock.mockReset();
     settingsNetworkStatusMock.mockReset();
     settingsRuntimeStatusMock.mockReset();
+    auditLogsListMock.mockReset();
+    auditLogsListMock.mockResolvedValue({ data: [], meta: {} });
+    teamListMembersMock.mockReset();
+    teamListMembersMock.mockResolvedValue({ data: [], meta: {} });
     settingsGetMock.mockResolvedValue({
       data: {
         id: "org-1",

@@ -11,6 +11,7 @@ import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -2321,6 +2322,10 @@ export default function IntegrationsPage() {
         disconnectErrorProvider={disconnectMutation.isError ? disconnectMutation.variables ?? null : null}
         disconnectError={disconnectMutation.isError ? "Failed to disconnect." : null}
         readOnly={!isAdmin}
+      />
+      <SettingsLastActivity
+        scopes={[{ resource_type: "integration" }, { resource_type: "credential" }]}
+        title="Integration settings activity"
       />
       </div>
 

@@ -21,6 +21,7 @@ import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
@@ -426,6 +427,10 @@ export default function AgentPage() {
             </Card>
           </section>
 
+          <SettingsLastActivity
+            scopes={[{ resource_type: "credential" }, { resource_type: "settings" }]}
+            title="Coding agent settings activity"
+          />
         </div>
       </PageContainer>
     );
@@ -498,6 +503,11 @@ export default function AgentPage() {
             </CardContent>
           </Card>
         </section>
+
+        <SettingsLastActivity
+          scopes={[{ resource_type: "credential" }, { resource_type: "settings" }]}
+          title="Coding agent settings activity"
+        />
 
         <Sheet open={Boolean(selected)} onOpenChange={(open) => { if (!open) setSelectedId(null); }}>
           <SheetContent className="w-full sm:max-w-lg">

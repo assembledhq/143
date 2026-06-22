@@ -122,6 +122,48 @@ describe('AuditLogTrigger', () => {
     expect(container.querySelector('svg')).not.toBeNull();
   });
 
+  it('footer variant: chooses the newest entry across multiple resource scopes', async () => {
+    auditLogListMock.mockImplementation((params: { resource_type?: string }) => {
+      if (params.resource_type === 'settings') {
+        return Promise.resolve({
+          data: [{
+            id: 'audit-settings',
+            actor_type: 'user',
+            user_id: 'user-1',
+            action: 'settings.updated',
+            created_at: new Date(Date.now() - 10 * 60000).toISOString(),
+          }],
+          meta: {},
+        });
+      }
+      return Promise.resolve({
+        data: [{
+          id: 'audit-credential',
+          actor_type: 'system',
+          actor_id: 'system',
+          action: 'credential.updated',
+          created_at: new Date(Date.now() - 2 * 60000).toISOString(),
+        }],
+        meta: {},
+      });
+    });
+
+    renderWithProviders(
+      <AuditLogTrigger
+        filters={[{ resource_type: 'settings' }, { resource_type: 'credential' }]}
+        members={mockMembers}
+        variant="footer"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Last activity:/)).toBeInTheDocument();
+      expect(screen.getByText(/Updated.*ago by System/)).toBeInTheDocument();
+    });
+    expect(auditLogListMock).toHaveBeenCalledWith({ resource_type: 'settings', limit: 1 });
+    expect(auditLogListMock).toHaveBeenCalledWith({ resource_type: 'credential', limit: 1 });
+  });
+
   it('default variant: renders the Clock icon and no separator', async () => {
     auditLogListMock.mockResolvedValue({
       data: [{
