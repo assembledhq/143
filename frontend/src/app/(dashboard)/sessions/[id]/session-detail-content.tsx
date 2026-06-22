@@ -6332,7 +6332,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="flex flex-col gap-3">
                   <div className="flex min-w-0 flex-1 items-center gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                       {reviewLoopRunning || readinessRunning ? (
@@ -6354,42 +6354,44 @@ export function SessionDetailContent({ id }: { id: string }) {
                       </p>
                     </div>
                   </div>
-                  <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="w-full gap-1.5 sm:w-auto"
-                      disabled={readinessCheckDisabled}
-                      onClick={() => runReadinessMutation.mutate()}
-                    >
-                      {readinessRunning ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      )}
-                      {latestReadiness ? "Re-check" : "Check readiness"}
-                    </Button>
-                    {canUseNativeReviewLoop ? (
-                      <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
-                        <Button
-                          type="button"
-                          size="sm"
-                          className="w-full gap-1.5 sm:w-auto"
-                          disabled={reviewActionDisabled}
-                          title={reviewActionDisabledReason}
-                          onClick={() => setReviewConfigOpen(true)}
-                        >
-                          {startReviewLoopMutation.isPending || reviewLoopRunning ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Settings2 className="h-3.5 w-3.5" />
-                          )}
-                          Review &amp; fix
-                        </Button>
-                      </DisabledTooltip>
-                    ) : null}
-                  </div>
+                  {!reviewLoopRunning ? (
+                    <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="w-full gap-1.5 sm:w-auto"
+                        disabled={readinessCheckDisabled}
+                        onClick={() => runReadinessMutation.mutate()}
+                      >
+                        {readinessRunning ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                        {latestReadiness ? "Re-check" : "Check readiness"}
+                      </Button>
+                      {canUseNativeReviewLoop ? (
+                        <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="w-full gap-1.5 sm:w-auto"
+                            disabled={reviewActionDisabled}
+                            title={reviewActionDisabledReason}
+                            onClick={() => setReviewConfigOpen(true)}
+                          >
+                            {startReviewLoopMutation.isPending ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Settings2 className="h-3.5 w-3.5" />
+                            )}
+                            Review &amp; fix
+                          </Button>
+                        </DisabledTooltip>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 {readinessRunning ? (
                   <div className="space-y-1 text-xs text-muted-foreground">
