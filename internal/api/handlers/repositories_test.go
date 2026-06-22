@@ -33,10 +33,12 @@ func TestRepositoryHandler_List(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		setupMock    func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
-		expectedCode int
-		expectedLen  int
+		name          string
+		setupMock     func(mock pgxmock.PgxPoolIface, orgID uuid.UUID)
+		expectedCode  int
+		expectedLen   int
+		useOrgStore   bool
+		expectDefault bool
 	}{
 		{
 			name: "returns repositories for org successfully",
@@ -56,6 +58,88 @@ func TestRepositoryHandler_List(t *testing.T) {
 			},
 			expectedCode: http.StatusOK,
 			expectedLen:  1,
+		},
+		{
+			name: "returns configured shared default repository in meta",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				repoID := uuid.New()
+				integrationID := uuid.New()
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns()).AddRow(
+							repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+							false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+							nil, nil, json.RawMessage(`{}`), now, now,
+						),
+					)
+				mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "test-org", json.RawMessage(`{"default_work_repository_id":"`+repoID.String()+`"}`), now, now),
+					)
+			},
+			expectedCode:  http.StatusOK,
+			expectedLen:   1,
+			useOrgStore:   true,
+			expectDefault: true,
+		},
+		{
+			name: "omits default_repository_id when org has no default configured",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				repoID := uuid.New()
+				integrationID := uuid.New()
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns()).AddRow(
+							repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+							false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+							nil, nil, json.RawMessage(`{}`), now, now,
+						),
+					)
+				mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "test-org", json.RawMessage(`{}`), now, now),
+					)
+			},
+			expectedCode:  http.StatusOK,
+			expectedLen:   1,
+			useOrgStore:   true,
+			expectDefault: false,
+		},
+		{
+			name: "omits default_repository_id when configured default is not in active repos list",
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
+				now := time.Now()
+				repoID := uuid.New()
+				deletedRepoID := uuid.New()
+				integrationID := uuid.New()
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(repoColumns()).AddRow(
+							repoID, orgID, integrationID, int64(1001), "test-org/repo1", "main",
+							false, nil, nil, "https://github.com/test-org/repo1.git", int64(12345), "active",
+							nil, nil, json.RawMessage(`{}`), now, now,
+						),
+					)
+				mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+					WithArgs(pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "test-org", json.RawMessage(`{"default_work_repository_id":"`+deletedRepoID.String()+`"}`), now, now),
+					)
+			},
+			expectedCode:  http.StatusOK,
+			expectedLen:   1,
+			useOrgStore:   true,
+			expectDefault: false,
 		},
 		{
 			name: "returns empty list when no repositories exist",
@@ -80,6 +164,9 @@ func TestRepositoryHandler_List(t *testing.T) {
 			orgID := uuid.New()
 			store := db.NewRepositoryStore(mock)
 			handler := NewRepositoryHandler(store)
+			if tt.useOrgStore {
+				handler = NewRepositoryHandler(store, db.NewOrganizationStore(mock))
+			}
 
 			tt.setupMock(mock, orgID)
 
@@ -95,6 +182,12 @@ func TestRepositoryHandler_List(t *testing.T) {
 			err = json.Unmarshal(w.Body.Bytes(), &resp)
 			require.NoError(t, err, "response body should be valid JSON")
 			require.Equal(t, tt.expectedLen, len(resp.Data), "should return expected number of repositories")
+			if tt.expectDefault {
+				require.NotEmpty(t, resp.Meta.DefaultRepositoryID, "repository list meta should include the shared default repository id")
+				require.Equal(t, resp.Data[0].ID.String(), resp.Meta.DefaultRepositoryID, "repository list meta should use the configured shared default repository")
+			} else {
+				require.Empty(t, resp.Meta.DefaultRepositoryID, "repository list meta should not include a default repository id when none is configured")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

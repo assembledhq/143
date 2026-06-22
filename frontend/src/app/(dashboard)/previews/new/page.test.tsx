@@ -119,6 +119,47 @@ describe("NewPreviewPage", () => {
     });
   });
 
+  it("preselects the shared default repository when no repo param exists", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: repositories,
+          meta: { default_repository_id: "repo-2" },
+        }),
+      ),
+      http.get("*/api/v1/repositories/:id/branches", () =>
+        HttpResponse.json({
+          data: [
+            { name: "develop", protected: true },
+            { name: "main", protected: true },
+          ],
+          meta: {},
+        }),
+      ),
+      http.get("*/api/v1/previews/configs", () =>
+        HttpResponse.json({
+          data: {
+            names: [],
+            default_name: "",
+            selected_name: "",
+            requires_selection: false,
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewPreviewPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Repository" })).toHaveTextContent(
+        "assembledhq/web",
+      );
+    });
+    expect(screen.getByRole("button", { name: "Target branch" })).toHaveTextContent(
+      "develop",
+    );
+  });
+
   it("navigates to /previews when the dialog is closed", async () => {
     installHandlers();
 
