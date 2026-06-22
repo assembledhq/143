@@ -138,7 +138,7 @@ const (
 	AuditActionPRReadinessPolicyUpdated      AuditAction = "pr_readiness_policy.updated"
 	AuditActionPRReadinessCustomCheckUpdated AuditAction = "pr_readiness_custom_check.updated"
 	AuditActionPRReadinessCustomCheckDeleted AuditAction = "pr_readiness_custom_check.deleted"
-	AuditActionPRReadinessBypassed           AuditAction = "pr_readiness.bypassed"
+	AuditActionPRReadinessBypassed           AuditAction = "pr_readiness.bypassed" // #nosec G101 -- not a credential
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -251,7 +251,7 @@ const (
 	AuditResourcePreviewPolicy          AuditResourceType = "preview_policy"
 	AuditResourcePRReadinessPolicy      AuditResourceType = "pr_readiness_policy"
 	AuditResourcePRReadinessCustomCheck AuditResourceType = "pr_readiness_custom_check"
-	AuditResourcePRReadinessBypass      AuditResourceType = "pr_readiness_bypass"
+	AuditResourcePRReadinessBypass      AuditResourceType = "pr_readiness_bypass" // #nosec G101 -- not a credential
 	AuditResourceAPIClient              AuditResourceType = "api_client"
 	AuditResourceAPIToken               AuditResourceType = "api_token"      // #nosec G101 -- audit resource type
 	AuditResourceCLIToken               AuditResourceType = "cli_token"      // #nosec G101 -- audit resource type
