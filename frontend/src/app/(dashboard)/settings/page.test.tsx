@@ -417,7 +417,11 @@ describe('SettingsPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
 
     expect(await screen.findByRole('dialog', { name: 'PR readiness policy' })).toBeInTheDocument();
-    expect(screen.getByText('Built-in checks')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Built-in readiness checks' })).toBeInTheDocument();
+    expect(screen.getByRole('row', { name: /Freshness/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'About Freshness' })).toBeInTheDocument();
+    expect(screen.getAllByText('Blocking').length).toBeGreaterThan(0);
+    expect(screen.queryByText('agent review clean')).not.toBeInTheDocument();
     expect(await screen.findByText('No schema drift')).toBeInTheDocument();
     expect(screen.getAllByText('2 total')).toHaveLength(2);
     expect(screen.getByText('repo-1: 1')).toBeInTheDocument();
