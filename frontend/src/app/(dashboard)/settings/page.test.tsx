@@ -398,7 +398,11 @@ describe('SettingsPage', () => {
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
 
     expect(await screen.findByRole('dialog', { name: 'PR readiness policy' })).toBeInTheDocument();
-    expect(screen.getByText('Built-in checks')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Built-in readiness checks' })).toBeInTheDocument();
+    expect(screen.getByRole('row', { name: /Freshness/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'About Freshness' })).toBeInTheDocument();
+    expect(screen.getAllByText('Blocking').length).toBeGreaterThan(0);
+    expect(screen.queryByText('agent review clean')).not.toBeInTheDocument();
     expect(await screen.findByText('No schema drift')).toBeInTheDocument();
     expect(screen.getAllByText('2 total')).toHaveLength(2);
     expect(screen.getByText('repo-1: 1')).toBeInTheDocument();
@@ -410,7 +414,7 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.click(await screen.findByRole('combobox', { name: /Policy preset/i }));
+    await user.click(await screen.findByRole('combobox', { name: /Preset/i }));
     await user.click(screen.getByRole('option', { name: 'Strict' }));
 
     await waitFor(() => {
@@ -436,7 +440,7 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.click(await screen.findByLabelText('Enable advisory checks for engineers'));
+    await user.click(await screen.findByLabelText('Engineer advisory checks'));
 
     await waitFor(() => {
       expect(readinessPolicyUpdateMock).toHaveBeenCalledWith(
@@ -524,7 +528,7 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.click(await screen.findByRole('combobox', { name: /PR readiness policy/i }));
+    await user.click(await screen.findByRole('combobox', { name: /Policy scope/i }));
     await user.click(screen.getByRole('option', { name: 'acme/app' }));
 
     expect(await screen.findByText('org_policy · org settings')).toBeInTheDocument();
