@@ -2305,11 +2305,27 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		if pinGoCacheEnv {
 			// Raw (unescaped) so $HOME expands in the shell. Only set when the
 			// service hasn't already chosen a location.
+			//
+			// GOTMPDIR is redirected off the container's default scratch dir.
+			// That default is the small exec tmpfs at /var/tmp (512 MiB,
+			// RAM-backed; see defaultScratchDir): a large module graph's compile
+			// scratch overflows it ("no space left on device" writing the build
+			// work dir) and, being RAM-backed, also draws down the memory cgroup.
+			// Point the build's work dir at the disk-quota'd $HOME instead (go
+			// build needs room, not exec). The dir must exist before the
+			// toolchain will use it, and it lives outside the archived cache set
+			// (.cache/go-build + go/pkg/mod) so scratch never bloats the cache.
+			if _, ok := svcCfg.Env["GOTMPDIR"]; !ok {
+				cmdParts = append(cmdParts, `mkdir -p "$HOME/.cache/go-build-tmp" &&`)
+			}
 			if _, ok := svcCfg.Env["GOCACHE"]; !ok {
 				cmdParts = append(cmdParts, `GOCACHE="$HOME/.cache/go-build"`)
 			}
 			if _, ok := svcCfg.Env["GOMODCACHE"]; !ok {
 				cmdParts = append(cmdParts, `GOMODCACHE="$HOME/go/pkg/mod"`)
+			}
+			if _, ok := svcCfg.Env["GOTMPDIR"]; !ok {
+				cmdParts = append(cmdParts, `GOTMPDIR="$HOME/.cache/go-build-tmp"`)
 			}
 		}
 		envKeys := make([]string, 0, len(svcCfg.Env))
