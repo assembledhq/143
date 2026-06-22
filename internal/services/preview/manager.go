@@ -1203,12 +1203,11 @@ const maxOriginalFailureRunes = 500
 func oomFailureExplanation(memoryLimitMB int) string {
 	capText := ""
 	if memoryLimitMB > 0 {
-		capText = fmt.Sprintf(" The preview is capped at %d MiB of memory.", memoryLimitMB)
+		capText = fmt.Sprintf("; capped at %d MiB", memoryLimitMB)
 	}
 	return fmt.Sprintf(
-		"ran out of memory and was killed (OOM, exit code 137 / SIGKILL).%s "+
-			"Reduce the workload's memory use — e.g. run fewer concurrent build "+
-			"steps, or serve a production build instead of a dev server.",
+		"ran out of memory (OOM, exit 137)%s. Reduce memory use — "+
+			"e.g. serve a production build instead of a dev server.",
 		capText,
 	)
 }

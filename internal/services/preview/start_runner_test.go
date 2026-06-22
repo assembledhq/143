@@ -40,7 +40,7 @@ func TestClassifyLaunchFailure_OutOfMemory(t *testing.T) {
 	failure := ClassifyLaunchFailure(fmt.Errorf("%w: webserver exited with code 137", ErrServiceNotReady), 8192)
 
 	require.Contains(t, failure.Message, "ran out of memory", "OOM failures should be explained in plain English")
-	require.Contains(t, failure.Message, "exit code 137", "OOM message should name the exit code")
+	require.Contains(t, failure.Message, "exit 137", "OOM message should name the exit code")
 	require.Contains(t, failure.Message, "8192 MiB", "OOM message should include the memory cap")
 	require.Contains(t, failure.Message, "webserver exited with code 137", "underlying detail should be preserved")
 }

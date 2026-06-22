@@ -3449,7 +3449,7 @@ func TestAnnotatePreviewFailure(t *testing.T) {
 		got := annotatePreviewFailure("exited with code 137; last output: app compiled", 8192)
 		require.Contains(t, got, "ran out of memory")
 		require.Contains(t, got, "8192 MiB")
-		require.Contains(t, got, "exit code 137")
+		require.Contains(t, got, "exit 137")
 		// The original failure is preserved for debugging.
 		require.Contains(t, got, "exited with code 137; last output: app compiled")
 	})
@@ -3467,8 +3467,10 @@ func TestAnnotatePreviewFailure(t *testing.T) {
 		raw := "exited with code 137; last output: " + strings.Repeat("x", 5000)
 		got := annotatePreviewFailure(raw, 8192)
 		require.Contains(t, got, "ran out of memory")
-		require.Less(t, len([]rune(got)), len([]rune(raw)), "the raw tail should be truncated")
 		require.Contains(t, got, "8192 MiB")
+		// The whole message is the short explanation + the bounded tail, so it
+		// stays close to the cap rather than echoing the full 5k-rune raw output.
+		require.LessOrEqual(t, len([]rune(got)), maxOriginalFailureRunes+256, "the raw tail should be truncated to the cap")
 	})
 
 	t.Run("non-oom failures pass through unchanged", func(t *testing.T) {
