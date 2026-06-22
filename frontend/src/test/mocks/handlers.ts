@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse } from '@/lib/types';
+import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse, JoinToken, JoinTokenLink } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -957,6 +957,23 @@ export const handlers = [
       data: [],
       meta: {},
     } satisfies ListResponse<CliToken>);
+  }),
+
+  http.get('/api/v1/org/join-tokens', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    } satisfies ListResponse<JoinToken>);
+  }),
+
+  http.get('/api/v1/org/join-tokens/:id/link', ({ params }) => {
+    return HttpResponse.json({
+      data: {
+        id: String(params.id),
+        token_prefix: '143j_testlink',
+        install_command: 'curl -fsSL https://143.example/install/143j_testlinkabcdefghijkl | sh',
+      },
+    } satisfies SingleResponse<JoinTokenLink>);
   }),
 
   http.get('/api/v1/settings', () => {

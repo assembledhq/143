@@ -287,7 +287,7 @@ describe("ManualSessionCreatePageContent", () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     expect(await screen.findByRole("textbox", { name: "Manual session prompt" })).toBeInTheDocument();
-    expect(screen.queryByText(/No API key configured/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/isn't connected yet/)).not.toBeInTheDocument();
 
     settings.resolve({
       data: {
@@ -299,7 +299,7 @@ describe("ManualSessionCreatePageContent", () => {
       },
     });
 
-    expect(await screen.findByText(/No API key configured for Codex/)).toBeInTheDocument();
+    expect(await screen.findByText(/Codex isn't connected yet/)).toBeInTheDocument();
   });
 
   it("uses a mobile settings sheet instead of inline repo and model controls on small screens", async () => {

@@ -393,9 +393,11 @@ export interface PreviewPolicySummary {
   repository_full_name: string;
   auto_mode: "off" | "warm" | "on";
   session_prewarm_mode: "off" | "cache" | "smart";
+  session_prewarm_untrusted_fork: boolean;
   pr_preview_surfaces_enabled: boolean;
   github_pr_comment_enabled: boolean;
   github_commit_status_enabled: boolean;
+  preview_config_name?: string;
   preview_configured: boolean;
   preview_success_recorded: boolean;
   preview_config_names?: string[];
@@ -1958,6 +1960,7 @@ export interface InvitationResponse {
 export interface JoinToken {
   id: string;
   token_prefix: string;
+  can_reveal: boolean;
   name: string;
   role: string;
   max_uses?: number | null;
@@ -1968,7 +1971,7 @@ export interface JoinToken {
 }
 
 // CreatedJoinToken is the create response: the plaintext token and the
-// ready-to-paste install command, shown exactly once.
+// ready-to-paste install command.
 export interface CreatedJoinToken {
   id: string;
   token: string;
@@ -1977,6 +1980,12 @@ export interface CreatedJoinToken {
   name: string;
   expires_at?: string | null;
   max_uses?: number | null;
+  install_command: string;
+}
+
+export interface JoinTokenLink {
+  id: string;
+  token_prefix: string;
   install_command: string;
 }
 

@@ -932,16 +932,6 @@ a { display: inline-flex; align-items: center; justify-content: center; min-heig
   var descEl = document.getElementById("pv-desc");
   var statusEl = document.getElementById("pv-status");
   var actionEl = document.getElementById("pv-action");
-  var original = {
-    title: titleEl.textContent,
-    desc: descEl.textContent,
-    status: statusEl.textContent,
-    action: actionEl.textContent
-  };
-  var restarting = false;
-  var popup = null;
-  var pollTimer = null;
-  var activeSince = 0;
 
   function setPanel(title, desc, status) {
     titleEl.textContent = title;
@@ -950,98 +940,12 @@ a { display: inline-flex; align-items: center; justify-content: center; min-heig
     document.title = title;
   }
 
-  function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
-
-  function enableAction() {
-    restarting = false;
-    actionEl.textContent = original.action;
-    actionEl.removeAttribute("aria-disabled");
-  }
-
-  function resetPanel() {
-    stopPolling();
-    enableAction();
-    setPanel(original.title, original.desc, original.status);
-  }
-
-  function fallbackLaunch() {
-    stopPolling();
-    window.location.href = cfg.controlUrl;
-  }
-
-  // The popup posts this once it has connected the browser to the restarted
-  // preview (the session cookie is set at that point). The cookie is scoped
-  // to the host in data.url; when this overlay is on an alias host (runtime
-  // instance ID vs stable target ID) we must navigate there instead of
-  // reloading in place.
-  window.addEventListener("message", function(event) {
-    if (event.origin !== cfg.appOrigin) return;
-    var data = event.data;
-    if (!data || data.type !== "preview_launch_complete") return;
-    stopPolling();
-    statusEl.textContent = "Connected";
-    var dest = null;
-    try { dest = new URL(data.url); } catch (e) {}
-    if (dest && (dest.protocol === "https:" || dest.protocol === "http:") && dest.origin !== window.location.origin) {
-      window.location.href = dest.href;
-      return;
-    }
-    window.location.reload();
-  });
-
-  function poll() {
-    fetch(cfg.statusPath, {cache: "no-store"}).then(function(resp) {
-      return resp.ok ? resp.json() : null;
-    }).then(function(state) {
-      if (!state || !restarting) return;
-      if (state.status === cfg.initialStatus) {
-        // The restart has not been picked up yet. If the popup was closed
-        // without starting anything, put the panel back.
-        if (popup && popup.closed) resetPanel();
-        return;
-      }
-      if (state.status === "failed") {
-        stopPolling();
-        enableAction();
-        setPanel("Preview failed to start", "Check status and logs for details, then try restarting again.", state.label);
-        return;
-      }
-      if (state.active && state.status !== "starting") {
-        // Ready. The popup finishes the browser handshake and notifies us;
-        // if it is gone or stuck, fall back to the full launch flow.
-        if (!activeSince) activeSince = Date.now();
-        if (!popup || popup.closed || Date.now() - activeSince > 15000) {
-          fallbackLaunch();
-          return;
-        }
-        statusEl.textContent = "Connecting this browser…";
-        return;
-      }
-      statusEl.textContent = state.label + "…";
-    }).catch(function() {});
-  }
-
   actionEl.addEventListener("click", function(event) {
     event.preventDefault();
-    if (restarting) return;
-    popup = window.open(cfg.controlUrl + "&popup=1", "143-preview-launch", "popup=yes,width=440,height=400");
-    if (!popup) {
-      // Popup blocked: fall back to the full-page launch flow.
-      window.location.href = cfg.controlUrl;
-      return;
-    }
-    restarting = true;
-    activeSince = 0;
-    setPanel("Restarting preview", "Keep this tab open — the preview opens here when it is ready.", "Restart requested…");
-    actionEl.textContent = "Restarting…";
+    setPanel("Opening preview in 143", "143 will start or reconnect this preview, then return you here when it is ready.", "Opening launch flow…");
+    actionEl.textContent = "Opening…";
     actionEl.setAttribute("aria-disabled", "true");
-    pollTimer = setInterval(poll, 2500);
-    poll();
+    window.location.href = cfg.controlUrl;
   });
 })();
 </script>

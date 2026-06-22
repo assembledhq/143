@@ -1589,6 +1589,31 @@ func TestParseNamedConfig_InstallCacheFieldMerge(t *testing.T) {
 	require.Equal(t, []string{".turbo/cache"}, turbo.Install.Cache.Paths, "named cache.paths should replace base cache paths")
 }
 
+func TestParseNamedConfig_MissingNameReturnsSentinel(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"preview": {
+			"default": "web",
+			"configs": {
+				"web": {"name": "web", "command": ["npm", "run", "dev"], "port": 3000},
+				"admin": {"name": "admin", "command": ["npm", "run", "admin"], "port": 4000}
+			}
+		}
+	}`)
+
+	_, err := ParseNamedConfig(raw, "ghost")
+	require.Error(t, err, "a missing named config should error")
+	require.ErrorIs(t, err, ErrPreviewConfigNotFound,
+		"missing config must report the sentinel so build callers can fall back to default")
+
+	// An empty name resolves the file's default config rather than failing,
+	// which is the fallback target when a saved profile no longer exists.
+	cfg, err := ParseNamedConfig(raw, "")
+	require.NoError(t, err, "empty name should resolve the default config")
+	require.Equal(t, "web", cfg.Name, "empty name should select the default profile")
+}
+
 func TestResolveConfig_DiffCannotAddServices(t *testing.T) {
 	t.Parallel()
 

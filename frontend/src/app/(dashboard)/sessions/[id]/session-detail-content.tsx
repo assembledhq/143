@@ -25,6 +25,7 @@ import {
   Plus,
   Minus,
   Square,
+  Settings2,
   PanelRightOpen,
   PanelRightClose,
   Clock,
@@ -652,298 +653,10 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
   );
 }
 
-type PRReadinessCardProps = {
-  session: Session;
-  hasPR?: boolean;
-  onOpenChanges?: () => void;
-  onOpenReview?: () => void;
-  reviewActionDisabled?: boolean;
-};
-
-function PRReadinessCard({ session, hasPR, onOpenChanges, onOpenReview, reviewActionDisabled }: PRReadinessCardProps) {
-  const queryClient = useQueryClient();
-  const router = useRouter();
-  const { user } = useAuth();
-  const [bypassOpen, setBypassOpen] = useState(false);
-  const [bypassReason, setBypassReason] = useState("");
-  const [issueLessReason, setIssueLessReason] = useState<string | null>(null);
-  const [detailsCollapsed, setDetailsCollapsed] = useState(!!hasPR);
-  const packetRef = useRef<HTMLDivElement | null>(null);
-  const contextRef = useRef<HTMLTextAreaElement | null>(null);
-  const readinessQuery = useQuery({
-    queryKey: queryKeys.sessions.readiness(session.id),
-    queryFn: () => api.sessions.getReadiness(session.id),
-    refetchInterval: (query) => {
-      const status = query.state.data?.data.latest?.status;
-      return status === "queued" || status === "running" ? pollMs(3000) : false;
-    },
-  });
-  const readiness = readinessQuery.data?.data.latest;
-  const contextQuery = useQuery({
-    queryKey: [...queryKeys.sessions.readiness(session.id), "context"],
-    queryFn: () => api.sessions.getReadinessContext(session.id),
-  });
-  const policyQuery = useQuery({
-    queryKey: queryKeys.settings.prReadinessPolicy(session.repository_id ?? null),
-    queryFn: () => api.settings.getPRReadinessPolicy(session.repository_id ?? undefined),
-  });
-  const runMutation = useMutation({
-    mutationFn: () => api.sessions.runReadiness(session.id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(session.id) });
-      toast.success("Readiness checks started");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness checks could not be started");
-    },
-  });
-  const bypassMutation = useMutation({
-    mutationFn: () => api.sessions.createReadinessBypass(session.id, bypassReason),
-    onSuccess: () => {
-      setBypassOpen(false);
-      setBypassReason("");
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(session.id) });
-      toast.success("Readiness blocker bypassed");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness blocker could not be bypassed");
-    },
-  });
-  const contextMutation = useMutation({
-    mutationFn: (reason: string) => api.sessions.updateReadinessContext(session.id, reason),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [...queryKeys.sessions.readiness(session.id), "context"] });
-      toast.success("Readiness context saved");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness context could not be saved");
-    },
-  });
-  const status = readiness?.status;
-  const running = status === "queued" || status === "running" || runMutation.isPending;
-  const checks = readiness?.checks ?? [];
-  const bypassedKeys = new Set((readiness?.bypasses ?? []).flatMap((bypass) => bypass.bypassed_checks));
-  const checkKey = (check: PRReadinessCheck) => check.check_key || check.check_type;
-  const checkEnforcement = (check: PRReadinessCheck) => check.effective_enforcement || enforcementForRole(check, user?.role) || check.enforcement;
-  const stale = readiness && (
+function readinessIsStale(readiness: PRReadinessRun | undefined, session: Session) {
+  return !!readiness && (
     readiness.evaluated_workspace_revision !== session.workspace_revision ||
     (readiness.evaluated_snapshot_key ?? "") !== (session.snapshot_key ?? "")
-  );
-  const staleCheck = stale && readiness ? staleReadinessCheck(readiness, session, checkEnforcement) : null;
-  const visibleChecks = stale ? checks.filter((check) => check.check_type !== "freshness") : checks;
-  const passed = visibleChecks.filter((check) => check.status === "passed");
-  const blocked = [
-    ...visibleChecks.filter((check) => (check.status === "failed" || check.status === "error") && checkEnforcement(check) === "blocking" && !bypassedKeys.has(checkKey(check))),
-    ...(staleCheck ? [staleCheck] : []),
-  ];
-  const bypassed = checks.filter((check) => bypassedKeys.has(checkKey(check)));
-  const warnings = visibleChecks.filter((check) =>
-    check.status === "warning" ||
-    ((check.status === "failed" || check.status === "error") && checkEnforcement(check) !== "blocking")
-  );
-  const bypassPolicy = policyQuery.data?.data.config.bypass;
-  const currentRole = user?.role ?? "";
-  const bypassRoleAllowed = !bypassPolicy || (
-    bypassPolicy.enabled !== false &&
-    (bypassPolicy.allowed_roles ?? ["admin", "member", "builder"]).includes(currentRole) &&
-    (bypassPolicy.scopes ?? ["completed_blocking_checks"]).includes("completed_blocking_checks")
-  );
-  const nonBypassableChecks = new Set(bypassPolicy?.non_bypassable_checks ?? []);
-  const bypassableBlocked = blocked.filter((check) =>
-    !stale &&
-    !isDerivedStaleReadinessCheck(check) &&
-    bypassRoleAllowed &&
-    !nonBypassableChecks.has(checkKey(check)) &&
-    !nonBypassableChecks.has(check.check_type)
-  );
-  const title = !readiness
-    ? "Not checked yet"
-    : running
-      ? "Checking..."
-      : stale
-        ? "Stale after latest changes"
-        : readiness.summary || readinessStatusLabel(readiness.status);
-  const packet = readinessPacket(readiness?.review_packet);
-  const displayedIssueLessReason = issueLessReason ?? contextQuery.data?.data.issue_less_reason ?? "";
-  const handleCheckAction = (check: PRReadinessCheck) => {
-    const action = (check.action ?? "").toLowerCase();
-    if (!action) return;
-    if (action.includes("re-run") || action.includes("run readiness")) {
-      if (!running) runMutation.mutate();
-      return;
-    }
-    if (action.includes("view files") || action.includes("view changes")) {
-      onOpenChanges?.();
-      return;
-    }
-    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
-      if (!reviewActionDisabled) onOpenReview?.();
-      return;
-    }
-    if (action.includes("view packet")) {
-      packetRef.current?.scrollIntoView({ block: "nearest" });
-      return;
-    }
-    if (action.includes("view context") || action.includes("add context")) {
-      contextRef.current?.focus();
-      contextRef.current?.scrollIntoView({ block: "nearest" });
-      return;
-    }
-    if (action.includes("configuration")) {
-      router.push("/settings");
-    }
-  };
-  const checkActionDisabled = (check: PRReadinessCheck) => {
-    const action = (check.action ?? "").toLowerCase();
-    if (action.includes("re-run") || action.includes("run readiness")) {
-      return running;
-    }
-    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
-      return !!reviewActionDisabled || !onOpenReview;
-    }
-    if (action.includes("view files") || action.includes("view changes")) {
-      return !onOpenChanges;
-    }
-    return false;
-  };
-
-  if (hasPR && readiness && detailsCollapsed) {
-    return (
-      <Card>
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-xs flex items-center gap-2">
-              {readinessStatusIcon(readiness, stale, running)}
-              PR readiness
-            </CardTitle>
-            <Button size="xs" variant="outline" onClick={() => setDetailsCollapsed(false)}>
-              Details
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="flex flex-wrap gap-2 text-xs text-muted-foreground">
-          <Badge variant={stale ? "destructive" : "secondary"}>{stale ? "stale" : "current"}</Badge>
-          <span>{title}</span>
-          {readiness.bypasses?.length ? <Badge variant="outline">{readiness.bypasses.length} bypass</Badge> : null}
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle className="text-xs flex items-center gap-2">
-            {readinessStatusIcon(readiness, stale, running)}
-            PR readiness
-          </CardTitle>
-          <Button
-            size="xs"
-            variant={readiness ? "outline" : "default"}
-            onClick={() => runMutation.mutate()}
-            disabled={running || session.status === "running"}
-          >
-            {runMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1.5 h-3 w-3" />}
-            {readiness ? "Re-run" : "Run readiness checks"}
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3 text-xs">
-        <div className="font-medium text-foreground">{title}</div>
-        {readiness && !running && (
-          <div className="flex flex-wrap gap-2 text-muted-foreground">
-            <Badge variant="outline">rev {readiness.evaluated_workspace_revision}</Badge>
-            <Badge variant={stale ? "destructive" : "secondary"}>{stale ? "stale" : "current"}</Badge>
-            {readiness.bypasses?.length ? <Badge variant="outline">{readiness.bypasses.length} bypass</Badge> : null}
-          </div>
-        )}
-        {running && (
-          <div className="space-y-1 text-muted-foreground">
-            <div>Collecting diff</div>
-            <div>Running agent review</div>
-            <div>Checking test evidence</div>
-            <div>Checking risk signals</div>
-          </div>
-        )}
-        {!running && readiness && (
-          <div className="space-y-3">
-            <ReadinessCheckGroup title="Passed" checks={passed} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
-            <ReadinessCheckGroup title="Warnings" checks={warnings} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
-            <ReadinessCheckGroup title="Blocked" checks={blocked} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
-            <ReadinessCheckGroup title="Bypassed" checks={bypassed} empty="None" onAction={handleCheckAction} actionDisabled={checkActionDisabled} />
-            {packet && <ReadinessPacketSummary ref={packetRef} packet={packet} />}
-            {blocked.length > 0 && !stale && bypassableBlocked.length > 0 && (
-              <Button size="xs" variant="outline" onClick={() => setBypassOpen(true)}>
-                Bypass blockers
-              </Button>
-            )}
-          </div>
-        )}
-        {hasPR && readiness && !detailsCollapsed && (
-          <Button size="xs" variant="ghost" onClick={() => setDetailsCollapsed(true)}>
-            Collapse
-          </Button>
-        )}
-        {(session.linked_issues?.length ?? 0) === 0 && (
-          <div className="space-y-2 border-t border-border pt-3">
-            <Label htmlFor="readiness-context" className="text-xs">Issue-less context</Label>
-            <Textarea
-              id="readiness-context"
-              ref={contextRef}
-              value={displayedIssueLessReason}
-              onChange={(event) => setIssueLessReason(event.target.value)}
-              rows={2}
-              placeholder="Reason this PR has no linked issue"
-            />
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={contextMutation.isPending || !displayedIssueLessReason.trim()}
-              onClick={() => contextMutation.mutate(displayedIssueLessReason)}
-            >
-              Save context
-            </Button>
-          </div>
-        )}
-      </CardContent>
-      <Dialog open={bypassOpen} onOpenChange={setBypassOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Bypass readiness blockers</DialogTitle>
-            <DialogDescription>Bypass applies only to the current completed readiness run and will be shown in the PR footer.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2 rounded-md border border-border px-3 py-2 text-xs">
-            <div className="font-medium text-foreground">Blockers being bypassed</div>
-            <div className="space-y-1">
-              {bypassableBlocked.map((check) => (
-                <div key={checkKey(check)}>
-                  <div className="font-medium text-foreground">{check.title}</div>
-                  {check.summary ? <div className="text-muted-foreground">{check.summary}</div> : null}
-                </div>
-              ))}
-            </div>
-          </div>
-          <Textarea
-            value={bypassReason}
-            onChange={(event) => setBypassReason(event.target.value)}
-            rows={4}
-            placeholder="Reason for bypass"
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBypassOpen(false)}>Cancel</Button>
-            <Button
-              variant="destructive"
-              disabled={bypassMutation.isPending || bypassReason.trim().length < 8}
-              onClick={() => bypassMutation.mutate()}
-            >
-              {bypassMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
-              Bypass
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </Card>
   );
 }
 
@@ -1170,21 +883,7 @@ function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boole
   return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
-function OverviewTab({
-  session,
-  members,
-  prStatus,
-  onOpenChanges,
-  onOpenReview,
-  reviewActionDisabled,
-}: {
-  session: Session;
-  members: User[];
-  prStatus?: PullRequestStatus | null;
-  onOpenChanges?: () => void;
-  onOpenReview?: () => void;
-  reviewActionDisabled?: boolean;
-}) {
+function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -1228,14 +927,6 @@ function OverviewTab({
 
   return (
     <div className="space-y-4">
-      <PRReadinessCard
-        session={session}
-        hasPR={!!prStatus}
-        onOpenChanges={onOpenChanges}
-        onOpenReview={onOpenReview}
-        reviewActionDisabled={reviewActionDisabled}
-      />
-
       {/* Result card — most important for completed sessions, shown first */}
       {session.result_summary && (
         <Card className="border-l-2 border-l-success bg-success/5">
@@ -3909,7 +3600,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
-  const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
+  const [reviewConfigOpen, setReviewConfigOpen] = useState(false);
   const [reviewPasses, setReviewPasses] = useState(2);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
@@ -4953,7 +4644,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: readinessPolicyResponse } = useQuery({
     queryKey: queryKeys.settings.prReadinessPolicy(session?.repository_id ?? null),
     queryFn: () => api.settings.getPRReadinessPolicy(session?.repository_id ?? undefined),
-    enabled: user?.role === "builder" && !!session,
+    enabled: !!session,
   });
   const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
@@ -5142,7 +4833,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }),
     onSuccess: (response) => {
       toast.success("Review loop started");
-      setReviewSetupOpen(false);
+      setReviewConfigOpen(false);
       const reviewThread = buildReviewLoopThreadPreview(response.data, session);
       if (reviewThread) {
         setPendingThreadPreview(reviewThread);
@@ -5173,6 +4864,135 @@ export function SessionDetailContent({ id }: { id: string }) {
   const reviewActionDisabledReason = startReviewLoopMutation.isPending
     ? "Starting review loop..."
     : reviewUnavailableReason;
+
+  const readinessRunning =
+    latestReadiness?.status === "queued" ||
+    latestReadiness?.status === "running" ||
+    runReadinessMutation.isPending;
+  const readinessStale = !!session && readinessIsStale(latestReadiness, session);
+  const readinessHeadline = !latestReadiness
+    ? "Not reviewed yet"
+    : readinessRunning
+      ? "Checking…"
+      : readinessStale
+        ? "Stale after latest changes"
+        : latestReadiness.summary || readinessStatusLabel(latestReadiness.status);
+  const readinessCheckDisabled = readinessRunning || isRunning;
+
+  // Readiness findings, grouped with role-aware enforcement so the merged
+  // Review card can surface blockers, bypasses, the review packet, and the
+  // issue-less context editor inline (see folded-in PRReadinessCard features).
+  const [readinessBypassOpen, setReadinessBypassOpen] = useState(false);
+  const [readinessBypassReason, setReadinessBypassReason] = useState("");
+  const [readinessIssueLessReason, setReadinessIssueLessReason] = useState<string | null>(null);
+  const readinessPacketRef = useRef<HTMLDivElement | null>(null);
+  const readinessContextRef = useRef<HTMLTextAreaElement | null>(null);
+  const readinessContextQuery = useQuery({
+    queryKey: [...queryKeys.sessions.readiness(id), "context"],
+    queryFn: () => api.sessions.getReadinessContext(id),
+    enabled: !!session,
+  });
+  const readinessBypassMutation = useMutation({
+    mutationFn: () => api.sessions.createReadinessBypass(id, readinessBypassReason),
+    onSuccess: () => {
+      setReadinessBypassOpen(false);
+      setReadinessBypassReason("");
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+      toast.success("Readiness blocker bypassed");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness blocker could not be bypassed");
+    },
+  });
+  const readinessContextMutation = useMutation({
+    mutationFn: (reason: string) => api.sessions.updateReadinessContext(id, reason),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [...queryKeys.sessions.readiness(id), "context"] });
+      toast.success("Readiness context saved");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness context could not be saved");
+    },
+  });
+  const readinessChecks = latestReadiness?.checks ?? [];
+  const readinessCheckKey = (check: PRReadinessCheck) => check.check_key || check.check_type;
+  const readinessCheckEnforcement = (check: PRReadinessCheck) =>
+    check.effective_enforcement || enforcementForRole(check, user?.role) || check.enforcement;
+  const readinessStaleCheck = readinessStale && latestReadiness && session
+    ? staleReadinessCheck(latestReadiness, session, readinessCheckEnforcement)
+    : null;
+  const readinessVisibleChecks = readinessStale
+    ? readinessChecks.filter((check) => check.check_type !== "freshness")
+    : readinessChecks;
+  const readinessPassedChecks = readinessVisibleChecks.filter((check) => check.status === "passed");
+  const readinessBlockedChecks = [
+    ...readinessVisibleChecks.filter((check) =>
+      (check.status === "failed" || check.status === "error") &&
+      readinessCheckEnforcement(check) === "blocking" &&
+      !latestBypassedKeys.has(readinessCheckKey(check))
+    ),
+    ...(readinessStaleCheck ? [readinessStaleCheck] : []),
+  ];
+  const readinessBypassedChecks = readinessChecks.filter((check) => latestBypassedKeys.has(readinessCheckKey(check)));
+  const readinessWarningChecks = readinessVisibleChecks.filter((check) =>
+    check.status === "warning" ||
+    ((check.status === "failed" || check.status === "error") && readinessCheckEnforcement(check) !== "blocking")
+  );
+  const readinessBypassPolicy = readinessPolicyResponse?.data.config.bypass;
+  const readinessBypassRoleAllowed = !readinessBypassPolicy || (
+    readinessBypassPolicy.enabled !== false &&
+    (readinessBypassPolicy.allowed_roles ?? ["admin", "member", "builder"]).includes(user?.role ?? "") &&
+    (readinessBypassPolicy.scopes ?? ["completed_blocking_checks"]).includes("completed_blocking_checks")
+  );
+  const readinessNonBypassableChecks = new Set(readinessBypassPolicy?.non_bypassable_checks ?? []);
+  const readinessBypassableBlocked = readinessBlockedChecks.filter((check) =>
+    !readinessStale &&
+    !isDerivedStaleReadinessCheck(check) &&
+    readinessBypassRoleAllowed &&
+    !readinessNonBypassableChecks.has(readinessCheckKey(check)) &&
+    !readinessNonBypassableChecks.has(check.check_type)
+  );
+  const readinessReviewPacket = readinessPacket(latestReadiness?.review_packet);
+  const readinessDisplayedIssueLessReason =
+    readinessIssueLessReason ?? readinessContextQuery.data?.data.issue_less_reason ?? "";
+  const handleReadinessCheckAction = (check: PRReadinessCheck) => {
+    const action = (check.action ?? "").toLowerCase();
+    if (!action) return;
+    if (action.includes("re-run") || action.includes("run readiness")) {
+      if (!readinessCheckDisabled) runReadinessMutation.mutate();
+      return;
+    }
+    if (action.includes("view files") || action.includes("view changes")) {
+      setDetailTab("changes");
+      return;
+    }
+    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
+      if (!reviewActionDisabled) setReviewConfigOpen(true);
+      return;
+    }
+    if (action.includes("view packet")) {
+      readinessPacketRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (action.includes("view context") || action.includes("add context")) {
+      readinessContextRef.current?.focus();
+      readinessContextRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (action.includes("configuration")) {
+      router.push("/settings");
+    }
+  };
+  const readinessCheckActionDisabled = (check: PRReadinessCheck) => {
+    const action = (check.action ?? "").toLowerCase();
+    if (action.includes("re-run") || action.includes("run readiness")) {
+      return readinessCheckDisabled;
+    }
+    if (action.includes("run review") || action.includes("fix with agent") || action.includes("view review")) {
+      return reviewActionDisabled;
+    }
+    return false;
+  };
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -6562,45 +6382,150 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
+          {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                        <ClipboardList className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground">Review work</p>
-                        <p className="text-xs text-muted-foreground">
-                          Review and fix with a selected agent before creating a PR.
-                        </p>
-                      </div>
+              <CardContent className="space-y-3 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      {reviewLoopRunning || readinessRunning ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        readinessStatusIcon(latestReadiness, readinessStale, false)
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        {reviewLoopRunning
+                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`
+                          : "Review before PR"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {reviewLoopRunning
+                          ? `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`
+                          : readinessHeadline}
+                      </p>
                     </div>
                   </div>
-                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                  <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="w-full gap-1.5 sm:w-auto"
-                      disabled={reviewActionDisabled}
-                      title={reviewActionDisabledReason}
-                      onClick={() => setReviewSetupOpen(true)}
+                      disabled={readinessCheckDisabled}
+                      onClick={() => runReadinessMutation.mutate()}
                     >
-                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                      {readinessRunning ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
-                        <ClipboardList className="h-3.5 w-3.5" />
+                        <RefreshCw className="h-3.5 w-3.5" />
                       )}
-                      Review
+                      {latestReadiness ? "Re-check" : "Check readiness"}
                     </Button>
-                  </DisabledTooltip>
+                    {canUseNativeReviewLoop ? (
+                      <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="w-full gap-1.5 sm:w-auto"
+                          disabled={reviewActionDisabled}
+                          title={reviewActionDisabledReason}
+                          onClick={() => setReviewConfigOpen(true)}
+                        >
+                          {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Settings2 className="h-3.5 w-3.5" />
+                          )}
+                          Review &amp; fix
+                        </Button>
+                      </DisabledTooltip>
+                    ) : null}
+                  </div>
                 </div>
+                {readinessRunning ? (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <div>Collecting diff</div>
+                    <div>Running agent review</div>
+                    <div>Checking test evidence</div>
+                    <div>Checking risk signals</div>
+                  </div>
+                ) : null}
+                {!readinessRunning && latestReadiness ? (
+                  <div className="space-y-3 text-xs">
+                    <ReadinessCheckGroup title="Passed" checks={readinessPassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                    <ReadinessCheckGroup title="Warnings" checks={readinessWarningChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                    <ReadinessCheckGroup title="Blocked" checks={readinessBlockedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                    <ReadinessCheckGroup title="Bypassed" checks={readinessBypassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                    {readinessReviewPacket && <ReadinessPacketSummary ref={readinessPacketRef} packet={readinessReviewPacket} />}
+                    {readinessBlockedChecks.length > 0 && !readinessStale && readinessBypassableBlocked.length > 0 && (
+                      <Button size="xs" variant="outline" onClick={() => setReadinessBypassOpen(true)}>
+                        Bypass blockers
+                      </Button>
+                    )}
+                  </div>
+                ) : null}
+                {(session.linked_issues?.length ?? 0) === 0 && (
+                  <div className="space-y-2 border-t border-border pt-3 text-xs">
+                    <Label htmlFor="readiness-context" className="text-xs">Issue-less context</Label>
+                    <Textarea
+                      id="readiness-context"
+                      ref={readinessContextRef}
+                      value={readinessDisplayedIssueLessReason}
+                      onChange={(event) => setReadinessIssueLessReason(event.target.value)}
+                      rows={2}
+                      placeholder="Reason this PR has no linked issue"
+                    />
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={readinessContextMutation.isPending || !readinessDisplayedIssueLessReason.trim()}
+                      onClick={() => readinessContextMutation.mutate(readinessDisplayedIssueLessReason)}
+                    >
+                      Save context
+                    </Button>
+                  </div>
+                )}
               </CardContent>
             </Card>
           ) : null}
+          <Dialog open={readinessBypassOpen} onOpenChange={setReadinessBypassOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Bypass readiness blockers</DialogTitle>
+                <DialogDescription>Bypass applies only to the current completed readiness run and will be shown in the PR footer.</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-2 rounded-md border border-border px-3 py-2 text-xs">
+                <div className="font-medium text-foreground">Blockers being bypassed</div>
+                <div className="space-y-1">
+                  {readinessBypassableBlocked.map((check) => (
+                    <div key={readinessCheckKey(check)}>
+                      <div className="font-medium text-foreground">{check.title}</div>
+                      {check.summary ? <div className="text-muted-foreground">{check.summary}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <Textarea
+                value={readinessBypassReason}
+                onChange={(event) => setReadinessBypassReason(event.target.value)}
+                rows={4}
+                placeholder="Reason for bypass"
+              />
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setReadinessBypassOpen(false)}>Cancel</Button>
+                <Button
+                  variant="destructive"
+                  disabled={readinessBypassMutation.isPending || readinessBypassReason.trim().length < 8}
+                  onClick={() => readinessBypassMutation.mutate()}
+                >
+                  {readinessBypassMutation.isPending ? <Loader2 className="mr-1.5 h-3 w-3 animate-spin" /> : null}
+                  Bypass
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
@@ -6629,7 +6554,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
                   title: reviewActionDisabledReason,
-                  onClick: () => setReviewSetupOpen(true),
+                  onClick: () => setReviewConfigOpen(true),
                 } : undefined}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
@@ -6685,14 +6610,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab
-            session={session}
-            members={members}
-            prStatus={prStatus}
-            onOpenChanges={() => setDetailTab("changes")}
-            onOpenReview={() => setReviewSetupOpen(true)}
-            reviewActionDisabled={reviewActionDisabled}
-          />
+          <OverviewTab session={session} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
@@ -7034,7 +6952,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
-      <Dialog open={reviewSetupOpen} onOpenChange={setReviewSetupOpen}>
+      <Dialog open={reviewConfigOpen} onOpenChange={setReviewConfigOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Review</DialogTitle>
@@ -7155,7 +7073,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               type="button"
               variant="outline"
               disabled={startReviewLoopMutation.isPending}
-              onClick={() => setReviewSetupOpen(false)}
+              onClick={() => setReviewConfigOpen(false)}
             >
               Cancel
             </Button>

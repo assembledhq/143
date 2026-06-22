@@ -1214,21 +1214,47 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 // best-effort for compatibility. Explicit bootstrap command failures are
 // returned because the workspace is not ready for normal agent work.
 func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger, sessions ...*models.Session) error {
-	if sandbox == nil || workDir == "" {
+	return prepareSandboxRepositoryWithMaterialize(ctx, o.provider, sandbox, workDir, log, func(cfgPath string, checks []models.PRReadinessCustomCheck) {
+		o.materializeRepoReadinessChecks(ctx, sessions, checks, log, cfgPath)
+	})
+}
+
+// PrepareSandboxRepository reads .143/config.json from the sandbox workspace,
+// installs supported platform-managed tools, then runs repo-declared bootstrap
+// commands before lint/test-style commands or agent work starts. Missing or
+// malformed config stays best-effort for compatibility. Explicit bootstrap
+// command failures are returned because the workspace is not ready for normal
+// sandbox work. It does not materialize PR readiness checks; that is reserved
+// for session-driven preparation via (*Orchestrator).prepareSandboxRepository.
+func PrepareSandboxRepository(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
+	return prepareSandboxRepositoryWithMaterialize(ctx, provider, sandbox, workDir, log, nil)
+}
+
+// prepareSandboxRepositoryWithMaterialize is the shared core. When materialize
+// is non-nil it is invoked with the repo-declared readiness checks (nil when the
+// config is missing or empty, so stale repo-config checks get deactivated). The
+// callback is skipped on parse failure, matching the best-effort dependency
+// handling.
+func prepareSandboxRepositoryWithMaterialize(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger, materialize func(cfgPath string, checks []models.PRReadinessCustomCheck)) error {
+	if provider == nil || sandbox == nil || workDir == "" {
 		return nil
 	}
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
-	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
+	raw, err := provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
-			o.materializeRepoReadinessChecks(ctx, sessions, nil, log, cfgPath)
+			if materialize != nil {
+				materialize(cfgPath, nil)
+			}
 			return nil
 		}
 		log.Warn().Err(err).Str("path", cfgPath).Msg("could not read repo config; skipping sandbox dependency install")
 		return nil
 	}
 	if len(raw) == 0 {
-		o.materializeRepoReadinessChecks(ctx, sessions, nil, log, cfgPath)
+		if materialize != nil {
+			materialize(cfgPath, nil)
+		}
 		return nil
 	}
 	cfg, err := repoconfig.Parse(raw)
@@ -1236,14 +1262,16 @@ func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sa
 		log.Warn().Err(err).Str("path", cfgPath).Msg("repo config failed to parse; skipping sandbox dependency install")
 		return nil
 	}
-	o.materializeRepoReadinessChecks(ctx, sessions, repoConfigReadinessChecks(cfg.PRReadiness.Checks), log, cfgPath)
+	if materialize != nil {
+		materialize(cfgPath, repoConfigReadinessChecks(cfg.PRReadiness.Checks))
+	}
 	if len(cfg.Dependencies) > 0 {
 		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
-			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+			return provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
 		}
 		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+	return runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
 }
 
 func (o *Orchestrator) materializeRepoReadinessChecks(ctx context.Context, sessions []*models.Session, checks []models.PRReadinessCustomCheck, log zerolog.Logger, cfgPath string) {
@@ -1339,11 +1367,11 @@ func (o *Orchestrator) legacyPRReadinessBuilderSetting(ctx context.Context, orgI
 	return settings.BuilderPermissions.RequireReviewBeforePR
 }
 
-func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
+func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
 	for _, command := range commands {
 		shellCmd := fmt.Sprintf("cd '%s' && %s", shellEscapeSingleQuote(workDir), command)
 		var stderr bytes.Buffer
-		exitCode, execErr := o.provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
+		exitCode, execErr := provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
 		stderrText := strings.TrimSpace(stderr.String())
 		if execErr != nil || exitCode != 0 {
 			log.Warn().

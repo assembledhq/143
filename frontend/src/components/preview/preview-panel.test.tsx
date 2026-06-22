@@ -193,7 +193,7 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start preview" })).toBeInTheDocument();
   });
 
   it("keeps no-preview status quiet when no preview has ever been created", async () => {
@@ -207,7 +207,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
     expect(screen.queryByText("no active preview")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start preview" })).toBeInTheDocument();
   });
 
   it("shows resume copy when a session preview is warmed", async () => {
@@ -225,7 +225,26 @@ describe("PreviewPanel component", () => {
     await waitFor(() => {
       expect(screen.getByText("Warmed and ready")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Resume Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume preview" })).toBeInTheDocument();
+  });
+
+  it("shows failed prewarm diagnostics when the warm attempt failed", async () => {
+    mockGet.mockResolvedValue({
+      services: [],
+      prewarm: {
+        state: "failed",
+        workspace_revision: 12,
+        preview_id: "preview-failed",
+        error: "install command failed",
+      },
+    });
+
+    renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No preview running")).toBeInTheDocument();
+    });
+    expect(screen.getByText("install command failed")).toBeInTheDocument();
   });
 
   it('shows idle state when phase is "stopped"', async () => {
@@ -273,7 +292,7 @@ describe("PreviewPanel component", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText(/Unavailable 1m ago/)).toHaveClass("rounded-full");
-    expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start preview" })).toBeInTheDocument();
   });
 
   it("uses endpoint-unreachable copy in the startup checklist open-preview row", async () => {
@@ -325,7 +344,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Preparing preview")).toBeInTheDocument();
@@ -381,7 +400,7 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("Waiting for the preview URL to become reachable.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Restart preview" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Start Preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Start preview")).not.toBeInTheDocument();
   });
 
   it("keeps preview container logs hidden during startup until requested", async () => {
@@ -1106,7 +1125,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Start mutation ---------- */
 
-  it("calls start mutation when Start Preview button is clicked in idle state", async () => {
+  it("calls start mutation when Start preview button is clicked in idle state", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(makePreviewStatus({ status: "stopped" }));
 
@@ -1116,7 +1135,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(mockEnsure).toHaveBeenCalledWith("sess-1");
@@ -1135,10 +1154,10 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Start Preview" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start preview" })).toBeInTheDocument();
     });
 
-    const button = screen.getByRole("button", { name: "Start Preview" });
+    const button = screen.getByRole("button", { name: "Start preview" });
     await user.click(button);
 
     await waitFor(() => {
@@ -1435,7 +1454,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
@@ -1455,12 +1474,12 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(
         screen.getByText(
-          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start Preview again."
+          "This session's last sandbox snapshot is unavailable. Send a new message to rebuild the sandbox, then try Start preview again."
         )
       ).toBeInTheDocument();
     });
@@ -1481,12 +1500,12 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(
         screen.getByText(
-          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start Preview again."
+          "The agent is currently using this session's sandbox. Wait for the current turn to finish, then try Start preview again."
         )
       ).toBeInTheDocument();
     });
@@ -1519,12 +1538,12 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(
         screen.getByText(
-          "Could not reach the preview worker (connection dropped). Try Start Preview again — if this keeps happening, the worker may be unhealthy."
+          "Could not reach the preview worker (connection dropped). Try Start preview again — if this keeps happening, the worker may be unhealthy."
         )
       ).toBeInTheDocument();
     });
@@ -1548,7 +1567,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(screen.getByText(backendMessage)).toBeInTheDocument();
@@ -1576,7 +1595,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(screen.getByText(backendMessage)).toBeInTheDocument();
@@ -1619,7 +1638,7 @@ describe("PreviewPanel component", () => {
         expect(screen.getByText("No preview running")).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole("button", { name: "Start Preview" }));
+      await user.click(screen.getByRole("button", { name: "Start preview" }));
 
       await waitFor(() => {
         expect(screen.getByText(backendMessage)).toBeInTheDocument();
@@ -1641,7 +1660,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to start preview: connection refused")).toBeInTheDocument();
@@ -1671,7 +1690,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("No preview running")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Start Preview" }));
+    await user.click(screen.getByRole("button", { name: "Start preview" }));
 
     const message = await screen.findByText(backendMessage);
     expect(message).toHaveClass("min-w-0", "break-words", "[overflow-wrap:anywhere]");

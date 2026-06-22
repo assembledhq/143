@@ -341,9 +341,11 @@ export const api = {
       update: (repositoryId: string, body: {
         auto_mode?: 'off' | 'warm' | 'on';
         session_prewarm_mode?: 'off' | 'cache' | 'smart';
+        session_prewarm_untrusted_fork?: boolean;
         pr_preview_surfaces_enabled?: boolean;
         github_pr_comment_enabled?: boolean;
         github_commit_status_enabled?: boolean;
+        preview_config_name?: string;
       }) =>
         request<import('./types').SingleResponse<unknown>>(`/api/v1/repositories/${repositoryId}/preview-policy`, {
           method: 'PUT',
@@ -999,6 +1001,8 @@ export const api = {
       get<import('./types').ListResponse<import('./types').JoinToken>>('/api/v1/org/join-tokens'),
     createJoinToken: (body: { name?: string; role?: string; max_uses?: number; expires_in_days?: number }) =>
       post<import('./types').SingleResponse<import('./types').CreatedJoinToken>>('/api/v1/org/join-tokens', body),
+    getJoinTokenLink: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').JoinTokenLink>>(`/api/v1/org/join-tokens/${id}/link`),
     revokeJoinToken: (id: string) => del<void>(`/api/v1/org/join-tokens/${id}`),
     // The caller's own CLI device tokens (any authenticated user).
     listCliTokens: () =>

@@ -1,8 +1,8 @@
 # 143
 
-Open-source autopilot for coding agents.
+The open-source platform where your whole team builds software together.
 
-143 gives engineering teams one shared place to run coding agents in the cloud, connect them to the tools that hold product context, and turn the result into reviewable GitHub PRs.
+143 gives your whole team one shared place to run coding agents in the cloud, connect them to the tools that hold product context, and turn the result into reviewable GitHub PRs.
 
 [143.dev](https://www.143.dev) · [Getting started](#getting-started) · [Development setup](docs/contributing/development-setup.md) · [Architecture](docs/design/overall.md) · [Self-hosting](docs/self-hosting/README.md)
 

@@ -169,9 +169,7 @@ export function ClaudeCodeAuthModal({
         )}
 
         {status === "completed" && (
-          <div className="mt-4">
-            <p className="text-sm font-medium text-success">Connected successfully!</p>
-          </div>
+          <p className="text-sm font-medium text-success">Connected successfully!</p>
         )}
 
         {status === "error" && (

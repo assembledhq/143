@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { landingLayout as layout } from "./landing-layout";
 import { landingTypography as type } from "./landing-typography";
 
 interface FooterProps {
@@ -11,7 +12,7 @@ export default function Footer({ isDark }: FooterProps) {
       className="px-6 sm:px-10 py-12 sm:py-16"
       style={{ background: isDark ? "#08080f" : "#eef4f8" }}
     >
-      <div className="max-w-5xl mx-auto">
+      <div className={layout.pageShell}>
         <div className="flex flex-col sm:flex-row justify-between gap-10">
           {/* Brand */}
           <div className="space-y-3">
@@ -53,6 +54,14 @@ export default function Footer({ isDark }: FooterProps) {
                     className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
                   >
                     About
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    href="/why-143"
+                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                  >
+                    Why &ldquo;143&rdquo;?
                   </Link>
                 </li>
                 <li>

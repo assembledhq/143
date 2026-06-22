@@ -6,6 +6,8 @@
 
 This document is the product and architecture map. It should explain the overall system at a high level and link to detailed design docs for contracts, state machines, UI specifics, rollout plans, and operational procedures.
 
+The public homepage positions 143 as shared coding-agent infrastructure for engineering teams: one team-visible workspace for context, integrations, cloud agent execution, previews, review loops, audit logs, and usage analytics. Product imagery uses wide, repeatable screenshots from seeded/demo product states so the homepage shows the real workspace instead of mock-only generated visuals. See [implemented/81-homepage-positioning-refresh.md](implemented/81-homepage-positioning-refresh.md) and [future/88-homepage-product-screenshots.md](future/88-homepage-product-screenshots.md).
+
 ## Product Model
 
 - **Organization** is the tenant boundary. Repositories, integrations, API clients, credentials, usage, audit logs, sessions, automations, and projects are all scoped to one `org_id`.
@@ -65,6 +67,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 ### Data And Coordination
 
 - PostgreSQL is the source of truth for org data, repositories, issues, sessions, threads, jobs, credentials, PRs, previews, usage, and audit records. Every tenant-owned table and query is scoped by `org_id`.
+- Database-backed foreign keys remain the default for tenant-scoped product/control-plane tables. Hot append-only/event/log/cache/runtime tables need an explicit exception review before omitting parent FKs, because parent-row lock fan-in can become a Postgres operational risk; exceptions must keep `org_id NOT NULL`, keep query scoping, and validate parent ownership in the write path.
 - The job queue is Postgres-backed. Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED`, and durable state transitions are committed before Redis wakeups or SSE notifications.
 - Redis is an optional acceleration layer for cache, pub/sub, SSE fan-out, and coordination. Losing Redis should degrade live updates, not lose durable work. See [implemented/52-redis.md](implemented/52-redis.md).
 - Session snapshots and multi-node recovery use shared object storage so workers and API nodes do not depend on one machine's local disk. See [implemented/54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md).
@@ -73,7 +76,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 
 - Workers run coding-agent jobs, continuation turns, preview starts, ingestion syncs, PM planning, automations, and repair work.
 - Sandboxes are the permission boundary for agent execution. They run with resource limits, gVisor isolation in production, controlled network policy, and per-session GitHub credential access through a worker-owned auth broker rather than long-lived tokens in the container environment.
-- Repository-owned `.143/config.json` can declare sandbox setup for agent work, including supported platform-managed tool dependencies, bootstrap commands that run after clone and auth setup before the coding agent starts, and prompt-only PR readiness custom checks that are validated and materialized for the repository.
+- Repository-owned `.143/config.json` can declare sandbox setup for agent work and deterministic validation sandboxes, including supported platform-managed tool dependencies, bootstrap commands that run after clone/checkout and auth setup before the coding agent or lint/test commands start, and prompt-only PR readiness custom checks that are validated and materialized for the repository.
 - The sandbox image installs the supported coding-agent CLIs, including Codex, Claude Code, OpenCode, Amp, and Pi. Runtime credentials are resolved from ordered personal/team auth stacks with health and rate-limit state tracked separately from credential config.
 - Long-running sessions survive routine deploys through durable session executors, leases, checkpointed recovery, snapshots, and worker drain/spin-down controls. See [implemented/82-durable-session-executors.md](implemented/82-durable-session-executors.md).
 - Routine worker deploys verify host support services without activating support-service changes. Mutating shared worker support services such as `sandbox-dns`, Chrome, gVisor checks, bridge config, or Docker daemon config is a maintenance-mode operation because it can affect active sandboxes and previews.
@@ -115,6 +118,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - **Agent tools must use platform paths.** Sandbox agents, automations, and external clients should call `143-tools` or `/api/v1`, so auth, audit, templates, Linear links, PR state, dedupe, and policy checks stay consistent.
 - **Untrusted app previews stay isolated.** Previewed apps run on preview origins, not the main app origin, and preview secrets are delivered through preview-specific backend controls.
 - **Credentials are visible, scoped, and revocable.** Coding-agent credentials, API tokens, GitHub tokens, preview secrets, and CLI tokens each have explicit ownership, scope, runtime state, and audit surfaces.
+- **CLI join links are bearer membership grants.** They grant org membership only after GitHub sign-in, are revocable and optionally bounded by expiry/use count, validate through non-reversible hashes, and expose recoverable install commands only to admins through explicit actions.
 
 ## Known Broad Gaps
 

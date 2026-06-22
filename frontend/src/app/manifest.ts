@@ -4,7 +4,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "143",
     short_name: "143",
-    description: "Shared coding-agent infrastructure for engineering teams.",
+    description: "Where your whole team builds software together with coding agents.",
     start_url: "/",
     scope: "/",
     display: "standalone",

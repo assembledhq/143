@@ -3934,7 +3934,7 @@ func TestPushChangesToPR_EnqueuesHealthSyncAfterSuccessfulPush(t *testing.T) {
 	})
 	require.NoError(t, err, "PushChangesToPR should succeed for a snapshot-backed session with an open PR")
 	require.Equal(t, headSHA, *pr.HeadSHA, "PushChangesToPR should return the just-pushed head SHA")
-	require.Contains(t, provider.lastExecCmd, "HEAD:refs/heads/'"+headRef+"'", "PushChangesToPR should push to the persisted PR head ref")
+	require.Contains(t, provider.lastExecCmd, "branch='"+headRef+"'", "PushChangesToPR should push to the persisted PR head ref")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -4104,20 +4104,32 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// WorkDir is cd'd into.
 	require.Contains(t, script, "cd '/home/user/repo'")
 
+	// User-controlled shell values are assigned once through shellQuote, then
+	// referenced via variables so every later git command handles branch names
+	// and URLs consistently.
+	require.Contains(t, script, "branch='143/abc123/fix-typo'", "push script should assign the branch through shellQuote")
+	require.Contains(t, script, "push_url='https://github.com/owner/repo.git'", "push script should assign the push URL through shellQuote")
+
 	// Hydrated snapshots may have been captured while the repo was on a stale
 	// branch. The PR push path must normalize the current branch before the
 	// pre-push guard runs.
-	require.Contains(t, script, "git checkout -B '143/abc123/fix-typo'")
+	require.Contains(t, script, `git checkout -B "$branch"`, "push script should check out the persisted branch before staging")
 
 	// Commit message is read from file (not argv).
 	require.Contains(t, script, "git commit -F '/home/user/.143-pr-commit-msg'")
 
 	// Push uses --force-with-lease keyed on the remote SHA we just observed
-	// via ls-remote. Auth flows through credential.helper=!143-tools
-	// git-credential talking to the per-push host socket — no userinfo in
-	// the URL.
-	require.Contains(t, script, "git ls-remote 'https://github.com/owner/repo.git' refs/heads/'143/abc123/fix-typo'")
-	require.Contains(t, script, `git push --force-with-lease=refs/heads/'143/abc123/fix-typo':"${remote_sha}" 'https://github.com/owner/repo.git' HEAD:refs/heads/'143/abc123/fix-typo'`)
+	// via ls-remote. Before force-pushing, the script fetches the current PR
+	// branch and refuses to overwrite a different remote tree unless HEAD
+	// already contains it. That still allows metadata-only retry rewrites.
+	require.Contains(t, script, `remote_ref="refs/heads/$branch"`, "push script should derive the remote branch ref from the persisted branch")
+	require.Contains(t, script, `remote_guard_ref="refs/remotes/__143_push_guard/$branch"`, "push script should derive a local guard ref for the remote branch")
+	require.Contains(t, script, `git ls-remote "$push_url" "$remote_ref"`, "push script should read the current remote SHA before pushing")
+	require.Contains(t, script, `git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"`, "push script should fetch the current PR branch before force pushing")
+	require.Contains(t, script, `git merge-base --is-ancestor "$remote_guard_ref" HEAD`, "push script should allow pushes that include the remote PR head")
+	require.Contains(t, script, `git diff --quiet HEAD "$remote_guard_ref"`, "push script should allow metadata-only retries with identical trees")
+	require.Contains(t, script, "exit 78", "push script should use the divergent-branch sentinel exit code")
+	require.Contains(t, script, `git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"`, "push script should lease against the observed remote SHA")
 
 	// No-changes sentinel exit code is present in the upstream-ancestor branch.
 	require.Contains(t, script, "exit 77")
@@ -4142,13 +4154,11 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"143/abc/it's-fine",
 		"https://github.com/o/r.git",
 	)
-	require.Contains(t, script, `HEAD:refs/heads/'143/abc/it'\''s-fine'`)
-	// The branch is interpolated four times now (checkout, ls-remote, lease
-	// ref, push ref); each must round-trip through shellQuote so the embedded
-	// quote can't break out and corrupt the script.
-	require.Contains(t, script, `git checkout -B '143/abc/it'\''s-fine'`)
-	require.Contains(t, script, `git ls-remote 'https://github.com/o/r.git' refs/heads/'143/abc/it'\''s-fine'`)
-	require.Contains(t, script, `--force-with-lease=refs/heads/'143/abc/it'\''s-fine':"${remote_sha}"`)
+	// The branch is assigned through shellQuote once, so the embedded quote
+	// cannot break out and corrupt later variable-based git commands.
+	require.Contains(t, script, `branch='143/abc/it'\''s-fine'`, "push script should quote hostile branch names in the branch variable")
+	require.Contains(t, script, `git checkout -B "$branch"`, "push script should use the safely assigned branch variable")
+	require.Contains(t, script, `--force-with-lease="${remote_ref}:${remote_sha}"`, "push script should lease through the safely derived remote ref")
 }
 
 func TestIsPushRejection(t *testing.T) {
@@ -4386,6 +4396,13 @@ func TestPushSessionBranch(t *testing.T) {
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
 			provider:       &prTestSandboxProvider{execExit: 1, execStderr: "! [rejected]   HEAD -> b (stale info)"},
 			wantErrIs:      ErrPushRejected,
+			wantDestroyCnt: 1,
+		},
+		{
+			name:           "divergent remote branch guard maps to ErrPushBranchDiverged",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: pushExitBranchDiverged, execStderr: pushBranchDivergedMessage},
+			wantErrIs:      ErrPushBranchDiverged,
 			wantDestroyCnt: 1,
 		},
 		{
@@ -5176,7 +5193,7 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	require.Equal(t, 1, labelCalls, "CreatePR should add labels to the created PR")
 	require.Equal(t, true, createPRPayload["draft"], "CreatePR should honor the org default draft setting")
 	require.Contains(t, string(provider.writes[pushCommitMsgPath(agent.DefaultSandboxConfig().HomeDir)]), "Co-authored-by: Alice <alice@example.com>", "CreatePR should include a co-author trailer when using the app token for a user-triggered run")
-	require.Contains(t, provider.lastExecCmd, "HEAD:refs/heads/", "CreatePR should push the restored branch before opening the PR")
+	require.Contains(t, provider.lastExecCmd, `git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"`, "CreatePR should push the restored branch before opening the PR")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 	_ = body
 }
