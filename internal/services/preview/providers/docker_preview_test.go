@@ -3239,6 +3239,11 @@ func TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache(t *testing.T) {
 	require.Contains(t, buildCmd, "cmd/web", "the build command should be the service Build")
 	require.Contains(t, buildCmd, `GOCACHE="$HOME/.cache/go-build"`, "build env should pin GOCACHE to the archived default")
 	require.Contains(t, buildCmd, `GOMODCACHE="$HOME/go/pkg/mod"`, "build env should pin GOMODCACHE to the archived default")
+	// GOTMPDIR is steered off the small /var/tmp scratch tmpfs onto the
+	// disk-quota'd $HOME so a large compile's work dir cannot exhaust it; the
+	// dir is created first since the toolchain requires GOTMPDIR to exist.
+	require.Contains(t, buildCmd, `GOTMPDIR="$HOME/.cache/go-build-tmp"`, "build env should redirect GOTMPDIR off the /var/tmp scratch tmpfs")
+	require.Contains(t, buildCmd, `mkdir -p "$HOME/.cache/go-build-tmp" &&`, "the build should create GOTMPDIR before compiling")
 	mu.Unlock()
 
 	// The home build cache (Root=HomeDir) is saved asynchronously after readiness.
