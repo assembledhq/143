@@ -3318,7 +3318,7 @@ func TestManagerServiceObserver_OnServiceReady_WithPID(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3339,7 +3339,7 @@ func TestManagerServiceObserver_OnServiceReady_NoPID(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	// pid=0 must skip the second exec — the readiness probe runs before the
 	// PID-detection goroutine has had a chance to populate ss.pid for some
@@ -3360,7 +3360,7 @@ func TestManagerServiceObserver_OnServiceReady_DBErrorsLogged(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3383,7 +3383,7 @@ func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3400,6 +3400,83 @@ func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// When the failing service is the config's primary service, OnServiceFailed
+// must additionally demote the instance to "unhealthy" so a crash after
+// readiness (e.g. an OOM kill at serve time) doesn't leave the row stuck at
+// "ready" forever — which is what makes the launch page spin indefinitely
+// against a dead process.
+func TestManagerServiceObserver_OnServiceFailed_PrimaryServiceDemotesInstance(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "frontend", 8192)
+
+	// Service row flips to failed.
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+	// Instance is demoted via UpdatePreviewStatusIfActive (non-terminal path).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	obs.OnServiceFailed("frontend", "exited with code 137", []string{"out of memory"})
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAnnotatePreviewFailure(t *testing.T) {
+	t.Parallel()
+
+	t.Run("oom exit 137 is explained with the memory cap", func(t *testing.T) {
+		t.Parallel()
+		got := annotatePreviewFailure("exited with code 137; last output: app compiled", 8192)
+		require.Contains(t, got, "ran out of memory")
+		require.Contains(t, got, "8192 MiB")
+		require.Contains(t, got, "exit code 137")
+		// The original failure is preserved for debugging.
+		require.Contains(t, got, "exited with code 137; last output: app compiled")
+	})
+
+	t.Run("oom without a known cap omits the cap text", func(t *testing.T) {
+		t.Parallel()
+		got := annotatePreviewFailure("signal: killed", 0)
+		require.Contains(t, got, "ran out of memory")
+		require.NotContains(t, got, "capped at")
+	})
+
+	t.Run("non-oom failures pass through unchanged", func(t *testing.T) {
+		t.Parallel()
+		// Exit 126 (permission) and disk exhaustion must not be mislabeled as OOM.
+		require.Equal(t, "exited with code 126", annotatePreviewFailure("exited with code 126", 8192))
+		require.Equal(t,
+			"build failed: no space left on device",
+			annotatePreviewFailure("build failed: no space left on device", 8192),
+		)
+	})
+
+	t.Run("looksLikeOOMFailure matches known signatures", func(t *testing.T) {
+		t.Parallel()
+		for _, msg := range []string{"exited with code 137", "signal: killed", "OOMKilled", "runtime: out of memory", "cannot allocate memory"} {
+			require.True(t, looksLikeOOMFailure(msg), msg)
+		}
+		for _, msg := range []string{"exited with code 1", "exited with code 126", "no space left on device", ""} {
+			require.False(t, looksLikeOOMFailure(msg), msg)
+		}
+	})
+}
+
 func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	t.Parallel()
 
@@ -3410,7 +3487,7 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3434,7 +3511,7 @@ func TestManagerServiceObserver_OnInstallOutput_PersistsInstallLog(t *testing.T)
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3458,7 +3535,7 @@ func TestManagerServiceObserver_OnPhaseStart_PersistsPreviewLog(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_instances SET current_phase").
 		WithArgs(pgx.NamedArgs{"id": previewID, "org_id": orgID, "phase": "dependency_cache_restore"}).
@@ -3511,7 +3588,7 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 			mgr := newTestManager(mock, &mockProvider{})
 			orgID := uuid.New()
 			previewID := uuid.New()
-			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+			obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 			logID := uuid.New()
 			mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3541,7 +3618,7 @@ func TestManagerServiceObserver_OnCacheRestore_EmitsPreviewHealthCacheEvent(t *t
 	})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 	cacheKey := strings.Repeat("d", 64)
 
 	logID := uuid.New()
@@ -3578,7 +3655,7 @@ func TestManagerServiceObserver_OnPhaseStartAndEnd_PersistsLifecycleLogs(t *test
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_instances SET current_phase").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3611,7 +3688,7 @@ func TestManagerServiceObserver_OnPhaseStart_DoesNotBlockOnLifecycleLogWrite(t *
 		Logger:       zerolog.Nop(),
 		WorkerNodeID: "worker-1",
 	})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	done := make(chan struct{})
 	go func() {
@@ -3672,7 +3749,7 @@ func TestManagerServiceObserver_OnCacheSave_PersistsSuccessfulStatuses(t *testin
 			mgr := newTestManager(mock, &mockProvider{})
 			orgID := uuid.New()
 			previewID := uuid.New()
-			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+			obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 			cacheKey := strings.Repeat("c", 64)
 
 			logID := uuid.New()
@@ -3698,7 +3775,7 @@ func TestManagerServiceObserver_OnServiceOutput_PersistsStartupLog(t *testing.T)
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3755,7 +3832,7 @@ func TestManagerServiceObserver_OnServiceOutput_DoesNotBlockOnDatabaseWrites(t *
 		Logger:       zerolog.Nop(),
 		WorkerNodeID: "worker-1",
 	})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	done := make(chan struct{})
 	go func() {
@@ -3788,7 +3865,7 @@ func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3812,7 +3889,7 @@ func TestManagerServiceObserver_OnServiceFailed_DBErrorsLogged(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	// Both DB writes fail; the observer must log and return without panicking
 	// so a flaky DB doesn't crash the worker mid-launch.

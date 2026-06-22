@@ -39,7 +39,7 @@ import {
   PM_SCHEDULE_MAX_HOURS,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
+import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, Repository, SingleResponse } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const { user } = useAuth();

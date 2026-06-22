@@ -31,6 +31,19 @@ func TestClassifyLaunchFailure_InstallFailed(t *testing.T) {
 	require.Contains(t, failure.Message, "npm ci exited with code 1", "install failure message should include provider details")
 }
 
+func TestClassifyLaunchFailure_OutOfMemory(t *testing.T) {
+	t.Parallel()
+
+	// A service OOM-killed at boot arrives wrapped as ErrServiceNotReady with a
+	// "code 137" cause. The classified message should call out the OOM and
+	// still preserve the underlying detail for debugging.
+	failure := ClassifyLaunchFailure(fmt.Errorf("%w: webserver exited with code 137", ErrServiceNotReady))
+
+	require.Contains(t, failure.Message, "ran out of memory", "OOM failures should be explained in plain English")
+	require.Contains(t, failure.Message, "exit code 137", "OOM message should name the exit code")
+	require.Contains(t, failure.Message, "webserver exited with code 137", "underlying detail should be preserved")
+}
+
 func TestShouldReassignPreviewWorker(t *testing.T) {
 	t.Parallel()
 
