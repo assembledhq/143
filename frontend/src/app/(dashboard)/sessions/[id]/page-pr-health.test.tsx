@@ -846,6 +846,48 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(mergeButton).toHaveAttribute('title', 'Waiting for GitHub to confirm required checks.');
   });
 
+  it('groups a stopped merge when ready state with its retry action', async () => {
+    let retryRequested = false;
+
+    server.use(
+      http.get('/api/v1/pull-requests/:id/health', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPRHealth,
+            merge_state: 'blocked' as const,
+            can_merge: false,
+            checks_confirmed: true,
+            summary: 'PR #42 is blocked by GitHub merge requirements.',
+            merge_when_ready: {
+              state: 'failed' as const,
+              last_error: 'Fix failing checks before enabling merge when ready.',
+              requested_head_sha: 'head-sha',
+              requested_health_version: 1,
+            },
+          },
+        } satisfies SingleResponse<typeof mockPRHealth>);
+      }),
+      http.post('/api/v1/pull-requests/:id/merge-when-ready', () => {
+        retryRequested = true;
+        return HttpResponse.json({
+          data: { state: 'queued', requested_head_sha: 'head-sha', requested_health_version: 1 },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const stoppedNotice = await screen.findByRole('status', { name: 'Merge when ready stopped' });
+    expect(within(stoppedNotice).getByText(/Fix failing checks before enabling merge when ready\./)).toBeInTheDocument();
+
+    await user.click(within(stoppedNotice).getByRole('button', { name: 'Retry merge when ready' }));
+
+    await waitFor(() => {
+      expect(retryRequested).toBe(true);
+    });
+  });
+
   it('shows the Merge button when GitHub has confirmed that the repo has no CI checks configured', async () => {
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
