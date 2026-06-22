@@ -4880,18 +4880,10 @@ export function SessionDetailContent({ id }: { id: string }) {
   const readinessCheckDisabled = readinessRunning || isRunning;
 
   // Readiness findings, grouped with role-aware enforcement so the merged
-  // Review card can surface blockers, bypasses, the review packet, and the
-  // issue-less context editor inline (see folded-in PRReadinessCard features).
+  // Review card can surface blockers, bypasses, and the review packet inline.
   const [readinessBypassOpen, setReadinessBypassOpen] = useState(false);
   const [readinessBypassReason, setReadinessBypassReason] = useState("");
-  const [readinessIssueLessReason, setReadinessIssueLessReason] = useState<string | null>(null);
   const readinessPacketRef = useRef<HTMLDivElement | null>(null);
-  const readinessContextRef = useRef<HTMLTextAreaElement | null>(null);
-  const readinessContextQuery = useQuery({
-    queryKey: [...queryKeys.sessions.readiness(id), "context"],
-    queryFn: () => api.sessions.getReadinessContext(id),
-    enabled: !!session && canManageSession && (session?.linked_issues?.length ?? 0) === 0,
-  });
   const readinessBypassMutation = useMutation({
     mutationFn: () => api.sessions.createReadinessBypass(id, readinessBypassReason),
     onSuccess: () => {
@@ -4902,19 +4894,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     onError: (err) => {
       toast.error(err instanceof Error ? err.message : "Readiness blocker could not be bypassed");
-    },
-  });
-  const readinessContextMutation = useMutation({
-    mutationFn: (reason: string) => api.sessions.updateReadinessContext(id, reason),
-    onSuccess: () => {
-      // Drop the local override so the field re-syncs from the invalidated query
-      // (and reflects edits made elsewhere) instead of pinning the typed value.
-      setReadinessIssueLessReason(null);
-      queryClient.invalidateQueries({ queryKey: [...queryKeys.sessions.readiness(id), "context"] });
-      toast.success("Readiness context saved");
-    },
-    onError: (err) => {
-      toast.error(err instanceof Error ? err.message : "Readiness context could not be saved");
     },
   });
   const readinessChecks = latestReadiness?.checks ?? [];
@@ -4956,8 +4935,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     !readinessNonBypassableChecks.has(check.check_type)
   );
   const readinessReviewPacket = readinessPacket(latestReadiness?.review_packet);
-  const readinessDisplayedIssueLessReason =
-    readinessIssueLessReason ?? readinessContextQuery.data?.data.issue_less_reason ?? "";
   const handleReadinessCheckAction = (check: PRReadinessCheck) => {
     const action = (check.action ?? "").toLowerCase();
     if (!action) return;
@@ -4975,11 +4952,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     if (action.includes("view packet")) {
       readinessPacketRef.current?.scrollIntoView({ block: "nearest" });
-      return;
-    }
-    if (action.includes("view context") || action.includes("add context")) {
-      readinessContextRef.current?.focus();
-      readinessContextRef.current?.scrollIntoView({ block: "nearest" });
       return;
     }
     if (action.includes("configuration")) {
@@ -6388,8 +6360,8 @@ export function SessionDetailContent({ id }: { id: string }) {
           {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="flex min-w-0 items-center gap-2">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                       {reviewLoopRunning || readinessRunning ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -6469,27 +6441,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                     )}
                   </div>
                 ) : null}
-                {(session.linked_issues?.length ?? 0) === 0 && (
-                  <div className="space-y-2 border-t border-border pt-3 text-xs">
-                    <Label htmlFor="readiness-context" className="text-xs">Issue-less context</Label>
-                    <Textarea
-                      id="readiness-context"
-                      ref={readinessContextRef}
-                      value={readinessDisplayedIssueLessReason}
-                      onChange={(event) => setReadinessIssueLessReason(event.target.value)}
-                      rows={2}
-                      placeholder="Reason this PR has no linked issue"
-                    />
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      disabled={readinessContextMutation.isPending || !readinessDisplayedIssueLessReason.trim()}
-                      onClick={() => readinessContextMutation.mutate(readinessDisplayedIssueLessReason)}
-                    >
-                      Save context
-                    </Button>
-                  </div>
-                )}
               </CardContent>
             </Card>
           ) : null}
