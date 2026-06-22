@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
 import { captureError } from "@/lib/errors";
@@ -13,7 +13,7 @@ import { AuditLogSidesheet } from "./audit-log-sidesheet";
 
 interface AuditLogTriggerProps {
   /** Filters to scope the audit log query (e.g., { session_id: "..." }). */
-  filters: Record<string, string>;
+  filters: Record<string, string> | Record<string, string>[];
   /** Team members for resolving actor names. If omitted, fetched internally. */
   members?: User[];
   /** Sidesheet title. */
@@ -32,6 +32,7 @@ export function AuditLogTrigger({ filters, members: membersProp, title, variant 
   const [open, setOpen] = useState(false);
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const filterList = Array.isArray(filters) ? filters : [filters];
 
   // Fetch members internally when not provided by parent
   const { data: membersData } = useQuery({
@@ -41,18 +42,33 @@ export function AuditLogTrigger({ filters, members: membersProp, title, variant 
   });
   const members = membersProp ?? membersData?.data ?? [];
 
-  // Fetch just the latest entry to show "Updated X ago by Y"
-  const { data, error } = useQuery({
-    queryKey: ["audit-logs", "latest", filters],
-    queryFn: () => api.auditLogs.list({ ...filters, limit: 1 }),
-    enabled: isAdmin,
+  // Fetch just the latest entry from each scope to show the newest activity.
+  const latestQueries = useQueries({
+    queries: filterList.map((filter) => ({
+      queryKey: ["audit-logs", "latest", filter],
+      queryFn: () => api.auditLogs.list({ ...filter, limit: 1 }),
+      enabled: isAdmin,
+    })),
   });
 
-  if (error) {
-    captureError(error, { feature: "audit-log" });
-  }
+  useEffect(() => {
+    for (const query of latestQueries) {
+      if (query.error) {
+        captureError(query.error, { feature: "audit-log" });
+      }
+    }
+  // Depend on individual error objects so the effect fires once per new error identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, latestQueries.map((q) => q.error));
 
-  const latestEntry = data?.data?.[0];
+  const latestResult = latestQueries
+    .map((query, index) => ({ entry: query.data?.data?.[0], filters: filterList[index] }))
+    .filter((result): result is { entry: NonNullable<(typeof result)["entry"]>; filters: Record<string, string> } =>
+      Boolean(result.entry),
+    )
+    .sort((a, b) => new Date(b.entry.created_at).getTime() - new Date(a.entry.created_at).getTime())[0];
+  const latestEntry = latestResult?.entry;
+  const sidesheetFilters = latestResult?.filters ?? filterList[0] ?? {};
 
   // Don't render anything if there's no audit history
   if (!latestEntry) return null;
@@ -90,7 +106,7 @@ export function AuditLogTrigger({ filters, members: membersProp, title, variant 
         <AuditLogSidesheet
           open={open}
           onOpenChange={setOpen}
-          filters={filters}
+          filters={sidesheetFilters}
           title={title}
           members={members}
         />
@@ -120,7 +136,7 @@ export function AuditLogTrigger({ filters, members: membersProp, title, variant 
       <AuditLogSidesheet
         open={open}
         onOpenChange={setOpen}
-        filters={filters}
+        filters={sidesheetFilters}
         title={title}
         members={members}
       />

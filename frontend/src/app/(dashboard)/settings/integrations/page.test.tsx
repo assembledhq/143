@@ -29,6 +29,7 @@ const {
   startPagerDutyIncidentSessionMock,
   loginPagerDutyMock,
   teamListMembersMock,
+  auditLogsListMock,
   githubConnectMock,
   githubStatusGetMock,
   githubDisconnectMock,
@@ -72,6 +73,7 @@ const {
     startPagerDutyIncidentSessionMock: vi.fn(),
     loginPagerDutyMock: vi.fn(),
     teamListMembersMock: vi.fn(),
+    auditLogsListMock: vi.fn(),
     githubConnectMock: vi.fn(),
     githubStatusGetMock: vi.fn(),
     githubDisconnectMock: vi.fn(),
@@ -153,6 +155,9 @@ vi.mock("@/lib/api", () => ({
     team: {
       listMembers: teamListMembersMock,
     },
+    auditLogs: {
+      list: auditLogsListMock,
+    },
   },
 }));
 
@@ -165,6 +170,7 @@ vi.mock("@/hooks/use-auth", () => ({
 
 describe("IntegrationsPage", () => {
   beforeEach(() => {
+    auditLogsListMock.mockResolvedValue({ data: [], meta: {} });
     integrationsListMock.mockResolvedValue({
       data: [
         {

@@ -2607,7 +2607,23 @@ export type AuditResourceType =
   | "credential"
   | "user"
   | "api_client"
-  | "api_token";
+  | "api_token"
+  | "session_review_comment"
+  | "pm_document"
+  | "pm_document_set"
+  | "eval_task"
+  | "eval_run"
+  | "eval_batch"
+  | "organization"
+  | "preview_secret_bundle"
+  | "preview_policy"
+  | "pr_readiness_policy"
+  | "pr_readiness_custom_check"
+  | "pr_readiness_bypass"
+  | "cli_token"
+  | "org_join_token"
+  | "cli_tool"
+  | "organization_domain";
 
 export interface AuditLog {
   id: number;
